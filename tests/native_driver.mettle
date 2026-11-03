@@ -1,0 +1,176 @@
+// native_driver: runs the native module against a project on disk.
+//
+//   native_driver <app-dir> <linux|windows> prepare
+//   native_driver <app-dir> <linux|windows> doctor
+//   native_driver <app-dir> <linux|windows> explain LOGFILE
+//
+// The DepState is built by hand from APP/.mbuild/deps/<host>/<owner>/<repo>
+// (three levels, each with or without an mbuild.toml). The compiler's
+// runtime directory comes from MB_RUNTIME_DIR, the profile from MB_PROFILE
+// (default debug). prepare prints one line per result: "arg X", "env X",
+// "copy X", "fp X". `syms FILE` and `soname FILE` read one library.
+
+import "std/io";
+import "std/mem";
+import "../src/base";
+import "../src/path";
+import "../src/fs";
+import "../src/toml";
+import "../src/manifest";
+import "../src/project";
+import "../src/native";
+import "../src/symbols";
+import "../src/sys_linux" if linux;
+import "../src/sys_windows" if windows;
+
+fn drv_manifest(dir: string, fallback: string) -> Manifest* {
+  var file: string = dir + "/mbuild.toml";
+  var rd: FsRead = fs_read(file);
+  if (!rd.ok) {
+    return man_empty(dir, fallback);
+  }
+  var m: Manifest* = man_parse(toml_parse(rd.data, file), dir);
+  if (slen(m->error) > 0) {
+    fail(m->error);
+  }
+  return m;
+}
+
+// Subdirectories, links to directories included.
+fn drv_subdirs(dir: string) -> StrList* {
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  sys_list_dir(dir, files, dirs);
+  var i: int64 = 0;
+  while (i < files->len) {
+    if (fs_is_dir(dir + "/" + sl_get(files, i))) {
+      sl_push(dirs, sl_get(files, i));
+    }
+    i = i + 1;
+  }
+  free(files->items);
+  free(files);
+  sl_sort(dirs);
+  return dirs;
+}
+
+fn drv_free(l: StrList*) {
+  free(l->items);
+  free(l);
+}
+
+fn drv_deps(root: string) -> DepState* {
+  var base_dir: string = root + "/.mbuild/deps";
+  var ds: DepState* = depstate_empty(base_dir);
+  var hosts: StrList* = drv_subdirs(base_dir);
+  var a: int64 = 0;
+  while (a < hosts->len) {
+    var owners: StrList* = drv_subdirs(base_dir + "/" + sl_get(hosts, a));
+    var b: int64 = 0;
+    while (b < owners->len) {
+      var repos: StrList* = drv_subdirs(base_dir + "/" + sl_get(hosts, a) + "/" + sl_get(owners, b));
+      var r: int64 = 0;
+      while (r < repos->len) {
+        var module: string = sl_get(hosts, a) + "/" + sl_get(owners, b) + "/" + sl_get(repos, r);
+        var dm: DepModule;
+        dm.module = module;
+        dm.version = "";
+        dm.commit = "";
+        dm.dir = base_dir + "/" + module;
+        dm.alias = "";
+        dm.is_path = false;
+        dm.man = (Manifest*)0;
+        dm.replaced = "";
+        dm.submodules = (StrList*)0;
+        // A link stands for a [replace] path (or the project itself); dir
+        // stays the link path so native must resolve it.
+        if (sys_is_link(dm.dir)) {
+          dm.replaced = "path";
+        }
+        if (fs_is_file(dm.dir + "/mbuild.toml")) {
+          dm.man = drv_manifest(dm.dir, sl_get(repos, r));
+        }
+        depstate_add(ds, dm);
+        r = r + 1;
+      }
+      drv_free(repos);
+      b = b + 1;
+    }
+    drv_free(owners);
+    a = a + 1;
+  }
+  drv_free(hosts);
+  return ds;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  if (argc < 4) {
+    err_line("usage: native_driver <app-dir> <linux|windows> <prepare|doctor|explain LOGFILE|syms FILE|soname FILE>");
+    return 2;
+  }
+  var mode: string = s_from_c(argv[3]);
+  if (s_eq(mode, "syms")) {
+    var l: StrList* = sym_defined(s_from_c(argv[4]));
+    say(sym_format(s_from_c(argv[4])) + " " + s_int(l->len));
+    say(sl_join(l, "\n"));
+    return 0;
+  }
+  if (s_eq(mode, "soname")) {
+    say("soname " + sym_soname(s_from_c(argv[4])));
+    return 0;
+  }
+  var root: string = sys_realpath(s_from_c(argv[1]));
+  if (slen(root) == 0) {
+    fail("no such directory: " + s_from_c(argv[1]));
+  }
+  root = s_replace_byte(root, 92, 47);
+  var p: Project* = new Project;
+  p->root = root;
+  p->man = drv_manifest(root, p_base(root));
+  p->has_manifest = true;
+  p->opts = options_new();
+  p->opts->verbose = slen(env_get("MB_VERBOSE")) > 0;
+  g_verbose = p->opts->verbose;
+  p->state_dir = root + "/.mbuild";
+  var ds: DepState* = drv_deps(root);
+  var profile: string = env_get("MB_PROFILE");
+  if (slen(profile) == 0) {
+    profile = "debug";
+  }
+  var t: TargetCtx* = targetctx_new(p, s_from_c(argv[2]), profile);
+  t->compiler_runtime_dir = s_replace_byte(env_get("MB_RUNTIME_DIR"), 92, 47);
+  if (s_eq(mode, "prepare")) {
+    var nl: NatLink* = nat_prepare(p, ds, t);
+    var i: int64 = 0;
+    while (i < nl->mettle_args->len) {
+      say("arg " + sl_get(nl->mettle_args, i));
+      i = i + 1;
+    }
+    i = 0;
+    while (i < nl->env->len) {
+      say("env " + sl_get(nl->env, i));
+      i = i + 1;
+    }
+    i = 0;
+    while (i < nl->copy_files->len) {
+      say("copy " + sl_get(nl->copy_files, i));
+      i = i + 1;
+    }
+    say("fp " + nl->fingerprint);
+    return 0;
+  }
+  if (s_eq(mode, "doctor")) {
+    return nat_doctor(p, ds, t);
+  }
+  if (s_eq(mode, "explain") && argc >= 5) {
+    var rd: FsRead = fs_read(s_from_c(argv[4]));
+    if (!rd.ok) {
+      fail("cannot read " + s_from_c(argv[4]));
+    }
+    nat_explain_failure(p, ds, t, rd.data);
+    return 0;
+  }
+  err_line("unknown mode " + mode);
+  return 2;
+}

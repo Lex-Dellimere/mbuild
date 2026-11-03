@@ -1,0 +1,277 @@
+// fs: portable file helpers over the platform layer.
+
+import "std/io";
+import "std/mem";
+import "base";
+import "path";
+import "sys_linux" if linux;
+import "sys_windows" if windows;
+
+// 64-bit offsets on both runtimes (`long` is 32 bits on Windows).
+extern fn fs_c_fseek(fp: cstring, off: int64, origin: int32) -> int32 = "_fseeki64";
+extern fn fs_c_ftell(fp: cstring) -> int64 = "_ftelli64";
+extern fn fs_c_access(path: cstring, mode: int32) -> int32 = "access";
+extern fn fs_c_remove(path: cstring) -> int32 = "remove";
+
+export struct FsRead {
+  ok: bool;
+  data: string;
+}
+
+export fn fs_read(p: string) -> FsRead {
+  var r: FsRead;
+  r.ok = false;
+  r.data = "";
+  var fi: FileInfo = sys_stat(p);
+  if (!fi.exists || fi.is_dir) {
+    return r;
+  }
+  var fp: cstring = fopen(s_c(p), "rb");
+  if (fp == 0) {
+    return r;
+  }
+  var size: int64 = 0;
+  if (fs_c_fseek(fp, 0, 2) == 0) {
+    size = fs_c_ftell(fp);
+    fs_c_fseek(fp, 0, 0);
+  }
+  if (size < 0) {
+    size = 0;
+  }
+  var b: Buf* = buf_new();
+  buf_reserve(b, size + 1);
+  // Read until EOF rather than trusting the size: files can grow, and some
+  // (under /proc) report 0.
+  while (true) {
+    if (b->cap - b->len < 4097) {
+      buf_reserve(b, 65536);
+    }
+    var want: int64 = b->cap - b->len - 1;
+    var got: int64 = fread((cstring)&b->data[b->len], 1, want, fp);
+    if (got <= 0) {
+      break;
+    }
+    b->len = b->len + got;
+  }
+  fclose(fp);
+  r.ok = true;
+  r.data = buf_take(b);
+  return r;
+}
+
+export fn fs_exists(p: string) -> bool {
+  return sys_stat(p).exists;
+}
+
+export fn fs_is_dir(p: string) -> bool {
+  var fi: FileInfo = sys_stat(p);
+  return fi.exists && fi.is_dir;
+}
+
+export fn fs_is_file(p: string) -> bool {
+  var fi: FileInfo = sys_stat(p);
+  return fi.exists && !fi.is_dir;
+}
+
+export fn fs_mkdirs(p: string) -> bool {
+  var c: string = p_clean(p);
+  if (fs_is_dir(c)) {
+    return true;
+  }
+  var parent: string = p_dir(c);
+  if (!s_eq(parent, c) && !s_eq(parent, ".")) {
+    if (!fs_mkdirs(parent)) {
+      return false;
+    }
+  }
+  return sys_mkdir(c);
+}
+
+// Takes the lock named by the directory dir (its parent is created when
+// missing): creating a directory is atomic on both systems, so exactly one
+// process succeeds. Retries until timeout_ms has passed (once when it is 0 or
+// less); false on timeout. A holder that dies leaves dir behind, so the lock
+// stays taken until someone removes it.
+export fn fs_lock_acquire(dir: string, timeout_ms: int64) -> bool {
+  var c: string = p_clean(dir);
+  var parent: string = p_dir(c);
+  if (!s_eq(parent, c) && !s_eq(parent, ".")) {
+    fs_mkdirs(parent);
+  }
+  var start: int64 = sys_now_ms();
+  var nap: int64 = 5;
+  while (true) {
+    if (sys_mkdir_new(c)) {
+      return true;
+    }
+    var left: int64 = timeout_ms - (sys_now_ms() - start);
+    if (left <= 0) {
+      return false;
+    }
+    if (nap > left) {
+      nap = left;
+    }
+    sys_sleep_ms(nap);
+    if (nap < 100) {
+      nap = nap * 2;
+    }
+  }
+  return false;
+}
+
+// Releases a lock taken with fs_lock_acquire.
+export fn fs_lock_release(dir: string) {
+  var c: string = p_clean(dir);
+  if (fs_c_remove(s_c(c)) != 0 && fs_exists(c)) {
+    sys_remove_tree(c);
+  }
+}
+
+// Written to p.tmp, then renamed over p, so a reader never sees half a file.
+export fn fs_write(p: string, data: string) -> bool {
+  var parent: string = p_dir(p);
+  if (!s_eq(parent, ".") && !fs_mkdirs(parent)) {
+    return false;
+  }
+  var tmp: string = p + ".tmp";
+  var fp: cstring = fopen(s_c(tmp), "wb");
+  if (fp == 0) {
+    return false;
+  }
+  var n: int64 = slen(data);
+  var put: int64 = 0;
+  if (n > 0) {
+    put = fwrite((cstring)data.chars, 1, n, fp);
+  }
+  var closed: int32 = fclose(fp);
+  if (put != n || closed != 0) {
+    sys_remove_file(tmp);
+    return false;
+  }
+  if (!sys_rename(tmp, p)) {
+    sys_remove_file(tmp);
+    return false;
+  }
+  return true;
+}
+
+export fn fs_write_if_changed(p: string, data: string) -> bool {
+  var cur: FsRead = fs_read(p);
+  if (cur.ok && s_eq(cur.data, data)) {
+    return false;
+  }
+  return fs_write(p, data);
+}
+
+export fn fs_copy(src: string, dst: string) -> bool {
+  var r: FsRead = fs_read(src);
+  if (!r.ok) {
+    return false;
+  }
+  if (!fs_write(dst, r.data)) {
+    return false;
+  }
+  if (s_eq(sys_os(), "linux") && fs_c_access(s_c(src), 1) == 0) {
+    sys_set_executable(dst);
+  }
+  return true;
+}
+
+// True when dst was (re)written.
+export fn fs_copy_if_changed(src: string, dst: string) -> bool {
+  var a: FsRead = fs_read(src);
+  if (!a.ok) {
+    return false;
+  }
+  var b: FsRead = fs_read(dst);
+  if (b.ok && s_eq(a.data, b.data)) {
+    return false;
+  }
+  return fs_copy(src, dst);
+}
+
+fn fs_walk_into(root: string, rel: string, suffix: string, skip: StrList*, found: StrList*) {
+  var dir: string = root;
+  if (slen(rel) > 0) {
+    dir = p_join(root, rel);
+  }
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  if (sys_list_dir(dir, files, dirs)) {
+    var i: int64 = 0;
+    while (i < files->len) {
+      var name: string = sl_get(files, i);
+      if (s_ends(name, suffix) && (skip == 0 || !sl_has(skip, name))) {
+        sl_push(found, p_join(rel, name));
+      }
+      i = i + 1;
+    }
+    i = 0;
+    while (i < dirs->len) {
+      var d: string = sl_get(dirs, i);
+      if (!s_starts(d, ".") && (skip == 0 || !sl_has(skip, d))) {
+        fs_walk_into(root, p_join(rel, d), suffix, skip, found);
+      }
+      i = i + 1;
+    }
+  }
+  free(files->items);
+  free(files);
+  free(dirs->items);
+  free(dirs);
+}
+
+// Files below root whose name ends with suffix ("" for all), as sorted
+// `/`-separated paths relative to root. Directories named in skip, or whose
+// name starts with a dot, are not entered; files named in skip are left out.
+export fn fs_walk(root: string, suffix: string, skip: StrList*) -> StrList* {
+  var found: StrList* = sl_new();
+  fs_walk_into(root, "", suffix, skip, found);
+  sl_sort(found);
+  return found;
+}
+
+export fn fs_hash_file(p: string) -> string {
+  var r: FsRead = fs_read(p);
+  if (!r.ok) {
+    return "";
+  }
+  var h: Hasher = h_new();
+  h_bytes(&h, r.data.chars, slen(r.data));
+  free(r.data.chars);
+  return h_hex(&h);
+}
+
+// $MBUILD_HOME, else ~/.mbuild on Linux and %LOCALAPPDATA%/mbuild on Windows.
+// $MBUILD_HOME, else ~/.mbuild on Linux. Under wine the host's ~/.mbuild is
+// shared (WINEHOMEDIR names the host home as \??\Z:\home\user), so a wine
+// mbuild sees the same toolchains and git mirrors; a Linux-form MBUILD_HOME
+// is reached through Z:. Real Windows uses %LOCALAPPDATA%\mbuild.
+export fn fs_mbuild_home() -> string {
+  var h: string = s_replace_byte(env_get("MBUILD_HOME"), 92, 47);
+  if (slen(h) > 0) {
+    if (sys_is_wine() && s_starts(h, "/")) {
+      return "Z:" + h;
+    }
+    return h;
+  }
+  if (s_eq(sys_os(), "windows")) {
+    if (sys_is_wine()) {
+      var wh: string = s_replace_byte(env_get("WINEHOMEDIR"), 92, 47);
+      if (s_starts(wh, "/??/")) {
+        wh = s_from(wh, 4);
+      }
+      if (slen(wh) > 0) {
+        return wh + "/.mbuild";
+      }
+    }
+    return sys_home() + "/mbuild";
+  }
+  return sys_home() + "/.mbuild";
+}
+
+export fn fs_temp_dir() -> string {
+  var d: string = fs_mbuild_home() + "/tmp";
+  fs_mkdirs(d);
+  return d;
+}

@@ -1,0 +1,549 @@
+// sys_smoke: exercises path, sys, fs and proc against a scratch directory.
+// Run with: tools/mcheck.sh tests/sys_smoke.mettle --run
+//
+// The program also starts itself as a child (`--child ...`) to test native
+// processes on every platform; under wine the host programs (sh, git) go
+// through the sh-script runner.
+
+import "std/io";
+import "std/mem";
+import "../src/base";
+import "../src/path";
+import "../src/fs";
+import "../src/proc";
+import "../src/sys_linux" if linux;
+import "../src/sys_windows" if windows;
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn check(name: string, ok: bool) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+  }
+  flush_out();
+}
+
+fn check_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    check(name, true);
+  } else {
+    check(name + " (got [" + got + "], want [" + want + "])", false);
+  }
+}
+
+fn check_code(name: string, got: int32, want: int32) {
+  if (got == want) {
+    check(name, true);
+  } else {
+    check(name + " (got {got}, want {want})", false);
+  }
+}
+
+// Child modes, used when this program starts itself.
+fn child(argc: int32, argv: cstring*) -> int32 {
+  var mode: string = s_from_c(argv[2]);
+  if (s_eq(mode, "exit")) {
+    print("child-out\n");
+    print_err("child-err\n");
+    flush_out();
+    return (int32)s_to_int(s_from_c(argv[3]));
+  }
+  if (s_eq(mode, "env")) {
+    print(env_get(s_from_c(argv[3])));
+    flush_out();
+    return 0;
+  }
+  if (s_eq(mode, "cwd")) {
+    print(sys_cwd());
+    flush_out();
+    return 0;
+  }
+  if (s_eq(mode, "lock")) {
+    if (!fs_lock_acquire(s_from_c(argv[3]), 10000)) {
+      print("timeout");
+      flush_out();
+      return 1;
+    }
+    print("got");
+    flush_out();
+    fs_lock_release(s_from_c(argv[3]));
+    return 0;
+  }
+  if (s_eq(mode, "args")) {
+    var i: int32 = 3;
+    while (i < argc) {
+      print("[" + s_from_c(argv[i]) + "]");
+      i = i + 1;
+    }
+    flush_out();
+    return 0;
+  }
+  return 99;
+}
+
+fn test_path() {
+  check_eq("p_clean dots", p_clean("a/./b/../c/"), "a/c");
+  check_eq("p_clean backslash drive", p_clean("C:\\x\\..\\y\\.\\z"), "C:/y/z");
+  check_eq("p_clean leading ..", p_clean("../a/../../b"), "../../b");
+  check_eq("p_clean root ..", p_clean("/../a"), "/a");
+  check_eq("p_clean empty", p_clean(""), ".");
+  check_eq("p_clean unc", p_clean("//srv/share/./x"), "//srv/share/x");
+  check_eq("p_join abs", p_join("a", "/b"), "/b");
+  check_eq("p_join dot", p_join(".", "b"), "b");
+  check_eq("p_join", p_join("a/b", "c.txt"), "a/b/c.txt");
+  check_eq("p_dir", p_dir("a/b/c.txt"), "a/b");
+  check_eq("p_dir none", p_dir("c.txt"), ".");
+  check_eq("p_dir root", p_dir("/c"), "/");
+  check_eq("p_dir drive", p_dir("C:/c"), "C:/");
+  check_eq("p_base", p_base("a/b/c.txt"), "c.txt");
+  check_eq("p_ext", p_ext("a/c.tar.gz"), ".gz");
+  check_eq("p_ext dir dot", p_ext("a.d/c"), "");
+  check_eq("p_ext dotfile", p_ext("a/.gitignore"), "");
+  check_eq("p_stem", p_stem("a/c.tar.gz"), "c.tar");
+  check("p_is_abs", p_is_abs("/x") && p_is_abs("\\x") && p_is_abs("C:/x") && p_is_abs("c:\\x") && !p_is_abs("x/y") && !p_is_abs("C:x"));
+  check_eq("p_rel inside", p_rel("/a/b", "/a/b/c/d"), "c/d");
+  check_eq("p_rel same", p_rel("/a/b", "/a/b"), ".");
+  check_eq("p_rel outside", p_rel("/a/b", "/a/bc"), "/a/bc");
+  check_eq("p_to_backslash", p_to_backslash("a/b/c"), "a\\b\\c");
+  check("p_has_prefix_dir", p_has_prefix_dir("a/b/c", "a/b") && p_has_prefix_dir("a/b", "a/b/") && !p_has_prefix_dir("a/bc", "a/b"));
+}
+
+fn test_basics() {
+  check("sys_os", s_eq(sys_os(), "linux") || s_eq(sys_os(), "windows"));
+  if (s_eq(sys_os(), "linux")) {
+    check("linux constants", s_eq(sys_exe_ext(), "") && sys_list_sep() == 58 && !sys_is_wine());
+  } else {
+    check("windows constants", s_eq(sys_exe_ext(), ".exe") && sys_list_sep() == 59);
+  }
+  say("  wine: {sys_is_wine()}  home: " + sys_home() + "  cwd: " + sys_cwd() + "  tty(1): {sys_isatty(1)}");
+  check("sys_home", slen(sys_home()) > 0);
+  check_eq("sys_unix_path_default", sys_unix_path_default(), "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin");
+  check("sys_cwd absolute", p_is_abs(sys_cwd()));
+  check("sys_self_exe", fs_is_file(sys_self_exe()));
+  check("sys_realpath exists", p_is_abs(sys_realpath(".")));
+  check_eq("sys_realpath missing", sys_realpath("no/such/file/here"), "");
+  var t0: int64 = sys_now_ms();
+  sys_sleep_ms(60);
+  var dt: int64 = sys_now_ms() - t0;
+  check("sys_sleep_ms/sys_now_ms ({dt} ms)", dt >= 45 && dt < 2000);
+  check("fs_mbuild_home", slen(fs_mbuild_home()) > 0);
+  check("fs_temp_dir", fs_is_dir(fs_temp_dir()));
+  check("proc_jobs", proc_jobs() > 0);
+}
+
+fn binary_blob() -> string {
+  var b: Buf* = buf_new();
+  var i: int32 = 0;
+  while (i < 3000) {
+    buf_addb(b, i & 255);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+fn test_fs(dir: string) {
+  check("fs_mkdirs", fs_mkdirs(dir + "/a/b/c") && fs_is_dir(dir + "/a/b/c"));
+  check("sys_mkdir existing", sys_mkdir(dir + "/a"));
+  var blob: string = binary_blob();
+  check("fs_write binary", fs_write(dir + "/a/blob.bin", blob));
+  check("fs_write no tmp left", !fs_exists(dir + "/a/blob.bin.tmp"));
+  var r: FsRead = fs_read(dir + "/a/blob.bin");
+  check("fs_read binary", r.ok && s_eq(r.data, blob));
+  check("fs_read missing", !fs_read(dir + "/nope").ok);
+  check("fs_read dir", !fs_read(dir + "/a").ok);
+  var fi: FileInfo = sys_stat(dir + "/a/blob.bin");
+  check("sys_stat file", fi.exists && !fi.is_dir && fi.size == 3000 && fi.mtime != 0);
+  var di: FileInfo = sys_stat(dir + "/a");
+  check("sys_stat dir", di.exists && di.is_dir);
+  check("sys_stat missing", !sys_stat(dir + "/nope").exists);
+  check("fs_write creates parents", fs_write(dir + "/new/deep/x.txt", "x\n"));
+  check("fs_is_file", fs_is_file(dir + "/new/deep/x.txt") && !fs_is_file(dir + "/new"));
+
+  check("fs_write_if_changed first", fs_write_if_changed(dir + "/w.txt", "one"));
+  check("fs_write_if_changed same", !fs_write_if_changed(dir + "/w.txt", "one"));
+  check("fs_write_if_changed changed", fs_write_if_changed(dir + "/w.txt", "two"));
+  check_eq("fs_write_if_changed content", fs_read(dir + "/w.txt").data, "two");
+
+  var h1: string = fs_hash_file(dir + "/a/blob.bin");
+  var hh: Hasher = h_new();
+  h_bytes(&hh, blob.chars, slen(blob));
+  check("fs_hash_file length", slen(h1) == 32);
+  check_eq("fs_hash_file value", h1, h_hex(&hh));
+  check("fs_hash_file differs", !s_eq(h1, fs_hash_file(dir + "/w.txt")));
+  check_eq("fs_hash_file missing", fs_hash_file(dir + "/nope"), "");
+
+  check("sys_rename", sys_rename(dir + "/w.txt", dir + "/w2.txt") && !fs_exists(dir + "/w.txt") && fs_is_file(dir + "/w2.txt"));
+  fs_write(dir + "/w3.txt", "three");
+  check("sys_rename replaces", sys_rename(dir + "/w2.txt", dir + "/w3.txt"));
+  check_eq("sys_rename replaced content", fs_read(dir + "/w3.txt").data, "two");
+
+  check("fs_copy", fs_copy(dir + "/a/blob.bin", dir + "/copy/blob2.bin"));
+  check_eq("fs_copy content", fs_hash_file(dir + "/copy/blob2.bin"), h1);
+  check("fs_copy_if_changed same", !fs_copy_if_changed(dir + "/a/blob.bin", dir + "/copy/blob2.bin"));
+  check("fs_copy_if_changed changed", fs_copy_if_changed(dir + "/w3.txt", dir + "/copy/blob2.bin"));
+
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  defer t_sl_free(files);
+  defer t_sl_free(dirs);
+  check("sys_list_dir", sys_list_dir(dir + "/a", files, dirs));
+  sl_sort(files);
+  sl_sort(dirs);
+  check_eq("sys_list_dir files", sl_join(files, ","), "blob.bin");
+  check_eq("sys_list_dir dirs", sl_join(dirs, ","), "b");
+  check("sys_list_dir missing", !sys_list_dir(dir + "/nope", files, dirs));
+
+  fs_write(dir + "/t/one.txt", "1");
+  fs_write(dir + "/t/two.c", "2");
+  fs_write(dir + "/t/sub/three.txt", "3");
+  fs_write(dir + "/t/sub/deeper/four.txt", "4");
+  fs_write(dir + "/t/.hidden/five.txt", "5");
+  fs_write(dir + "/t/skipme/six.txt", "6");
+  fs_write(dir + "/t/name with space.txt", "7");
+  var skip: StrList* = sl_of("skipme");
+  defer t_sl_free(skip);
+  check_eq("fs_walk suffix", sl_join(fs_walk(dir + "/t", ".txt", skip), ","), "name with space.txt,one.txt,sub/deeper/four.txt,sub/three.txt");
+  check_eq("fs_walk all", sl_join(fs_walk(dir + "/t", "", skip), ","), "name with space.txt,one.txt,sub/deeper/four.txt,sub/three.txt,two.c");
+
+  check("sys_remove_file", sys_remove_file(dir + "/t/two.c") && !fs_exists(dir + "/t/two.c"));
+  check("sys_remove_file missing", !sys_remove_file(dir + "/t/two.c"));
+  check("sys_remove_file dir", !sys_remove_file(dir + "/t/sub"));
+  check("sys_remove_tree", sys_remove_tree(dir + "/t") && !fs_exists(dir + "/t"));
+  check("sys_remove_tree missing", sys_remove_tree(dir + "/t"));
+
+  fs_write(dir + "/exe.sh", "#!/bin/sh\necho ran-script\n");
+  sys_set_executable(dir + "/exe.sh");
+  if (s_eq(sys_os(), "linux")) {
+    check("sys_set_executable", tool_found(sys_find_tool(dir + "/exe.sh")));
+    fs_copy(dir + "/exe.sh", dir + "/exe2.sh");
+    check("fs_copy keeps exec bit", tool_found(sys_find_tool(dir + "/exe2.sh")));
+  } else if (sys_is_wine()) {
+    var t: Cmd* = cmd_new(sys_find_tool("sh"));
+    defer t_cmd_free(t);
+    cmd_arg(t, "-c");
+    cmd_arg(t, "test -x \"$1\"");
+    cmd_arg(t, "sh");
+    cmd_path(t, dir + "/exe.sh");
+    check_code("sys_set_executable (wine)", sys_run(t), 0);
+  }
+}
+
+fn t_cmd_free(c: Cmd*) {
+  t_sl_free(c->args);
+  t_sl_free(c->kinds);
+  t_sl_free(c->env);
+  free(c);
+}
+
+fn t_sl_free(l: StrList*) {
+  free(l->items);
+  free(l);
+}
+
+fn sh_cmd(script: string) -> Cmd* {
+  var c: Cmd* = cmd_new(sys_find_tool("sh"));
+  cmd_arg(c, "-c");
+  cmd_arg(c, script);
+  return c;
+}
+
+fn self_cmd(mode: string) -> Cmd* {
+  var t: Tool = tool_none();
+  t.path = sys_self_exe();
+  var c: Cmd* = cmd_new(t);
+  cmd_arg(c, "--child");
+  cmd_arg(c, mode);
+  return c;
+}
+
+fn test_tools(dir: string) {
+  var git: Tool = sys_find_tool("git");
+  check("sys_find_tool git (" + git.path + ")", tool_found(git));
+  check("sys_find_tool git unix flag", git.unix == sys_is_wine());
+  check("sys_find_tool missing", !tool_found(sys_find_tool("mbuild-no-such-tool-xyz")));
+  var sh: Tool = sys_find_tool("sh");
+  check("sys_find_tool sh (" + sh.path + ")", tool_found(sh));
+  check("sys_find_tool self by path", tool_found(sys_find_tool(sys_self_exe())));
+  var gp: Tool = sys_find_tool(git.path);
+  check("sys_find_tool by found path (" + gp.path + ")", tool_found(gp) && gp.unix == git.unix && s_eq(gp.path, git.path));
+
+}
+
+fn test_proc_tool() {
+  var git: Tool = sys_find_tool("git");
+  sys_setenv("MBUILD_SMOKE_GIT", git.path);
+  var t1: Tool = proc_tool("mbuild-no-such-tool-xyz", "MBUILD_SMOKE_GIT");
+  check("proc_tool override", tool_found(t1));
+  var t2: Tool = proc_tool("git", "MBUILD_SMOKE_UNSET_VAR");
+  check("proc_tool fallback", tool_found(t2));
+  var req: Tool = *proc_require("git", "MBUILD_SMOKE_UNSET_VAR", "for the smoke test");
+  check("proc_require", tool_found(req));
+
+}
+
+fn test_capture() {
+  var git: Tool = sys_find_tool("git");
+  var gv: Cmd* = cmd_new(git);
+  defer t_cmd_free(gv);
+  cmd_arg(gv, "--version");
+  var r: Captured = proc_capture(gv);
+  check("capture git --version (" + s_trim(r.out) + ")", r.code == 0 && s_starts(r.out, "git version "));
+
+  var gf: Cmd* = cmd_new(git);
+  defer t_cmd_free(gf);
+  cmd_arg(gf, "no-such-subcommand-xyz");
+  var rf: Captured = proc_capture_all(gf);
+  check("capture failing git (code {rf.code})", rf.code != 0 && slen(rf.out) > 0);
+
+}
+
+fn test_exit_codes() {
+  check_code("run sh exit 3", proc_run(sh_cmd("exit 3")), 3);
+  var rc: Captured = sys_capture(sh_cmd("echo out-line; echo err-line 1>&2; exit 3"), false);
+  check_code("capture sh exit 3", rc.code, 3);
+  check_eq("capture stdout only", s_trim(rc.out), "out-line");
+  var rm: Captured = sys_capture(sh_cmd("echo out-line; echo err-line 1>&2"), true);
+  check("capture merged", s_contains(rm.out, "out-line") && s_contains(rm.out, "err-line"));
+  var fl: Tool = sys_find_tool("false");
+  check("sys_find_tool false", tool_found(fl));
+  check_code("run false", sys_run(cmd_new(fl)), 1);
+  var cfl: Captured = sys_capture(cmd_new(fl), false);
+  check_code("capture false", cfl.code, 1);
+  var missing: Tool = tool_none();
+  missing.path = "/no/such/program-xyz";
+  check_code("run missing program", sys_run(cmd_new(missing)), 127);
+  say("  (next line should read: visible-through-run)");
+  check_code("run inherits stdout", sys_run(sh_cmd("echo visible-through-run")), 0);
+
+}
+
+fn test_tools2(dir: string) {
+  sys_setenv("MBUILD_SMOKE_VAR", "set by sys_setenv");
+  check_eq("sys_setenv in-process", env_get("MBUILD_SMOKE_VAR"), "set by sys_setenv");
+  check_eq("sys_setenv seen by sh", s_trim(sys_capture(sh_cmd("echo \"$MBUILD_SMOKE_VAR\""), false).out), "set by sys_setenv");
+  var ce: Cmd* = sh_cmd("echo \"$MBUILD_SMOKE_CMD\"");
+  defer t_cmd_free(ce);
+  cmd_env(ce, "MBUILD_SMOKE_CMD", "it's per command");
+  check_eq("Cmd.env seen by sh", s_trim(sys_capture(ce, false).out), "it's per command");
+  check("Cmd.env not leaked", slen(env_get("MBUILD_SMOKE_CMD")) == 0);
+
+  var cw: Cmd* = sh_cmd("pwd");
+  defer t_cmd_free(cw);
+  cw->cwd = dir + "/a";
+  var pw: string = s_trim(sys_capture(cw, false).out);
+  check("Cmd.cwd for sh (" + pw + ")", s_ends(pw, "/a") && s_contains(pw, p_base(dir)));
+
+  fs_write(dir + "/cat-me.txt", "cat content");
+  var cc: Cmd* = sh_cmd("cat \"$1\"");
+  defer t_cmd_free(cc);
+  cmd_arg(cc, "sh");
+  cmd_path(cc, dir + "/cat-me.txt");
+  check_eq("path argument to sh", sys_capture(cc, false).out, "cat content");
+  var cr: Cmd* = sh_cmd("cat \"$1\"");
+  defer t_cmd_free(cr);
+  cmd_arg(cr, "sh");
+  cmd_path(cr, "cat-me.txt");
+  cr->cwd = dir;
+  check_eq("relative path argument with cwd", sys_capture(cr, false).out, "cat content");
+
+}
+
+fn test_tools3(dir: string) {
+  var hp: string = sys_host_path(dir);
+  if (sys_is_wine()) {
+    check("sys_host_path (" + hp + ")", s_starts(hp, "/") && s_ends(hp, p_base(dir)));
+    var cdrive: string = sys_host_path("C:/windows");
+    check("sys_host_path C: (" + cdrive + ")", s_starts(cdrive, "/") && s_ends(cdrive, "/windows"));
+  } else {
+    check_eq("sys_host_path identity", hp, dir);
+  }
+
+}
+
+// Windows batch files: found through PATHEXT, run through cmd.exe with
+// every argument quoted for cmd.
+fn test_batch(dir: string) {
+  if (!s_eq(sys_os(), "windows")) {
+    return;
+  }
+  var self_win: string = s_replace_byte(sys_self_exe(), 47, 92);
+  fs_write(dir + "/echoargs.bat", "@echo off\r\necho [%1][%2][%3][%4][%5][%6][%7][%8][%9]\r\n\"" + self_win + "\" --child args %*\r\nexit /b 7\r\n");
+  fs_write(dir + "/plain.cmd", "@exit /b 3\r\n");
+  var bt: Tool = sys_find_tool(dir + "/echoargs");
+  check("sys_find_tool finds .bat through PATHEXT (" + bt.path + ")", tool_found(bt) && s_ends(s_lower(bt.path), "echoargs.bat") && !bt.unix);
+  var ct: Tool = sys_find_tool(dir + "/plain");
+  check("sys_find_tool finds .cmd through PATHEXT", tool_found(ct) && s_ends(s_lower(ct.path), "plain.cmd") && !ct.unix);
+  check_code("run .cmd exit code", sys_run(cmd_new(ct)), 3);
+  var bc: Cmd* = cmd_new(bt);
+  cmd_arg(bc, "a b");
+  cmd_arg(bc, "x&y|z<w>v^u(t)");
+  cmd_arg(bc, "100%");
+  cmd_arg(bc, "%PATH%");
+  cmd_arg(bc, "q\"uote");
+  cmd_arg(bc, "");
+  cmd_arg(bc, "!bang!");
+  cmd_arg(bc, "back\\slash\\");
+  cmd_arg(bc, "plain");
+  var r: Captured = sys_capture(bc, false);
+  check_code("run .bat exit code", r.code, 7);
+  var lines: StrList* = s_split(s_replace(r.out, "\r", ""), 10);
+  check_eq(".bat sees each argument quoted", sl_get(lines, 0), "[\"a b\"][\"x&y|z<w>v^u(t)\"][\"100%\"][\"%PATH%\"][\"q\"\"uote\"][\"\"][\"!bang!\"][\"back\\slash\\\\\"][\"plain\"]");
+  check_eq(".bat passes the arguments on (%*)", sl_get(lines, 1), "[a b][x&y|z<w>v^u(t)][100%][%PATH%][q\"uote][][!bang!][back\\slash\\][plain]");
+  var bad: Cmd* = cmd_new(bt);
+  cmd_arg(bad, "two\nlines");
+  check_code(".bat refuses a newline in an argument", sys_run(bad), 127);
+  t_cmd_free(bc);
+  t_cmd_free(bad);
+  free(lines);
+}
+
+fn test_lock(dir: string) {
+  var lk: string = dir + "/locks/sub/the.lock";
+  check("fs_lock_acquire free (creates parents)", fs_lock_acquire(lk, 0) && fs_is_dir(lk));
+  check("fs_lock_acquire held, no wait", !fs_lock_acquire(lk, 0));
+  var t0: int64 = sys_now_ms();
+  var got: bool = fs_lock_acquire(lk, 150);
+  var dt: int64 = sys_now_ms() - t0;
+  check("fs_lock_acquire held, times out ({dt} ms)", !got && dt >= 140 && dt < 2000);
+  fs_lock_release(lk);
+  check("fs_lock_release removes the lock", !fs_exists(lk));
+  check("fs_lock_acquire after release", fs_lock_acquire(lk, 0));
+
+  // Another process waits for the lock and gets it once it is released.
+  var lc: Cmd* = self_cmd("lock");
+  cmd_path(lc, lk);
+  var j: Job* = sys_job_start(lc, dir + "/lock.log");
+  sys_sleep_ms(300);
+  check("fs_lock: the other process waits", !sys_job_poll(j));
+  fs_lock_release(lk);
+  var waited: int64 = 0;
+  while (!sys_job_poll(j) && waited < 15000) {
+    sys_sleep_ms(10);
+    waited = waited + 10;
+  }
+  check_code("fs_lock: the other process got it", j->code, 0);
+  check_eq("fs_lock: the other process said so", s_trim(fs_read(dir + "/lock.log").data), "got");
+  check("fs_lock: the other process released it", !fs_exists(lk));
+  t_cmd_free(lc);
+  free(j);
+  fs_lock_release(lk);
+}
+
+fn test_self(dir: string) {
+  // Native processes: this program as its own child.
+  var se: Cmd* = self_cmd("exit");
+  defer t_cmd_free(se);
+  cmd_arg(se, "5");
+  check_code("run self exit 5", sys_run(se), 5);
+  var sc: Captured = sys_capture(se, false);
+  check("capture self", sc.code == 5 && s_eq(s_trim(sc.out), "child-out"));
+  var sm: Captured = sys_capture(se, true);
+  check("capture self merged", s_contains(sm.out, "child-out") && s_contains(sm.out, "child-err"));
+  var sv: Cmd* = self_cmd("env");
+  defer t_cmd_free(sv);
+  cmd_arg(sv, "MBUILD_SMOKE_VAR");
+  check_eq("sys_setenv seen by self", sys_capture(sv, false).out, "set by sys_setenv");
+  var sv2: Cmd* = self_cmd("env");
+  defer t_cmd_free(sv2);
+  cmd_arg(sv2, "MBUILD_SMOKE_CMD2");
+  cmd_env(sv2, "MBUILD_SMOKE_CMD2", "per command");
+  check_eq("Cmd.env seen by self", sys_capture(sv2, false).out, "per command");
+  check("Cmd.env restored", slen(env_get("MBUILD_SMOKE_CMD2")) == 0);
+  var sd: Cmd* = self_cmd("cwd");
+  defer t_cmd_free(sd);
+  sd->cwd = dir + "/a";
+  var sdo: string = sys_capture(sd, false).out;
+  check("Cmd.cwd for self (" + sdo + ")", s_ends(sdo, "/a") && s_contains(sdo, p_base(dir)));
+  var sa: Cmd* = self_cmd("args");
+  defer t_cmd_free(sa);
+  cmd_arg(sa, "a b");
+  cmd_arg(sa, "q\"uote");
+  cmd_arg(sa, "back\\slash\\");
+  cmd_arg(sa, "");
+  check_eq("argument quoting", sys_capture(sa, false).out, "[a b][q\"uote][back\\slash\\][]");
+}
+
+fn test_jobs(dir: string) {
+  var n: int64 = 6;
+  var cmds: Cmd** = (Cmd**)malloc(n * 8);
+  defer free(cmds);
+  cmds[0] = sh_cmd("echo job0; exit 0");
+  cmds[1] = sh_cmd("echo job1 >&2; sleep 0.2; exit 1");
+  cmds[2] = sh_cmd("echo job2; exit 2");
+  cmds[3] = sh_cmd("sleep 0.1; echo job3 \"$MBUILD_SMOKE_VAR\"");
+  var e5: Cmd* = self_cmd("exit");
+  defer t_cmd_free(e5);
+  cmd_arg(e5, "7");
+  cmds[4] = e5;
+  var e6: Cmd* = self_cmd("cwd");
+  defer t_cmd_free(e6);
+  e6->cwd = dir + "/a";
+  cmds[5] = e6;
+  var logs: StrList* = sl_new();
+  defer t_sl_free(logs);
+  var i: int64 = 0;
+  while (i < n) {
+    sl_push(logs, dir + "/job{i}.log");
+    i = i + 1;
+  }
+  var t0: int64 = sys_now_ms();
+  var codes: int32* = proc_run_jobs(cmds, n, logs, 4);
+  var dt: int64 = sys_now_ms() - t0;
+  check("job pool codes ({codes[0]} {codes[1]} {codes[2]} {codes[3]} {codes[4]} {codes[5]}, {dt} ms)", codes[0] == 0 && codes[1] == 1 && codes[2] == 2 && codes[3] == 0 && codes[4] == 7 && codes[5] == 0);
+  free(codes);
+  check_eq("job log 0", s_trim(fs_read(dir + "/job0.log").data), "job0");
+  check_eq("job log 1 (stderr)", s_trim(fs_read(dir + "/job1.log").data), "job1");
+  check_eq("job log 3 (env)", s_trim(fs_read(dir + "/job3.log").data), "job3 set by sys_setenv");
+  var l4: string = fs_read(dir + "/job4.log").data;
+  check("job log 4 (self, merged)", s_contains(l4, "child-out") && s_contains(l4, "child-err"));
+  check("job log 5 (self cwd)", s_ends(s_trim(fs_read(dir + "/job5.log").data), "/a"));
+  check("job status files gone", !fs_exists(dir + "/job0.log.status"));
+
+  var one: Job* = sys_job_start(sh_cmd("sleep 0.3; exit 4"), dir + "/single.log");
+  check("sys_job_poll running", !sys_job_poll(one));
+  while (!sys_job_poll(one)) {
+    sys_sleep_ms(5);
+  }
+  check_code("sys_job_poll code", one->code, 4);
+  free(one);
+  var codes2: int32* = proc_run_jobs(cmds, 3, (StrList*)0, 1);
+  check("proc_run_jobs temp logs, serial", codes2[0] == 0 && codes2[1] == 1 && codes2[2] == 2);
+  free(codes2);
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  if (argc >= 3 && s_eq(s_from_c(argv[1]), "--child")) {
+    return child(argc, argv);
+  }
+  var dir: string = "/tmp/opencode/sys_smoke-" + sys_os() + "-{sys_now_ms()}";
+  if (s_eq(sys_os(), "windows") && !sys_is_wine()) {
+    dir = fs_temp_dir() + "/sys_smoke-{sys_now_ms()}";
+  }
+  sys_remove_tree(dir);
+  test_path();
+  test_basics();
+  test_fs(dir);
+  test_tools(dir);
+  test_proc_tool();
+  test_capture();
+  test_exit_codes();
+  test_tools2(dir);
+  test_tools3(dir);
+  test_batch(dir);
+  test_lock(dir);
+  test_self(dir);
+  test_jobs(dir);
+  check("cleanup", sys_remove_tree(dir) && !fs_exists(dir));
+  say("");
+  say("sys_smoke: {g_pass} passed, {g_fail} failed");
+  flush_out();
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}

@@ -1,0 +1,97 @@
+// platform_driver: links (sys_is_link, sys_make_link, sys_remove_link) and
+// sys_remove_tree on links, against a scratch directory.
+//
+//   tools/mcheck.sh tests/platform_driver.mettle --run [-- DIR]
+//
+// DIR (default: a fresh directory under the mbuild temp directory) is
+// created, used and removed. Under wine it may be given in Linux form
+// through Z: (`Z:/tmp/...`).
+
+import "std/io";
+import "std/mem";
+import "../src/base";
+import "../src/fs";
+import "../src/sys_linux" if linux;
+import "../src/sys_windows" if windows;
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn check(name: string, ok: bool) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+  }
+  flush_out();
+}
+
+fn run_cases(dir: string) {
+  var tgt: string = dir + "/target";
+  var tgt2: string = dir + "/target2";
+  var lnk: string = dir + "/link";
+  check("setup", fs_write(tgt + "/keep.txt", "keep\n") && fs_write(tgt2 + "/other.txt", "other\n"));
+  var abs1: string = sys_realpath(tgt);
+  var abs2: string = sys_realpath(tgt2);
+  check("realpath", slen(abs1) > 0 && slen(abs2) > 0);
+
+  check("no link yet", !sys_is_link(lnk));
+  check("real dir is not a link", !sys_is_link(tgt));
+  check("file is not a link", !sys_is_link(tgt + "/keep.txt"));
+  check("missing is not a link", !sys_is_link(dir + "/missing"));
+
+  check("make_link", sys_make_link(abs1, lnk));
+  check("is_link", sys_is_link(lnk));
+  check("is_link with trailing slash", sys_is_link(lnk + "/"));
+  check("file through link", fs_is_file(lnk + "/keep.txt"));
+  check("link is a dir", fs_is_dir(lnk));
+
+  check("make_link replaces a link", sys_make_link(abs2, lnk));
+  check("replaced link points at target2", fs_is_file(lnk + "/other.txt") && !fs_exists(lnk + "/keep.txt"));
+  check("target untouched by replace", fs_is_file(tgt + "/keep.txt"));
+
+  check("remove_link on a real dir is false", !sys_remove_link(tgt));
+  check("real dir remains", fs_is_file(tgt + "/keep.txt"));
+  check("remove_link on a missing path is false", !sys_remove_link(dir + "/missing"));
+
+  check("make_link over a real dir is false", !sys_make_link(abs2, tgt));
+  check("real dir intact", fs_is_file(tgt + "/keep.txt") && !sys_is_link(tgt));
+
+  check("remove_link", sys_remove_link(lnk));
+  check("link gone", !fs_exists(lnk) && !sys_is_link(lnk));
+  check("target2 kept", fs_is_file(tgt2 + "/other.txt"));
+
+  check("make_link again", sys_make_link(abs1, lnk));
+  check("remove_tree on link", sys_remove_tree(lnk));
+  check("link gone after remove_tree", !fs_exists(lnk) && !sys_is_link(lnk));
+  check("target kept after remove_tree", fs_is_file(tgt + "/keep.txt"));
+
+  var outer: string = dir + "/outer";
+  check("nested setup", fs_mkdirs(outer + "/deps") && fs_write(outer + "/deps/f.txt", "x"));
+  check("nested make_link", sys_make_link(abs1, outer + "/deps/mod"));
+  check("nested is_link", sys_is_link(outer + "/deps/mod") && fs_is_file(outer + "/deps/mod/keep.txt"));
+  check("remove_tree over a link", sys_remove_tree(outer) && !fs_exists(outer));
+  check("target kept after nested remove_tree", fs_is_file(tgt + "/keep.txt"));
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var dir: string = "";
+  if (argc >= 2) {
+    dir = s_from_c(argv[1]);
+  } else {
+    dir = fs_temp_dir() + "/platform-" + sys_os() + "-{sys_now_ms()}";
+  }
+  say("platform_driver: " + sys_os() + " in " + dir);
+  sys_remove_tree(dir);
+  check("mkdirs", fs_mkdirs(dir));
+  run_cases(dir);
+  check("cleanup", sys_remove_tree(dir) && !fs_exists(dir));
+  say("platform_driver: {g_pass} passed, {g_fail} failed");
+  flush_out();
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}

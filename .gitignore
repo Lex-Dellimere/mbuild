@@ -1,0 +1,48 @@
+# build output and mbuild state
+/build/
+/.mbuild/
+build/
+.mbuild/
+mbuild.local.toml
+
+# compiler leftovers
+*.o
+*.obj
+*.ilk
+*.pdb
+*.ice
+*.explain*
+*.mprof
+*.startup.o
+*-ice-*/
+mettle-trace.txt
+
+# agent / tool artifacts
+.apex/
+.apex*
+.claude/
+.cursor/
+.opencode/
+.aider*
+.codex/
+.continue/
+
+# editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+
+# os junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# logs and scratch
+*.log
+*.tmp
+tmp/
+_tmp*/
+scratch/

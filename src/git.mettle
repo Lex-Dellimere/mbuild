@@ -1,0 +1,1154 @@
+// git: bare mirrors of dependency repositories, and the checkouts made from
+// them (DESIGN.md section 9).
+//
+// A mirror is $MBUILD_HOME/git/<module>.git for the default URL
+// (https://<module>), and $MBUILD_HOME/git/<module>@<hash of the URL>.git for
+// any other URL (an explicit `url`, or MBUILD_GIT_BASE), so two projects that
+// fetch one module from different places never share a mirror. It is made
+// with `git clone --mirror` and refreshed with `git fetch --prune --tags
+// --force`; both run under the lock directory <mirror>.lock, so concurrent
+// mbuild runs take turns. A checkout is a `clone --shared --no-checkout` of
+// the mirror, detached at one commit, with the commit recorded in
+// `.mbuild-commit`.
+//
+// Every git command runs with GIT_TERMINAL_PROMPT=0 and, unless the user set
+// GIT_SSH_COMMAND, GIT_SSH_COMMAND="ssh -o BatchMode=yes" (a repository that
+// needs a password fails instead of asking for one), and LC_ALL=C (messages
+// are matched in English). Every path argument goes through cmd_path so that,
+// under wine, host git sees its Linux form.
+//
+// Most functions take the mirror directory (git_mirror_dir), not the module.
+
+import "std/mem";
+import "base";
+import "path";
+import "fs";
+import "proc";
+import "sys_linux" if linux;
+import "sys_windows" if windows;
+
+// The C runtime's mkdir (both runtimes): 0 only when it created the
+// directory, so it can serve as a lock. sys_mkdir cannot tell.
+extern fn gt_c_mkdir(path: cstring, mode: uint32) -> int32 = "mkdir";
+
+export struct GitShow {
+  ok: bool;        // git answered (found or not)
+  found: bool;     // the file exists at that commit
+  text: string;    // its content, or git's message when !ok
+}
+
+var g_gt_have: bool = false;
+var g_gt_tool: Tool;
+
+fn gt_tool() -> Tool {
+  if (!g_gt_have) {
+    var t: Tool* = proc_require("git", "MBUILD_GIT", "to download dependencies");
+    g_gt_tool = *t;
+    free(t);
+    g_gt_have = true;
+  }
+  return g_gt_tool;
+}
+
+fn gt_cmd() -> Cmd* {
+  var c: Cmd* = cmd_new(gt_tool());
+  cmd_env(c, "GIT_TERMINAL_PROMPT", "0");
+  if (slen(env_get("GIT_SSH_COMMAND")) == 0) {
+    cmd_env(c, "GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+  }
+  cmd_env(c, "LC_ALL", "C");
+  cmd_arg(c, "-c");
+  cmd_arg(c, "advice.detachedHead=false");
+  return c;
+}
+
+fn gt_free(c: Cmd*) {
+  free(c->args->items);
+  free(c->args);
+  free(c->kinds->items);
+  free(c->kinds);
+  free(c->env->items);
+  free(c->env);
+  free(c);
+}
+
+fn gt_cmd_in(dir: string) -> Cmd* {
+  var c: Cmd* = gt_cmd();
+  cmd_arg(c, "-C");
+  cmd_path(c, dir);
+  return c;
+}
+
+// Runs c, captures stdout (all: also stderr) and frees c.
+fn gt_capture(c: Cmd*, all: bool) -> Captured {
+  var r: Captured;
+  if (all) {
+    r = proc_capture_all(c);
+  } else {
+    r = proc_capture(c);
+  }
+  gt_free(c);
+  return r;
+}
+
+// A URL that is a filesystem path rather than scheme://... or host:path.
+export fn git_url_is_path(u: string) -> bool {
+  if (s_contains(u, "://")) {
+    return false;
+  }
+  if (slen(u) >= 2 && is_alpha_b(s_byte(u, 0)) && s_byte(u, 1) == 58) {
+    return true;
+  }
+  var colon: int64 = s_find_byte(u, 58);
+  var slash: int64 = s_find_byte(u, 47);
+  if (colon >= 0 && (slash < 0 || colon < slash)) {
+    return false;
+  }
+  return true;
+}
+
+// Under wine a path that starts with `/` is already the host's form: passing
+// it through the converter would put it under drive C:.
+fn gt_add_url(c: Cmd*, u: string) {
+  if (!git_url_is_path(u) || (sys_is_wine() && s_starts(u, "/"))) {
+    cmd_arg(c, u);
+    return;
+  }
+  cmd_path(c, u);
+}
+
+// The requirement's url, else $MBUILD_GIT_BASE/<module>, else https://<module>.
+export fn git_url(module: string, req_url: string) -> string {
+  if (slen(req_url) > 0) {
+    return req_url;
+  }
+  var base: string = env_get("MBUILD_GIT_BASE");
+  if (slen(base) > 0) {
+    if (git_url_is_path(base)) {
+      base = s_replace_byte(base, 92, 47);
+    }
+    while (slen(base) > 1 && s_ends(base, "/")) {
+      base = s_sub(base, 0, slen(base) - 1);
+    }
+    return base + "/" + module;
+  }
+  return "https://" + module;
+}
+
+// The mirror of module as fetched from its URL (see the top of the file).
+export fn git_mirror_dir(module: string, req_url: string) -> string {
+  var u: string = git_url(module, req_url);
+  var base: string = fs_mbuild_home() + "/git/" + module;
+  if (s_eq(u, "https://" + module)) {
+    return base + ".git";
+  }
+  return base + "@" + s_sub(hash_string(u), 0, 12) + ".git";
+}
+
+export fn git_has_mirror(mirror: string) -> bool {
+  return fs_is_file(mirror + "/HEAD");
+}
+
+fn gt_first_lines(text: string, n: int64) -> string {
+  var lines: StrList* = s_lines(text);
+  var keep: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < lines->len && keep->len < n) {
+    var l: string = s_trim(sl_get(lines, i));
+    if (slen(l) > 0) {
+      sl_push(keep, l);
+    }
+    i = i + 1;
+  }
+  free(lines);
+  var joined: string = sl_join(keep, "\n");
+  free(keep);
+  return joined;
+}
+
+// The first lines of git's output, for error messages.
+export fn git_summary(output: string) -> string {
+  return gt_first_lines(output, 4);
+}
+
+// ---------------------------------------------------------------------------
+// Mirror locks
+// ---------------------------------------------------------------------------
+
+// How long the lock directory has existed, in seconds, or -1 when that cannot
+// be told (Windows: mtime is opaque there). Compares its mtime with that of a
+// file written now beside it.
+fn gt_lock_age_s(lock: string) -> int64 {
+  if (!s_eq(sys_os(), "linux")) {
+    return -1;
+  }
+  var li: FileInfo = sys_stat(lock);
+  if (!li.exists) {
+    return -1;
+  }
+  // Unique per process: heap addresses differ between processes.
+  var mark: uint8* = (uint8*)malloc(16);
+  var probe: string = lock + ".probe-" + s_int(sys_now_ms()) + "-" + s_int((int64)mark);
+  free(mark);
+  if (!fs_write(probe, "probe\n")) {
+    return -1;
+  }
+  var pi: FileInfo = sys_stat(probe);
+  sys_remove_file(probe);
+  if (!pi.exists) {
+    return -1;
+  }
+  return (pi.mtime - li.mtime) / 1000000000;
+}
+
+// Takes <mirror>.lock: waits up to 60 s for another mbuild to finish with
+// the mirror, breaks a lock older than 10 minutes. True when it is held.
+fn gt_lock(mirror: string) -> bool {
+  var lock: string = mirror + ".lock";
+  fs_mkdirs(p_dir(lock));
+  var start: int64 = sys_now_ms();
+  var said: bool = false;
+  var tries: int64 = 0;
+  while (true) {
+    if (gt_c_mkdir(s_c(lock), (uint32)511) == 0) {
+      return true;
+    }
+    if (!fs_is_dir(lock)) {
+      tries = tries + 1;
+      if (tries > 20) {
+        warn("cannot create the lock " + lock + "; using the mirror without it");
+        return false;
+      }
+    } else {
+      if (!said) {
+        var age: int64 = gt_lock_age_s(lock);
+        if (age > 600) {
+          warn("breaking the stale lock " + lock + " (left behind " + s_int(age / 60) + " minutes ago)");
+          sys_remove_tree(lock);
+          continue;
+        }
+        status("Waiting", "for another mbuild using " + mirror);
+        said = true;
+      }
+      if (sys_now_ms() - start > 60000) {
+        fail_hint("timed out after 60 s waiting for the lock " + lock, "if no other mbuild is running, delete " + lock);
+      }
+    }
+    sys_sleep_ms(100);
+  }
+  return false;
+}
+
+fn gt_unlock(mirror: string, held: bool) {
+  if (held) {
+    sys_remove_tree(mirror + ".lock");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mirrors
+// ---------------------------------------------------------------------------
+
+// git clone --mirror URL into the mirror directory, unless another process
+// made it meanwhile. code 0 on success; out holds git's messages. The clone
+// goes to <mirror>.new first, so a half-made mirror is never seen.
+export fn git_clone_mirror(module: string, req_url: string) -> Captured {
+  return gt_clone_into(git_mirror_dir(module, req_url), git_url(module, req_url));
+}
+
+// Refreshes an existing mirror from its URL.
+export fn git_fetch(module: string, req_url: string) -> Captured {
+  return gt_fetch_into(git_mirror_dir(module, req_url), git_url(module, req_url));
+}
+
+// The mirror of a repository known only by its URL (submodules):
+// $MBUILD_HOME/git/sub/<leaf>@<12 hex of hash(url)>.git, leaf being the last
+// URL component without `.git`.
+export fn git_url_mirror_dir(url: string) -> string {
+  var u: string = url;
+  while (slen(u) > 1 && (s_ends(u, "/") || s_ends(u, "\\"))) {
+    u = s_sub(u, 0, slen(u) - 1);
+  }
+  var cut: int64 = s_rfind_byte(u, 47);
+  var bs: int64 = s_rfind_byte(u, 92);
+  if (bs > cut) {
+    cut = bs;
+  }
+  var colon: int64 = s_rfind_byte(u, 58);
+  if (colon > cut) {
+    cut = colon;
+  }
+  var leaf: string = s_from(u, cut + 1);
+  if (s_ends(leaf, ".git")) {
+    leaf = s_sub(leaf, 0, slen(leaf) - 4);
+  }
+  if (slen(leaf) == 0) {
+    leaf = "repo";
+  }
+  return fs_mbuild_home() + "/git/sub/" + leaf + "@" + s_sub(hash_string(url), 0, 12) + ".git";
+}
+
+// git clone --mirror URL into git_url_mirror_dir(url) (lock, .new, rename).
+export fn git_clone_url(url: string) -> Captured {
+  return gt_clone_into(git_url_mirror_dir(url), url);
+}
+
+// Refreshes the mirror of url (git fetch --prune --tags --force).
+export fn git_fetch_url(url: string) -> Captured {
+  return gt_fetch_into(git_url_mirror_dir(url), url);
+}
+
+// Fetches one commit by id (`git fetch -q origin SHA`): brings in a commit no
+// ref reaches any more, which the ref fetch does not.
+export fn git_fetch_commit(mirror: string, sha: string) -> Captured {
+  var held: bool = gt_lock(mirror);
+  var c: Cmd* = gt_cmd_in(mirror);
+  cmd_arg(c, "fetch");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "origin");
+  cmd_arg(c, sha);
+  var r: Captured = gt_capture(c, true);
+  gt_unlock(mirror, held);
+  return r;
+}
+
+fn gt_has_any(text: string, needles: StrList*) -> bool {
+  var i: int64 = 0;
+  while (i < needles->len) {
+    if (s_contains(text, sl_get(needles, i))) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// What a failed git command ran into, from its (LC_ALL=C) output:
+// network | gone | auth | other.
+export fn git_failure_kind(output: string) -> string {
+  var net: StrList* = sl_of("Could not resolve host");
+  sl_push(net, "Failed to connect");
+  sl_push(net, "Connection timed out");
+  sl_push(net, "Network is unreachable");
+  sl_push(net, "Connection refused");
+  sl_push(net, "Temporary failure in name resolution");
+  var gone: StrList* = sl_of("Repository not found");
+  sl_push(gone, "does not exist");
+  sl_push(gone, "not found");
+  sl_push(gone, "404");
+  var auth: StrList* = sl_of("Authentication failed");
+  sl_push(auth, "could not read Username");
+  sl_push(auth, "Permission denied (publickey)");
+  sl_push(auth, "terminal prompts disabled");
+  var kind: string = "other";
+  if (gt_has_any(output, net)) {
+    kind = "network";
+  } else if (gt_has_any(output, gone)) {
+    kind = "gone";
+  } else if (gt_has_any(output, auth)) {
+    kind = "auth";
+  }
+  free(net->items);
+  free(net);
+  free(gone->items);
+  free(gone);
+  free(auth->items);
+  free(auth);
+  return kind;
+}
+
+// The subject line of a tag's message (of its commit for a lightweight
+// tag), "" when there is no such tag.
+export fn git_tag_subject(mirror: string, tag: string) -> string {
+  var c: Cmd* = gt_cmd_in(mirror);
+  cmd_arg(c, "for-each-ref");
+  cmd_arg(c, "--format=%(contents:subject)");
+  cmd_arg(c, "refs/tags/" + tag);
+  var r: Captured = gt_capture(c, false);
+  if (r.code != 0) {
+    return s_empty();
+  }
+  return gt_first_lines(r.out, 1);
+}
+
+fn gt_clone_into(dir: string, url: string) -> Captured {
+  var r: Captured;
+  r.code = 0;
+  r.out = s_empty();
+  var held: bool = gt_lock(dir);
+  if (git_has_mirror(dir)) {
+    gt_unlock(dir, held);
+    return r;
+  }
+  var tmp: string = dir + ".new";
+  if (fs_exists(tmp)) {
+    sys_remove_tree(tmp);
+  }
+  if (fs_exists(dir)) {
+    sys_remove_tree(dir);
+  }
+  fs_mkdirs(p_dir(dir));
+  var c: Cmd* = gt_cmd();
+  cmd_arg(c, "clone");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "--mirror");
+  gt_add_url(c, url);
+  cmd_path(c, tmp);
+  r = gt_capture(c, true);
+  if (r.code == 0 && git_has_mirror(tmp)) {
+    if (!sys_rename(tmp, dir)) {
+      r.code = 1;
+      r.out = "cannot move " + tmp + " to " + dir;
+    }
+  } else if (r.code == 0) {
+    r.code = 1;
+  }
+  if (r.code != 0) {
+    sys_remove_tree(tmp);
+  }
+  gt_unlock(dir, held);
+  return r;
+}
+
+fn gt_fetch_into(dir: string, url: string) -> Captured {
+  var held: bool = gt_lock(dir);
+  var s: Cmd* = gt_cmd_in(dir);
+  cmd_arg(s, "remote");
+  cmd_arg(s, "set-url");
+  cmd_arg(s, "origin");
+  gt_add_url(s, url);
+  gt_capture(s, true);
+  var c: Cmd* = gt_cmd_in(dir);
+  cmd_arg(c, "fetch");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "--prune");
+  cmd_arg(c, "--tags");
+  cmd_arg(c, "--force");
+  cmd_arg(c, "origin");
+  var r: Captured = gt_capture(c, true);
+  gt_unlock(dir, held);
+  return r;
+}
+
+fn gt_list(mirror: string, what: string) -> StrList* {
+  var c: Cmd* = gt_cmd_in(mirror);
+  defer gt_free(c);
+  cmd_arg(c, "for-each-ref");
+  cmd_arg(c, "--format=%(refname:short)");
+  cmd_arg(c, what);
+  var r: Captured = proc_capture(c);
+  var found: StrList* = sl_new();
+  if (r.code != 0) {
+    return found;
+  }
+  var lines: StrList* = s_lines(r.out);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = s_trim(sl_get(lines, i));
+    if (slen(l) > 0) {
+      sl_push(found, l);
+    }
+    i = i + 1;
+  }
+  free(lines);
+  return found;
+}
+
+export fn git_tags(mirror: string) -> StrList* {
+  return gt_list(mirror, "refs/tags");
+}
+
+export fn git_branches(mirror: string) -> StrList* {
+  return gt_list(mirror, "refs/heads");
+}
+
+fn gt_is_commit_id(s: string) -> bool {
+  if (slen(s) != 40) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    if (!is_hex_b(s_byte(s, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+// The full commit `rev` names in the mirror ("refs/tags/v1.0.0",
+// "refs/heads/main", a commit id), or "" when it names none.
+export fn git_rev(mirror: string, rev: string) -> string {
+  var c: Cmd* = gt_cmd_in(mirror);
+  cmd_arg(c, "rev-parse");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "--verify");
+  cmd_arg(c, rev + "^{{commit}");
+  var r: Captured = gt_capture(c, false);
+  var id: string = s_trim(r.out);
+  if (r.code != 0 || !gt_is_commit_id(id)) {
+    return s_empty();
+  }
+  return s_lower(id);
+}
+
+// The branch the mirror's HEAD names ("main"), "" when unknown.
+export fn git_default_branch(mirror: string) -> string {
+  var c: Cmd* = gt_cmd_in(mirror);
+  cmd_arg(c, "symbolic-ref");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "HEAD");
+  var r: Captured = gt_capture(c, false);
+  var ref: string = s_trim(r.out);
+  if (r.code != 0 || !s_starts(ref, "refs/heads/")) {
+    return s_empty();
+  }
+  return s_from(ref, slen("refs/heads/"));
+}
+
+// The content of `file` at `commit` (git show COMMIT:FILE).
+export fn git_show(mirror: string, commit: string, file: string) -> GitShow* {
+  var g: GitShow* = new GitShow;
+  g->ok = false;
+  g->found = false;
+  g->text = s_empty();
+  var c: Cmd* = gt_cmd_in(mirror);
+  defer gt_free(c);
+  cmd_arg(c, "show");
+  cmd_arg(c, commit + ":" + file);
+  var r: Captured = proc_capture_all(c);
+  if (r.code == 0) {
+    g->ok = true;
+    g->found = true;
+    g->text = r.out;
+    return g;
+  }
+  if (s_contains(r.out, "does not exist") || s_contains(r.out, "exists on disk, but not in")) {
+    g->ok = true;
+    return g;
+  }
+  g->text = r.out;
+  return g;
+}
+
+fn gt_checkout_in(dest: string, commit: string) -> Captured {
+  var c: Cmd* = gt_cmd_in(dest);
+  cmd_arg(c, "checkout");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "--force");
+  cmd_arg(c, "--detach");
+  cmd_arg(c, commit);
+  var r: Captured = gt_capture(c, true);
+  if (r.code != 0) {
+    return r;
+  }
+  var k: Cmd* = gt_cmd_in(dest);
+  cmd_arg(k, "clean");
+  cmd_arg(k, "-ffdxq");
+  return gt_capture(k, true);
+}
+
+// The commit a checkout records (the first line of .mbuild-commit), "" when
+// there is none.
+export fn git_checkout_commit(dest: string) -> string {
+  var r: FsRead = fs_read(dest + "/.mbuild-commit");
+  if (!r.ok) {
+    return s_empty();
+  }
+  var nl: int64 = s_find_byte(r.data, 10);
+  if (nl >= 0) {
+    return s_trim(s_sub(r.data, 0, nl));
+  }
+  return s_trim(r.data);
+}
+
+// True when the checkout's marker has a `subs ` line: git_checkout_tree
+// finished, submodules included.
+export fn git_marker_complete(dest: string) -> bool {
+  var r: FsRead = fs_read(dest + "/.mbuild-commit");
+  if (!r.ok) {
+    return false;
+  }
+  var lines: StrList* = s_lines(r.data);
+  var found: bool = false;
+  var i: int64 = 1;
+  while (i < lines->len) {
+    if (s_starts(sl_get(lines, i), "subs ")) {
+      found = true;
+    }
+    i = i + 1;
+  }
+  free(lines);
+  return found;
+}
+
+// The files mbuild adds to a checkout are not the package's: keep them out
+// of `git status`.
+fn gt_exclude(dest: string) {
+  fs_write_if_changed(dest + "/.git/info/exclude", "/.mbuild-commit\n/mettle.deps\n");
+}
+
+fn gt_link_refusal(dest: string) -> string {
+  return "refusing to check out into a linked directory: " + dest;
+}
+
+// git_checkout without the marker.
+fn gt_checkout_raw(mirror: string, commit: string, dest: string) -> string {
+  if (sys_is_link(dest)) {
+    return gt_link_refusal(dest);
+  }
+  if (fs_is_dir(dest + "/.git")) {
+    var again: Captured = gt_checkout_in(dest, commit);
+    if (again.code == 0) {
+      gt_exclude(dest);
+      return s_empty();
+    }
+  }
+  if (fs_exists(dest)) {
+    sys_remove_tree(dest);
+  }
+  fs_mkdirs(p_dir(dest));
+  var c: Cmd* = gt_cmd();
+  cmd_arg(c, "clone");
+  cmd_arg(c, "-q");
+  cmd_arg(c, "--shared");
+  cmd_arg(c, "--no-checkout");
+  cmd_path(c, mirror);
+  cmd_path(c, dest);
+  var r: Captured = gt_capture(c, true);
+  if (r.code != 0) {
+    sys_remove_tree(dest);
+    return "git clone failed:\n" + r.out;
+  }
+  var co: Captured = gt_checkout_in(dest, commit);
+  if (co.code != 0) {
+    sys_remove_tree(dest);
+    return "git checkout " + commit + " failed:\n" + co.out;
+  }
+  gt_exclude(dest);
+  return s_empty();
+}
+
+// Makes dest a checkout of `commit` from the mirror (again, when it already
+// is one: checkout --force and clean restore edited and deleted files), and
+// records the commit in .mbuild-commit. Never touches a linked dest (a local
+// replacement: the user's own checkout). Answers "" on success, else git's
+// messages.
+export fn git_checkout(mirror: string, commit: string, dest: string) -> string {
+  var e: string = gt_checkout_raw(mirror, commit, dest);
+  if (slen(e) > 0) {
+    return e;
+  }
+  if (!fs_write(dest + "/.mbuild-commit", commit + "\n")) {
+    return "cannot write " + dest + "/.mbuild-commit";
+  }
+  return s_empty();
+}
+
+// ---------------------------------------------------------------------------
+// Submodules (DESIGN.md 12.7)
+// ---------------------------------------------------------------------------
+
+// The part of a URL a relative URL cannot climb above, as a length:
+// "https://host/", "host:", "/", "X:/", or nothing for a relative path.
+fn gt_url_prefix_len(u: string) -> int64 {
+  var sch: int64 = s_find(u, "://");
+  if (sch >= 0) {
+    var j: int64 = s_find_from(u, "/", sch + 3);
+    if (j < 0) {
+      return slen(u);
+    }
+    return j + 1;
+  }
+  if (git_url_is_path(u)) {
+    if (s_starts(u, "/")) {
+      return 1;
+    }
+    if (slen(u) >= 3 && is_alpha_b(s_byte(u, 0)) && s_byte(u, 1) == 58 && (s_byte(u, 2) == 47 || s_byte(u, 2) == 92)) {
+      return 3;
+    }
+    return 0;
+  }
+  return s_find_byte(u, 58) + 1;
+}
+
+fn gt_url_root(u: string) -> string {
+  var root: string = s_sub(u, 0, gt_url_prefix_len(u));
+  if (slen(root) > 1 && (s_ends(root, "/") || s_ends(root, ":"))) {
+    root = s_sub(root, 0, slen(root) - 1);
+  }
+  return root;
+}
+
+fn gt_is_relative_url(u: string) -> bool {
+  return s_starts(u, "./") || s_starts(u, "../") || s_eq(u, ".") || s_eq(u, "..");
+}
+
+// A submodule URL relative to the URL its parent was fetched from, by git's
+// rules: one trailing `/` of base is dropped, `./` stays, each `../` drops a
+// path component (for host:path, the components after the colon). "" when
+// rel climbs above the host or the root. Any other rel is returned as is.
+export fn git_resolve_url(base: string, rel: string) -> string {
+  if (!gt_is_relative_url(rel)) {
+    return rel;
+  }
+  var b: string = base;
+  if (slen(b) > 1 && s_ends(b, "/")) {
+    b = s_sub(b, 0, slen(b) - 1);
+  }
+  var pl: int64 = gt_url_prefix_len(b);
+  var prefix: string = s_sub(b, 0, pl);
+  var parts: StrList* = s_split(s_from(b, pl), 47);
+  var comps: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < parts->len) {
+    if (slen(sl_get(parts, i)) > 0) {
+      sl_push(comps, sl_get(parts, i));
+    }
+    i = i + 1;
+  }
+  free(parts->items);
+  free(parts);
+  var r: string = rel;
+  var climbed: bool = false;
+  while (true) {
+    if (s_starts(r, "./")) {
+      r = s_from(r, 2);
+    } else if (s_eq(r, ".")) {
+      r = s_empty();
+    } else if (s_starts(r, "../") || s_eq(r, "..")) {
+      if (comps->len == 0) {
+        climbed = true;
+        break;
+      }
+      comps->len = comps->len - 1;
+      if (s_eq(r, "..")) {
+        r = s_empty();
+      } else {
+        r = s_from(r, 3);
+      }
+    } else {
+      break;
+    }
+  }
+  if (climbed) {
+    free(comps->items);
+    free(comps);
+    return s_empty();
+  }
+  if (slen(r) > 0) {
+    sl_push(comps, r);
+  }
+  var rest: string = sl_join(comps, "/");
+  free(comps->items);
+  free(comps);
+  if (slen(prefix) > 0 && slen(rest) > 0 && !s_ends(prefix, "/") && !s_ends(prefix, ":")) {
+    return prefix + "/" + rest;
+  }
+  return prefix + rest;
+}
+
+// The submodules a commit has: paths, URLs as written in .gitmodules, and
+// the commits its gitlinks pin. ok is false (err says why) only when git
+// fails; a commit without .gitmodules has none.
+export struct GitSubs {
+  paths: StrList*;
+  urls: StrList*;
+  commits: StrList*;
+  ok: bool;
+  err: string;
+}
+
+fn gt_set_at(l: StrList*, names: StrList*, name: string, value: string) {
+  var i: int64 = sl_index(names, name);
+  if (i < 0) {
+    return;
+  }
+  sl_set(l, i, value);
+}
+
+export fn git_submodules(mirror: string, commit: string) -> GitSubs* {
+  var g: GitSubs* = new GitSubs;
+  g->paths = sl_new();
+  g->urls = sl_new();
+  g->commits = sl_new();
+  g->ok = true;
+  g->err = s_empty();
+  var c: Cmd* = gt_cmd_in(mirror);
+  cmd_arg(c, "config");
+  cmd_arg(c, "--blob");
+  cmd_arg(c, commit + ":.gitmodules");
+  cmd_arg(c, "--get-regexp");
+  cmd_arg(c, "^submodule\\..*\\.(path|url)$");
+  var r: Captured = gt_capture(c, true);
+  if (r.code != 0) {
+    if (slen(s_trim(r.out)) == 0) {
+      return g;
+    }
+    if (s_contains(r.out, "unable to resolve config blob") || s_contains(r.out, "does not exist") || s_contains(r.out, "bad revision")) {
+      if (slen(git_rev(mirror, commit)) == 0) {
+        g->ok = false;
+        g->err = "commit " + commit + " is not in " + mirror;
+      }
+      return g;
+    }
+    g->ok = false;
+    g->err = git_summary(r.out);
+    return g;
+  }
+  var names: StrList* = sl_new();
+  var npaths: StrList* = sl_new();
+  var nurls: StrList* = sl_new();
+  var lines: StrList* = s_lines(r.out);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = s_trim(sl_get(lines, i));
+    i = i + 1;
+    if (!s_starts(l, "submodule.")) {
+      continue;
+    }
+    var pp: int64 = s_find(l, ".path ");
+    var up: int64 = s_find(l, ".url ");
+    var is_path: bool = pp >= 0 && (up < 0 || pp < up);
+    var at: int64 = up;
+    var skip: int64 = 5;
+    if (is_path) {
+      at = pp;
+      skip = 6;
+    }
+    if (at < 0) {
+      continue;
+    }
+    var name: string = s_sub(l, 10, at);
+    var value: string = s_trim(s_from(l, at + skip));
+    if (!sl_has(names, name)) {
+      sl_push(names, name);
+      sl_push(npaths, s_empty());
+      sl_push(nurls, s_empty());
+    }
+    if (is_path) {
+      gt_set_at(npaths, names, name, value);
+    } else {
+      gt_set_at(nurls, names, name, value);
+    }
+  }
+  free(lines);
+  var lpaths: StrList* = sl_new();
+  var lshas: StrList* = sl_new();
+  var t: Cmd* = gt_cmd_in(mirror);
+  cmd_arg(t, "ls-tree");
+  cmd_arg(t, commit);
+  cmd_arg(t, "--");
+  var any: bool = false;
+  i = 0;
+  while (i < npaths->len) {
+    if (slen(sl_get(npaths, i)) > 0) {
+      cmd_arg(t, sl_get(npaths, i));
+      any = true;
+    }
+    i = i + 1;
+  }
+  if (any) {
+    var lr: Captured = gt_capture(t, false);
+    if (lr.code != 0) {
+      g->ok = false;
+      g->err = git_summary(lr.out);
+    }
+    var tl: StrList* = s_lines(lr.out);
+    var k: int64 = 0;
+    while (k < tl->len) {
+      var e: string = sl_get(tl, k);
+      var tab: int64 = s_find_byte(e, 9);
+      if (tab > 0) {
+        var f: StrList* = s_fields(s_sub(e, 0, tab));
+        if (f->len >= 3 && s_eq(sl_get(f, 0), "160000")) {
+          sl_push(lpaths, s_trim(s_from(e, tab + 1)));
+          sl_push(lshas, s_lower(sl_get(f, 2)));
+        }
+        free(f->items);
+        free(f);
+      }
+      k = k + 1;
+    }
+    free(tl);
+  } else {
+    gt_free(t);
+  }
+  i = 0;
+  while (i < names->len) {
+    var p: string = sl_get(npaths, i);
+    var j: int64 = sl_index(lpaths, p);
+    if (slen(p) == 0 || slen(sl_get(nurls, i)) == 0) {
+      verbose("submodule " + sl_get(names, i) + " in .gitmodules of " + commit + " has no path or url: skipped");
+    } else if (j < 0) {
+      verbose("submodule " + p + " in .gitmodules of " + commit + " has no gitlink: skipped");
+    } else {
+      sl_push(g->paths, p);
+      sl_push(g->urls, sl_get(nurls, i));
+      sl_push(g->commits, sl_get(lshas, j));
+    }
+    i = i + 1;
+  }
+  free(names->items);
+  free(names);
+  free(npaths->items);
+  free(npaths);
+  free(nurls->items);
+  free(nurls);
+  free(lpaths->items);
+  free(lpaths);
+  free(lshas->items);
+  free(lshas);
+  return g;
+}
+
+// What git_checkout_tree checks out. url is the URL the mirror was fetched
+// from (relative submodule URLs resolve against it). fetched holds the URLs
+// fetched during this command (each is fetched at most once; 0 is allowed).
+// select names the top-level submodule paths to check out: 0 for all, an
+// empty list for none. label ("github.com/demo/wrapper v1.0.0") names the
+// package in messages.
+export struct GitTree {
+  mirror: string;
+  url: string;
+  commit: string;
+  dest: string;
+  offline: bool;
+  fetched: StrList*;
+  select: StrList*;
+  label: string;
+}
+
+struct GtWalk {
+  t: GitTree*;
+  marker: StrList*;
+  chain: StrList*;
+}
+
+fn gt_module_of(label: string) -> string {
+  var sp: int64 = s_find_byte(label, 32);
+  if (sp < 0) {
+    return label;
+  }
+  return s_sub(label, 0, sp);
+}
+
+fn gt_short(sha: string) -> string {
+  if (slen(sha) > 7) {
+    return s_sub(sha, 0, 7);
+  }
+  return sha;
+}
+
+// A submodule that is not wanted: an earlier nested checkout goes, leaving
+// the empty directory git leaves for an uninitialised submodule.
+fn gt_clear_sub(dir: string) {
+  if (sys_is_link(dir)) {
+    return;
+  }
+  if (fs_exists(dir + "/.git")) {
+    sys_remove_tree(dir);
+    fs_mkdirs(dir);
+  }
+}
+
+// One submodule: its mirror, its commit, its checkout, then its own
+// submodules. "" or the error.
+fn gt_one_sub(w: GtWalk*, subs: GitSubs*, i: int64, a: GtLevel*) -> string {
+  var t: GitTree* = w->t;
+  var path: string = sl_get(subs->paths, i);
+  var full: string = path;
+  if (slen(a->prefix) > 0) {
+    full = a->prefix + "/" + path;
+  }
+  var sdir: string = a->dir + "/" + path;
+  var what: string = "submodule " + full + " of " + t->label;
+  var written: string = sl_get(subs->urls, i);
+  var surl: string = written;
+  if (gt_is_relative_url(written)) {
+    surl = git_resolve_url(a->url, written);
+    if (slen(surl) == 0) {
+      return what + ": relative URL " + written + " climbs above " + gt_url_root(a->url);
+    }
+  }
+  var key: string = surl + "\n" + path;
+  if (sl_has(w->chain, key)) {
+    return "submodule cycle: " + what + " (" + surl + ") is already being checked out above it";
+  }
+  if (a->depth >= 8) {
+    return what + ": submodules nest deeper than 8 levels";
+  }
+  var smirror: string = git_url_mirror_dir(surl);
+  if (!git_has_mirror(smirror)) {
+    if (t->offline) {
+      return what + " (from " + surl + ") is not downloaded and --offline forbids fetching it\n  help: run `mbuild fetch` once while online, or drop --offline";
+    }
+    status("Fetching", what + " from " + surl);
+    var cr: Captured = git_clone_url(surl);
+    if (cr.code != 0) {
+      var hint: string = "check the URL in the package's .gitmodules";
+      if (s_eq(git_failure_kind(cr.out), "network")) {
+        hint = "connect and retry; builds of already-fetched dependencies work with --offline";
+      }
+      return "cannot download " + what + " from " + surl + "\n  git: " + s_replace(git_summary(cr.out), "\n", "\n  git: ") + "\n  help: " + hint;
+    }
+    sl_add_uniq(t->fetched, surl);
+  }
+  var sha: string = sl_get(subs->commits, i);
+  var have: bool = slen(git_rev(smirror, sha)) > 0;
+  if (!have && !t->offline) {
+    if (!sl_has(t->fetched, surl)) {
+      sl_push(t->fetched, surl);
+      verbose("updating the mirror of " + surl + " for commit " + sha);
+      var fr: Captured = git_fetch_url(surl);
+      if (fr.code != 0) {
+        verbose("could not update the mirror of " + surl + ": " + git_summary(fr.out));
+      }
+      have = slen(git_rev(smirror, sha)) > 0;
+    }
+    if (!have) {
+      var fc: Captured = git_fetch_commit(smirror, sha);
+      if (fc.code != 0) {
+        verbose("git fetch origin " + sha + " failed: " + git_summary(fc.out));
+      }
+      have = slen(git_rev(smirror, sha)) > 0;
+    }
+  }
+  if (!have) {
+    var module: string = gt_module_of(t->label);
+    return what + " pins commit " + gt_short(sha) + ", which " + surl + " does not have\n  help: the package was tagged with a submodule commit that was never pushed; use another version of " + module + ", or exclude the submodule: \"" + module + "\" = {{ version = \"...\", submodules = false }";
+  }
+  verbose("checkout " + what + " (" + sha + ") into " + sdir);
+  var e: string = gt_checkout_raw(smirror, sha, sdir);
+  if (slen(e) > 0) {
+    return "cannot check out " + what + " into " + sdir + ":\n  " + git_summary(e);
+  }
+  sl_push(w->marker, "sub " + full + " " + sha);
+  sl_push(w->chain, key);
+  var next: GtLevel* = new GtLevel;
+  next->mirror = smirror;
+  next->url = surl;
+  next->commit = sha;
+  next->dir = sdir;
+  next->prefix = full;
+  next->depth = a->depth + 1;
+  next->select = (StrList*)0;
+  var deeper: string = gt_subs_into(w, next);
+  free(next);
+  w->chain->len = w->chain->len - 1;
+  return deeper;
+}
+
+// One level of the tree: a checkout (dir) of commit from mirror, fetched
+// from url, at prefix (relative to the top checkout).
+struct GtLevel {
+  mirror: string;
+  url: string;
+  commit: string;
+  dir: string;
+  prefix: string;
+  depth: int64;
+  select: StrList*;
+}
+
+fn gt_subs_into(w: GtWalk*, a: GtLevel*) -> string {
+  var t: GitTree* = w->t;
+  var subs: GitSubs* = git_submodules(a->mirror, a->commit);
+  if (!subs->ok) {
+    var owner: string = t->label;
+    if (slen(a->prefix) > 0) {
+      owner = "submodule " + a->prefix + " of " + t->label;
+    }
+    return "cannot read the submodules of " + owner + ":\n  " + subs->err;
+  }
+  if (a->select != 0) {
+    var have: string = "it has none";
+    if (subs->paths->len > 0) {
+      have = "it has " + sl_join(subs->paths, ", ");
+    }
+    var k: int64 = 0;
+    while (k < a->select->len) {
+      if (!sl_has(subs->paths, sl_get(a->select, k))) {
+        warn(t->label + ": submodules lists " + sl_get(a->select, k) + ", which is not a submodule at this commit (" + have + ")");
+      }
+      k = k + 1;
+    }
+  }
+  var i: int64 = 0;
+  while (i < subs->paths->len) {
+    if (a->select != 0 && !sl_has(a->select, sl_get(subs->paths, i))) {
+      gt_clear_sub(a->dir + "/" + sl_get(subs->paths, i));
+    } else {
+      var e: string = gt_one_sub(w, subs, i, a);
+      if (slen(e) > 0) {
+        return e;
+      }
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// Checks out t->commit into t->dest (git_checkout), then its submodules,
+// recursively, at the commits the gitlinks pin, each from its own mirror
+// (12.7). The marker, written last, is the commit, `subs N` (`subs 0 off`
+// when none are selected) and one `sub PATH COMMIT` line per nested
+// checkout. A checkout whose one-line marker (written before submodules
+// existed) already names the commit keeps its parent checkout. "" or a
+// complete error message.
+export fn git_checkout_tree(t: GitTree*) -> string {
+  if (t->fetched == 0) {
+    t->fetched = sl_new();
+  }
+  var dest: string = t->dest;
+  var marker_path: string = dest + "/.mbuild-commit";
+  if (sys_is_link(dest)) {
+    return gt_link_refusal(dest);
+  }
+  var keep: bool = fs_is_dir(dest + "/.git") && s_eq(git_checkout_commit(dest), t->commit) && !git_marker_complete(dest);
+  if (!keep) {
+    if (fs_exists(marker_path)) {
+      sys_remove_file(marker_path);
+    }
+    var e: string = gt_checkout_raw(t->mirror, t->commit, dest);
+    if (slen(e) > 0) {
+      return e;
+    }
+  }
+  var off: bool = t->select != 0 && t->select->len == 0;
+  var w: GtWalk* = new GtWalk;
+  w->t = t;
+  w->marker = sl_new();
+  w->chain = sl_new();
+  var top: GtLevel* = new GtLevel;
+  top->mirror = t->mirror;
+  top->url = t->url;
+  top->commit = t->commit;
+  top->dir = dest;
+  top->prefix = s_empty();
+  top->depth = 0;
+  top->select = t->select;
+  var err: string = gt_subs_into(w, top);
+  free(top);
+  var text: string = t->commit + "\n";
+  if (off) {
+    text = text + "subs 0 off\n";
+  } else {
+    text = text + "subs " + s_int(w->marker->len) + "\n";
+    if (w->marker->len > 0) {
+      text = text + sl_join(w->marker, "\n") + "\n";
+    }
+  }
+  free(w->marker->items);
+  free(w->marker);
+  free(w->chain->items);
+  free(w->chain);
+  free(w);
+  if (slen(err) > 0) {
+    return err;
+  }
+  if (!fs_write(marker_path, text)) {
+    return "cannot write " + marker_path;
+  }
+  return s_empty();
+}

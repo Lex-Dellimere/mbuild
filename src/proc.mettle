@@ -1,0 +1,120 @@
+// proc: tool lookup with environment overrides, running and capturing
+// commands, and a pool of parallel jobs.
+
+import "std/mem";
+import "base";
+import "fs";
+import "sys_linux" if linux;
+import "sys_windows" if windows;
+
+// The program named by the environment variable env_override (e.g.
+// MBUILD_GIT) when that is set, else `name` searched on PATH.
+export fn proc_tool(name: string, env_override: string) -> Tool {
+  if (slen(env_override) > 0) {
+    var v: string = env_get(env_override);
+    if (slen(v) > 0) {
+      return sys_find_tool(v);
+    }
+  }
+  return sys_find_tool(name);
+}
+
+// Returns a pointer, not a Tool: v0.17.0 cannot compile a cross-module call
+// that returns an aggregate through memory and takes six argument registers.
+export fn proc_require(name: string, env_override: string, why: string) -> Tool* {
+  var t: Tool* = new Tool;
+  *t = proc_tool(name, env_override);
+  if (!tool_found(*t)) {
+    var hint: string = "install `" + name + "` and put it on PATH";
+    if (slen(env_override) > 0) {
+      hint = hint + ", or set " + env_override + " to its path";
+      if (slen(env_get(env_override)) > 0) {
+        fail_hint(env_override + "=" + env_get(env_override) + " does not name a program (needed " + why + ")", hint);
+      }
+    }
+    fail_hint("cannot find `" + name + "` (needed " + why + ")", hint);
+  }
+  return t;
+}
+
+export fn proc_run(c: Cmd*) -> int32 {
+  verbose(cmd_display(c));
+  return sys_run(c);
+}
+
+export fn proc_capture(c: Cmd*) -> Captured {
+  verbose(cmd_display(c));
+  return sys_capture(c, false);
+}
+
+export fn proc_capture_all(c: Cmd*) -> Captured {
+  verbose(cmd_display(c));
+  return sys_capture(c, true);
+}
+
+export fn proc_jobs() -> int64 {
+  var n: int64 = s_to_int(s_trim(env_get("MBUILD_JOBS")));
+  if (n > 0) {
+    return n;
+  }
+  return 8;
+}
+
+// Runs n commands, at most `parallel` at a time, each with stdout and stderr
+// going to logs[i] (logs may be 0: then to files under fs_temp_dir()).
+// Returns the exit codes, in command order.
+export fn proc_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64) -> int32* {
+  var codes: int32* = (int32*)malloc((n + 1) * 4);
+  var jobs: Job** = (Job**)malloc((n + 1) * 8);
+  defer free(jobs);
+  var tmp: string = "";
+  if (logs == 0) {
+    tmp = fs_temp_dir();
+  }
+  if (parallel < 1) {
+    parallel = 1;
+  }
+  var upto: int64 = 0;
+  var running: int64 = 0;
+  var finished: int64 = 0;
+  var nap: int64 = 1;
+  while (finished < n) {
+    while (running < parallel && upto < n) {
+      var logp: string = "";
+      if (logs != 0) {
+        logp = sl_get(logs, upto);
+      } else {
+        logp = tmp + "/job-" + hash_string(sys_cwd() + "{sys_now_ms()}-{upto}") + ".log";
+      }
+      verbose(cmd_display(cmds[upto]));
+      jobs[upto] = sys_job_start(cmds[upto], logp);
+      running = running + 1;
+      upto = upto + 1;
+    }
+    var progressed: bool = false;
+    var i: int64 = 0;
+    while (i < upto) {
+      var j: Job* = jobs[i];
+      if (j != 0) {
+        if (sys_job_poll(j)) {
+          codes[i] = j->code;
+          free(j);
+          jobs[i] = (Job*)0;
+          running = running - 1;
+          finished = finished + 1;
+          progressed = true;
+        }
+      }
+      i = i + 1;
+    }
+    if (progressed) {
+      nap = 1;
+    } else {
+      sys_sleep_ms(nap);
+      if (nap < 20) {
+        nap = nap * 2;
+      }
+    }
+  }
+  return codes;
+}

@@ -1,0 +1,1160 @@
+// sys_windows: the platform layer on Windows and wine. sys_linux exports the
+// same API.
+//
+// Processes are started with CreateProcessA directly. Output that must be
+// captured goes to a temporary file the child inherits as its stdout.
+//
+// Under wine, a host Linux program (Tool.unix) cannot be waited for: the
+// process handle wine returns for it is not waitable. Such a command is
+// written into a small shell script that runs it and then writes its exit
+// status to a file; `Z:\bin\sh` runs the script and mbuild polls for the
+// status file.
+//
+// Cmd.env entries are set in this process just before the child is created
+// and restored right after, so they reach that child only.
+
+import "std/io";
+import "std/mem";
+import "base";
+
+extern fn w_GetFileAttributesA(path: cstring) -> uint32 = "GetFileAttributesA";
+extern fn w_SetFileAttributesA(path: cstring, attrs: uint32) -> int32 = "SetFileAttributesA";
+extern fn w_GetFileAttributesExA(path: cstring, level: int32, info: rawptr) -> int32 = "GetFileAttributesExA";
+extern fn w_FindFirstFileA(pattern: cstring, data: rawptr) -> int64 = "FindFirstFileA";
+extern fn w_FindNextFileA(h: int64, data: rawptr) -> int32 = "FindNextFileA";
+extern fn w_FindClose(h: int64) -> int32 = "FindClose";
+extern fn w_CreateDirectoryA(path: cstring, sa: rawptr) -> int32 = "CreateDirectoryA";
+extern fn w_RemoveDirectoryA(path: cstring) -> int32 = "RemoveDirectoryA";
+extern fn w_DeleteFileA(path: cstring) -> int32 = "DeleteFileA";
+extern fn w_MoveFileExA(from: cstring, to: cstring, flags: uint32) -> int32 = "MoveFileExA";
+extern fn w_Sleep(ms: uint32) = "Sleep";
+extern fn w_GetTickCount64() -> uint64 = "GetTickCount64";
+extern fn w_SetEnvironmentVariableA(name: cstring, value: cstring) -> int32 = "SetEnvironmentVariableA";
+extern fn w_GetEnvironmentVariableA(name: cstring, buf: cstring, size: uint32) -> uint32 = "GetEnvironmentVariableA";
+extern fn w_GetLastError() -> uint32 = "GetLastError";
+extern fn w_GetModuleHandleA(name: cstring) -> int64 = "GetModuleHandleA";
+extern fn w_GetProcAddress(module: int64, name: cstring) -> rawptr = "GetProcAddress";
+extern fn w_MultiByteToWideChar(cp: uint32, flags: uint32, s: cstring, n: int32, w: rawptr, wn: int32) -> int32 = "MultiByteToWideChar";
+extern fn w_GetFullPathNameA(path: cstring, size: uint32, buf: cstring, part: rawptr) -> uint32 = "GetFullPathNameA";
+extern fn w_CreateProcessA(app: cstring, cmd: cstring, pa: rawptr, ta: rawptr, inherit: int32, flags: uint32, env: rawptr, cwd: cstring, si: rawptr, pi: rawptr) -> int32 = "CreateProcessA";
+extern fn w_WaitForSingleObject(h: int64, ms: uint32) -> uint32 = "WaitForSingleObject";
+extern fn w_GetExitCodeProcess(h: int64, code: uint32*) -> int32 = "GetExitCodeProcess";
+extern fn w_CloseHandle(h: int64) -> int32 = "CloseHandle";
+extern fn w_CreateFileA(path: cstring, access: uint32, share: uint32, sa: rawptr, creation: uint32, flags: uint32, template: int64) -> int64 = "CreateFileA";
+extern fn w_GetStdHandle(which: int32) -> int64 = "GetStdHandle";
+extern fn w_SetHandleInformation(h: int64, mask: uint32, flags: uint32) -> int32 = "SetHandleInformation";
+extern fn w_GetCurrentProcessId() -> uint32 = "GetCurrentProcessId";
+extern fn w_rt_getcwd(buf: cstring, size: int32) -> int32 = "mettle_getcwd";
+extern fn w_rt_exe_path(buf: cstring, size: uint64) -> int64 = "mettle_executable_path";
+extern fn w_rt_realpath(path: cstring, buf: cstring) -> cstring = "mettle_realpath";
+extern fn w_rt_isatty(fd: int32) -> int32 = "isatty";
+
+// 0 not yet checked, 1 native Windows, 2 wine.
+var g_w_wine: int32 = 0;
+var g_w_unix_name: rawptr = 0;
+var g_w_seq: int64 = 0;
+// "NAME=value" for every sys_setenv call, exported again to host programs.
+var g_w_env: StrList* = 0;
+
+export fn sys_os() -> string {
+  return "windows";
+}
+
+// The host directories searched for Linux programs under wine when
+// MBUILD_UNIX_PATH is unset (colon-separated; sys_linux answers the same).
+export fn sys_unix_path_default() -> string {
+  return "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin";
+}
+
+fn w_unix_path() -> string {
+  var unix_path: string = env_get("MBUILD_UNIX_PATH");
+  if (slen(unix_path) == 0) {
+    return sys_unix_path_default();
+  }
+  return unix_path;
+}
+
+export fn sys_exe_ext() -> string {
+  return ".exe";
+}
+
+export fn sys_is_wine() -> bool {
+  if (g_w_wine == 0) {
+    g_w_wine = 1;
+    var ntdll: int64 = w_GetModuleHandleA("ntdll.dll");
+    if (ntdll != 0 && w_GetProcAddress(ntdll, "wine_get_version") != 0) {
+      g_w_wine = 2;
+    }
+  }
+  return g_w_wine == 2;
+}
+
+export fn sys_list_sep() -> int32 {
+  return 59;
+}
+
+fn w_slash(s: string) -> string {
+  return s_replace_byte(s, 92, 47);
+}
+
+fn w_env_list() -> StrList* {
+  if (g_w_env == 0) {
+    g_w_env = sl_new();
+  }
+  return g_w_env;
+}
+
+export fn sys_setenv(name: string, value: string) {
+  w_SetEnvironmentVariableA(s_c(name), s_c(value));
+  var l: StrList* = w_env_list();
+  var entry: string = name + "=" + value;
+  var i: int64 = 0;
+  while (i < l->len) {
+    if (s_starts(sl_get(l, i), name + "=")) {
+      sl_set(l, i, entry);
+      return;
+    }
+    i = i + 1;
+  }
+  sl_push(l, entry);
+}
+
+export fn sys_home() -> string {
+  var h: string = env_get("LOCALAPPDATA");
+  if (slen(h) == 0) {
+    h = env_get("USERPROFILE");
+  }
+  return w_slash(h);
+}
+
+export fn sys_cwd() -> string {
+  var buf: uint8* = (uint8*)malloc(4096);
+  var r: string = ".";
+  if (w_rt_getcwd((cstring)buf, 4096) == 0) {
+    r = w_slash(s_from_c((cstring)buf));
+  }
+  free(buf);
+  return r;
+}
+
+export fn sys_self_exe() -> string {
+  var buf: uint8* = (uint8*)malloc(4096);
+  var n: int64 = w_rt_exe_path((cstring)buf, (uint64)4096);
+  var r: string = "";
+  if (n > 0) {
+    r = w_slash(s_dup(s_view(buf, n)));
+  }
+  free(buf);
+  return r;
+}
+
+export fn sys_realpath(p: string) -> string {
+  var buf: uint8* = (uint8*)malloc(4096);
+  var r: string = "";
+  if (w_rt_realpath(s_c(p), (cstring)buf) != 0) {
+    r = w_slash(s_from_c((cstring)buf));
+  }
+  free(buf);
+  return r;
+}
+
+export fn sys_now_ms() -> int64 {
+  return (int64)w_GetTickCount64();
+}
+
+export fn sys_sleep_ms(ms: int64) {
+  if (ms > 0) {
+    w_Sleep((uint32)ms);
+  }
+}
+
+export fn sys_isatty(fd: int32) -> bool {
+  return w_rt_isatty(fd) != 0;
+}
+
+fn w_rd32(p: uint8*, off: int64) -> int64 {
+  var v: int64 = 0;
+  var i: int64 = 3;
+  while (i >= 0) {
+    v = (v << 8) | (int64)p[off + i];
+    i = i - 1;
+  }
+  return v;
+}
+
+fn w_wr32(p: uint8*, off: int64, v: int64) {
+  var i: int64 = 0;
+  while (i < 4) {
+    p[off + i] = (uint8)((v >> (i * 8)) & 255);
+    i = i + 1;
+  }
+}
+
+fn w_wr64(p: uint8*, off: int64, v: int64) {
+  w_wr32(p, off, v & 4294967295);
+  w_wr32(p, off + 4, (v >> 32) & 4294967295);
+}
+
+fn w_rd64(p: uint8*, off: int64) -> int64 {
+  return (w_rd32(p, off + 4) << 32) | w_rd32(p, off);
+}
+
+fn w_attr(p: string) -> int64 {
+  return (int64)w_GetFileAttributesA(s_c(p));
+}
+
+const W_NO_ATTR: int64 = 4294967295;
+
+fn w_is_dir(p: string) -> bool {
+  var a: int64 = w_attr(p);
+  return a != W_NO_ATTR && (a & 16) != 0;
+}
+
+fn w_is_file(p: string) -> bool {
+  var a: int64 = w_attr(p);
+  return a != W_NO_ATTR && (a & 16) == 0;
+}
+
+export fn sys_stat(p: string) -> FileInfo {
+  var fi: FileInfo;
+  fi.exists = false;
+  fi.is_dir = false;
+  fi.size = 0;
+  fi.mtime = 0;
+  var buf: uint8* = (uint8*)malloc(64);
+  memset(buf, 0, 64);
+  if (w_GetFileAttributesExA(s_c(p), 0, (rawptr)buf) != 0) {
+    fi.exists = true;
+    fi.is_dir = (w_rd32(buf, 0) & 16) != 0;
+    fi.mtime = w_rd64(buf, 20);
+    fi.size = (w_rd32(buf, 28) << 32) | w_rd32(buf, 32);
+  }
+  free(buf);
+  return fi;
+}
+
+export fn sys_mkdir(p: string) -> bool {
+  w_CreateDirectoryA(s_c(p), 0);
+  return w_is_dir(p);
+}
+
+// Creates p and answers true only when this call created it (false when it
+// already existed or could not be made): an atomic test-and-set for locks.
+export fn sys_mkdir_new(p: string) -> bool {
+  return w_CreateDirectoryA(s_c(p), 0) != 0;
+}
+
+// Calls back for every entry of dir except . and ..: names and attributes
+// go to the two lists. False when dir cannot be listed.
+fn w_list(dir: string, names: StrList*, attrs: StrList*) -> bool {
+  var data: uint8* = (uint8*)malloc(400);
+  defer free(data);
+  memset(data, 0, 400);
+  var pat: string = dir + "/*";
+  if (s_ends(dir, "/") || s_ends(dir, "\\")) {
+    pat = dir + "*";
+  }
+  var h: int64 = w_FindFirstFileA(s_c(pat), (rawptr)data);
+  if (h == -1) {
+    return w_is_dir(dir);
+  }
+  while (true) {
+    var name: string = s_from_c((cstring)&data[44]);
+    if (!s_eq(name, ".") && !s_eq(name, "..")) {
+      sl_push(names, name);
+      sl_push(attrs, s_int(w_rd32(data, 0)));
+    }
+    if (w_FindNextFileA(h, (rawptr)data) == 0) {
+      break;
+    }
+  }
+  w_FindClose(h);
+  return true;
+}
+
+fn w_sl_free(l: StrList*) {
+  free(l->items);
+  free(l);
+}
+
+export fn sys_list_dir(p: string, files: StrList*, dirs: StrList*) -> bool {
+  if (!w_is_dir(p)) {
+    return false;
+  }
+  var names: StrList* = sl_new();
+  var attrs: StrList* = sl_new();
+  var ok: bool = w_list(p, names, attrs);
+  var i: int64 = 0;
+  while (i < names->len) {
+    if ((s_to_int(sl_get(attrs, i)) & 16) != 0) {
+      sl_push(dirs, sl_get(names, i));
+    } else {
+      sl_push(files, sl_get(names, i));
+    }
+    i = i + 1;
+  }
+  w_sl_free(names);
+  w_sl_free(attrs);
+  return ok;
+}
+
+export fn sys_remove_file(p: string) -> bool {
+  var a: int64 = w_attr(p);
+  if (a == W_NO_ATTR || (a & 16) != 0) {
+    return false;
+  }
+  if ((a & 1) != 0) {
+    w_SetFileAttributesA(s_c(p), (uint32)128);
+  }
+  return w_DeleteFileA(s_c(p)) != 0;
+}
+
+// Read-only files (git objects) are made writable first; directory links
+// (reparse points) are removed without entering them.
+fn w_remove_rec(p: string, attr: int64) {
+  if ((attr & 1024) != 0 && sys_is_wine()) {
+    // Neither RemoveDirectoryA nor DeleteFileA removes a host link.
+    w_host_rm(p);
+    return;
+  }
+  if ((attr & 16) == 0) {
+    sys_remove_file(p);
+    return;
+  }
+  if ((attr & 1024) == 0) {
+    var names: StrList* = sl_new();
+    var attrs: StrList* = sl_new();
+    w_list(p, names, attrs);
+    var i: int64 = 0;
+    while (i < names->len) {
+      w_remove_rec(p + "/" + sl_get(names, i), s_to_int(sl_get(attrs, i)));
+      i = i + 1;
+    }
+    w_sl_free(names);
+    w_sl_free(attrs);
+  }
+  if ((attr & 1) != 0) {
+    w_SetFileAttributesA(s_c(p), (uint32)16);
+  }
+  // A just-deleted file can linger while another process holds it open.
+  var tries: int32 = 0;
+  while (w_RemoveDirectoryA(s_c(p)) == 0 && tries < 10) {
+    w_Sleep(10);
+    tries = tries + 1;
+  }
+}
+
+export fn sys_remove_tree(p: string) -> bool {
+  var a: int64 = w_attr(p);
+  if (a == W_NO_ATTR) {
+    return true;
+  }
+  w_remove_rec(p, a);
+  return w_attr(p) == W_NO_ATTR;
+}
+
+// A link: a reparse point (a junction or symbolic link natively, a host
+// symbolic link under wine).
+export fn sys_is_link(p: string) -> bool {
+  var a: int64 = w_attr(w_trim_slash(p));
+  return a != W_NO_ATTR && (a & 1024) != 0;
+}
+
+fn w_trim_slash(p: string) -> string {
+  var n: int64 = slen(p);
+  while (n > 1 && (s_byte(p, n - 1) == 47 || s_byte(p, n - 1) == 92) && s_byte(p, n - 2) != 58) {
+    n = n - 1;
+  }
+  return s_sub(p, 0, n);
+}
+
+// A host program run through the wine sh-script runner; arguments are
+// passed as they are (callers convert paths with sys_host_path).
+fn w_host_run(prog: string, args: StrList*) -> int32 {
+  var t: Tool = tool_none();
+  t.path = prog;
+  t.unix = true;
+  var c: Cmd* = cmd_new(t);
+  cmd_args(c, args);
+  var code: int32 = sys_run(c);
+  w_cmd_free(c);
+  return code;
+}
+
+// Under wine: host `rm -f -- p` (removes a link, never its target).
+fn w_host_rm(p: string) -> int32 {
+  var args: StrList* = sl_of("-f");
+  sl_push(args, "--");
+  sl_push(args, sys_host_path(w_trim_slash(p)));
+  var code: int32 = w_host_run("rm", args);
+  w_sl_free(args);
+  return code;
+}
+
+// Makes link point to target (an absolute path), replacing a link already
+// there. A real directory or file at link is left alone (false). Under wine
+// a host symbolic link (`ln -s`); natively a junction (`mklink /J`, which
+// needs no administrator rights).
+export fn sys_make_link(target: string, link: string) -> bool {
+  var q: string = w_trim_slash(link);
+  var a: int64 = w_attr(q);
+  if (a != W_NO_ATTR && (a & 1024) == 0) {
+    return false;
+  }
+  if (sys_is_wine()) {
+    // Also clears a dangling host link, which has no attributes.
+    w_host_rm(q);
+    var args: StrList* = sl_of("-sn");
+    sl_push(args, "--");
+    sl_push(args, sys_host_path(w_trim_slash(target)));
+    sl_push(args, sys_host_path(q));
+    var code: int32 = w_host_run("ln", args);
+    w_sl_free(args);
+    if (code != 0) {
+      return false;
+    }
+    return sys_is_link(q);
+  }
+  if (a != W_NO_ATTR && !sys_remove_link(q)) {
+    return false;
+  }
+  return w_make_junction(target, q) && sys_is_link(q);
+}
+
+// cmd.exe /d /c mklink /J "LINK" "TARGET" with backslashes. Unverified: wine's
+// cmd cannot make junctions ("Failed to open").
+fn w_make_junction(target: string, link: string) -> bool {
+  var tq: string = s_replace_byte(w_trim_slash(target), 47, 92);
+  var lq: string = s_replace_byte(link, 47, 92);
+  if (s_find_byte(tq, 34) >= 0 || s_find_byte(lq, 34) >= 0) {
+    return false;
+  }
+  var shell: string = env_get("ComSpec");
+  if (slen(shell) == 0) {
+    shell = "cmd.exe";
+  }
+  var line: string = win_quote(shell) + " /d /c mklink /J \"" + lq + "\" \"" + tq + "\" >NUL";
+  var none: StrList* = sl_new();
+  var h: int64 = w_spawn("", line, "", none, 0, 0, 0);
+  w_sl_free(none);
+  if (h == -1 || h == 0) {
+    return false;
+  }
+  return w_wait(h) == 0;
+}
+
+// Removes p only when it is a link; the target is never touched.
+export fn sys_remove_link(p: string) -> bool {
+  var q: string = w_trim_slash(p);
+  var a: int64 = w_attr(q);
+  if (a == W_NO_ATTR || (a & 1024) == 0) {
+    return false;
+  }
+  if (sys_is_wine()) {
+    w_host_rm(q);
+  } else if ((a & 16) != 0) {
+    w_RemoveDirectoryA(s_c(q));
+  } else {
+    w_DeleteFileA(s_c(q));
+  }
+  return w_attr(q) == W_NO_ATTR;
+}
+
+export fn sys_rename(from: string, to: string) -> bool {
+  return w_MoveFileExA(s_c(from), s_c(to), (uint32)3) != 0;
+}
+
+fn w_read_small(p: string) -> string {
+  var fp: cstring = fopen(s_c(p), "rb");
+  if (fp == 0) {
+    return "";
+  }
+  var b: Buf* = buf_new();
+  var got: int64 = fread((cstring)b->data, 1, 200, fp);
+  fclose(fp);
+  if (got > 0) {
+    b->len = got;
+  }
+  return buf_take(b);
+}
+
+fn w_read_all(p: string) -> string {
+  var fp: cstring = fopen(s_c(p), "rb");
+  if (fp == 0) {
+    return "";
+  }
+  var b: Buf* = buf_new();
+  while (true) {
+    buf_reserve(b, 65536);
+    var got: int64 = fread((cstring)&b->data[b->len], 1, 65535, fp);
+    if (got <= 0) {
+      break;
+    }
+    b->len = b->len + got;
+  }
+  fclose(fp);
+  return buf_take(b);
+}
+
+fn w_write_all(p: string, data: string) -> bool {
+  var fp: cstring = fopen(s_c(p), "wb");
+  if (fp == 0) {
+    return false;
+  }
+  var put: int64 = fwrite((cstring)data.chars, 1, slen(data), fp);
+  fclose(fp);
+  return put == slen(data);
+}
+
+// A Windows executable starts with "MZ"; anything else wine can only start
+// as a host program.
+fn w_is_pe(p: string) -> bool {
+  var head: string = w_read_small(p);
+  return slen(head) >= 2 && s_byte(head, 0) == 77 && s_byte(head, 1) == 90;
+}
+
+fn w_tool_at(p: string) -> Tool {
+  var t: Tool = tool_none();
+  if (sys_is_wine() && !w_is_batch(p) && !w_is_pe(p)) {
+    t.path = sys_host_path(p);
+    t.unix = true;
+    return t;
+  }
+  t.path = w_slash(p);
+  return t;
+}
+
+fn w_has_ext(name: string) -> bool {
+  var slash: int64 = s_rfind_byte(w_slash(name), 47);
+  return s_rfind_byte(name, 46) > slash;
+}
+
+// A batch file (.bat or .cmd), which runs through cmd.exe.
+fn w_is_batch(p: string) -> bool {
+  var low: string = s_lower(p);
+  return s_ends(low, ".bat") || s_ends(low, ".cmd");
+}
+
+// The existing file for base: base itself when the name has an extension,
+// else base plus the first extension of PATHEXT (default
+// .COM;.EXE;.BAT;.CMD) that exists. Only .com, .exe, .bat and .cmd count:
+// other PATHEXT entries (.vbs, .js, ...) need their own hosts. "" when none
+// exists.
+fn w_try_exts(base: string, has_ext: bool) -> string {
+  if (has_ext) {
+    if (w_is_file(base)) {
+      return base;
+    }
+    return "";
+  }
+  var exts: string = env_get("PATHEXT");
+  if (slen(exts) == 0) {
+    exts = ".COM;.EXE;.BAT;.CMD";
+  }
+  var n: int64 = w_list_count(exts, 59);
+  var i: int64 = 0;
+  while (i < n) {
+    var e: string = s_lower(w_list_item(exts, 59, i));
+    if (s_eq(e, ".com") || s_eq(e, ".exe") || s_eq(e, ".bat") || s_eq(e, ".cmd")) {
+      if (w_is_file(base + e)) {
+        return base + e;
+      }
+    }
+    i = i + 1;
+  }
+  return "";
+}
+
+// The i-th entry of a separated list, trimmed ("" past the end).
+fn w_list_item(l: string, sep: int32, i: int64) -> string {
+  var start: int64 = 0;
+  var k: int64 = 0;
+  var j: int64 = 0;
+  while (j <= slen(l)) {
+    if (j == slen(l) || s_byte(l, j) == sep) {
+      if (k == i) {
+        return s_trim(s_sub(l, start, j));
+      }
+      k = k + 1;
+      start = j + 1;
+    }
+    j = j + 1;
+  }
+  return "";
+}
+
+fn w_list_count(l: string, sep: int32) -> int64 {
+  var n: int64 = 1;
+  var j: int64 = 0;
+  while (j < slen(l)) {
+    if (s_byte(l, j) == sep) {
+      n = n + 1;
+    }
+    j = j + 1;
+  }
+  return n;
+}
+
+fn w_find_host(name: string) -> Tool {
+  var t: Tool = tool_none();
+  var unix_path: string = w_unix_path();
+  var n: int64 = w_list_count(unix_path, 58);
+  var u: int64 = 0;
+  while (u < n) {
+    var ud: string = w_list_item(unix_path, 58, u);
+    if (slen(ud) > 0) {
+      var host: string = ud + "/" + name;
+      if (s_ends(ud, "/")) {
+        host = ud + name;
+      }
+      if (w_is_file("Z:" + host)) {
+        t.path = host;
+        t.unix = true;
+        return t;
+      }
+    }
+    u = u + 1;
+  }
+  return t;
+}
+
+export fn sys_find_tool(name: string) -> Tool {
+  if (slen(name) == 0) {
+    return tool_none();
+  }
+  var has_ext: bool = w_has_ext(name);
+  if (s_find_byte(name, 47) >= 0 || s_find_byte(name, 92) >= 0) {
+    var direct: string = w_try_exts(name, has_ext);
+    if (slen(direct) > 0) {
+      return w_tool_at(direct);
+    }
+    if (sys_is_wine()) {
+      // A host program named by its Linux path, or by a path to a file
+      // without extension (wine marks it unix when it is not a PE file).
+      if (s_starts(name, "/") && w_is_file("Z:" + name)) {
+        return w_tool_at("Z:" + name);
+      }
+      if (!has_ext && w_is_file(name)) {
+        return w_tool_at(name);
+      }
+    }
+    return tool_none();
+  }
+  var path_var: string = env_get("PATH");
+  var n: int64 = w_list_count(path_var, 59);
+  var d: int64 = 0;
+  while (d < n) {
+    var dir: string = w_list_item(path_var, 59, d);
+    if (slen(dir) > 0) {
+      if (!s_ends(dir, "/") && !s_ends(dir, "\\")) {
+        dir = dir + "/";
+      }
+      var cand: string = w_try_exts(dir + name, has_ext);
+      if (slen(cand) > 0) {
+        return w_tool_at(cand);
+      }
+    }
+    d = d + 1;
+  }
+  if (sys_is_wine()) {
+    return w_find_host(name);
+  }
+  return tool_none();
+}
+
+// ---------------------------------------------------------------------------
+// Windows processes
+// ---------------------------------------------------------------------------
+
+// One argument of a batch-file command line, always quoted. Inside quotes
+// cmd treats ^ & | < > ( ) literally; an embedded `"` is doubled so the
+// quote parity stays even, backslashes before a `"` (and before the closing
+// quote) are doubled for programs the script passes the argument on to, and
+// each `%` becomes `%%cd:~,%` (an empty substring of %cd% follows the `%`, so
+// no %NAME% can expand). The script sees `%1` with its quotes and `%~1`
+// without; an embedded quote arrives doubled.
+fn w_bat_quote(s: string) -> string {
+  var b: Buf* = buf_new();
+  buf_addb(b, 34);
+  var slashes: int64 = 0;
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 92) {
+      slashes = slashes + 1;
+    } else {
+      if (c == 34) {
+        buf_add(b, s_repeat("\\", slashes));
+        buf_addb(b, 34);
+      } else if (c == 37) {
+        buf_add(b, "%%cd:~,");
+      }
+      slashes = 0;
+    }
+    buf_addb(b, c);
+    i = i + 1;
+  }
+  buf_add(b, s_repeat("\\", slashes));
+  buf_addb(b, 34);
+  return buf_take(b);
+}
+
+// cmd.exe /e:ON /v:OFF /d /s /c ""script" "arg" ..."; /s makes cmd strip
+// exactly the outer pair of quotes, /v:OFF keeps `!` literal, /d skips
+// AutoRun. "" (the process then fails to start) when an argument holds a
+// CR, LF or NUL, which cmd would treat as the end of the command, or the
+// script path holds a quote.
+fn w_bat_cmdline(c: Cmd*) -> string {
+  var script: string = s_replace_byte(c->tool.path, 47, 92);
+  if (s_find_byte(script, 34) >= 0) {
+    return "";
+  }
+  var shell: string = env_get("ComSpec");
+  if (slen(shell) == 0) {
+    shell = "cmd.exe";
+  }
+  var b: Buf* = buf_new();
+  buf_add(b, win_quote(shell));
+  buf_add(b, " /e:ON /v:OFF /d /s /c \"\"");
+  buf_add(b, script);
+  buf_addb(b, 34);
+  var i: int64 = 0;
+  while (i < c->args->len) {
+    var a: string = sl_get(c->args, i);
+    if (s_find_byte(a, 10) >= 0 || s_find_byte(a, 13) >= 0 || s_find_byte(a, 0) >= 0) {
+      free(b->data);
+      free(b);
+      return "";
+    }
+    buf_addb(b, 32);
+    buf_add(b, w_bat_quote(a));
+    i = i + 1;
+  }
+  buf_addb(b, 34);
+  return buf_take(b);
+}
+
+fn w_cmdline(c: Cmd*) -> string {
+  if (w_is_batch(c->tool.path)) {
+    return w_bat_cmdline(c);
+  }
+  var b: Buf* = buf_new();
+  buf_add(b, win_quote(s_replace_byte(c->tool.path, 47, 92)));
+  var i: int64 = 0;
+  while (i < c->args->len) {
+    buf_addb(b, 32);
+    buf_add(b, win_quote(sl_get(c->args, i)));
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// Sets each "NAME=value" and returns the previous values ("\0" marks
+// "was not set") so w_env_restore can put them back.
+fn w_env_apply(env: StrList*) -> StrList* {
+  var old: StrList* = sl_new();
+  var buf: uint8* = (uint8*)malloc(32768);
+  defer free(buf);
+  var i: int64 = 0;
+  while (i < env->len) {
+    var e: string = sl_get(env, i);
+    var eq: int64 = s_find_byte(e, 61);
+    var name: string = s_sub(e, 0, eq);
+    var n: uint32 = w_GetEnvironmentVariableA(s_c(name), (cstring)buf, (uint32)32768);
+    if (n == (uint32)0 && w_GetLastError() == (uint32)203) {
+      sl_push(old, "\0");
+    } else {
+      sl_push(old, s_dup(s_view(buf, (int64)n)));
+    }
+    w_SetEnvironmentVariableA(s_c(name), s_c(s_from(e, eq + 1)));
+    i = i + 1;
+  }
+  return old;
+}
+
+fn w_env_restore(env: StrList*, old: StrList*) {
+  var i: int64 = old->len - 1;
+  while (i >= 0) {
+    var e: string = sl_get(env, i);
+    var name: string = s_sub(e, 0, s_find_byte(e, 61));
+    var v: string = sl_get(old, i);
+    if (s_eq(v, "\0")) {
+      w_SetEnvironmentVariableA(s_c(name), (cstring)0);
+    } else {
+      w_SetEnvironmentVariableA(s_c(name), s_c(v));
+    }
+    i = i - 1;
+  }
+  w_sl_free(old);
+}
+
+// Starts a process; returns its handle, -1 when it could not start (wine
+// answers 0 for a host program it did start). With
+// out_h != 0 the child's stdout goes there, stderr to err_h (or the console's)
+// and stdin to in_h (or the console's).
+fn w_spawn(app: string, cmdline: string, cwd: string, env: StrList*, in_h: int64, out_h: int64, err_h: int64) -> int64 {
+  flush_out();
+  var si: uint8* = (uint8*)malloc(104);
+  defer free(si);
+  var pi: uint8* = (uint8*)malloc(24);
+  defer free(pi);
+  memset(si, 0, 104);
+  memset(pi, 0, 24);
+  w_wr32(si, 0, 104);
+  var inherit: int32 = 0;
+  if (out_h != 0) {
+    var hin: int64 = in_h;
+    var herr: int64 = err_h;
+    if (hin == 0) {
+      hin = w_GetStdHandle(-10);
+      w_SetHandleInformation(hin, (uint32)1, (uint32)1);
+    }
+    if (herr == 0) {
+      herr = w_GetStdHandle(-12);
+      w_SetHandleInformation(herr, (uint32)1, (uint32)1);
+    }
+    w_wr32(si, 60, 256);
+    w_wr64(si, 80, hin);
+    w_wr64(si, 88, out_h);
+    w_wr64(si, 96, herr);
+    inherit = 1;
+  }
+  var dir: cstring = (cstring)0;
+  if (slen(cwd) > 0) {
+    dir = s_c(cwd);
+  }
+  var appc: cstring = (cstring)0;
+  if (slen(app) > 0) {
+    appc = s_c(app);
+  }
+  var old: StrList* = w_env_apply(env);
+  var ok: int32 = w_CreateProcessA(appc, s_c(cmdline), 0, 0, inherit, (uint32)0, 0, dir, (rawptr)si, (rawptr)pi);
+  w_env_restore(env, old);
+  if (ok == 0) {
+    return -1;
+  }
+  if (w_rd64(pi, 8) != 0) {
+    w_CloseHandle(w_rd64(pi, 8));
+  }
+  return w_rd64(pi, 0);
+}
+
+fn w_wait(h: int64) -> int32 {
+  w_WaitForSingleObject(h, (uint32)4294967295);
+  var code: uint32 = (uint32)127;
+  w_GetExitCodeProcess(h, &code);
+  w_CloseHandle(h);
+  return (int32)code;
+}
+
+// An inheritable handle: a file created for writing, or NUL for reading.
+fn w_open_inheritable(p: string, write: bool) -> int64 {
+  var sa: uint8* = (uint8*)malloc(24);
+  defer free(sa);
+  memset(sa, 0, 24);
+  w_wr32(sa, 0, 24);
+  w_wr32(sa, 16, 1);
+  if (write) {
+    return w_CreateFileA(s_c(p), (uint32)1073741824, (uint32)7, (rawptr)sa, (uint32)2, (uint32)128, 0);
+  }
+  return w_CreateFileA(s_c(p), (uint32)2147483648, (uint32)3, (rawptr)sa, (uint32)3, (uint32)128, 0);
+}
+
+fn w_tmp_dir() -> string {
+  var t: string = env_get("TEMP");
+  if (slen(t) == 0) {
+    t = env_get("TMP");
+  }
+  if (slen(t) == 0 || !w_is_dir(t)) {
+    t = sys_home() + "/mbuild";
+    sys_mkdir(t);
+    t = t + "/tmp";
+    sys_mkdir(t);
+  }
+  return w_slash(t);
+}
+
+// A fresh path in the temp directory, without extension.
+fn w_tmp_base(kind: string) -> string {
+  g_w_seq = g_w_seq + 1;
+  var pid: uint32 = w_GetCurrentProcessId();
+  return w_tmp_dir() + "/mbuild-" + kind + "-{pid}-{g_w_seq}-{sys_now_ms()}";
+}
+
+// ---------------------------------------------------------------------------
+// Host programs under wine
+// ---------------------------------------------------------------------------
+
+fn w_unix_arg(c: Cmd*, i: int64) -> string {
+  var a: string = sl_get(c->args, i);
+  if (!cmd_is_path(c, i)) {
+    return a;
+  }
+  // A relative path stays relative: the script runs in the same directory.
+  if (w_needs_host(a)) {
+    return sys_host_path(a);
+  }
+  return w_slash(a);
+}
+
+fn w_needs_host(a: string) -> bool {
+  if (slen(a) == 0) {
+    return false;
+  }
+  var c0: int32 = s_byte(a, 0);
+  if (c0 == 47 || c0 == 92) {
+    return true;
+  }
+  return slen(a) >= 2 && is_alpha_b(c0) && s_byte(a, 1) == 58;
+}
+
+// Writes and starts the script; returns the status file's Windows path, ""
+// when sh could not be started. redirect is appended to the command.
+fn w_unix_start(c: Cmd*, redirect: string) -> string {
+  var base: string = w_tmp_base("sh");
+  var script: string = base + ".sh";
+  var st: string = base + ".st";
+  var st_host: string = sys_host_path(st);
+  var b: Buf* = buf_new();
+  buf_line(b, "export PATH=\"$PATH\":" + sh_quote(w_unix_path()));
+  var ov: StrList* = w_env_list();
+  var i: int64 = 0;
+  while (i < ov->len) {
+    var e: string = sl_get(ov, i);
+    if (!s_starts(s_lower(e), "path=")) {
+      buf_line(b, "export " + sh_quote(e));
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < c->env->len) {
+    buf_line(b, "export " + sh_quote(sl_get(c->env, i)));
+    i = i + 1;
+  }
+  var cwd: string = c->cwd;
+  if (slen(cwd) == 0) {
+    cwd = sys_cwd();
+  }
+  buf_add(b, "if cd " + sh_quote(sys_host_path(cwd)) + "; then " + sh_quote(c->tool.path));
+  i = 0;
+  while (i < c->args->len) {
+    buf_addb(b, 32);
+    buf_add(b, sh_quote(w_unix_arg(c, i)));
+    i = i + 1;
+  }
+  buf_line(b, redirect + "; else (exit 127); fi");
+  buf_line(b, "echo $? >" + sh_quote(st_host + ".tmp"));
+  buf_line(b, "mv -f " + sh_quote(st_host + ".tmp") + " " + sh_quote(st_host));
+  if (!w_write_all(script, buf_take(b))) {
+    return "";
+  }
+  var none: StrList* = sl_new();
+  var h: int64 = w_spawn("Z:\\bin\\sh", "sh " + win_quote(sys_host_path(script)), "", none, 0, 0, 0);
+  w_sl_free(none);
+  if (h == -1) {
+    sys_remove_file(script);
+    return "";
+  }
+  if (h != 0) {
+    w_CloseHandle(h);
+  }
+  return st;
+}
+
+// The exit status once the script has written it; -1 while it runs.
+fn w_unix_status(st: string) -> int32 {
+  if (!w_is_file(st)) {
+    return -1;
+  }
+  var v: int64 = s_to_int(s_trim(w_read_small(st)));
+  if (v < 0) {
+    v = 127;
+  }
+  sys_remove_file(st);
+  sys_remove_file(s_sub(st, 0, slen(st) - 3) + ".sh");
+  return (int32)v;
+}
+
+fn w_unix_wait(st: string) -> int32 {
+  if (slen(st) == 0) {
+    return 127;
+  }
+  var nap: int64 = 2;
+  while (true) {
+    var code: int32 = w_unix_status(st);
+    if (code >= 0) {
+      return code;
+    }
+    w_Sleep((uint32)nap);
+    if (nap < 25) {
+      nap = nap + nap / 2 + 1;
+    }
+  }
+  return 127;
+}
+
+// ---------------------------------------------------------------------------
+// Running commands
+// ---------------------------------------------------------------------------
+
+export fn sys_run(c: Cmd*) -> int32 {
+  if (c->tool.unix) {
+    return w_unix_wait(w_unix_start(c, ""));
+  }
+  var h: int64 = w_spawn("", w_cmdline(c), c->cwd, c->env, 0, 0, 0);
+  if (h == -1) {
+    return 127;
+  }
+  return w_wait(h);
+}
+
+export fn sys_capture(c: Cmd*, merge_stderr: bool) -> Captured {
+  var r: Captured;
+  r.code = 127;
+  r.out = "";
+  var outp: string = w_tmp_base("out") + ".txt";
+  if (c->tool.unix) {
+    var redir: string = " >" + sh_quote(sys_host_path(outp));
+    if (merge_stderr) {
+      redir = redir + " 2>&1";
+    }
+    r.code = w_unix_wait(w_unix_start(c, redir));
+  } else {
+    var fh: int64 = w_open_inheritable(outp, true);
+    if (fh == -1) {
+      return r;
+    }
+    var eh: int64 = 0;
+    if (merge_stderr) {
+      eh = fh;
+    }
+    var h: int64 = w_spawn("", w_cmdline(c), c->cwd, c->env, 0, fh, eh);
+    w_CloseHandle(fh);
+    if (h != -1) {
+      r.code = w_wait(h);
+    }
+  }
+  r.out = w_read_all(outp);
+  sys_remove_file(outp);
+  return r;
+}
+
+export fn sys_job_start(c: Cmd*, log_path: string) -> Job* {
+  var j: Job* = new Job;
+  j->log_path = log_path;
+  j->status_path = "";
+  j->done = false;
+  j->code = 127;
+  if (c->tool.unix) {
+    var redir: string = " >" + sh_quote(sys_host_path(log_path)) + " 2>&1 </dev/null";
+    j->status_path = w_unix_start(c, redir);
+    if (slen(j->status_path) == 0) {
+      j->done = true;
+    }
+    return j;
+  }
+  var fh: int64 = w_open_inheritable(log_path, true);
+  if (fh == -1) {
+    j->done = true;
+    return j;
+  }
+  var nul: int64 = w_open_inheritable("NUL", false);
+  var inh: int64 = 0;
+  if (nul != -1) {
+    inh = nul;
+  }
+  var h: int64 = w_spawn("", w_cmdline(c), c->cwd, c->env, inh, fh, fh);
+  w_CloseHandle(fh);
+  if (nul != -1) {
+    w_CloseHandle(nul);
+  }
+  if (h == -1) {
+    j->done = true;
+    return j;
+  }
+  j->handle = h;
+  return j;
+}
+
+export fn sys_job_poll(j: Job*) -> bool {
+  if (j->done) {
+    return true;
+  }
+  if (slen(j->status_path) > 0) {
+    var code: int32 = w_unix_status(j->status_path);
+    if (code < 0) {
+      return false;
+    }
+    j->code = code;
+    j->done = true;
+    return true;
+  }
+  if (w_WaitForSingleObject(j->handle, (uint32)0) != (uint32)0) {
+    return false;
+  }
+  var code2: uint32 = (uint32)127;
+  w_GetExitCodeProcess(j->handle, &code2);
+  w_CloseHandle(j->handle);
+  j->handle = 0;
+  j->code = (int32)code2;
+  j->done = true;
+  return true;
+}
+
+export fn sys_set_executable(p: string) {
+  // Windows has no execute bit. Under wine the file lives on a Linux
+  // filesystem, where a host program may need one.
+  if (!sys_is_wine()) {
+    return;
+  }
+  var t: Tool = tool_none();
+  t.path = "chmod";
+  t.unix = true;
+  var c: Cmd* = cmd_new(t);
+  cmd_arg(c, "+x");
+  cmd_path(c, p);
+  sys_run(c);
+  w_cmd_free(c);
+}
+
+fn w_cmd_free(c: Cmd*) {
+  w_sl_free(c->args);
+  w_sl_free(c->kinds);
+  w_sl_free(c->env);
+  free(c);
+}
+
+// Under wine, the Linux form of p (made absolute first); otherwise p.
+export fn sys_host_path(p: string) -> string {
+  if (!sys_is_wine()) {
+    return p;
+  }
+  if (g_w_unix_name == 0) {
+    g_w_unix_name = w_GetProcAddress(w_GetModuleHandleA("kernel32.dll"), "wine_get_unix_file_name");
+    if (g_w_unix_name == 0) {
+      return p;
+    }
+  }
+  var full: uint8* = (uint8*)malloc(8192);
+  var wide: uint8* = (uint8*)malloc(16384);
+  var r: string = w_host_path_in(p, full, wide);
+  free(full);
+  free(wide);
+  return r;
+}
+
+fn w_host_path_in(p: string, full: uint8*, wide: uint8*) -> string {
+  var n: uint32 = w_GetFullPathNameA(s_c(p), (uint32)8192, (cstring)full, 0);
+  if (n == (uint32)0 || n >= (uint32)8192) {
+    return p;
+  }
+  if (w_MultiByteToWideChar((uint32)65001, (uint32)0, (cstring)full, -1, (rawptr)wide, 8192) == 0) {
+    return p;
+  }
+  var f: fn(rawptr) -> cstring = (fn(rawptr) -> cstring)g_w_unix_name;
+  var r: cstring = f((rawptr)wide);
+  if (r == 0) {
+    return p;
+  }
+  return s_from_c(r);
+}

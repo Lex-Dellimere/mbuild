@@ -1,0 +1,12 @@
+[package]
+name = "mbuild"
+version = "0.1.0"
+
+[build]
+targets = ["linux", "windows"]
+
+[profile.release]
+optimize = "full"
+
+[bin.mbuild]
+main = "src/main.mettle"

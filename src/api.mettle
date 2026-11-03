@@ -1,0 +1,257 @@
+// api: the exported surface of a package version, the difference between two
+// surfaces, and the report lines of DESIGN.md 12.13. Scanner-based: it sees
+// declarations, not types, so the report is information, not a verdict.
+
+import "std/mem";
+import "base";
+import "fs";
+import "scan";
+
+// Parallel lists, one entry per exported name (the first declaration of a
+// name wins). sigs hold the display text ("fn al_add(a: int32) -> int32",
+// "struct AlPair { a: int32; b: int32 }"), files the path relative to the
+// surface's directory, lines the declaration line.
+export struct ApiSurface {
+  names: StrList*;
+  kinds: StrList*;
+  sigs: StrList*;
+  files: StrList*;
+  lines: StrList*;
+}
+
+// One entry per difference: what is "removed", "changed" or "added"; old_sigs
+// is "" for added, new_sigs "" for removed. Order: removed, changed (both in
+// the old surface's order), then added (in the new surface's order).
+export struct ApiDiff {
+  what: StrList*;
+  names: StrList*;
+  old_sigs: StrList*;
+  new_sigs: StrList*;
+}
+
+fn apx_new_surface() -> ApiSurface* {
+  var s: ApiSurface* = new ApiSurface;
+  s->names = sl_new();
+  s->kinds = sl_new();
+  s->sigs = sl_new();
+  s->files = sl_new();
+  s->lines = sl_new();
+  return s;
+}
+
+// The text a report shows for an export.
+fn apx_display(it: ExportItem*) -> string {
+  if (s_eq(it->kind, "fn")) {
+    return "fn " + it->name + it->sig;
+  }
+  if (s_eq(it->kind, "extern")) {
+    if (s_starts(it->sig, "(")) {
+      return "extern fn " + it->name + it->sig;
+    }
+    return "extern var " + it->name + it->sig;
+  }
+  if (s_eq(it->kind, "struct") || s_eq(it->kind, "enum")) {
+    if (slen(it->sig) == 0) {
+      return it->kind + " " + it->name + " {{}";
+    }
+    return it->kind + " " + it->name + " {{ " + it->sig + " }";
+  }
+  if (slen(it->sig) == 0) {
+    return it->kind + " " + it->name;
+  }
+  return it->kind + " " + it->name + ": " + it->sig;
+}
+
+// Files that are part of a package's API: .mettle files except tests,
+// examples and commands.
+fn apx_api_file(rel: string) -> bool {
+  var slash: int64 = s_rfind_byte(rel, 47);
+  var base_name: string = s_from(rel, slash + 1);
+  if (s_ends(base_name, "_test.mettle") || s_starts(base_name, "test_")) {
+    return false;
+  }
+  if (s_starts(rel, "tests/") || s_starts(rel, "examples/") || s_starts(rel, "cmd/")) {
+    return false;
+  }
+  return true;
+}
+
+fn apx_add_file(s: ApiSurface*, rel: string, text: string) {
+  var l: ExportList* = scan_exports(text);
+  var i: int64 = 0;
+  while (i < l->n) {
+    var it: ExportItem* = scan_export(l, i);
+    if (!sl_has(s->names, it->name)) {
+      sl_push(s->names, it->name);
+      sl_push(s->kinds, it->kind);
+      sl_push(s->sigs, apx_display(it));
+      sl_push(s->files, rel);
+      sl_push(s->lines, s_int(it->line));
+    }
+    i = i + 1;
+  }
+  free(l->items);
+  free(l);
+}
+
+// The exported surface of the package in dir: every top-level `export` of
+// its .mettle files (sorted by path), except *_test.mettle, test_*.mettle
+// and files under tests/, examples/ and cmd/ (dot-directories are skipped).
+export fn api_surface_dir(dir: string) -> ApiSurface* {
+  var s: ApiSurface* = apx_new_surface();
+  var files: StrList* = fs_walk(dir, ".mettle", (StrList*)0);
+  var i: int64 = 0;
+  while (i < files->len) {
+    var rel: string = sl_get(files, i);
+    if (apx_api_file(rel)) {
+      var r: FsRead = fs_read(dir + "/" + rel);
+      if (r.ok) {
+        apx_add_file(s, rel, r.data);
+      }
+    }
+    i = i + 1;
+  }
+  free(files->items);
+  free(files);
+  return s;
+}
+
+fn apx_push(d: ApiDiff*, what: string, name: string, old_sig: string, new_sig: string) {
+  sl_push(d->what, what);
+  sl_push(d->names, name);
+  sl_push(d->old_sigs, old_sig);
+  sl_push(d->new_sigs, new_sig);
+}
+
+// What changed from old to cur: names gone (removed), names whose kind or
+// display text differs (changed; a struct gaining a field is a change), and
+// new names (added).
+export fn api_diff(old: ApiSurface*, cur: ApiSurface*) -> ApiDiff* {
+  var d: ApiDiff* = new ApiDiff;
+  d->what = sl_new();
+  d->names = sl_new();
+  d->old_sigs = sl_new();
+  d->new_sigs = sl_new();
+  var i: int64 = 0;
+  while (i < old->names->len) {
+    var name: string = sl_get(old->names, i);
+    if (sl_index(cur->names, name) < 0) {
+      apx_push(d, "removed", name, sl_get(old->sigs, i), "");
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < old->names->len) {
+    var cname: string = sl_get(old->names, i);
+    var k: int64 = sl_index(cur->names, cname);
+    if (k >= 0 && !s_eq(sl_get(old->sigs, i), sl_get(cur->sigs, k))) {
+      apx_push(d, "changed", cname, sl_get(old->sigs, i), sl_get(cur->sigs, k));
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < cur->names->len) {
+    var aname: string = sl_get(cur->names, i);
+    if (sl_index(old->names, aname) < 0) {
+      apx_push(d, "added", aname, "", sl_get(cur->sigs, i));
+    }
+    i = i + 1;
+  }
+  return d;
+}
+
+// Only the removed and changed entries of d (what breaks callers), e.g. for
+// the report of a failed `get` or `update`.
+export fn api_breaking(d: ApiDiff*) -> ApiDiff* {
+  var r: ApiDiff* = new ApiDiff;
+  r->what = sl_new();
+  r->names = sl_new();
+  r->old_sigs = sl_new();
+  r->new_sigs = sl_new();
+  var i: int64 = 0;
+  while (i < d->what->len) {
+    if (!s_eq(sl_get(d->what, i), "added")) {
+      apx_push(r, sl_get(d->what, i), sl_get(d->names, i), sl_get(d->old_sigs, i), sl_get(d->new_sigs, i));
+    }
+    i = i + 1;
+  }
+  return r;
+}
+
+// " used at a:1, b:2" for the uses ("name file:line") of name; "" when none.
+// At most 3 places, then "and N more".
+fn apx_used_at(uses: StrList*, name: string) -> string {
+  if (uses == (StrList*)0) {
+    return s_empty();
+  }
+  var places: StrList* = sl_new();
+  var prefix: string = name + " ";
+  var i: int64 = 0;
+  while (i < uses->len) {
+    var u: string = sl_get(uses, i);
+    if (s_starts(u, prefix)) {
+      sl_add_uniq(places, s_from(u, slen(prefix)));
+    }
+    i = i + 1;
+  }
+  var n: int64 = places->len;
+  if (n == 0) {
+    free(places->items);
+    free(places);
+    return s_empty();
+  }
+  var b: Buf* = buf_new();
+  buf_add(b, "used at ");
+  i = 0;
+  while (i < n && i < 3) {
+    if (i > 0) {
+      buf_add(b, ", ");
+    }
+    buf_add(b, sl_get(places, i));
+    i = i + 1;
+  }
+  if (n > 3) {
+    buf_add(b, " and " + s_int(n - 3) + " more");
+  }
+  free(places->items);
+  free(places);
+  return buf_take(b);
+}
+
+// sig, then "used at ..." in the column after 45 characters (3 spaces at least).
+fn apx_with_uses(sig: string, used: string) -> string {
+  if (slen(used) == 0) {
+    return sig;
+  }
+  var padded: string = s_pad_right(sig, 42);
+  return padded + "   " + used;
+}
+
+// The report lines, joined with "\n" (no trailing newline; "" when d is
+// empty):
+//     removed  fn al_mul(a: int32, b: int32) -> int32       used at src/main.mettle:5
+//     changed  fn al_add(a: int32, b: int32) -> int32
+//           -> fn al_add(a: int32, b: int32, c: int32) -> int32   used at src/main.mettle:4
+//     added    fn al_sub(a: int32, b: int32) -> int32
+// uses: "name file:line" entries (may be 0).
+export fn api_render(d: ApiDiff*, uses: StrList*) -> string {
+  var lines: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < d->what->len) {
+    var what: string = sl_get(d->what, i);
+    var used: string = apx_used_at(uses, sl_get(d->names, i));
+    if (s_eq(what, "removed")) {
+      sl_push(lines, "    removed  " + apx_with_uses(sl_get(d->old_sigs, i), used));
+    } else if (s_eq(what, "changed")) {
+      sl_push(lines, "    changed  " + sl_get(d->old_sigs, i));
+      sl_push(lines, "          -> " + apx_with_uses(sl_get(d->new_sigs, i), used));
+    } else {
+      sl_push(lines, "    added    " + sl_get(d->new_sigs, i));
+    }
+    i = i + 1;
+  }
+  var text: string = sl_join(lines, "\n");
+  free(lines->items);
+  free(lines);
+  return text;
+}

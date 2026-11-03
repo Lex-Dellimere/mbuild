@@ -1,0 +1,243 @@
+// toolchain_driver: a command line over src/toolchain.mettle for
+// tests/toolchain_test.sh. Build it with tools/mcheck.sh (all three compilers).
+//
+//   toolchain_driver [--root DIR] [--offline] [--locked] [-v] [-t T]... [--mettle PATH] CMD ...
+//     select T            the chosen compiler as key=value lines
+//     version T           tc_version
+//     toolchain ARGS...   tc_cmd_toolchain (list / install / use / remove)
+//     build-hello T DIR   compiles a hello world for T in DIR and runs it
+//     run-cmd T EXE       whether tc_run_program_cmd can run EXE here
+//     unsupported T FLAG... tc_unsupported, twice (the second answer is cached)
+//     require-min T NEED WHO  tc_require_minimum
+//
+// DIR and EXE may be given in Linux form under wine.
+
+import "std/io";
+import "std/mem";
+import "../src/base";
+import "../src/fs";
+import "../src/proc";
+import "../src/toml";
+import "../src/manifest";
+import "../src/project";
+import "../src/toolchain";
+import "../src/sys_linux" if linux;
+import "../src/sys_windows" if windows;
+
+fn drv_win_form(p: string) -> string {
+  if (sys_is_wine() && s_starts(p, "/")) {
+    return "Z:" + p;
+  }
+  return p;
+}
+
+fn drv_project(root: string, opts: Options*) -> Project* {
+  var p: Project* = new Project;
+  p->root = root;
+  p->opts = opts;
+  p->state_dir = root + "/.mbuild";
+  var file: string = root + "/mbuild.toml";
+  var r: FsRead = fs_read(file);
+  if (r.ok) {
+    var m: Manifest* = man_parse(toml_parse(r.data, file), root);
+    if (slen(m->error) > 0) {
+      fail(m->error);
+    }
+    p->man = m;
+    p->has_manifest = true;
+  } else {
+    p->man = man_empty(root, "scratch");
+    p->has_manifest = false;
+  }
+  return p;
+}
+
+fn drv_select(p: Project*, target: string) -> int32 {
+  var m: Mettle* = tc_select(p, target);
+  say("target=" + m->target);
+  say("path=" + m->path);
+  say("tool=" + m->tool.path);
+  if (m->tool.unix) {
+    say("unix=true");
+  } else {
+    say("unix=false");
+  }
+  if (m->via_wine) {
+    say("via_wine=true");
+  } else {
+    say("via_wine=false");
+  }
+  say("stdlib=" + m->stdlib_dir);
+  say("runtime=" + m->runtime_dir);
+  say("id=" + m->id);
+  say("source=" + m->source);
+  say("installed=" + m->installed);
+  say("stdlib_ok=" + drv_bool(fs_is_file(m->stdlib_dir + "/std/io.mettle") || fs_is_dir(m->stdlib_dir + "/std")));
+  return 0;
+}
+
+fn drv_bool(b: bool) -> string {
+  if (b) {
+    return "true";
+  }
+  return "false";
+}
+
+fn drv_version(p: Project*, target: string) -> int32 {
+  var m: Mettle* = tc_select(p, target);
+  var v: string = tc_version(m);
+  say("version=" + v);
+  // A second ask on a fresh Mettle must come from the cache.
+  var again: Mettle* = tc_select(p, target);
+  say("version2=" + tc_version(again));
+  if (slen(v) == 0) {
+    return 1;
+  }
+  return 0;
+}
+
+fn drv_build_hello(p: Project*, target: string, dir_arg: string) -> int32 {
+  var dir: string = drv_win_form(dir_arg);
+  fs_mkdirs(dir);
+  var src: string = dir + "/hello_" + target + ".mettle";
+  fs_write(src, "import \"std/io\";\n\nfn main() -> int32 {{\n  print(\"hello from mettle\\n\");\n  return 7;\n}\n");
+  var exe: string = dir + "/hello_" + target + target_exe_ext(target);
+  sys_remove_file(exe);
+  var m: Mettle* = tc_select(p, target);
+  var c: Cmd* = tc_cmd(m);
+  cmd_arg(c, "--build");
+  cmd_path(c, src);
+  cmd_arg(c, "-o");
+  cmd_path(c, exe);
+  var code: int32 = proc_run(c);
+  free(c->args->items);
+  free(c->args);
+  free(c->kinds->items);
+  free(c->kinds);
+  free(c->env->items);
+  free(c->env);
+  free(c);
+  say("compile=" + s_int((int64)code));
+  if (code != 0 || !fs_is_file(exe)) {
+    return 1;
+  }
+  var rc: Cmd* = tc_run_program_cmd(target, exe);
+  if (rc == (Cmd*)0) {
+    say("run=impossible");
+    return 1;
+  }
+  var cap: Captured = proc_capture(rc);
+  say("run_code=" + s_int((int64)cap.code));
+  say("run_out=" + s_trim(cap.out));
+  return 0;
+}
+
+fn drv_run_cmd(target: string, exe: string) -> int32 {
+  var c: Cmd* = tc_run_program_cmd(target, exe);
+  if (c == (Cmd*)0) {
+    say("run=impossible");
+    return 0;
+  }
+  say("run=" + cmd_display(c));
+  return 0;
+}
+
+fn drv_unsupported(p: Project*, target: string, flags: StrList*) -> int32 {
+  var m: Mettle* = tc_select(p, target);
+  var bad: StrList* = tc_unsupported(m, flags);
+  say("unsupported=[" + sl_join(bad, ", ") + "]");
+  var again: StrList* = tc_unsupported(tc_select(p, target), flags);
+  say("unsupported2=[" + sl_join(again, ", ") + "]");
+  free(bad->items);
+  free(bad);
+  free(again->items);
+  free(again);
+  return 0;
+}
+
+fn drv_require_min(p: Project*, target: string, need: string, who: string) -> int32 {
+  var m: Mettle* = tc_select(p, target);
+  var text: string = tc_require_minimum(m, need, who);
+  say("require=" + text);
+  if (slen(text) > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  var opts: Options* = options_new();
+  var root: string = sys_cwd();
+  var cmd: string = s_empty();
+  var args: StrList* = sl_new();
+  var i: int32 = 1;
+  while (i < argc) {
+    var a: string = s_from_c(argv[i]);
+    if (slen(cmd) > 0) {
+      sl_push(args, a);
+    } else if (s_eq(a, "--root") && i + 1 < argc) {
+      i = i + 1;
+      root = drv_win_form(s_from_c(argv[i]));
+    } else if (s_eq(a, "--offline")) {
+      opts->offline = true;
+    } else if (s_eq(a, "--locked")) {
+      opts->locked = true;
+    } else if (s_eq(a, "-v")) {
+      opts->verbose = true;
+      g_verbose = true;
+    } else if (s_eq(a, "-t") && i + 1 < argc) {
+      i = i + 1;
+      sl_push(opts->targets, s_from_c(argv[i]));
+    } else if (s_eq(a, "--mettle") && i + 1 < argc) {
+      i = i + 1;
+      opts->mettle = s_from_c(argv[i]);
+    } else {
+      cmd = a;
+    }
+    i = i + 1;
+  }
+  // Options after the command (`toolchain install v -t windows`).
+  var rest: StrList* = sl_new();
+  var k: int64 = 0;
+  while (k < args->len) {
+    var a2: string = sl_get(args, k);
+    if (s_eq(a2, "-t") && k + 1 < args->len) {
+      k = k + 1;
+      sl_push(opts->targets, sl_get(args, k));
+    } else if (s_eq(a2, "--offline")) {
+      opts->offline = true;
+    } else {
+      sl_push(rest, a2);
+    }
+    k = k + 1;
+  }
+  var p: Project* = drv_project(root, opts);
+  var code: int32 = 2;
+  if (s_eq(cmd, "select") && rest->len == 1) {
+    code = drv_select(p, sl_get(rest, 0));
+  } else if (s_eq(cmd, "version") && rest->len == 1) {
+    code = drv_version(p, sl_get(rest, 0));
+  } else if (s_eq(cmd, "toolchain")) {
+    opts->rest = rest;
+    code = tc_cmd_toolchain(p);
+  } else if (s_eq(cmd, "build-hello") && rest->len == 2) {
+    code = drv_build_hello(p, sl_get(rest, 0), sl_get(rest, 1));
+  } else if (s_eq(cmd, "run-cmd") && rest->len == 2) {
+    code = drv_run_cmd(sl_get(rest, 0), sl_get(rest, 1));
+  } else if (s_eq(cmd, "unsupported") && rest->len >= 1) {
+    var flags: StrList* = sl_new();
+    var f: int64 = 1;
+    while (f < rest->len) {
+      sl_push(flags, sl_get(rest, f));
+      f = f + 1;
+    }
+    code = drv_unsupported(p, sl_get(rest, 0), flags);
+  } else if (s_eq(cmd, "require-min") && rest->len == 3) {
+    code = drv_require_min(p, sl_get(rest, 0), sl_get(rest, 1), sl_get(rest, 2));
+  } else {
+    err_line("usage: toolchain_driver [--root DIR] [--offline] [--locked] [-v] [-t T] [--mettle PATH] select|version|toolchain|build-hello|run-cmd|unsupported|require-min ...");
+  }
+  flush_out();
+  return code;
+}

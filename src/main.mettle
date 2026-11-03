@@ -1,0 +1,389 @@
+// mbuild: the build tool and package manager for Mettle.
+//
+// Global flags may appear anywhere before `--`; everything after `--` is
+// passed through (to the program for `run`, to the compiler for `mettle`).
+
+import "std/io";
+import "std/mem";
+import "base";
+import "manifest";
+import "project";
+import "build";
+import "deps";
+import "toolchain";
+import "sys_linux" if linux;
+import "sys_windows" if windows;
+
+struct MxCmd {
+  name: string;
+  usage: string;
+  summary: string;
+  details: string;
+}
+
+var g_mx_cmds: MxCmd* = (MxCmd*)0;
+var g_mx_ncmds: int64 = 0;
+
+fn mx_def(name: string, usage: string, summary: string, details: string) {
+  g_mx_cmds = (MxCmd*)realloc(g_mx_cmds, (g_mx_ncmds + 1) * sizeof(MxCmd));
+  g_mx_cmds[g_mx_ncmds].name = name;
+  g_mx_cmds[g_mx_ncmds].usage = usage;
+  g_mx_cmds[g_mx_ncmds].summary = summary;
+  g_mx_cmds[g_mx_ncmds].details = details;
+  g_mx_ncmds = g_mx_ncmds + 1;
+}
+
+fn mx_init_cmds() {
+  mx_def("init", "mbuild init [NAME | MODULE]", "create mbuild.toml and src/main.mettle here",
+    "Creates mbuild.toml ([package] name, default: the directory name), a hello-world\nsrc/main.mettle unless a main file exists, and adds /build/, /.mbuild/ and\n/mbuild.local.toml to .gitignore. A module path (github.com/you/app) also sets\n[package] module. Lines of an existing mettle.deps become dependencies.\nRefuses to overwrite an existing mbuild.toml.");
+  mx_def("build", "mbuild build [BINS...] [-t T] [-r | -p PROFILE] [--set KEY=VALUE] [--flag ARG] [--force]", "compile the project's programs",
+    "Builds every bin (or the named ones) for each target into\nbuild/<target>/<profile>/<bin>. Unchanged programs are reported Fresh and not\nrecompiled. Imports of modules not yet in mbuild.toml are added automatically\n(unless --locked or --offline). Independent bins and targets compile in\nparallel (-j). A package with no bins (a library) is type-checked instead.");
+  mx_def("run", "mbuild run [BIN] [-t T] [-r] [-- ARGS...]", "build and run a program",
+    "Builds one bin for one target (default: the host) and runs it with ARGS.\nmbuild exits with the program's exit code.");
+  mx_def("test", "mbuild test [FILES...] [--filter S] [--force]", "run @test functions",
+    "Runs `mettle test` on the given files, or on every project file that has an\n@test function. Passing files are cached: an unchanged file prints\n`ok FILE (cached)`. --filter S runs only tests whose names contain S;\n--force ignores the cache. Tests run in the compiler's interpreter, which\ncannot call C functions (externs).");
+  mx_def("check", "mbuild check [BINS...] [-t T]", "type-check without linking",
+    "Compiles each bin to an object (types, borrow analysis, warnings) without\nlinking an executable. In a library package (no bins) each top-level and\nsrc/ .mettle file is checked.");
+  mx_def("clean", "mbuild clean [--all]", "remove build outputs",
+    "Removes build/ and .mbuild/{{cache,stamps,tmp}. --all removes .mbuild entirely,\nincluding fetched dependencies.");
+  mx_def("get", "mbuild get MODULE[@VERSION]... [--no-verify] [--test]", "add or upgrade a dependency",
+    "Adds MODULE to [dependencies] (default: latest) and updates mbuild.lock, then\nverifies that every bin still compiles for every target (--test: and that the\ntests pass). When it does not, mbuild.toml and mbuild.lock are restored and\nthe errors and API changes are shown. --no-verify takes the version anyway.");
+  mx_def("remove", "mbuild remove MODULE... [--no-verify]", "drop a dependency",
+    "Removes MODULE from mbuild.toml and mbuild.lock, then verifies the project\nstill compiles (restoring both files when it does not).");
+  mx_def("update", "mbuild update [MODULE...] [--all] [--major] [--dry-run] [--no-verify] [--test]", "move dependencies forward, verified",
+    "Moves each requirement to the newest version in its compatibility line\n(--major: the newest overall; --all: transitive modules too), and \"latest\"\nand branch pins to what the remotes have now. The result is verified by\ncompiling every bin; a version that breaks the code is held back and the\nnewest one that works is taken. --dry-run shows the plan and the API changes\nwithout changing anything.");
+  mx_def("tidy", "mbuild tidy [--no-verify]", "add missing and drop unused dependencies",
+    "Adds remote modules the code imports, removes requirements nothing imports\nand adopts hand-written mettle.deps lines; then verifies the project.");
+  mx_def("deps", "mbuild deps [--tree]", "show the resolved dependencies", "Lists the selected modules with their versions and native libraries.");
+  mx_def("outdated", "mbuild outdated [-v] [MODULE]", "show newer dependency versions",
+    "Lists each dependency with its current version, the newest compatible one and\nthe newest overall. -v adds the tag subjects; MODULE shows one module and its\nAPI changes.");
+  mx_def("profiles", "mbuild profiles", "show the resolved build settings",
+    "Lists each profile with its settings (and where they are set) and the\ncompiler flags it passes, per bin when a bin changes them.");
+  mx_def("fetch", "mbuild fetch [--submodules]", "download every locked dependency",
+    "Downloads everything mbuild.lock names, so later builds work offline.\n--submodules also checks out the project's own git submodules that are not\nchecked out (git submodule update --init --recursive).");
+  mx_def("doctor", "mbuild doctor [-t T]", "check the environment",
+    "Shows the host, the tools mbuild uses (git, curl, the Linux and Windows C\ncompilers, pkg-config, wine), the compiler for each target (and whether a\n[toolchain] pin overrides $METTLE / PATH) and the native-code audit.");
+  mx_def("toolchain", "mbuild toolchain [list | install VERSION [-t T] | use VERSION | remove VERSION [-t T]]", "manage Mettle compilers",
+    "Lists, installs, pins ([toolchain] mettle in mbuild.toml) or removes Mettle\ncompiler releases under the mbuild home. VERSION may be `latest` for install\nand use.");
+  mx_def("mettle", "mbuild mettle [-t T] -- ARGS...", "run the selected compiler",
+    "Runs the Mettle compiler mbuild would use for the target, in the project\nroot, with ARGS. Example: mbuild mettle -- --version");
+  mx_def("trace", "mbuild trace FN [ARGS...]", "trace a function (mettle trace)",
+    "Runs `mettle trace` on the first bin's main file.");
+  mx_def("why", "mbuild why MODULE | mbuild why SUBJECT FACT", "why a module is in the build; why a fact holds",
+    "With one argument: why MODULE is in the build (the requirement chains and\nthe files that import it). With two, runs `mettle why` on the first bin's\nmain file: `mbuild why main Audit` walks the call graph to the line that\nperforms an effect; `mbuild why 15 Percent` explains the range known at a line.");
+  mx_def("explain", "mbuild explain CODE", "explain a diagnostic code",
+    "Runs `mettle explain CODE`, e.g. mbuild explain E0003.");
+  mx_def("version", "mbuild version", "print the mbuild version", "Prints the mbuild version and the host.");
+  mx_def("help", "mbuild help [COMMAND]", "show help", "Shows the command list, or the help of one command.");
+}
+
+fn mx_cmd_names() -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < g_mx_ncmds) {
+    sl_push(l, g_mx_cmds[i].name);
+    i = i + 1;
+  }
+  return l;
+}
+
+fn mx_find(name: string) -> MxCmd* {
+  var i: int64 = 0;
+  while (i < g_mx_ncmds) {
+    if (s_eq(g_mx_cmds[i].name, name)) {
+      return &g_mx_cmds[i];
+    }
+    i = i + 1;
+  }
+  return (MxCmd*)0;
+}
+
+fn mx_global_help() -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "Global flags:");
+  buf_line(b, "  -v, --verbose          print every command mbuild runs");
+  buf_line(b, "  -q, --quiet            print only errors and program output");
+  buf_line(b, "  --color WHEN           auto (default), always or never (also --color=WHEN)");
+  buf_line(b, "  -t, --target T         linux, windows, all or host (repeatable)");
+  buf_line(b, "  -r, --release          use the release profile");
+  buf_line(b, "  -p, --profile NAME     use [profile.NAME]");
+  buf_line(b, "  -j, --jobs N           parallel compiles (C files, bins, targets)");
+  buf_line(b, "  --force                ignore every up-to-date stamp");
+  buf_line(b, "  --offline              never touch the network");
+  buf_line(b, "  --locked               fail rather than change mbuild.toml or mbuild.lock");
+  buf_line(b, "  --mettle PATH          the compiler to use for the host target");
+  buf_line(b, "  --set KEY=VALUE        override a typed build setting (repeatable)");
+  buf_line(b, "  --flag ARG             pass a raw compiler flag (repeatable)");
+  return buf_take(b);
+}
+
+fn mx_help(topic: string) -> int32 {
+  if (slen(topic) > 0) {
+    var c: MxCmd* = mx_find(topic);
+    if (c == (MxCmd*)0) {
+      mx_unknown(topic);
+      return 1;
+    }
+    say(bold("usage") + ": " + c->usage);
+    say("");
+    say(c->details);
+    say("");
+    print(mx_global_help());
+    return 0;
+  }
+  say(bold("mbuild") + " " + build_version_text + ": the build tool and package manager for Mettle");
+  say("");
+  say(bold("usage") + ": mbuild COMMAND [ARGS...] [FLAGS...] [-- PASSTHROUGH...]");
+  say("");
+  say("Commands:");
+  var i: int64 = 0;
+  while (i < g_mx_ncmds) {
+    say("  " + s_pad_right(g_mx_cmds[i].name, 11) + g_mx_cmds[i].summary);
+    i = i + 1;
+  }
+  say("");
+  print(mx_global_help());
+  say("");
+  say("See `mbuild help COMMAND` for one command.");
+  return 0;
+}
+
+fn mx_unknown(name: string) {
+  var sug: string = man_suggest(name, mx_cmd_names());
+  if (slen(sug) > 0) {
+    fail_hint("unknown command `" + name + "`", "did you mean `mbuild " + sug + "`?");
+  }
+  fail_hint("unknown command `" + name + "`", "run `mbuild help` for the list of commands");
+}
+
+fn mx_flag_names() -> StrList* {
+  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --major --dry-run --no-verify --test --submodules --remove", 32);
+}
+
+fn mx_bad_flag(a: string) {
+  var name: string = a;
+  var eq: int64 = s_find_byte(a, 61);
+  if (eq > 0) {
+    name = s_sub(a, 0, eq);
+  }
+  var sug: string = man_suggest(name, mx_flag_names());
+  if (slen(sug) > 0) {
+    fail_hint("unknown flag `" + name + "`", "did you mean `" + sug + "`?");
+  }
+  fail_hint("unknown flag `" + name + "`", "run `mbuild help` for the flags");
+}
+
+fn mx_set_color(when: string) {
+  if (s_eq(when, "always")) {
+    g_color = true;
+  } else if (s_eq(when, "never")) {
+    g_color = false;
+  } else if (s_eq(when, "auto")) {
+    g_color = sys_isatty(1) && !env_set("NO_COLOR");
+  } else {
+    fail_hint("--color takes auto, always or never, not `" + when + "`", "--color=never");
+  }
+}
+
+fn mx_is_color_word(s: string) -> bool {
+  return s_eq(s, "always") || s_eq(s, "never") || s_eq(s, "auto");
+}
+
+fn mx_add_targets(o: Options*, v: string) {
+  var parts: StrList* = s_split(v, 44);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var t: string = s_trim(sl_get(parts, i));
+    if (slen(t) > 0) {
+      sl_push(o->targets, t);
+    }
+    i = i + 1;
+  }
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  mx_init_cmds();
+  var mc: string = env_get("MBUILD_COLOR");
+  if (s_eq(mc, "always") || s_eq(mc, "never")) {
+    mx_set_color(mc);
+  } else {
+    mx_set_color("auto");
+  }
+  var args: StrList* = sl_new();
+  var ai: int32 = 1;
+  while (ai < argc) {
+    sl_push(args, s_from_c(argv[ai]));
+    ai = ai + 1;
+  }
+  var o: Options* = options_new();
+  var command: string = "";
+  var want_help: bool = false;
+  var i: int64 = 0;
+  while (i < args->len) {
+    var a: string = sl_get(args, i);
+    i = i + 1;
+    if (s_eq(a, "--")) {
+      while (i < args->len) {
+        sl_push(o->passthrough, sl_get(args, i));
+        i = i + 1;
+      }
+      break;
+    }
+    if (!s_starts(a, "-") || s_eq(a, "-")) {
+      if (slen(command) == 0) {
+        command = a;
+      } else {
+        sl_push(o->rest, a);
+      }
+      continue;
+    }
+    // Flags, with "--name=value" or "--name value" (and "-x value").
+    var name: string = a;
+    var val: string = "";
+    var has_val: bool = false;
+    var eq: int64 = s_find_byte(a, 61);
+    if (s_starts(a, "--") && eq > 0) {
+      name = s_sub(a, 0, eq);
+      val = s_from(a, eq + 1);
+      has_val = true;
+    }
+    var takes: bool = s_eq(name, "-j") || s_eq(name, "--jobs") || s_eq(name, "-t") || s_eq(name, "--target") || s_eq(name, "-p") || s_eq(name, "--profile") || s_eq(name, "--mettle") || s_eq(name, "--filter") || s_eq(name, "--color") || s_eq(name, "--set") || s_eq(name, "--flag");
+    if (takes && !has_val) {
+      if (s_eq(name, "--color")) {
+        val = "always";
+        if (i < args->len && mx_is_color_word(sl_get(args, i))) {
+          val = sl_get(args, i);
+          i = i + 1;
+        }
+      } else {
+        if (i >= args->len) {
+          fail("`" + name + "` needs a value");
+        }
+        val = sl_get(args, i);
+        i = i + 1;
+      }
+    }
+    if (s_eq(name, "-v") || s_eq(name, "--verbose")) {
+      o->verbose = true;
+      g_verbose = true;
+    } else if (s_eq(name, "-q") || s_eq(name, "--quiet")) {
+      o->quiet = true;
+      g_quiet = true;
+    } else if (s_eq(name, "--color")) {
+      mx_set_color(val);
+    } else if (s_eq(name, "--offline")) {
+      o->offline = true;
+    } else if (s_eq(name, "--locked")) {
+      o->locked = true;
+    } else if (s_eq(name, "-j") || s_eq(name, "--jobs")) {
+      o->jobs = s_to_int(val);
+      if (o->jobs <= 0) {
+        fail("-j needs a positive number, not `" + val + "`");
+      }
+    } else if (s_eq(name, "-t") || s_eq(name, "--target")) {
+      mx_add_targets(o, val);
+    } else if (s_eq(name, "-r") || s_eq(name, "--release")) {
+      o->release = true;
+    } else if (s_eq(name, "-p") || s_eq(name, "--profile")) {
+      o->profile = val;
+    } else if (s_eq(name, "--force")) {
+      o->force = true;
+    } else if (s_eq(name, "--mettle")) {
+      o->mettle = val;
+    } else if (s_eq(name, "--filter")) {
+      o->filter = val;
+    } else if (s_eq(name, "--set")) {
+      sl_push(o->sets, val);
+    } else if (s_eq(name, "--flag")) {
+      sl_push(o->flags, val);
+    } else if (s_eq(name, "--all") || s_eq(name, "--tree") || s_eq(name, "--major") || s_eq(name, "--dry-run") || s_eq(name, "--no-verify") || s_eq(name, "--test") || s_eq(name, "--submodules") || s_eq(name, "--remove")) {
+      sl_push(o->rest, name);
+    } else if (s_eq(name, "-h") || s_eq(name, "--help")) {
+      want_help = true;
+    } else if (s_eq(name, "-V") || s_eq(name, "--version")) {
+      if (slen(command) == 0) {
+        command = "version";
+      }
+    } else {
+      mx_bad_flag(a);
+    }
+  }
+  if (o->jobs > 0) {
+    sys_setenv("MBUILD_JOBS", s_int(o->jobs));
+  }
+  if (want_help || s_eq(command, "help")) {
+    var topic: string = command;
+    if (s_eq(command, "help")) {
+      topic = "";
+      if (o->rest->len > 0) {
+        topic = sl_get(o->rest, 0);
+      }
+    }
+    return mx_help(topic);
+  }
+  if (slen(command) == 0) {
+    mx_help("");
+    return 0;
+  }
+  if (mx_find(command) == (MxCmd*)0) {
+    mx_unknown(command);
+  }
+  var rc: int32 = mx_dispatch(command, o);
+  exit_with(rc);
+  return rc;
+}
+
+fn mx_positional_count(o: Options*) -> int64 {
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (i < o->rest->len) {
+    if (!s_starts(sl_get(o->rest, i), "-")) {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+fn mx_dispatch(command: string, o: Options*) -> int32 {
+  if (s_eq(command, "version")) {
+    var host: string = sys_os();
+    if (sys_is_wine()) {
+      host = host + ", under wine";
+    }
+    say("mbuild " + build_version_text + " (" + host + ")");
+    return 0;
+  }
+  if (s_eq(command, "init")) {
+    return build_cmd_init(o);
+  }
+  var p: Project* = build_open(o);
+  if (s_eq(command, "build")) { return build_cmd_build(p); }
+  if (s_eq(command, "run")) { return build_cmd_run(p); }
+  if (s_eq(command, "test")) { return build_cmd_test(p); }
+  if (s_eq(command, "check")) { return build_cmd_check(p); }
+  if (s_eq(command, "clean")) { return build_cmd_clean(p); }
+  if (s_eq(command, "mettle")) { return build_cmd_mettle(p); }
+  if (s_eq(command, "trace")) { return build_cmd_trace(p, "trace"); }
+  if (s_eq(command, "why")) {
+    if (mx_positional_count(o) == 1) {
+      return deps_cmd_why(p);
+    }
+    return build_cmd_trace(p, "why");
+  }
+  if (s_eq(command, "explain")) { return build_cmd_explain(p); }
+  if (s_eq(command, "doctor")) { return build_cmd_doctor(p); }
+  if (s_eq(command, "get")) { return build_cmd_get(p); }
+  if (s_eq(command, "remove")) { return build_cmd_remove(p); }
+  if (s_eq(command, "update")) { return build_cmd_update(p); }
+  if (s_eq(command, "tidy")) { return build_cmd_tidy(p); }
+  if (s_eq(command, "deps")) { return deps_cmd_list(p); }
+  if (s_eq(command, "outdated")) { return deps_cmd_outdated(p); }
+  if (s_eq(command, "profiles")) { return build_cmd_profiles(p); }
+  if (s_eq(command, "fetch")) { return build_cmd_fetch(p); }
+  if (s_eq(command, "toolchain")) { return tc_cmd_toolchain(p); }
+  mx_unknown(command);
+  return 1;
+}

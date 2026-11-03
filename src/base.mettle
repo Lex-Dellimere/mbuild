@@ -1,0 +1,901 @@
+// base: strings, string lists, byte buffers, hashing and console output.
+//
+// mbuild is built by every Mettle release since v0.17.0, whose standard
+// library differs from today's, so this file leans on std/io and std/mem only
+// and declares the few C runtime names it needs itself.
+
+import "std/io";
+import "std/mem";
+
+extern fn c_strlen(s: cstring) -> int64 = "strlen";
+extern fn c_getenv(name: cstring) -> cstring = "getenv";
+extern fn c_exit(code: int32) = "exit";
+
+// ---------------------------------------------------------------------------
+// Strings
+// ---------------------------------------------------------------------------
+
+export fn slen(s: string) -> int64 {
+  return (int64)s.length;
+}
+
+export fn s_view(p: uint8*, n: int64) -> string {
+  var s: string;
+  s.chars = p;
+  s.length = (uint64)n;
+  return s;
+}
+
+export fn s_empty() -> string {
+  return s_view((uint8*)"".chars, 0);
+}
+
+// A heap copy, always followed by a nul so it can cross to C.
+export fn s_dup(s: string) -> string {
+  var n: int64 = (int64)s.length;
+  var p: uint8* = (uint8*)malloc(n + 1);
+  var i: int64 = 0;
+  while (i < n) {
+    p[i] = s.chars[i];
+    i = i + 1;
+  }
+  p[n] = 0;
+  return s_view(p, n);
+}
+
+export fn s_c(s: string) -> cstring {
+  var d: string = s_dup(s);
+  return (cstring)d.chars;
+}
+
+export fn s_from_c(c: cstring) -> string {
+  if (c == 0) {
+    return s_empty();
+  }
+  return s_dup(s_view((uint8*)c, c_strlen(c)));
+}
+
+export fn s_byte(s: string, i: int64) -> int32 {
+  return (int32)s.chars[i];
+}
+
+export fn s_sub(s: string, start: int64, end: int64) -> string {
+  var n: int64 = (int64)s.length;
+  if (start < 0) { start = 0; }
+  if (end > n) { end = n; }
+  if (end <= start) {
+    return s_empty();
+  }
+  return s_view(&s.chars[start], end - start);
+}
+
+export fn s_from(s: string, start: int64) -> string {
+  var n: int64 = (int64)s.length;
+  if (start < 0) { start = 0; }
+  if (start >= n) {
+    return s_empty();
+  }
+  return s_view(&s.chars[start], n - start);
+}
+
+export fn s_eq(a: string, b: string) -> bool {
+  var n: int64 = (int64)a.length;
+  if (n != (int64)b.length) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < n) {
+    if (a.chars[i] != b.chars[i]) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+export fn s_cmp(a: string, b: string) -> int32 {
+  var na: int64 = (int64)a.length;
+  var nb: int64 = (int64)b.length;
+  var i: int64 = 0;
+  while (i < na && i < nb) {
+    var x: int32 = (int32)a.chars[i];
+    var y: int32 = (int32)b.chars[i];
+    if (x != y) {
+      return x - y;
+    }
+    i = i + 1;
+  }
+  if (na < nb) { return -1; }
+  if (na > nb) { return 1; }
+  return 0;
+}
+
+export fn s_starts(s: string, prefix: string) -> bool {
+  if ((int64)prefix.length > (int64)s.length) {
+    return false;
+  }
+  return s_eq(s_sub(s, 0, (int64)prefix.length), prefix);
+}
+
+export fn s_ends(s: string, suffix: string) -> bool {
+  if ((int64)suffix.length > (int64)s.length) {
+    return false;
+  }
+  return s_eq(s_from(s, (int64)s.length - (int64)suffix.length), suffix);
+}
+
+export fn s_find_from(s: string, needle: string, from: int64) -> int64 {
+  var n: int64 = (int64)s.length;
+  var m: int64 = (int64)needle.length;
+  var i: int64 = from;
+  if (i < 0) { i = 0; }
+  while (i + m <= n) {
+    var j: int64 = 0;
+    while (j < m && s.chars[i + j] == needle.chars[j]) {
+      j = j + 1;
+    }
+    if (j == m) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+export fn s_find(s: string, needle: string) -> int64 {
+  return s_find_from(s, needle, 0);
+}
+
+export fn s_contains(s: string, needle: string) -> bool {
+  return s_find(s, needle) >= 0;
+}
+
+export fn s_find_byte(s: string, c: int32) -> int64 {
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    if ((int32)s.chars[i] == c) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+export fn s_rfind_byte(s: string, c: int32) -> int64 {
+  var i: int64 = (int64)s.length - 1;
+  while (i >= 0) {
+    if ((int32)s.chars[i] == c) {
+      return i;
+    }
+    i = i - 1;
+  }
+  return -1;
+}
+
+export fn is_space_b(c: int32) -> bool {
+  return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+}
+
+export fn is_digit_b(c: int32) -> bool {
+  return c >= 48 && c <= 57;
+}
+
+export fn is_alpha_b(c: int32) -> bool {
+  return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+export fn is_ident_b(c: int32) -> bool {
+  return is_alpha_b(c) || is_digit_b(c) || c == 95;
+}
+
+export fn is_hex_b(c: int32) -> bool {
+  return is_digit_b(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+}
+
+export fn s_trim(s: string) -> string {
+  var a: int64 = 0;
+  var b: int64 = (int64)s.length;
+  while (a < b && is_space_b(s_byte(s, a))) { a = a + 1; }
+  while (b > a && is_space_b(s_byte(s, b - 1))) { b = b - 1; }
+  return s_sub(s, a, b);
+}
+
+export fn s_lower(s: string) -> string {
+  var d: string = s_dup(s);
+  var i: int64 = 0;
+  while (i < (int64)d.length) {
+    var c: int32 = (int32)d.chars[i];
+    if (c >= 65 && c <= 90) {
+      d.chars[i] = (uint8)(c + 32);
+    }
+    i = i + 1;
+  }
+  return d;
+}
+
+export fn s_replace_byte(s: string, from: int32, to: int32) -> string {
+  var d: string = s_dup(s);
+  var i: int64 = 0;
+  while (i < (int64)d.length) {
+    if ((int32)d.chars[i] == from) {
+      d.chars[i] = (uint8)to;
+    }
+    i = i + 1;
+  }
+  return d;
+}
+
+export fn s_replace(s: string, from: string, to: string) -> string {
+  if ((int64)from.length == 0) {
+    return s;
+  }
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    var at: int64 = s_find_from(s, from, i);
+    if (at < 0) {
+      buf_add(b, s_from(s, i));
+      break;
+    }
+    buf_add(b, s_sub(s, i, at));
+    buf_add(b, to);
+    i = at + (int64)from.length;
+  }
+  return buf_take(b);
+}
+
+export fn s_is_int(s: string) -> bool {
+  if ((int64)s.length == 0) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    if (!is_digit_b(s_byte(s, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+// Digits only; anything else answers -1.
+export fn s_to_int(s: string) -> int64 {
+  if (!s_is_int(s)) {
+    return -1;
+  }
+  var v: int64 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    v = v * 10 + (int64)(s_byte(s, i) - 48);
+    i = i + 1;
+  }
+  return v;
+}
+
+export fn s_int(n: int64) -> string {
+  return "{n}";
+}
+
+export fn s_repeat(s: string, n: int64) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < n) {
+    buf_add(b, s);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+export fn s_pad_left(s: string, width: int64) -> string {
+  if ((int64)s.length >= width) {
+    return s;
+  }
+  return s_repeat(" ", width - (int64)s.length) + s;
+}
+
+export fn s_pad_right(s: string, width: int64) -> string {
+  if ((int64)s.length >= width) {
+    return s;
+  }
+  return s + s_repeat(" ", width - (int64)s.length);
+}
+
+// Splits on one byte. Empty pieces are kept.
+export fn s_split(s: string, sep: int32) -> StrList* {
+  var out: StrList* = sl_new();
+  var start: int64 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    if (s_byte(s, i) == sep) {
+      sl_push(out, s_sub(s, start, i));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  sl_push(out, s_sub(s, start, (int64)s.length));
+  return out;
+}
+
+// Lines without their terminators; a trailing empty line is dropped.
+export fn s_lines(s: string) -> StrList* {
+  var out: StrList* = sl_new();
+  var start: int64 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    if (s_byte(s, i) == 10) {
+      var end: int64 = i;
+      if (end > start && s_byte(s, end - 1) == 13) {
+        end = end - 1;
+      }
+      sl_push(out, s_sub(s, start, end));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if (start < (int64)s.length) {
+    var tail: string = s_sub(s, start, (int64)s.length);
+    if (s_ends(tail, "\r")) {
+      tail = s_sub(tail, 0, (int64)tail.length - 1);
+    }
+    sl_push(out, tail);
+  }
+  return out;
+}
+
+// Whitespace-separated words.
+export fn s_fields(s: string) -> StrList* {
+  var out: StrList* = sl_new();
+  var i: int64 = 0;
+  var n: int64 = (int64)s.length;
+  while (i < n) {
+    while (i < n && is_space_b(s_byte(s, i))) { i = i + 1; }
+    var start: int64 = i;
+    while (i < n && !is_space_b(s_byte(s, i))) { i = i + 1; }
+    if (i > start) {
+      sl_push(out, s_sub(s, start, i));
+    }
+  }
+  return out;
+}
+
+export fn hex_digit(v: int32) -> int32 {
+  if (v < 10) {
+    return 48 + v;
+  }
+  return 87 + v;
+}
+
+export fn s_hex64(v: uint64) -> string {
+  var p: uint8* = (uint8*)malloc(17);
+  var i: int32 = 15;
+  while (i >= 0) {
+    p[i] = (uint8)hex_digit((int32)(v & (uint64)15));
+    v = v >> (uint64)4;
+    i = i - 1;
+  }
+  p[16] = 0;
+  return s_view(p, 16);
+}
+
+// ---------------------------------------------------------------------------
+// Byte buffer
+// ---------------------------------------------------------------------------
+
+export struct Buf {
+  data: uint8*;
+  len: int64;
+  cap: int64;
+}
+
+export fn buf_new() -> Buf* {
+  var b: Buf* = new Buf;
+  b->cap = 256;
+  b->len = 0;
+  b->data = (uint8*)malloc(b->cap);
+  return b;
+}
+
+export fn buf_reserve(b: Buf*, extra: int64) {
+  if (b->len + extra + 1 <= b->cap) {
+    return;
+  }
+  var nc: int64 = b->cap * 2;
+  while (nc < b->len + extra + 1) {
+    nc = nc * 2;
+  }
+  b->data = (uint8*)realloc(b->data, nc);
+  b->cap = nc;
+}
+
+export fn buf_add(b: Buf*, s: string) {
+  var n: int64 = (int64)s.length;
+  buf_reserve(b, n);
+  var i: int64 = 0;
+  while (i < n) {
+    b->data[b->len + i] = s.chars[i];
+    i = i + 1;
+  }
+  b->len = b->len + n;
+}
+
+export fn buf_addb(b: Buf*, c: int32) {
+  buf_reserve(b, 1);
+  b->data[b->len] = (uint8)c;
+  b->len = b->len + 1;
+}
+
+export fn buf_line(b: Buf*, s: string) {
+  buf_add(b, s);
+  buf_addb(b, 10);
+}
+
+export fn buf_str(b: Buf*) -> string {
+  buf_reserve(b, 1);
+  b->data[b->len] = 0;
+  return s_view(b->data, b->len);
+}
+
+// The finished string; the buffer header is released, the bytes are kept.
+export fn buf_take(b: Buf*) -> string {
+  var s: string = buf_str(b);
+  free(b);
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// String lists
+// ---------------------------------------------------------------------------
+
+export struct StrList {
+  items: string*;
+  len: int64;
+  cap: int64;
+}
+
+export fn sl_new() -> StrList* {
+  var l: StrList* = new StrList;
+  l->items = (string*)0;
+  l->len = 0;
+  l->cap = 0;
+  return l;
+}
+
+export fn sl_push(l: StrList*, s: string) {
+  if (l->len >= l->cap) {
+    var nc: int64 = l->cap * 2;
+    if (nc < 8) { nc = 8; }
+    l->items = (string*)realloc(l->items, nc * 16);
+    l->cap = nc;
+  }
+  l->items[l->len] = s;
+  l->len = l->len + 1;
+}
+
+export fn sl_get(l: StrList*, i: int64) -> string {
+  return l->items[i];
+}
+
+export fn sl_set(l: StrList*, i: int64, s: string) {
+  l->items[i] = s;
+}
+
+export fn sl_index(l: StrList*, s: string) -> int64 {
+  var i: int64 = 0;
+  while (i < l->len) {
+    if (s_eq(l->items[i], s)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+export fn sl_has(l: StrList*, s: string) -> bool {
+  return sl_index(l, s) >= 0;
+}
+
+export fn sl_add_uniq(l: StrList*, s: string) {
+  if (!sl_has(l, s)) {
+    sl_push(l, s);
+  }
+}
+
+export fn sl_extend(l: StrList*, other: StrList*) {
+  var i: int64 = 0;
+  while (i < other->len) {
+    sl_push(l, other->items[i]);
+    i = i + 1;
+  }
+}
+
+export fn sl_extend_uniq(l: StrList*, other: StrList*) {
+  var i: int64 = 0;
+  while (i < other->len) {
+    sl_add_uniq(l, other->items[i]);
+    i = i + 1;
+  }
+}
+
+export fn sl_copy(l: StrList*) -> StrList* {
+  var out: StrList* = sl_new();
+  sl_extend(out, l);
+  return out;
+}
+
+export fn sl_of(a: string) -> StrList* {
+  var l: StrList* = sl_new();
+  sl_push(l, a);
+  return l;
+}
+
+export fn sl_remove_at(l: StrList*, at: int64) {
+  var i: int64 = at;
+  while (i + 1 < l->len) {
+    l->items[i] = l->items[i + 1];
+    i = i + 1;
+  }
+  l->len = l->len - 1;
+}
+
+// Insertion sort: the lists here hold tens of names, and a stable order is
+// what keeps fingerprints and generated files byte-identical between runs.
+export fn sl_sort(l: StrList*) {
+  var i: int64 = 1;
+  while (i < l->len) {
+    var cur: string = l->items[i];
+    var j: int64 = i - 1;
+    while (j >= 0 && s_cmp(l->items[j], cur) > 0) {
+      l->items[j + 1] = l->items[j];
+      j = j - 1;
+    }
+    l->items[j + 1] = cur;
+    i = i + 1;
+  }
+}
+
+export fn sl_join(l: StrList*, sep: string) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < l->len) {
+    if (i > 0) {
+      buf_add(b, sep);
+    }
+    buf_add(b, l->items[i]);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// ---------------------------------------------------------------------------
+// Hashing (change detection, not security): two independent 64-bit lanes.
+// ---------------------------------------------------------------------------
+
+export struct Hasher {
+  a: uint64;
+  b: uint64;
+}
+
+export fn h_new() -> Hasher {
+  var h: Hasher;
+  h.a = (uint64)14695981039346656037;
+  h.b = (uint64)7809847782465536322;
+  return h;
+}
+
+export fn h_bytes(h: Hasher*, p: uint8*, n: int64) {
+  var a: uint64 = h->a;
+  var b: uint64 = h->b;
+  var i: int64 = 0;
+  while (i < n) {
+    var c: uint64 = (uint64)p[i];
+    a = (a ^ c) * (uint64)1099511628211;
+    b = (b + c + (uint64)1) * (uint64)6364136223846793005;
+    b = b ^ (b >> (uint64)29);
+    i = i + 1;
+  }
+  h->a = a;
+  h->b = b;
+}
+
+// Strings are length-prefixed so that ("ab","c") and ("a","bc") differ.
+export fn h_str(h: Hasher*, s: string) {
+  var n: int64 = (int64)s.length;
+  var len: uint8[8];
+  var i: int64 = 0;
+  while (i < 8) {
+    len[i] = (uint8)((n >> (i * 8)) & 255);
+    i = i + 1;
+  }
+  h_bytes(h, &len[0], 8);
+  h_bytes(h, s.chars, n);
+}
+
+export fn h_hex(h: Hasher*) -> string {
+  return s_hex64(h->a) + s_hex64(h->b);
+}
+
+export fn hash_string(s: string) -> string {
+  var h: Hasher = h_new();
+  h_str(&h, s);
+  return h_hex(&h);
+}
+
+// ---------------------------------------------------------------------------
+// Console output
+// ---------------------------------------------------------------------------
+
+export var g_verbose: bool = false;
+export var g_quiet: bool = false;
+export var g_color: bool = false;
+export var g_esc: string;
+
+export fn esc_init() {
+  var p: uint8* = (uint8*)malloc(2);
+  p[0] = 27;
+  p[1] = 0;
+  g_esc = s_view(p, 1);
+}
+
+export fn paint(code: string, text: string) -> string {
+  if (!g_color) {
+    return text;
+  }
+  return g_esc + "[" + code + "m" + text + g_esc + "[0m";
+}
+
+export fn bold(text: string) -> string { return paint("1", text); }
+export fn green(text: string) -> string { return paint("1;32", text); }
+export fn yellow(text: string) -> string { return paint("1;33", text); }
+export fn red(text: string) -> string { return paint("1;31", text); }
+export fn cyan(text: string) -> string { return paint("1;36", text); }
+export fn dim(text: string) -> string { return paint("2", text); }
+
+export fn flush_out() {
+  fflush(get_stdout());
+  fflush(get_stderr());
+}
+
+export fn say(msg: string) {
+  print(msg);
+  print("\n");
+}
+
+export fn err_line(msg: string) {
+  print_err(msg);
+  print_err("\n");
+}
+
+// "   Compiling app (linux, debug)": a right-aligned verb, then the subject.
+export fn status(verb: string, msg: string) {
+  if (g_quiet) {
+    return;
+  }
+  say(green(s_pad_left(verb, 12)) + " " + msg);
+  flush_out();
+}
+
+export fn status_warn(verb: string, msg: string) {
+  say(yellow(s_pad_left(verb, 12)) + " " + msg);
+  flush_out();
+}
+
+export fn verbose(msg: string) {
+  if (g_verbose) {
+    err_line(dim("  > " + msg));
+  }
+}
+
+export fn note(msg: string) {
+  err_line(cyan("note") + ": " + msg);
+}
+
+export fn warn(msg: string) {
+  flush_out();
+  err_line(yellow("warning") + ": " + msg);
+}
+
+export fn error_msg(msg: string) {
+  flush_out();
+  err_line(red("error") + ": " + msg);
+}
+
+export fn fail(msg: string) {
+  error_msg(msg);
+  flush_out();
+  c_exit(1);
+}
+
+export fn fail_hint(msg: string, hint: string) {
+  error_msg(msg);
+  err_line("  " + cyan("help") + ": " + hint);
+  flush_out();
+  c_exit(1);
+}
+
+export fn exit_with(code: int32) {
+  flush_out();
+  c_exit(code);
+}
+
+export fn env_get(name: string) -> string {
+  var v: cstring = c_getenv(s_c(name));
+  if (v == 0) {
+    return s_empty();
+  }
+  return s_from_c(v);
+}
+
+export fn env_set(name: string) -> bool {
+  return c_getenv(s_c(name)) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// Shared types for the platform layer (sys_linux / sys_windows)
+// ---------------------------------------------------------------------------
+
+// A program mbuild can start. `unix` is only ever true on Windows under wine:
+// it marks a host Linux program (git, gcc, curl) reached through Z:\.
+export struct Tool {
+  path: string;
+  unix: bool;
+}
+
+// One command. args are argv[1..]; argv[0] comes from the tool. kinds runs
+// parallel to args: "p" marks a filesystem path (converted when the command
+// crosses from wine to the host), "" a plain argument. env holds
+// "NAME=value" entries for this command only. cwd "" inherits.
+export struct Cmd {
+  tool: Tool;
+  args: StrList*;
+  kinds: StrList*;
+  env: StrList*;
+  cwd: string;
+}
+
+export struct Captured {
+  code: int32;
+  out: string;
+}
+
+// mtime is opaque: only compared for equality.
+export struct FileInfo {
+  exists: bool;
+  is_dir: bool;
+  size: int64;
+  mtime: int64;
+}
+
+// A command running in the background, its output going to log_path.
+export struct Job {
+  handle: int64;
+  aux: int64;
+  status_path: string;
+  log_path: string;
+  done: bool;
+  code: int32;
+}
+
+export fn tool_none() -> Tool {
+  var t: Tool;
+  t.path = s_empty();
+  t.unix = false;
+  return t;
+}
+
+export fn tool_found(t: Tool) -> bool {
+  return slen(t.path) > 0;
+}
+
+export fn cmd_new(t: Tool) -> Cmd* {
+  var c: Cmd* = new Cmd;
+  c->tool = t;
+  c->args = sl_new();
+  c->kinds = sl_new();
+  c->env = sl_new();
+  c->cwd = s_empty();
+  return c;
+}
+
+export fn cmd_arg(c: Cmd*, a: string) {
+  sl_push(c->args, a);
+  sl_push(c->kinds, s_empty());
+}
+
+export fn cmd_path(c: Cmd*, p: string) {
+  sl_push(c->args, p);
+  sl_push(c->kinds, "p");
+}
+
+export fn cmd_args(c: Cmd*, l: StrList*) {
+  var i: int64 = 0;
+  while (i < l->len) {
+    cmd_arg(c, sl_get(l, i));
+    i = i + 1;
+  }
+}
+
+export fn cmd_env(c: Cmd*, name: string, value: string) {
+  sl_push(c->env, name + "=" + value);
+}
+
+export fn cmd_is_path(c: Cmd*, i: int64) -> bool {
+  return slen(sl_get(c->kinds, i)) > 0;
+}
+
+// POSIX shell quoting: 'it'\''s'.
+export fn sh_quote(s: string) -> string {
+  var b: Buf* = buf_new();
+  buf_addb(b, 39);
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    var c: int32 = s_byte(s, i);
+    if (c == 39) {
+      buf_add(b, "'\\''");
+    } else {
+      buf_addb(b, c);
+    }
+    i = i + 1;
+  }
+  buf_addb(b, 39);
+  return buf_take(b);
+}
+
+// Windows argv quoting, the rule CommandLineToArgvW and the C runtimes parse.
+export fn win_quote(s: string) -> string {
+  var b: Buf* = buf_new();
+  buf_addb(b, 34);
+  var slashes: int64 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    var c: int32 = s_byte(s, i);
+    if (c == 92) {
+      slashes = slashes + 1;
+    } else if (c == 34) {
+      buf_add(b, s_repeat("\\", slashes * 2 + 1));
+      buf_addb(b, 34);
+      slashes = 0;
+    } else {
+      buf_add(b, s_repeat("\\", slashes));
+      buf_addb(b, c);
+      slashes = 0;
+    }
+    i = i + 1;
+  }
+  buf_add(b, s_repeat("\\", slashes * 2));
+  buf_addb(b, 34);
+  return buf_take(b);
+}
+
+// For display only: an argument the shell would not split stays bare.
+export fn display_arg(s: string) -> string {
+  if ((int64)s.length == 0) {
+    return "''";
+  }
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    var c: int32 = s_byte(s, i);
+    if (!(is_ident_b(c) || c == 45 || c == 46 || c == 47 || c == 58 || c == 61 || c == 43 || c == 44 || c == 64 || c == 92)) {
+      return sh_quote(s);
+    }
+    i = i + 1;
+  }
+  return s;
+}
+
+export fn cmd_display(c: Cmd*) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < c->env->len) {
+    buf_add(b, display_arg(sl_get(c->env, i)));
+    buf_addb(b, 32);
+    i = i + 1;
+  }
+  buf_add(b, display_arg(c->tool.path));
+  i = 0;
+  while (i < c->args->len) {
+    buf_addb(b, 32);
+    buf_add(b, display_arg(sl_get(c->args, i)));
+    i = i + 1;
+  }
+  return buf_take(b);
+}

@@ -1,0 +1,192 @@
+// git_driver: a small CLI over git.mettle for tests/r2_git.sh.
+//
+//   git_driver resolve BASE REL              git_resolve_url ("<empty>" for "")
+//   git_driver mirror MODULE                 git_clone_mirror + fetch; prints MIRROR / URL
+//   git_driver subs MIRROR COMMIT            git_submodules: "ok 1", then "SUB path url commit"
+//   git_driver tree MODULE TAG DEST [--offline] [--none] [--select P,P] [--verbose]
+//                                            git_checkout_tree of the module's mirror at TAG
+//   git_driver checkout MIRROR COMMIT DEST   git_checkout
+//   git_driver marker DEST                   git_checkout_commit, git_marker_complete
+//   git_driver urlmirror URL                 git_url_mirror_dir
+//   git_driver clone-url URL                 git_clone_url (then git_fetch_url)
+//   git_driver fetch-commit MIRROR SHA       git_fetch_commit, then git_rev
+//   git_driver kind TEXT                     git_failure_kind
+//   git_driver subject MIRROR TAG            git_tag_subject
+//   git_driver rev MIRROR REV                git_rev
+// Errors print "ERR" and the message, exit 1.
+
+import "std/io";
+import "std/mem";
+import "../src/base";
+import "../src/git";
+
+fn drv_arg(argc: int32, argv: cstring*, i: int32) -> string {
+  if (i >= argc) {
+    return s_empty();
+  }
+  return s_from_c(argv[i]);
+}
+
+fn drv_bool(b: bool) -> string {
+  if (b) {
+    return "1";
+  }
+  return "0";
+}
+
+fn drv_err(msg: string) -> int32 {
+  say("ERR");
+  say(msg);
+  return 1;
+}
+
+fn drv_captured(label: string, r: Captured) -> int32 {
+  say(label + " code=" + s_int((int64)r.code));
+  if (r.code != 0) {
+    say(r.out);
+    return 1;
+  }
+  return 0;
+}
+
+fn drv_tree(argc: int32, argv: cstring*) -> int32 {
+  var module: string = drv_arg(argc, argv, 2);
+  var tag: string = drv_arg(argc, argv, 3);
+  var t: GitTree* = new GitTree;
+  t->mirror = git_mirror_dir(module, "");
+  t->url = git_url(module, "");
+  t->dest = drv_arg(argc, argv, 4);
+  t->offline = false;
+  t->fetched = (StrList*)0;
+  t->select = (StrList*)0;
+  t->label = module + " " + tag;
+  var i: int32 = 5;
+  while (i < argc) {
+    var a: string = s_from_c(argv[i]);
+    if (s_eq(a, "--offline")) {
+      t->offline = true;
+    } else if (s_eq(a, "--none")) {
+      t->select = sl_new();
+    } else if (s_eq(a, "--select")) {
+      i = i + 1;
+      t->select = s_split(drv_arg(argc, argv, i), 44);
+    } else if (s_eq(a, "--verbose")) {
+      g_verbose = true;
+    }
+    i = i + 1;
+  }
+  if (!t->offline && !git_has_mirror(t->mirror)) {
+    var cr: Captured = git_clone_mirror(module, "");
+    if (cr.code != 0) {
+      return drv_err(cr.out);
+    }
+  }
+  t->commit = git_rev(t->mirror, "refs/tags/" + tag);
+  if (slen(t->commit) == 0) {
+    return drv_err("no tag " + tag + " in " + t->mirror);
+  }
+  var e: string = git_checkout_tree(t);
+  if (slen(e) > 0) {
+    return drv_err(e);
+  }
+  say("OK " + t->commit);
+  return 0;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  if (argc < 3) {
+    err_line("usage: git_driver <command> args...");
+    return 2;
+  }
+  var command: string = s_from_c(argv[1]);
+  var a1: string = drv_arg(argc, argv, 2);
+  var a2: string = drv_arg(argc, argv, 3);
+  var a3: string = drv_arg(argc, argv, 4);
+  if (s_eq(command, "resolve")) {
+    var r: string = git_resolve_url(a1, a2);
+    if (slen(r) == 0) {
+      say("<empty>");
+    } else {
+      say(r);
+    }
+    return 0;
+  }
+  if (s_eq(command, "mirror")) {
+    var m: string = git_mirror_dir(a1, "");
+    if (!git_has_mirror(m)) {
+      var cr: Captured = git_clone_mirror(a1, "");
+      if (cr.code != 0) {
+        return drv_err(cr.out);
+      }
+    } else {
+      var fr: Captured = git_fetch(a1, "");
+      if (fr.code != 0) {
+        return drv_err(fr.out);
+      }
+    }
+    say("MIRROR " + m);
+    say("URL " + git_url(a1, ""));
+    return 0;
+  }
+  if (s_eq(command, "subs")) {
+    var g: GitSubs* = git_submodules(a1, a2);
+    say("ok " + drv_bool(g->ok));
+    if (!g->ok) {
+      say(g->err);
+      return 1;
+    }
+    var i: int64 = 0;
+    while (i < g->paths->len) {
+      say("SUB " + sl_get(g->paths, i) + " " + sl_get(g->urls, i) + " " + sl_get(g->commits, i));
+      i = i + 1;
+    }
+    return 0;
+  }
+  if (s_eq(command, "tree")) {
+    return drv_tree(argc, argv);
+  }
+  if (s_eq(command, "checkout")) {
+    var e: string = git_checkout(a1, a2, a3);
+    if (slen(e) > 0) {
+      return drv_err(e);
+    }
+    say("OK");
+    return 0;
+  }
+  if (s_eq(command, "marker")) {
+    say("commit " + git_checkout_commit(a1));
+    say("complete " + drv_bool(git_marker_complete(a1)));
+    return 0;
+  }
+  if (s_eq(command, "urlmirror")) {
+    say(git_url_mirror_dir(a1));
+    return 0;
+  }
+  if (s_eq(command, "clone-url")) {
+    var c1: int32 = drv_captured("clone", git_clone_url(a1));
+    if (c1 != 0) {
+      return c1;
+    }
+    return drv_captured("fetch", git_fetch_url(a1));
+  }
+  if (s_eq(command, "fetch-commit")) {
+    var c2: int32 = drv_captured("fetch-commit", git_fetch_commit(a1, a2));
+    say("rev " + git_rev(a1, a2));
+    return c2;
+  }
+  if (s_eq(command, "kind")) {
+    say(git_failure_kind(a1));
+    return 0;
+  }
+  if (s_eq(command, "subject")) {
+    say("subject " + git_tag_subject(a1, a2));
+    return 0;
+  }
+  if (s_eq(command, "rev")) {
+    say("rev " + git_rev(a1, a2));
+    return 0;
+  }
+  err_line("unknown command " + command);
+  return 2;
+}

@@ -1,0 +1,543 @@
+// sys_linux: the platform layer on Linux. sys_windows exports the same API.
+//
+// Only names the v0.17.0 Linux runtime carries are used (DESIGN.md section 3).
+// What that runtime lacks (rename, rmdir, directory listing, fork) is done by
+// host programs: `ls`, `rm`, `mv`, and `/bin/sh` for background jobs.
+//
+// The runtime's putenv only changes what this process's getenv answers; the
+// children it starts get the environment the process started with. So every
+// variable set with sys_setenv is also remembered here and exported again in
+// front of each command that needs it.
+
+import "std/io";
+import "std/mem";
+import "base";
+
+extern fn lx_popen(cmd: cstring, mode: cstring) -> cstring = "popen";
+extern fn lx_pclose(fp: cstring) -> int32 = "pclose";
+extern fn lx_run_process(program: cstring, argv: cstring*) -> int32 = "mettle_run_process";
+extern fn lx_putenv(setting: cstring) -> int32 = "putenv";
+extern fn lx_mkdir(path: cstring, mode: uint32) -> int32 = "mkdir";
+extern fn lx_remove(path: cstring) -> int32 = "remove";
+extern fn lx_access(path: cstring, mode: int32) -> int32 = "access";
+extern fn lx_realpath(path: cstring, buf: cstring) -> cstring = "mettle_realpath";
+extern fn lx_getcwd(buf: cstring, size: int32) -> int32 = "mettle_getcwd";
+extern fn lx_exe_path(buf: cstring, size: uint64) -> int64 = "mettle_executable_path";
+extern fn lx_is_dir(path: cstring) -> int32 = "mettle_path_is_directory";
+extern fn lx_isatty(fd: int32) -> int32 = "isatty";
+extern fn lx_stat(path: cstring, buf: rawptr) -> int32 = "stat";
+extern fn lx_chmod(path: cstring, mode: uint32) -> int32 = "chmod";
+extern fn lx_usleep(us: uint32) -> int32 = "usleep";
+extern fn lx_clock_gettime(id: int32, ts: rawptr) -> int32 = "clock_gettime";
+
+// "NAME=value" for every sys_setenv call, latest value per name.
+var g_lx_env: StrList* = 0;
+
+export fn sys_os() -> string {
+  return "linux";
+}
+
+// The directories searched for programs when PATH is unset (colon-separated;
+// sys_windows answers the same list for host programs under wine).
+export fn sys_unix_path_default() -> string {
+  return "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin";
+}
+
+export fn sys_exe_ext() -> string {
+  return "";
+}
+
+export fn sys_is_wine() -> bool {
+  return false;
+}
+
+export fn sys_list_sep() -> int32 {
+  return 58;
+}
+
+fn lx_env_list() -> StrList* {
+  if (g_lx_env == 0) {
+    g_lx_env = sl_new();
+  }
+  return g_lx_env;
+}
+
+export fn sys_setenv(name: string, value: string) {
+  var entry: string = name + "=" + value;
+  var l: StrList* = lx_env_list();
+  var i: int64 = 0;
+  var found: bool = false;
+  while (i < l->len) {
+    if (s_starts(sl_get(l, i), name + "=")) {
+      sl_set(l, i, entry);
+      found = true;
+    }
+    i = i + 1;
+  }
+  if (!found) {
+    sl_push(l, entry);
+  }
+  // putenv keeps the pointer: the copy is never freed.
+  lx_putenv(s_c(entry));
+}
+
+export fn sys_home() -> string {
+  return env_get("HOME");
+}
+
+export fn sys_cwd() -> string {
+  var buf: uint8* = (uint8*)malloc(4096);
+  var r: string = ".";
+  if (lx_getcwd((cstring)buf, 4096) == 0) {
+    r = s_from_c((cstring)buf);
+  }
+  free(buf);
+  return r;
+}
+
+export fn sys_self_exe() -> string {
+  var buf: uint8* = (uint8*)malloc(4096);
+  var n: int64 = lx_exe_path((cstring)buf, (uint64)4096);
+  var r: string = "";
+  if (n > 0) {
+    r = s_dup(s_view(buf, n));
+  }
+  free(buf);
+  return r;
+}
+
+export fn sys_realpath(p: string) -> string {
+  var buf: uint8* = (uint8*)malloc(4096);
+  var r: string = "";
+  if (lx_realpath(s_c(p), (cstring)buf) != 0) {
+    r = s_from_c((cstring)buf);
+  }
+  free(buf);
+  return r;
+}
+
+export fn sys_now_ms() -> int64 {
+  var ts: int64[2];
+  ts[0] = 0;
+  ts[1] = 0;
+  lx_clock_gettime(1, (rawptr)&ts[0]);
+  return ts[0] * 1000 + ts[1] / 1000000;
+}
+
+export fn sys_sleep_ms(ms: int64) {
+  var left: int64 = ms;
+  while (left > 0) {
+    var step: int64 = left;
+    if (step > 1000000) {
+      step = 1000000;
+    }
+    lx_usleep((uint32)(step * 1000));
+    left = left - step;
+  }
+}
+
+export fn sys_isatty(fd: int32) -> bool {
+  return lx_isatty(fd) != 0;
+}
+
+fn lx_rd32(p: uint8*, off: int64) -> int64 {
+  var v: int64 = 0;
+  var i: int64 = 3;
+  while (i >= 0) {
+    v = (v << 8) | (int64)p[off + i];
+    i = i - 1;
+  }
+  return v;
+}
+
+fn lx_rd64(p: uint8*, off: int64) -> int64 {
+  return (lx_rd32(p, off + 4) << 32) | lx_rd32(p, off);
+}
+
+export fn sys_stat(p: string) -> FileInfo {
+  var fi: FileInfo;
+  fi.exists = false;
+  fi.is_dir = false;
+  fi.size = 0;
+  fi.mtime = 0;
+  var buf: uint8* = (uint8*)malloc(256);
+  memset(buf, 0, 256);
+  if (lx_stat(s_c(p), (rawptr)buf) != 0) {
+    free(buf);
+    return fi;
+  }
+  var mode: int64 = lx_rd32(buf, 24);
+  fi.exists = true;
+  fi.is_dir = (mode & 61440) == 16384;
+  fi.size = lx_rd64(buf, 48);
+  fi.mtime = lx_rd64(buf, 88) * 1000000000 + lx_rd64(buf, 96);
+  free(buf);
+  return fi;
+}
+
+export fn sys_mkdir(p: string) -> bool {
+  lx_mkdir(s_c(p), (uint32)511);
+  return lx_is_dir(s_c(p)) != 0;
+}
+
+// Creates p and answers true only when this call created it (false when it
+// already existed or could not be made): an atomic test-and-set for locks.
+export fn sys_mkdir_new(p: string) -> bool {
+  return lx_mkdir(s_c(p), (uint32)511) == 0;
+}
+
+// Runs argv (argv[0] is the program) directly, inheriting stdio. Consumes
+// the list.
+fn lx_exec(args: StrList*) -> int32 {
+  flush_out();
+  var argv: cstring* = (cstring*)malloc((args->len + 1) * 8);
+  defer free(argv);
+  var i: int64 = 0;
+  while (i < args->len) {
+    argv[i] = s_c(sl_get(args, i));
+    i = i + 1;
+  }
+  argv[args->len] = 0;
+  var code: int32 = lx_run_process(argv[0], argv);
+  free(args->items);
+  free(args);
+  return code;
+}
+
+// Reads a popen stream to EOF and closes it. Returns the exit code.
+fn lx_drain(fp: cstring, b: Buf*) -> int32 {
+  while (true) {
+    buf_reserve(b, 65536);
+    var got: int64 = fread((cstring)&b->data[b->len], 1, 65535, fp);
+    if (got <= 0) {
+      break;
+    }
+    b->len = b->len + got;
+  }
+  return lx_decode_status(lx_pclose(fp));
+}
+
+fn lx_decode_status(st: int32) -> int32 {
+  if (st < 0) {
+    return 127;
+  }
+  if ((st & 127) != 0) {
+    return 128 + (st & 127);
+  }
+  return (st >> 8) & 255;
+}
+
+// Runs a shell line and returns its standard output.
+fn lx_shell_capture(line: string) -> Captured {
+  var r: Captured;
+  r.code = 127;
+  r.out = "";
+  flush_out();
+  var fp: cstring = lx_popen(s_c(line), "r");
+  if (fp == 0) {
+    return r;
+  }
+  var b: Buf* = buf_new();
+  r.code = lx_drain(fp, b);
+  r.out = buf_take(b);
+  return r;
+}
+
+export fn sys_list_dir(p: string, files: StrList*, dirs: StrList*) -> bool {
+  if (lx_is_dir(s_c(p)) == 0) {
+    return false;
+  }
+  var r: Captured = lx_shell_capture("LC_ALL=C exec ls -1Ap -- " + sh_quote(p) + " 2>/dev/null");
+  if (r.code != 0) {
+    return false;
+  }
+  var lines: StrList* = s_split(r.out, 10);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var name: string = sl_get(lines, i);
+    if (slen(name) > 0) {
+      if (s_ends(name, "/")) {
+        var d: string = s_sub(name, 0, slen(name) - 1);
+        if (!s_eq(d, ".") && !s_eq(d, "..")) {
+          sl_push(dirs, d);
+        }
+      } else {
+        sl_push(files, name);
+      }
+    }
+    i = i + 1;
+  }
+  free(lines->items);
+  free(lines);
+  return true;
+}
+
+export fn sys_remove_file(p: string) -> bool {
+  if (lx_is_dir(s_c(p)) != 0) {
+    return false;
+  }
+  return lx_remove(s_c(p)) == 0;
+}
+
+fn lx_exists(p: string) -> bool {
+  return lx_access(s_c(p), 0) == 0;
+}
+
+export fn sys_remove_tree(p: string) -> bool {
+  if (!lx_exists(p)) {
+    return true;
+  }
+  var args: StrList* = sl_of("rm");
+  sl_push(args, "-rf");
+  sl_push(args, "--");
+  sl_push(args, p);
+  lx_exec(args);
+  return !lx_exists(p);
+}
+
+// p without trailing slashes ("/" stays "/").
+fn lx_trim_slash(p: string) -> string {
+  var n: int64 = slen(p);
+  while (n > 1 && s_byte(p, n - 1) == 47) {
+    n = n - 1;
+  }
+  return s_sub(p, 0, n);
+}
+
+// A symbolic link to a directory: `ls -1Ap` lists it among the files of its
+// parent (no trailing `/`) while stat, which follows links, sees a directory.
+export fn sys_is_link(p: string) -> bool {
+  var q: string = lx_trim_slash(p);
+  if (slen(q) == 0 || lx_is_dir(s_c(q)) == 0) {
+    return false;
+  }
+  var slash: int64 = s_rfind_byte(q, 47);
+  var parent: string = ".";
+  if (slash == 0) {
+    parent = "/";
+  } else if (slash > 0) {
+    parent = s_sub(q, 0, slash);
+  }
+  var name: string = s_from(q, slash + 1);
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  var found: bool = false;
+  if (sys_list_dir(parent, files, dirs)) {
+    found = sl_has(files, name);
+  }
+  free(files->items);
+  free(files);
+  free(dirs->items);
+  free(dirs);
+  return found;
+}
+
+// Makes link a symbolic link to target (an absolute path), replacing a link
+// already there. A real directory at link is left alone (false).
+export fn sys_make_link(target: string, link: string) -> bool {
+  var q: string = lx_trim_slash(link);
+  // lx_exists follows links: a dangling link is replaced too.
+  if (lx_exists(q) && !sys_is_link(q)) {
+    return false;
+  }
+  var rm: StrList* = sl_of("rm");
+  sl_push(rm, "-f");
+  sl_push(rm, "--");
+  sl_push(rm, q);
+  lx_exec(rm);
+  var ln: StrList* = sl_of("ln");
+  sl_push(ln, "-sn");
+  sl_push(ln, "--");
+  sl_push(ln, target);
+  sl_push(ln, q);
+  if (lx_exec(ln) != 0) {
+    return false;
+  }
+  return sys_is_link(q);
+}
+
+// Removes p only when it is a link; the target is never touched.
+export fn sys_remove_link(p: string) -> bool {
+  var q: string = lx_trim_slash(p);
+  if (!sys_is_link(q)) {
+    return false;
+  }
+  var rm: StrList* = sl_of("rm");
+  sl_push(rm, "-f");
+  sl_push(rm, "--");
+  sl_push(rm, q);
+  lx_exec(rm);
+  return !lx_exists(q);
+}
+
+export fn sys_rename(from: string, to: string) -> bool {
+  var args: StrList* = sl_of("mv");
+  sl_push(args, "-f");
+  sl_push(args, "--");
+  sl_push(args, from);
+  sl_push(args, to);
+  return lx_exec(args) == 0;
+}
+
+export fn sys_set_executable(p: string) {
+  var buf: uint8* = (uint8*)malloc(256);
+  defer free(buf);
+  if (lx_stat(s_c(p), (rawptr)buf) != 0) {
+    return;
+  }
+  var mode: int64 = lx_rd32(buf, 24) & 4095;
+  // Execute for whoever may read it: r--r----- becomes r-xr-x---.
+  mode = mode | ((mode & 292) >> 2) | 64;
+  lx_chmod(s_c(p), (uint32)mode);
+}
+
+fn lx_is_exec_file(p: string) -> bool {
+  var c: cstring = s_c(p);
+  return lx_access(c, 1) == 0 && lx_is_dir(c) == 0;
+}
+
+export fn sys_find_tool(name: string) -> Tool {
+  var t: Tool = tool_none();
+  if (slen(name) == 0) {
+    return t;
+  }
+  if (s_find_byte(name, 47) >= 0) {
+    if (lx_is_exec_file(name)) {
+      t.path = name;
+    }
+    return t;
+  }
+  var path_var: string = env_get("PATH");
+  if (slen(path_var) == 0) {
+    path_var = sys_unix_path_default();
+  }
+  var dirs: StrList* = s_split(path_var, 58);
+  var i: int64 = 0;
+  while (i < dirs->len) {
+    var d: string = sl_get(dirs, i);
+    if (slen(d) == 0) {
+      d = ".";
+    }
+    var cand: string = d + "/" + name;
+    if (s_ends(d, "/")) {
+      cand = d + name;
+    }
+    if (lx_is_exec_file(cand)) {
+      t.path = cand;
+      break;
+    }
+    i = i + 1;
+  }
+  free(dirs->items);
+  free(dirs);
+  return t;
+}
+
+// `cd DIR || exit 127; export 'K=V'; ... exec 'prog' 'args'`: the command as
+// one shell line, with this command's directory and environment.
+fn lx_shell_line(c: Cmd*) -> string {
+  var b: Buf* = buf_new();
+  if (slen(c->cwd) > 0) {
+    buf_add(b, "cd " + sh_quote(c->cwd) + " || exit 127; ");
+  }
+  var ov: StrList* = lx_env_list();
+  var i: int64 = 0;
+  while (i < ov->len) {
+    buf_add(b, "export " + sh_quote(sl_get(ov, i)) + "; ");
+    i = i + 1;
+  }
+  i = 0;
+  while (i < c->env->len) {
+    buf_add(b, "export " + sh_quote(sl_get(c->env, i)) + "; ");
+    i = i + 1;
+  }
+  buf_add(b, "exec " + sh_quote(c->tool.path));
+  i = 0;
+  while (i < c->args->len) {
+    buf_addb(b, 32);
+    buf_add(b, sh_quote(sl_get(c->args, i)));
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+export fn sys_run(c: Cmd*) -> int32 {
+  var args: StrList* = sl_new();
+  if (slen(c->cwd) == 0 && c->env->len == 0 && lx_env_list()->len == 0) {
+    sl_push(args, c->tool.path);
+    sl_extend(args, c->args);
+  } else {
+    sl_push(args, "/bin/sh");
+    sl_push(args, "-c");
+    sl_push(args, lx_shell_line(c));
+  }
+  return lx_exec(args);
+}
+
+export fn sys_capture(c: Cmd*, merge_stderr: bool) -> Captured {
+  var line: string = lx_shell_line(c);
+  if (merge_stderr) {
+    line = line + " 2>&1";
+  }
+  return lx_shell_capture(line);
+}
+
+export fn sys_job_start(c: Cmd*, log_path: string) -> Job* {
+  var j: Job* = new Job;
+  j->log_path = log_path;
+  j->status_path = log_path + ".status";
+  j->done = false;
+  j->code = 127;
+  var tmp: string = j->status_path + ".tmp";
+  lx_remove(s_c(j->status_path));
+  lx_remove(s_c(tmp));
+  var line: string = "( " + lx_shell_line(c) + " ) >" + sh_quote(log_path) + " 2>&1 </dev/null; echo $? >" + sh_quote(tmp) + "; exec mv -f -- " + sh_quote(tmp) + " " + sh_quote(j->status_path);
+  flush_out();
+  var fp: cstring = lx_popen(s_c(line), "r");
+  if (fp == 0) {
+    j->done = true;
+    return j;
+  }
+  j->handle = (int64)fp;
+  return j;
+}
+
+fn lx_read_small(p: string) -> string {
+  var fp: cstring = fopen(s_c(p), "rb");
+  if (fp == 0) {
+    return "";
+  }
+  var b: Buf* = buf_new();
+  var got: int64 = fread((cstring)b->data, 1, 200, fp);
+  fclose(fp);
+  if (got > 0) {
+    b->len = got;
+  }
+  return buf_take(b);
+}
+
+export fn sys_job_poll(j: Job*) -> bool {
+  if (j->done) {
+    return true;
+  }
+  if (!lx_exists(j->status_path)) {
+    return false;
+  }
+  var text: string = s_trim(lx_read_small(j->status_path));
+  var code: int64 = s_to_int(text);
+  if (code < 0) {
+    code = 127;
+  }
+  j->code = (int32)code;
+  j->done = true;
+  if (j->handle != 0) {
+    lx_pclose((cstring)j->handle);
+    j->handle = 0;
+  }
+  lx_remove(s_c(j->status_path));
+  return true;
+}
+
+export fn sys_host_path(p: string) -> string {
+  return p;
+}
