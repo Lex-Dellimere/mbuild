@@ -46,3 +46,6 @@ desktop.ini
 tmp/
 _tmp*/
 scratch/
+
+# Mettle compiler bug reports: local only, never pushed
+reports/

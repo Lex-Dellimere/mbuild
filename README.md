@@ -227,7 +227,6 @@ flags that work everywhere: `-v` (show every command), `-q`, `--offline`, `--loc
 - [docs/native.md](docs/native.md): C code and C libraries
 - [docs/platforms.md](docs/platforms.md): linux, windows, wine, toolchains, env vars
 - [docs/incremental.md](docs/incremental.md): what triggers a rebuild
-- [docs/compiler-bugs.md](docs/compiler-bugs.md): mettle compiler bugs found while writing this
 
 ## building and testing mbuild itself
 
