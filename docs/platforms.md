@@ -1,12 +1,9 @@
 # Platforms
 
 mbuild runs on Linux and on Windows, and builds for two targets: `linux`
-(ELF executables) and `windows` (PE `.exe` files), both x86-64.
-
-The Mettle compiler links executables only for the OS it runs on, so a
-Windows `.exe` is built by the Windows compiler and a Linux binary by the
-Linux one. mbuild keeps one compiler per target and starts each where it can
-run.
+(ELF executables) and `windows` (PE `.exe` files), both x86-64. The Mettle
+compiler only links executables for the OS it runs on, so each target has
+its own compiler, and mbuild starts each where it can run.
 
 ## Hosts and targets
 
@@ -22,10 +19,6 @@ $ mbuild run -t windows
     Finished in 2.5s
      Running build/windows/debug/hw.exe
 Hello from hw!
-$ mbuild build -t all --force
-   Compiling hw (linux, debug)
-   Compiling hw (windows, debug)
-    Finished in 1.1s
 ```
 
 Starting wine costs a second or two per compile; Fresh builds start nothing.
@@ -44,8 +37,7 @@ Which targets a command builds:
     help: pass -t linux or -t windows
   ```
 
-On Linux without wine, `-t windows` says to install it or set `MBUILD_WINE`.
-A wrong `MBUILD_WINE` is named:
+On Linux, `-t windows` needs wine (`wine` on PATH, or `MBUILD_WINE`):
 
 ```text
 $ MBUILD_WINE=/opt/wine/bin/wine mbuild build -t windows
@@ -53,15 +45,13 @@ error: building for windows on Linux needs wine to run the Windows Mettle compil
   help: point MBUILD_WINE at the wine executable, or unset it to search for wine
 ```
 
-C code has the same split: the Windows target needs a compiler that makes
-Windows DLLs (MinGW on Linux), and Windows can't compile C for Linux. See
-[native code](native.md#c-compilers).
+C code has the same split: see [native code](native.md#c-compilers).
 
 ## Which compiler builds a target
 
-mbuild uses a Mettle compiler built from the Mettle source. The v0.17.0
-release and older can't build current projects. For each target, the first
-of:
+mbuild needs a Mettle compiler built from the Mettle source; the v0.17.0
+release and older can't build current projects. For each target it uses the
+first of:
 
 1. `MBUILD_METTLE_LINUX` / `MBUILD_METTLE_WINDOWS` (a path, or a name on PATH);
 2. `mb_tool("mettle-linux", PATH)` / `mb_tool("mettle-windows", PATH)` in
@@ -83,63 +73,43 @@ Selected compilers:
            set MBUILD_METTLE_WINDOWS, or mb_tool("mettle-windows", PATH) in mbuild.local.mettle, to a windows build of ../Mettle
 ```
 
-With a Windows compiler named in `mbuild.local.mettle`:
+`mbuild doctor` shows the same with each compiler's version (every
+development build reports v0.17.0), and `mbuild mettle -- ARGS` runs the
+host's.
 
-```text
-Selected compilers:
-  linux    /home/you/Mettle/bin/mettle  ($METTLE)
-  windows  /home/you/win/mettle.exe  (mb_tool("mettle-windows") in mbuild.local.mettle, through wine)
-```
-
-`mbuild doctor` shows the same with each compiler's version, and
-`mbuild mettle -- ARGS` runs the host's:
-
-```text
-$ mbuild mettle -- --version
-mettle v0.17.0
-host: x86_64
-target: x86_64-linux (ELF)
-```
-
-(Every development build reports v0.17.0.)
-
-`mbuild toolchain install VERSION` still downloads a release into
+`mbuild toolchain install VERSION` downloads a release into
 `$MBUILD_HOME/toolchains/`, and `mbuild toolchain use VERSION` writes it into
-`mbuild.local.mettle` as `mb_tool("mettle-<os>", PATH)`. That's only useful
-for programs that still build with an old release.
+`mbuild.local.mettle` as `mb_tool("mettle-<os>", PATH)`, for programs that
+still build with an old release.
 
 ## Wine
 
 ### Linux mbuild, Windows target
 
-`-t windows` runs `wine mettle.exe ...` with `WINEDEBUG=-all`, and
-`mbuild run -t windows` runs `wine program.exe` the same way, passing its exit
-code through. `MBUILD_WINE` names wine when it isn't `wine` on PATH. When the
-program links DLLs, their directories go in front of `WINEPATH` for the
-compile; at run time the DLLs sit beside the `.exe`.
+`-t windows` runs `wine mettle.exe ...`, and `mbuild run -t windows` runs
+`wine program.exe`, passing its exit code through. DLL directories go in
+front of `WINEPATH` for the compile; at run time the DLLs sit beside the
+`.exe`.
 
 ### Windows mbuild under wine
 
-`wine mbuild.exe` notices wine and reaches Linux programs (cc, pkg-config,
-curl, tar, the Linux Mettle compiler) as host programs through drive `Z:`.
-They're searched for in `MBUILD_UNIX_PATH`, a colon-separated list (default
-`/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`), since wine's
-`PATH` holds Windows directories only. Program variables and `MBUILD_HOME`
-may be given in Linux form. With `MBUILD_HOME` unset it uses the host user's
-`~/.mbuild`, so Linux mbuild and wine mbuild share the download cache. The
-default target is `windows`.
+`wine mbuild.exe` runs Linux programs (cc, pkg-config, curl, tar, the Linux
+Mettle compiler) as host programs, searched in `MBUILD_UNIX_PATH` (default
+`/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`). Program
+variables and `MBUILD_HOME` may be given in Linux form. With `MBUILD_HOME`
+unset it shares the host user's `~/.mbuild` with Linux mbuild. The default
+target is `windows`.
 
 Linux mbuild and wine mbuild see the compilers under different paths, so
 switching between them rebuilds once ([incremental builds](incremental.md)).
 
 ## Windows programs and batch files
 
-A program name without an extension is looked up with each extension of
-`PATHEXT` (`.com`, `.exe`, `.bat`, `.cmd` are used), so a wrapper script such
-as `cc.bat` works wherever mbuild takes a program. Scripts run through
-`cmd.exe` with every argument quoted, so spaces and `^ & | < > ( ) %` reach
-the script literally; inside it, `%~1` removes the quotes. An argument with a
-line break can't be passed to a script.
+A program name without an extension is tried with `.com`, `.exe`, `.bat` and
+`.cmd` (from `PATHEXT`), so a wrapper such as `cc.bat` works wherever mbuild
+takes a program. Every argument reaches the script quoted and literal; `%~1`
+removes the quotes. An argument with a line break can't be passed to a
+script.
 
 ## Environment variables
 

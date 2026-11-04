@@ -1,8 +1,7 @@
 # Components and runtime options
 
 A component is an interface with several implementations, one file each.
-Your code imports the component by name and mbuild wires in an
-implementation:
+Your code imports it by name and mbuild wires in an implementation:
 
 - `static`: one impl is picked at build time, the others aren't compiled;
 - `dyn`: every impl is linked and the program picks one at run time;
@@ -10,23 +9,12 @@ implementation:
 
 ## static
 
-```text
-src/logger/stdout.mettle
-src/logger/quiet.mettle
-```
-
 ```mettle
-// src/logger/stdout.mettle
+// src/logger/stdout.mettle (quiet.mettle is the same with an empty body)
 import "std/io";
 
 export fn log_line(s: string) {
   println("log: " + s);
-}
-```
-
-```mettle
-// src/logger/quiet.mettle
-export fn log_line(s: string) {
 }
 ```
 
@@ -77,8 +65,8 @@ $ mbuild -r build
 error: component logger: impl quiet does not match stdout: missing fn log_flush() -> int32 (src/logger/stdout.mettle:6)
 ```
 
-Only the selected impl is compiled, so `mbuild components --check` compiles
-every impl to catch the ones you aren't using:
+`mbuild components --check` compiles every impl, including the ones not
+selected:
 
 ```text
 $ mbuild components --check
@@ -87,8 +75,8 @@ $ mbuild components --check
      Checked 2 static impls, every component's interface
 ```
 
-A component name is a single import component, so it's never mistaken for
-a package. Names must be unique across your project and its dependencies.
+A component name is a single path component, so it's never mistaken for a
+package. Names must be unique across your project and its dependencies.
 
 ## Which impl is used
 
@@ -125,9 +113,9 @@ $ mbuild use logger
 
 Libraries can declare components; only your project chooses.
 
-Plain `mettle` and editors don't know which impl is selected, so
-`import "logger"` doesn't resolve for them. `mbuild mettle -- ARGS` runs the
-compiler with the selection of a host debug build.
+Plain `mettle` and editors don't see the selection, so `import "logger"`
+doesn't resolve for them; `mbuild mettle -- ARGS` runs the compiler with the
+selection of a host debug build.
 
 ## dyn
 
@@ -203,16 +191,9 @@ Every impl is linked and each interface function becomes a slot. The
 program stages another impl, and the switch happens at its next `quiesce;`:
 
 ```mettle
-// src/policy/gentle.mettle
+// src/policy/gentle.mettle (harsh.mettle returns n * 10)
 @swappable export fn policy_score(n: int32) -> int32 {
   return n + 1;
-}
-```
-
-```mettle
-// src/policy/harsh.mettle
-@swappable export fn policy_score(n: int32) -> int32 {
-  return n * 10;
 }
 ```
 
@@ -297,13 +278,12 @@ $ mbuild live
 Built executable '/home/you/comp/build/linux/debug/live/comp'
 [live] running /home/you/comp/build/linux/debug/live/comp; saving any of its 4 source files patches it
 log: tick 0
-log: tick 1
+...
 log: tick 2
 Patch 1: log_line (520 bytes)
 [live] patch 1: 1 function
 LOG: tick 3
-LOG: tick 4
-LOG: tick 5
+...
 LOG: tick 6
 Patch 2: log_line (296 bytes)
 [live] patch 2: 1 function
@@ -311,26 +291,10 @@ Patch 2: log_line (296 bytes)
 ```
 
 `mbuild live [BIN] [-p PROFILE] [-- ARGS]`. The exit code is the program's.
-Dependencies, C libraries, components and `hook_pre_build` are set up as for
-`mbuild run`.
 
-## Runtime options
-
-The runtime is configured with typed settings in a profile, per bin or per
-OS ([project](project.md#profiles-and-settings) has the full table):
-
-```mettle
-  mb_profile("release");
-  mb_set("crash-report", "false");     // --no-crash-report
-  mb_set("native-heap", "true");       // new/malloc through std/alloc
-  mb_on("windows");
-  mb_set("subsystem", "windows");      // no console window
-  mb_on("");
-
-  mb_profile("debug");
-  mb_set("safe", "true");              // memory-safety checks
-  mb_set("profile-runtime", "true");   // a function timing report at exit
-```
+Runtime options (`native-heap`, `crash-report`, `safe`, `profile-runtime`,
+`subsystem`, ...) are typed settings per profile, bin or OS: see
+[project](project.md#profiles-and-settings).
 
 ## Bin kinds
 
@@ -402,27 +366,15 @@ $ mbuild build
    Compiling rl (linux, debug)
 -- /home/you/rl/src/util.mettle:1:8
 error[R0002]: rule 'no_recursion' failed: this program forbids recursion
-
-  ----+----------------------------------------------------------------------------------
-    1 |  export fn depth(n: int32) -> int32 {
-      :         ^ the rule points here
-    2 |    if (n <= 0) {
-  ----+----------------------------------------------------------------------------------
-      |  note  the rule that failed the build  /home/you/rl/rules/norec.mettle:3:7
-    3 |  @rule fn no_recursion(p: Program) -> Verdict {
-      :        ^^^^
-  ----+----------------------------------------------------------------------------------
-
------------------------------------------------------------------------------------------
+...
   error: could not compile `.mbuild/gen/linux-debug-rl/entry.mettle` due to 1 previous error
   help: for more about this error, run `mettle explain R0002`
 error: could not compile rl (linux, debug)
 ```
 
-mbuild builds a small generated file that imports your main file and the
-rule files, which is why the compiler names `entry.mettle`. One thing that
-changes for rules: `f.module` of a function in your main file is its
-absolute path, not `""`.
+The compiler names `entry.mettle` because mbuild compiles a generated file
+that imports your main file and the rule files. So in a rule, `f.module` of
+a function in your main file is its absolute path, not `""`.
 
 Rules of dependencies aren't attached; a library that wants its rules
 applied imports them from its own code.

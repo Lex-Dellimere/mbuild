@@ -22,28 +22,13 @@ $ mbuild init --package
   next: mbuild run
 ```
 
-The starting `init.rules` copies one template into the new project:
-
-```mettle
-// init.rules: how `mbuild new APP --from greet` starts a project.
-// @@name@@ in paths, templates and commands is an option, or project,
-// package, package_version, mbuild_version.
-import "mbuild/init";
-
-fn options() {
-}
-
-fn plan() {
-  mi_template("templates/main.mettle.tmpl", "src/main.mettle");
-  mi_next("mbuild run");
-}
-```
+The starting `init.rules` copies `templates/main.mettle.tmpl` to
+`src/main.mettle` in the new project.
 
 ## init.rules
 
 It's Mettle, like `mbuild.mettle`. `fn options()` declares what the user can
-choose, `fn plan()` describes what to write. It can't do anything itself:
-mbuild reads the plan and applies it.
+choose, `fn plan()` describes what to write, and mbuild applies the plan.
 
 ```mettle
 import "mbuild/init";
@@ -84,26 +69,6 @@ $ mbuild new site --from greet --opt who=world --opt style=loud --yes
   next: mbuild run, then mbuild hi
 ```
 
-which writes:
-
-```mettle
-// mbuild.mettle: the project file. `mbuild help` lists its commands.
-import "mbuild/api";
-
-fn project() {
-  mb_package("site", "0.1.0");
-  mb_dep("greet", "v1.0.0");
-  mb_dep("strutil", "v1.1.0");
-  mb_profile("release");
-  mb_set("optimize", "full");
-}
-
-// hi: greet world from the shell
-fn cmd_hi(a: MbArgs*) -> int32 {
-  mb_say("hi, world"); return 0;
-}
-```
-
 ### The API
 
 | Call | In | Does |
@@ -128,8 +93,7 @@ into `build/` or `.mbuild/`. Templates must be files in the package.
 `@@name@@` is replaced in template contents, destination paths, command
 summaries and bodies, and the next note. Names are the options plus
 `project`, `package`, `package_version` and `mbuild_version`; `@@@@` is a
-literal `@@`. `@@` never occurs in Mettle code, so templates full of Mettle
-survive untouched. An unknown name stops it:
+literal `@@`. An unknown name stops it:
 
 ```text
 error: templates/main.mettle.tmpl:5: unknown variable @@whom@@
@@ -154,17 +118,7 @@ mbuild init --from PKG[@VERSION] [--opt K=V]... [--yes] [--dry-run] [--force]
 
 `PKG` is a registry package (the newest stable version unless you give one)
 or a path (it contains `/` or starts with `.`), so you can try your rules
-before publishing. Here the plan also has `mi_dir("assets")` and a second
-template to `src/@@project@@_main.mettle`:
-
-```text
-$ mbuild new demo --from ./greet --yes
-     Created demo/mbuild.mettle (package `demo`, depends on greet (path))
-     Created demo/assets/, demo/src/demo_main.mettle, demo/src/main.mettle
-     Command hi: greet world from the shell
-
-  next: mbuild run, then mbuild hi
-```
+before publishing.
 
 Each option comes from `--opt`, else a prompt when you're at a terminal
 (`who the program greets [world]: `), else its default; `--yes` skips the
@@ -194,8 +148,8 @@ $ mbuild init --from greet --yes
 `--dry-run` prints what it would do and writes nothing. Nothing is resolved
 or built; the next `mbuild run` does that.
 
-`mbuild publish` runs your `init.rules` with its defaults first, so a
-missing template or unknown variable fails there instead of at your users:
+`mbuild publish` runs your `init.rules` with its defaults first, so mistakes
+fail there instead of at your users:
 
 ```text
 error: greet v1.1.0: init.rules: template templates/nope.tmpl is not a file in the package
@@ -235,10 +189,9 @@ rules of your direct dependencies, updated whenever dependencies change:
 # <<< mbuild
 ```
 
-The paths are the extracted packages themselves, so they always match what
-you build with. Everything outside the block is yours to write. The file is
-created when the first dependency with rules arrives. Turn it off with
-`mb_agents(false)` in `fn project()`.
+The paths are the extracted packages, so they always match what you build
+with. Everything outside the block is yours. The file is created when the
+first dependency with rules arrives. Turn it off with `mb_agents(false)`.
 
 `mbuild agents` refreshes the block and prints every file (`NAME` for one,
 `--all` for indirect dependencies too):

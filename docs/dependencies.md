@@ -1,13 +1,8 @@
 # Dependencies
 
-Packages come from registries. A registry is a static folder: an index file
-per package and a `.tar.gz` plus a small manifest per version. Any web host,
-a shared folder or a plain local directory can serve one; there's no server
-code. Local packages can also be used straight from a directory.
-
-The transcripts on this page use the fixture registry that
-`sh tests/fixtures/make-registry.sh DIR` builds, with `MBUILD_REGISTRY`
-pointing at it.
+Packages come from registries: static folders that any web host, file
+share or local directory can serve. Local packages can also be used straight
+from a directory.
 
 ## Importing a package
 
@@ -23,34 +18,11 @@ it's a file next to yours, or a [component](components.md).
 
 ### Import roots
 
-A package that keeps its code in `src/` says so, and `import
-"mistplot/core/scale"` then means `src/core/scale.mettle`, for its users
-and for its own files:
-
-```mettle
-fn project() {
-  mb_package("mistplot", "0.1.0");
-  mb_import_root("src");
-}
-```
-
-```text
-$ mbuild run
-   Compiling viewer (linux, debug)
-    Finished in 0.0s
-     Running build/linux/debug/viewer
-plot 7
-$ cat mettle.deps
-# >>> mbuild: generated, edits inside this block are overwritten
-mistplot=../mistplot/src
-viewer=.
-mbuild=./.mbuild/api/mbuild
-# <<< mbuild
-```
-
-It's part of the package's manifest, so it holds for path and registry
-packages alike; `publish` packs the files as they are. The directory must
-exist inside the package:
+A package that keeps its code in `src/` says so with
+`mb_import_root("src")`, and `import "mistplot/core/scale"` then means
+`src/core/scale.mettle`, for its users and for its own files. It holds for
+path and registry packages alike. The directory must exist inside the
+package:
 
 ```text
 $ mbuild check
@@ -74,13 +46,6 @@ $ mbuild run
     Finished in 0.0s
      Running build/linux/debug/hello
 hi!
-```
-
-```mettle
-fn project() {
-  mb_package("hello", "0.1.0");
-  mb_dep("strutil", "v1.1.0");
-}
 ```
 
 A name no registry has is left to the compiler's error. `--locked` refuses
@@ -273,8 +238,8 @@ strutil v1.1.0 (default)
 textfmt v0.1.0 (default)
 ```
 
-A dependency whose bins this project builds (`mb_dep_bin`,
-[project](project.md#bins)) says so:
+A dependency whose bins this project builds ([`mb_dep_bin`](project.md#bins))
+says so:
 
 ```text
 meosql (path ../meosql) [native: C] [bins built here: server]
@@ -283,15 +248,12 @@ meosql (path ../meosql) [native: C] [bins built here: server]
 ### mbuild fetch and --offline
 
 `mbuild fetch` downloads everything the lock names into the download cache,
-so builds work offline:
+so builds work with `--offline`:
 
 ```text
 $ mbuild fetch
    Resolving dependencies
      Fetched 2 package(s); builds can now run with --offline
-$ mbuild --offline build
-   Compiling app (linux, debug)
-    Finished in 0.0s
 ```
 
 `--locked` (for CI) fails instead of changing `mbuild.mettle` or the lock:
@@ -331,13 +293,8 @@ Declare more in `fn project()`; they're searched in call order, then
   mb_registry("mine", "../myreg");
 ```
 
-A URL is `https://...`, `http://...`, `file:///abs/dir`, or a plain path
-(relative to the project root). Over `http://` mbuild warns once per
-command:
-
-```text
-warning: registry default uses http://; locked builds are still checked against mbuild.lock, new versions are not
-```
+A URL is `https://...`, `http://...` (with a warning), `file:///abs/dir`,
+or a plain path (relative to the project root).
 
 A package comes from the registry `mb_dep_from` names, else the first one
 that has it; once locked, only the locked registry is asked. A registry that
@@ -366,10 +323,8 @@ machine pkgs.example.com login me password s3cret
 
 ## Integrity
 
-Every archive is checked against the sha256 in the index when downloaded,
-against the lock before every extraction, and the lock against the index on
-every resolve. A published version never changes, so a mismatch means
-something was tampered with:
+Archives are checked against the index when downloaded, against the lock
+before every extraction, and the lock against the index on every resolve:
 
 ```text
 $ mbuild build
@@ -381,16 +336,14 @@ error: strutil v1.1.0 from registry default does not match mbuild.lock
   help: if you trust the new bytes, delete the strutil line from mbuild.lock and build again (review the change first)
 ```
 
-Archives holding links, absolute paths or `..` are refused before
-extraction. A registry package's `mbuild.mettle` is never compiled or run on
-your machine; mbuild reads the manifest that was frozen when it was
-published.
+Archives holding links, absolute paths or `..` are refused. A registry
+package's `mbuild.mettle` is never compiled or run on your machine; mbuild
+reads the manifest frozen when it was published.
 
 ## Yanked versions
 
-A yanked version is never picked for a new requirement. One that's already
-in your lock still builds, with a warning that says how to move off it
-(`mbuild update yanky moves off it` when a later version exists):
+A yanked version is never picked for a new requirement. One already in
+your lock still builds, with a warning that says how to move off it:
 
 ```text
 warning: yanky v1.0.1 is yanked in registry default; no later version of line v1 exists; `mbuild get yanky@v1.0.0` moves back to v1.0.0
@@ -398,8 +351,8 @@ warning: yanky v1.0.1 is yanked in registry default; no later version of line v1
 
 ## Publishing
 
-A registry you can write to is a directory: the registry itself, or a local
-copy of the site that serves it. Make one:
+Publishing writes into a directory: the registry itself, or a local copy
+of the site that serves it. Make one:
 
 ```text
 $ mbuild registry init ~/www/registry --name mine
@@ -417,17 +370,10 @@ $ mbuild publish --dry-run --to ~/www/registry
 
 files:
   AGENT.rules
-  greet.mettle
-  init.rules
-  mbuild.mettle
-  src/main.mettle
-  templates/main.mettle.tmpl
-
+...
 manifest:
 [package]
-name = "greet"
-version = "0.1.0"
-description = "greeting strings"
+...
 $ mbuild publish --to ~/www/registry
    Verifying 1 bin for linux
    Packaging greet v0.1.0 (6 files, 1.4 KB)
@@ -442,7 +388,7 @@ Before writing, publish checks:
 
 - the version isn't published yet;
 - `init.rules` and `AGENT.rules` exist, and `init.rules` runs with its
-  defaults;
+  defaults ([packages](packages.md));
 - no `mb_dep_path` (users couldn't resolve it); replacements get a warning,
   since users ignore them;
 - the API against the newest earlier version in the same line: a removed or
@@ -481,19 +427,7 @@ pkg/greet/greet-v0.1.0.tar.gz     the files
 pkg/greet/greet-v0.1.0.toml       the manifest, frozen at publish time
 ```
 
-```text
-# mbuild index greet
-v0.1.0 sha256=c64fc9e6735d8f0e392872c8e689109fd568d990be92830f21fbb44a31b1f8ce manifest=6846fc837af47fcb308087b3eec7c30c88d2c51eef2529d7e7ce48add1804b1c
-```
-
 Everything except `index/` is immutable, so a CDN can cache it forever.
 
-## Where things live
-
-| Path | Holds |
-|---|---|
-| `.mbuild/deps/<name>/` | the extracted packages of this project |
-| `$MBUILD_HOME/registry/<registry>@<hash>/` | the download cache: indexes, manifests, archives, kept across projects |
-
-`mbuild clean --all` removes `.mbuild/`; the next build extracts again from
-the cache without downloading.
+Packages are extracted into `.mbuild/deps/<name>/`; downloads are kept
+across projects in `$MBUILD_HOME/registry/<registry>@<hash>/`.

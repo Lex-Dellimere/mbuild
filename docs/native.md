@@ -1,10 +1,9 @@
 # Native code
 
-A Mettle program calls C through `extern fn` declarations. mbuild provides
-the other half: it compiles C sources, finds libraries, passes the right link
-arguments to the compiler for each target, and puts the shared libraries the
-program needs beside the binary. It does this for every package in the
-dependency graph, so a package that wraps a C library works in any project
+A Mettle program calls C through `extern fn` declarations. mbuild compiles
+C sources, finds libraries, links them for each target and puts the shared
+libraries the program needs beside the binary, for every package in the
+dependency graph. So a package that wraps a C library works in any project
 that imports it.
 
 How `extern` declarations, `cstring`, `rawptr` and structs cross the boundary
@@ -69,40 +68,25 @@ nothing about C in its own `mbuild.mettle`:
 $ mbuild -v build --force
 ...
    Compiling vecmath (C, 1 file)
-  > /bin/cc -c /home/you/vm/.mbuild/deps/vecmath/csrc/vec.c -o /home/you/vm/.mbuild/cache/linux/c/vecmath/csrc/vec.c.o -MMD -MF /home/you/vm/.mbuild/cache/linux/c/vecmath/csrc/vec.c.o.d -fPIC -I /home/you/vm/.mbuild/deps/vecmath/csrc/include -O2
-  > /bin/cc -shared -o /home/you/vm/.mbuild/cache/linux/lib/libmb_vecmath.so /home/you/vm/.mbuild/cache/linux/c/vecmath/csrc/vec.c.o -Wl,-soname,libmb_vecmath.so -Wl,-Bsymbolic -lm
+...
    Compiling vm (linux, debug)
-  > NO_COLOR=1 /home/you/Mettle/bin/mettle -s -I .mbuild/deps -L/home/you/vm/.mbuild/cache/linux/lib -lmb_vecmath --rpath '$ORIGIN' --build src/main.mettle -o build/linux/debug/vm
-Built executable 'build/linux/debug/vm'
-    Finished in 0.0s
+...
 $ ls build/linux/debug
 libmb_vecmath.so
 vm
 ```
 
-What happens, per package with C sources:
-
-1. Each source is compiled to an object under
-   `.mbuild/cache/<target>/c/<package>/`, with a depfile that records the
-   headers it included. Linux objects add `-fPIC`. Files compile in parallel
-   (`-j N`, `MBUILD_JOBS`, default 8).
-2. The objects are linked into one shared library: `libmb_<package>.so` on
-   Linux, `mb_<package>.dll` on Windows. `mb_c_libs` are the libraries this C
-   code itself needs (`-lm` above). Windows DLLs add `-static-libgcc`, so they
-   don't need MinGW's libgcc DLL.
-3. The program's link names every such library, and the library is copied
-   beside the binary.
-
-The libraries go on the link with dependents before their dependencies.
+Each package's C sources compile (in parallel, `-j N`) into one shared
+library, `libmb_<package>.so` on Linux or `mb_<package>.dll` on Windows,
+which the program links and which is copied beside the binary. `mb_c_libs`
+are the libraries the C code itself needs (`-lm` above). Windows DLLs are
+linked with `-static-libgcc`, so they don't need MinGW's libgcc DLL.
 
 ### C code that calls C code in a dependency
 
-A package's C may call the C of the packages it depends on. mbuild builds
-dependencies first, compiles with `-I` for every dependency's include
-directories (after the package's own), and links the package's library
-against its dependencies' libraries (on Linux with `-Wl,-rpath,$ORIGIN`, so
-they're found beside the binary) and their `mb_link_libs`. A change to a
-dependency's header recompiles the objects that include it.
+A package's C may call the C of the packages it depends on: it compiles with
+their include directories (after its own) and links against their libraries
+and `mb_link_libs`.
 
 ### C flags per profile
 
@@ -115,10 +99,9 @@ default, not even `release`:
   mb_set_list("cflags", "-O2");
 ```
 
-A profile with `cflags` keeps its objects and libraries apart
-(`.mbuild/cache/<target>/c-release/`, `lib-release/`), so switching between
-debug and release doesn't recompile anything twice. A dependency's own
-profiles are ignored.
+A profile with `cflags` keeps its own objects, so switching between debug and
+release doesn't recompile anything twice. A dependency's own profiles are
+ignored.
 
 ## Existing libraries
 
@@ -151,16 +134,14 @@ $ mbuild run
 bound=113
 ```
 
-Each `mb_pkgconfig` name runs `pkg-config --libs NAME`, and its `-L` and `-l`
-words go to the link. For the Linux target the program is `$PKG_CONFIG`, else
-`pkg-config`. For the Windows target it is `$PKG_CONFIG_WINDOWS`, else
-`x86_64-w64-mingw32-pkg-config`; its `-l` names become DLL imports, and its
-`-L` directories (and the `bin/` beside each, where MinGW keeps DLLs) go on
-the DLL search path of the compile. Without either, a `pkgconfig` entry is
-skipped for Windows with a warning: name the DLL with `mb_link_libs` instead.
+Each `mb_pkgconfig` name runs `pkg-config --libs NAME` and links its `-L` and
+`-l` words. For the Linux target that's `$PKG_CONFIG`, else `pkg-config`; for
+the Windows target `$PKG_CONFIG_WINDOWS`, else
+`x86_64-w64-mingw32-pkg-config` (its `-L` directories and the `bin/` beside
+each are searched for DLLs). Without either, a `pkgconfig` entry is skipped
+for Windows with a warning: name the DLL with `mb_link_libs` instead.
 
-The Mettle linker records only the libraries a symbol actually comes from,
-so a library nothing uses doesn't end up in the binary.
+A library nothing uses doesn't end up in the binary.
 
 ### Prebuilt libraries in the package
 
@@ -189,28 +170,16 @@ $ readelf -d build/linux/debug/vend | grep -i 'needed\|runpath'
 
 Ship one directory per target and the program finds its libraries.
 
-## What happens on each OS
+## Shipping
 
-### Linux
+On Linux the program gets `--rpath $ORIGIN`, so it looks for libraries in its
+own directory first; on Windows the `.exe`'s directory is searched first
+anyway. C libraries and libraries found in `mb_link_paths` are copied there.
+System libraries (and DLLs found only on `PATH` or in `system32`) aren't: the
+machine that runs the program needs them installed.
 
-- Every library becomes `-l<name>`, every library directory `-L<dir>`.
-- When anything is linked, mbuild adds `--rpath $ORIGIN`, so the program looks
-  for libraries in its own directory first.
-- C libraries and libraries found in `mb_link_paths` are copied beside the
-  binary. System libraries aren't: the machine that runs the program needs
-  them installed.
-
-### Windows
-
-- Every library becomes `--link-arg -l<name>`, which imports `<name>.dll`.
-- The Windows compiler checks each DLL by loading it, so mbuild puts every
-  library directory in front of `PATH` (on Windows) or `WINEPATH` (Linux
-  mbuild running the Windows compiler through wine) for that one compile.
-- C DLLs and DLLs found in `mb_link_paths` are copied beside the `.exe`,
-  where Windows looks first. DLLs found only on `PATH` or in `system32` are
-  not.
-- `kernel32`, `user32`, `gdi32`, `advapi32` and `ws2_32` need no
-  `mb_link_libs`.
+On Windows, `kernel32`, `user32`, `gdi32`, `advapi32` and `ws2_32` need no
+`mb_link_libs`.
 
 ## C compilers
 
@@ -259,11 +228,7 @@ mbuild 0.2.0
   home      /home/you/.mbuild
 tools
   curl        found  /bin/curl
-  tar         found  /bin/tar
-  cc          found  /bin/cc
-  cc windows  found  /bin/x86_64-w64-mingw32-gcc
-  pkg-config  found  /bin/pkg-config
-  wine        found  /bin/wine
+...
 compilers
   linux     /home/you/Mettle/bin/mettle (v0.17.0; $METTLE)
             stdlib /home/you/Mettle/stdlib
@@ -281,9 +246,8 @@ only for the other OS (`import "x" if windows;`, `*.windows.mettle`).
 
 ## Caveats
 
-**C stdio is not flushed at exit.** A Mettle program exits without flushing
-the C library's buffers. On Linux, `printf` output from C code is lost when
-stdout is a pipe or a file:
+**C stdio is not flushed at exit.** On Linux, `printf` output from C code is
+lost when stdout is a pipe or a file:
 
 ```text
 $ ./build/linux/debug/cio | cat
@@ -293,26 +257,18 @@ from Mettle
 The C function printed `from C` first. Call `fflush(stdout)` in C code that
 prints, or make it unbuffered with `setvbuf`.
 
-**Two runtimes, two allocators.** Mettle has its own runtime, with its own
-`malloc` and `free`. A C library is linked against the system's C library
-(glibc on Linux, the MinGW runtime on Windows), which has another. Memory one
-side allocates must be freed by the same side: give the C library a `free`
-function of its own and call that from Mettle.
+**Two allocators.** Mettle's runtime has its own `malloc` and `free`; the C
+library has the system's. Memory must be freed by the side that allocated
+it: give the C library a `free` function of its own and call that.
 
-**Structs by value follow the platform ABI.** Mettle passes and returns
-structs by value the way C does: the Microsoft x64 rules on Windows (a struct
-of exactly 1, 2, 4 or 8 bytes in one register, anything else by pointer) and
-System V on Linux (up to 16 bytes in registers, classified per eight bytes;
-larger structs in memory). Define each struct with the same fields, in the
-same order, with the same types as the C header. `vm_scale` above takes and
-returns a `Vec2` by value on both targets. See
+**Structs by value follow the platform ABI** (Microsoft x64 on Windows,
+System V on Linux), as in C. Define each struct with the same fields, order
+and types as the C header. See
 [Structs by value](https://github.com/suidvandiewereld/Mettle/blob/main/docs/c-interop.md#structs-by-value).
 
 **Double-precision libm is not in the runtime.** `sqrt`, `sin`, `cos`, `pow`
-and friends do not resolve without `-lm`. Use `std/math` instead of declaring
-them.
+and friends need `-lm`. Use `std/math` instead.
 
-**Tests do not get native libraries.** `mbuild test` runs `mettle test`,
-which executes `@test` functions in the compiler's interpreter. mbuild passes
-it no native link arguments, so a test that calls into a C library does not
-work. Test that code through a built program.
+**Tests can't call C.** `mbuild test` runs `@test` functions in the
+compiler's interpreter, which can't call C ([incremental](incremental.md#tests)).
+Test that code through a built program.

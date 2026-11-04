@@ -1,8 +1,8 @@
 # The project file: mbuild.mettle
 
-`mbuild.mettle` sits at the root of a project and is Mettle code. mbuild
-finds it by walking up from the working directory. `fn project()` describes
-the package; every `fn cmd_NAME` is a command; `fn hook_pre_build` and
+`mbuild.mettle` sits at the project root (mbuild walks up from the working
+directory to find it) and is Mettle code. `fn project()` describes the
+package, every `fn cmd_NAME` is a command, `fn hook_pre_build` and
 `fn hook_post_build` run around builds.
 
 ```mettle
@@ -40,39 +40,33 @@ fn hook_pre_build() -> int32 {
 }
 ```
 
-mbuild compiles this file into a small program, runs it, and caches the
-result by content, so an unchanged `mbuild.mettle` costs nothing. A file that
-does not compile shows the compiler's error, then
+A file that doesn't compile shows the compiler's error, then
 `error: mbuild.mettle does not compile`.
 
-`mbuild.toml` is not read any more. A project or path dependency that only
-has one gets an error saying it needs an `mbuild.mettle`; `mbuild init` writes
-one.
+`mbuild.toml` is not read any more; a project or path dependency that only
+has one gets an error. `mbuild init` writes an `mbuild.mettle`.
 
 ## Rules
 
-- `fn project()` is required.
+- `fn project()` is required. No `fn main`.
 - Import the API plainly: `import "mbuild/api";`, never `as`.
-- No `fn main`.
 - If the file exports anything, `project`, every `cmd_*` and every `hook_*`
-  must be `export fn` too. A file with no `export` needs none.
+  must be `export fn` too.
 - Don't define names starting with `mb_`, `Mb` or `mbi_`.
-- `mbuild.mettle` may import other files of the project; they're part of
-  the cache key.
+- It may import other files of the project.
 - Every value is a string. A list is comma-separated: `"linux, windows"`.
   Booleans in `mb_set` are `"true"` / `"false"`.
 
 ## fn project()
 
-It must describe the project the same way on every machine, so it can't read
-the environment, files or the clock. Calling `mb_env`, `mb_home`, a file
-function or a process function there stops with:
+It must give the same result on every machine, so it can't read the
+environment, files or the clock:
 
 ```text
 error: mbuild.mettle: mb_env cannot be used in fn project() (the project description must be the same on every machine; use mbuild.local.mettle, a command, or a hook)
 ```
 
-Per-OS settings go through `mb_on(os)` instead.
+Per-OS settings go through `mb_on(os)`.
 
 ### Package
 
@@ -85,7 +79,7 @@ Per-OS settings go through `mb_on(os)` instead.
 | `mb_prelude(on)` | Pass `--prelude`, so `std/prelude` is imported everywhere. |
 | `mb_agents(on)` | Keep the dependencies block in `AGENT.rules` ([packages](packages.md#agentrules)). Default `true`. |
 | `mb_publish_include(csv)` | The files `mbuild publish` packs ([dependencies](dependencies.md#publishing)). |
-| `mb_import_root(dir)` | Imports of `name/...` start in `dir` instead of the package root: `mb_import_root("src")` ([dependencies](dependencies.md#import-roots)). |
+| `mb_import_root(dir)` | Imports of `name/...` start in `dir` instead of the package root ([dependencies](dependencies.md#import-roots)). |
 | `mb_raw(section, key, toml)` | Escape hatch: a raw key in the generated manifest. |
 
 ### Dependencies
@@ -100,11 +94,10 @@ Per-OS settings go through `mb_on(os)` instead.
 | `mb_replace_version(name, version)` | One version of `name` for the whole build. |
 | `mb_replace_path(name, path)` | Use a local directory instead of `name` everywhere in the build. |
 
-mbuild edits the `mb_dep*` lines itself (`get`, `remove`, `update`, `tidy`,
-auto-add), keeping everything else in the file as it is. It can only edit a
-call that sits on its own line inside `fn project()` with string literal
-arguments; anything else gets an error that shows the line to write. All of
-this is in [dependencies](dependencies.md).
+`get`, `remove`, `update`, `tidy` and auto-add edit the `mb_dep*` lines and
+leave the rest of the file alone. They can only edit a call on its own line
+inside `fn project()` with string literal arguments; anything else gets an
+error that shows the line to write. See [dependencies](dependencies.md).
 
 ### Bins
 
@@ -114,7 +107,7 @@ this is in [dependencies](dependencies.md).
 | `mb_bin_kind(name, kind, triple)` | `exe` (default), `shared`, `object` or `flat` ([components](components.md#bin-kinds)). |
 | `mb_for_bin(name)` | Following `mb_set` calls apply to this bin only. |
 
-Without any `mb_bin` or `mb_for_bin`, mbuild looks for programs itself:
+Without any `mb_bin` or `mb_for_bin`, mbuild finds the programs:
 
 1. `main.mettle`, else `src/main.mettle`, as a bin named after the package;
 2. plus every `cmd/<name>/main.mettle`, as a bin named `<name>`;
@@ -122,8 +115,8 @@ Without any `mb_bin` or `mb_for_bin`, mbuild looks for programs itself:
    named after the file.
 
 A bin builds to `build/<target>/<profile>/<bin>`, with `.exe` for Windows.
-`mbuild run` with several bins runs the one named after the package, or the
-one you name: `mbuild run tool -- --input data.txt`.
+With several bins, `mbuild run` runs the one named after the package, or
+the one you name: `mbuild run tool -- --input data.txt`.
 
 `mb_dep_bin("meosql", "server")` builds a dependency's bin along with
 yours, for the same target and profile, with the dependency's own settings
@@ -139,10 +132,6 @@ $ mbuild build
     Finished in 0.0s
 $ ls build/linux/debug
 libmb_meosql.so  sass  server
-$ mbuild build
-       Fresh sass (linux, debug)
-       Fresh meosql/server (linux, debug)
-    Finished in 0.0s
 ```
 
 A profile the dependency doesn't have falls back to the nearest one it does
@@ -155,8 +144,8 @@ error: mb_dep_bin("meosql", "sever"): meosql has no bin `sever`
 ```
 
 A package without bins is a library: `mbuild build` and `mbuild check`
-type-check its `.mettle` files at the top and in `src/` (not `mbuild.mettle`
-or tests), `mbuild test` works, `mbuild run` says there's nothing to run.
+type-check its `.mettle` files at the top and in `src/`, `mbuild test`
+works, `mbuild run` says there's nothing to run.
 
 ### Native code, components, rules
 
@@ -196,9 +185,8 @@ error: unknown profile `fats`
   help: did you mean `fast`? the profiles are: debug, release, fast (add mb_profile("fats") to mbuild.mettle)
 ```
 
-`mb_profile(name)` and `mb_for_bin(name)` move a cursor: `mb_set` and
-`mb_set_list` apply to whatever was named last. `mb_on("linux")` or
-`mb_on("windows")` makes the following `mb_set` (and the C and link calls)
+`mb_set` and `mb_set_list` apply to the last `mb_profile` or `mb_for_bin`.
+After `mb_on("linux")` or `mb_on("windows")` they (and the C and link calls)
 apply to that OS only, until `mb_on("")`.
 
 | Key | Values (default) | Passes |
@@ -237,9 +225,10 @@ error: --set optimize=fast: optimize = "fast" is not one of "off", "checked", "f
 ## Commands
 
 Every top-level `fn cmd_NAME(a: MbArgs*) -> int32` is `mbuild NAME`
-(`cmd_gen_docs` is `mbuild gen-docs`). Everything after the name goes to the
-command untouched, and its return value is mbuild's exit code. It runs in the
-project root.
+(`cmd_gen_docs` is `mbuild gen-docs`). It runs in the project root, gets
+everything after the name untouched, and its return value is mbuild's exit
+code. Global flags go before the name and reach the command only through
+`mb_verbose()`.
 
 The `//` comment block right above the function is its help: the first line
 is the summary in `mbuild help` (a leading `NAME:` is dropped), the whole
@@ -277,10 +266,7 @@ A command named like a built-in can't be reached; `mbuild help` lists it as
 | `mb_os()`, `mb_exe_ext()` | `"linux"` / `"windows"`, `""` / `".exe"` for the machine running mbuild |
 | `mb_verbose()` | whether `-v` was given |
 | `mb_out(bin, target, profile)` | absolute path of a built bin |
-| `mb_mbuild(args)` | runs this mbuild with `args` (split on spaces) and returns its exit code |
-
-Global flags go before the command name and reach the command only through
-`mb_verbose()`. Commands calling `mb_mbuild` may nest 8 deep.
+| `mb_mbuild(args)` | runs this mbuild with `args` (split on spaces) and returns its exit code; nests at most 8 deep |
 
 ### Processes and files
 
@@ -337,8 +323,7 @@ built: [] for linux debug
 
 A non-zero return fails the command:
 `error: hook_post_build failed (exit 2) for linux debug`. `--no-hooks` skips
-both. `-v` prints `Running hook_pre_build (linux, debug)` before each. Only
-your project's hooks run, never a dependency's.
+both. Only your project's hooks run, never a dependency's.
 
 ## mbuild.local.mettle
 
@@ -369,8 +354,7 @@ Allowed there: `mb_replace_path`, `mb_replace_version`, `mb_tool`,
 error: mbuild.local.mettle:2: [dependencies] is not allowed here (mbuild.local.mettle holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)
 ```
 
-Like `fn project()`, `fn local()` can't read the environment or files: write
-values as literals.
+Like `fn project()`, `fn local()` can't read the environment or files.
 
 `mb_tool` names: `cc`, `cc-windows`, `mettle-linux`, `mettle-windows`,
 `pkg-config`. A tool applies only when its environment variable (`CC`,
@@ -385,36 +369,21 @@ $ mbuild run
 note: using replacements from mbuild.local.mettle (strutil); mbuild.lock is left as it is
    Resolving dependencies
     Removing strutil v1.1.0
-     Updated AGENT.rules
-   Compiling viewer (linux, debug)
-    Finished in 0.0s
-     Running build/linux/debug/viewer
-viewer 0.3.0!!!
+...
 $ mbuild deps
 note: using replacements from mbuild.local.mettle (strutil); mbuild.lock is left as it is
 strutil => ../strutil (replaced) (local)
 ```
 
-Delete the file (or the line) and the next build goes back to the lock.
+Delete the line and the next build goes back to the lock.
 
 ## mbuild init
 
-```text
-$ mbuild init
-     Created mbuild.mettle (package `hello`)
-     Created src/main.mettle
-     Updated .gitignore
-
-  next: mbuild run
-```
-
-It writes `mbuild.mettle` (package named after the directory, or
-`mbuild init NAME`, with an example `cmd_hello`), a hello world
-`src/main.mettle` unless there's already a main file, and these `.gitignore`
-lines: `/build/`, `/.mbuild/`, `/mettle.deps`, `/mbuild.local.mettle`. Lines
-of a hand-written `mettle.deps` become `mb_dep_path` calls. Next to an old
-`mbuild.toml` it adds `note: mbuild.toml is no longer read and can be
-deleted`.
+`mbuild init [NAME]` writes `mbuild.mettle` (package named after the
+directory, with an example `cmd_hello`), a hello world `src/main.mettle`
+unless there's already a main file, and these `.gitignore` lines:
+`/build/`, `/.mbuild/`, `/mettle.deps`, `/mbuild.local.mettle`. Lines of a
+hand-written `mettle.deps` become `mb_dep_path` calls.
 
 `mbuild init --package` and `mbuild init --from PKG` are in
 [packages](packages.md).
@@ -430,6 +399,6 @@ deleted`.
 | `.mbuild/` | extracted packages, caches, stamps, generated files | no |
 
 `mbuild clean` removes `build/`, the C cache, `.mbuild/stamps`, `.mbuild/tmp`
-and `.mbuild/dep-bins`.
-`mbuild clean --all` removes all of `.mbuild/` too; packages come back from
-the download cache in `$MBUILD_HOME`, which `clean` never touches.
+and `.mbuild/dep-bins`. `mbuild clean --all` removes all of `.mbuild/` too;
+packages come back from the download cache in `$MBUILD_HOME`, which `clean`
+never touches.
