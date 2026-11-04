@@ -19,13 +19,13 @@ ok() { pass=$((pass + 1)); echo "PASS $1"; }
 bad() { failn=$((failn + 1)); echo "FAIL $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/     | /' | head -40; }
 # has NAME FILE ERE: a line of FILE matches ERE
 has() { if grep -qE -- "$3" "$2"; then ok "$1"; else bad "$1 (wanted: $3)" "$(cat "$2")"; fi; }
-# after NAME FILE INPUT ERE: the first answer line after "mettle> INPUT" (program ticks skipped) matches ERE
+# after NAME FILE INPUT ERE: the first answer line after "mettle> INPUT" (program ticks and held-lines notices skipped) matches ERE
 after() {
-  got=$(awk -v want="mettle> $3" 'f && !/^tick / { print; exit } $0 == want { f = 1 }' "$2")
+  got=$(awk -v want="mettle> $3" 'f && !/^tick / && !/^  \(.* held, :log\)$/ { print; exit } $0 == want { f = 1 }' "$2")
   if printf '%s\n' "$got" | grep -qE -- "$4"; then ok "$1"; else bad "$1 (after \`$3\` wanted: $4, got: $got)" "$(cat "$2")"; fi
 }
-# block FILE INPUT: the answer lines after "mettle> INPUT", up to the next prompt (program ticks skipped)
-block() { awk -v want="mettle> $2" 'f && /^mettle> / { exit } f && !/^tick / { print } $0 == want { f = 1 }' "$1"; }
+# block FILE INPUT: the answer lines after "mettle> INPUT", up to the next prompt (program ticks and held-lines notices skipped)
+block() { awk -v want="mettle> $2" 'f && /^mettle> / { exit } f && !/^tick / && !/^  \(.* held, :log\)$/ { print } $0 == want { f = 1 }' "$1"; }
 # gone NAME EXE: no process runs EXE
 gone() {
   i=0
@@ -67,7 +67,7 @@ echo "== non-shell builds get the empty shell_point"
 code=$?
 if [ $code -eq 0 ] && timeout 1 "$W/build/linux/debug/live_demo" 2>&1 | grep -q '^tick 0 '; then ok "plain build runs"; else bad "plain build runs" "$(cat "$T/plain.out")"; fi
 
-echo "== a session"
+echo "== a session (--stream)"
 cat >"$T/in1" <<'EOF'
 world.food = 1000;
 world.food >= 900
@@ -89,10 +89,12 @@ nosuch + 1
 world.pop
 :q
 EOF
-timeout 60 "$MB" shell <"$T/in1" >"$T/s1.out" 2>&1
+timeout 60 "$MB" shell --stream <"$T/in1" >"$T/s1.out" 2>&1
 code=$?
 [ $code -eq 0 ] && ok "quits with 0" || bad "quits with 0 (got $code)" "$(cat "$T/s1.out")"
 has "builds with --live" "$T/s1.out" '^ +Compiling live_demo \(linux, debug\)$'
+has "--stream: status line" "$T/s1.out" '^ +Running build/.*/live_demo; its output streams above the prompt'
+if grep -q 'new lines\? held' "$T/s1.out"; then bad "--stream holds nothing" "$(cat "$T/s1.out")"; else ok "--stream holds nothing"; fi
 after "statement" "$T/s1.out" "world.food = 1000;" '^ok$'
 has "the statement changed the program" "$T/s1.out" '^tick [0-9]+  pop [0-9]+  food (9[0-9][0-9]|1[0-9]{3})  \(steady\)$'
 after "bool expression" "$T/s1.out" "world.food >= 900" '^true$'
@@ -101,7 +103,7 @@ after "string" "$T/s1.out" "rule_name()" '^"steady"$'
 after "float" "$T/s1.out" "1.5 * 2.0" '^3\.0$'
 after "call" "$T/s1.out" "harvest(10)" '^5$'
 after "redefine" "$T/s1.out" "fn harvest(pop: int32) -> int32 { return pop * 3; }" '^redefined harvest$'
-redef=$(awk '/^mettle> harvest\(10\)/ { f = 1; next } f && !/^tick / { print; f = 0 }' "$T/s1.out" | tr '\n' ' ')
+redef=$(awk '/^mettle> harvest\(10\)/ { f = 1; next } f && !/^tick / && !/^  \(.* held, :log\)$/ { print; f = 0 }' "$T/s1.out" | tr '\n' ' ')
 [ "$redef" = "5 30 5 " ] && ok "the redefinition runs, undo takes it back" || bad "redefinition then undo (answers: $redef)" "$(cat "$T/s1.out")"
 has "undo once more: nothing" "$T/s1.out" '^nothing to undo$'
 has "h signature" "$T/s1.out" '^fn grow\(pop: int32, food: int32\) -> int32  src/rules\.mettle:[0-9]+$'
@@ -131,6 +133,7 @@ help
 world.pop
 :log 2
 :unmute
+:mute
 :q
 EOF
 timeout 60 "$MB" shell <"$T/in5" >"$T/s5.out" 2>&1
@@ -155,13 +158,37 @@ lines "$blk" '^struct World  src/main\.mettle:[0-9]+$' && lines "$blk" '^  food:
 blk=$(block "$T/s5.out" help)
 n=$(printf '%s\n' "$blk" | grep -cxE 'evaluate|change code|discover|output|session')
 [ "$n" = 5 ] && lines "$blk" '^  apropos TEXT +.*: apropos food$' && ok "help: grouped, with examples" || bad "help: grouped, with examples" "$blk"
-after ":mute" "$T/s5.out" ":mute" '^muted'
-held=$(awk '$0 == "mettle> :mute" { f = 1; next } $0 == "mettle> :log 2" { exit } f && /^tick / { print }' "$T/s5.out")
-[ -z "$held" ] && ok ":mute holds the output" || bad ":mute holds the output" "$held"
+has "held by default: status line" "$T/s5.out" '^ +Running build/.*/live_demo; its output is held \(:log to see it, :unmute to stream it\)\. help for help, :q to leave$'
+early=$(awk '$0 == "mettle> :log 2" { exit } /^tick / { print }' "$T/s5.out")
+[ -z "$early" ] && ok "output is held by default" || bad "output is held by default" "$early"
+has "held lines are counted before a prompt" "$T/s5.out" '^  \([0-9]+ new lines? held, :log\)$'
 n=$(awk '$0 == "mettle> :log 2" { f = 1; next } f && /^mettle> / { exit } f' "$T/s5.out" | grep -c '^tick ')
 [ "$n" = 2 ] && ok ":log N: the last N lines" || bad ":log N: the last N lines (got $n)" "$(cat "$T/s5.out")"
-after ":unmute" "$T/s5.out" ":unmute" '^unmuted; ([0-9]+ lines? held, :log [0-9]+ shows (it|them)|nothing was held)$'
+after ":unmute" "$T/s5.out" ":unmute" '^streaming the program'"'"'s output'
+after ":mute" "$T/s5.out" ":mute" '^holding the program'"'"'s output'
 gone "the program stops (discovery session)" "$EXE"
+
+echo "== held output: a program that exits"
+W2="$T/live2"
+mkdir -p "$W2/src"
+cp "$W/mbuild.mettle" "$W2/"
+cp "$here/examples/live/src/rules.mettle" "$W2/src/"
+sed -e 's/< 100000/< 12/' -e 's/return 0;/return 3;/' "$W/src/main.mettle" >"$W2/src/main.mettle"
+cd "$W2"
+rm -f "$T/fifo2"
+mkfifo "$T/fifo2"
+timeout 60 "$MB" shell <"$T/fifo2" >"$T/s6.out" 2>&1 &
+sp=$!
+exec 3>"$T/fifo2"
+i=0
+while kill -0 $sp 2>/dev/null && [ $i -lt 400 ]; do i=$((i + 1)); sleep 0.05; done
+if kill -0 $sp 2>/dev/null; then bad "the shell leaves when the program exits"; else ok "the shell leaves when the program exits"; fi
+exec 3>&-
+wait $sp
+has "exit code shown" "$T/s6.out" '^  the program exited with code 3$'
+n=$(grep -c '^tick ' "$T/s6.out")
+[ "$n" = 5 ] && has "the last line is shown" "$T/s6.out" '^tick 11 ' && ok "only its last 5 lines are shown" || bad "last 5 lines shown (got $n tick lines)" "$(cat "$T/s6.out")"
+cd "$W"
 
 echo "== r: the files on disk"
 rm -f "$T/fifo"

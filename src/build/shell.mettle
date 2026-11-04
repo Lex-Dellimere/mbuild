@@ -62,8 +62,10 @@ struct ShxSess {
   pend: Buf*;          // output after its last whole line
   pend_ms: int64;
   log: StrList*;       // its last lines, for :log
-  muted: bool;
-  held: int64;         // lines since :mute
+  muted: bool;         // its output is held (the default)
+  held: int64;         // lines held since the last prompt
+  exitf: string;       // the program's exit code, written when it ends
+  ended: bool;         // it has exited and the shell leaves
   lead: string;        // in front of an answer
 }
 
@@ -1099,8 +1101,8 @@ fn shx_help(ss: ShxSess*) {
   say("  explain NAME, h     signature and doc; a global's value, a struct's fields: explain world");
   say("  i EXPR              type, and the fields of a struct: i &world");
   say(bold("output"));
-  say("  :mute, :unmute      hold the program's output, show it again");
-  say("  :log [N]            its last N lines (20): :log 5");
+  say("  :log [N]            the program's last N output lines (20): :log 5");
+  say("  :unmute, :mute      stream the program's output above the prompt, hold it again");
   say(bold("session"));
   say("  help                this");
   say("  :q, Ctrl-D          quit (and stop the program); Ctrl-C clears the line, tab completes");
@@ -1138,29 +1140,74 @@ fn shx_log(ss: ShxSess*, arg: string) {
     say(sl_get(ss->log, i));
     i = i + 1;
   }
+  ss->held = 0;
 }
 
 fn shx_mute(ss: ShxSess*, on: bool) {
+  shx_relay(ss);
+  ss->muted = on;
+  ss->held = 0;
   if (on) {
-    shx_relay(ss);
-    ss->muted = true;
-    ss->held = 0;
-    say("muted: the program's output is held; :log shows it, :unmute shows it again");
-    return;
-  }
-  if (!ss->muted) {
-    say("not muted");
-    return;
-  }
-  shx_take(ss);
-  ss->muted = false;
-  if (ss->held == 0) {
-    say("unmuted; nothing was held");
-  } else if (ss->held == 1) {
-    say("unmuted; 1 line held, :log 1 shows it");
+    say("holding the program's output; :log shows it, :unmute streams it");
   } else {
-    say("unmuted; " + s_int(ss->held) + " lines held, :log " + s_int(ss->held) + " shows them");
+    say("streaming the program's output; :mute holds it");
   }
+}
+
+// Before a prompt: one dim line for the output held since the last one.
+fn shx_notice(ss: ShxSess*) {
+  shx_relay(ss);
+  if (ss->held <= 0) {
+    return;
+  }
+  var msg: string = "  (" + s_int(ss->held) + " new lines held, :log)";
+  if (ss->held == 1) {
+    msg = "  (1 new line held, :log)";
+  }
+  ss->held = 0;
+  var d: string = dim(msg);
+  say(d);
+  flush_out();
+}
+
+// The program ended: its last 5 lines and its exit code.
+fn shx_exited(ss: ShxSess*) -> bool {
+  return !ss->local && ss->pid > 0 && !sys_pid_alive(ss->pid);
+}
+
+fn shx_report_exit(ss: ShxSess*) {
+  ss->ended = true;
+  var code: string = "?";
+  var start: int64 = sys_now_ms();
+  while (sys_now_ms() - start < 1000) {
+    var r: FsRead = fs_read(ss->exitf);
+    if (r.ok && s_ends(r.data, "\n")) {
+      code = s_trim(r.data);
+      break;
+    }
+    sys_sleep_ms(10);
+  }
+  sys_sleep_ms(60);
+  ss->pend_ms = 0;
+  shx_relay(ss);
+  if (ss->pend->len > 0) {
+    sl_push(ss->log, s_dup(buf_str(ss->pend)));
+    ss->pend->len = 0;
+  }
+  if (ss->tty) {
+    print("\r" + g_esc + "[K");
+  }
+  var i: int64 = ss->log->len - 5;
+  if (i < 0) {
+    i = 0;
+  }
+  while (i < ss->log->len) {
+    say(sl_get(ss->log, i));
+    i = i + 1;
+  }
+  var msg: string = "  the program exited with code " + code;
+  say(dim(msg));
+  flush_out();
 }
 
 // One input; false to quit.
@@ -1354,6 +1401,7 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   var at: int64 = 0;
   var h: int64 = ss->hist->len;
   *eof = false;
+  shx_notice(ss);
   print(prompt);
   flush_out();
   while (true) {
@@ -1364,11 +1412,19 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
         print(shx_term_above(prompt, line, at, text));
         flush_out();
       }
+      if (shx_exited(ss)) {
+        *eof = true;
+        shx_report_exit(ss);
+        return s_empty();
+      }
       if ((w & 1) != 0) {
         break;
       }
     }
     var c: int32 = sys_read_byte();
+    if (c == -2) {
+      continue;
+    }
     if (c < 0 || (c == 4 && slen(line) == 0)) {
       *eof = true;
       say("");
@@ -1452,21 +1508,36 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
 fn shx_read_plain(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   var b: Buf* = buf_new();
   *eof = false;
-  while ((sys_wait_input(ss->fd, 100) & 1) == 0) {
+  var c: int32 = -2;
+  while (c == -2) {
+    while ((sys_wait_input(ss->fd, 100) & 1) == 0) {
+      shx_relay(ss);
+      if (shx_exited(ss)) {
+        *eof = true;
+        shx_report_exit(ss);
+        return buf_take(b);
+      }
+    }
     shx_relay(ss);
+    c = sys_read_byte();
+    if (c == -2) {
+      sys_sleep_ms(2);
+    }
   }
-  shx_relay(ss);
-  var c: int32 = sys_read_byte();
   if (c < 0) {
     *eof = true;
     return buf_take(b);
   }
+  shx_notice(ss);
   print(prompt);
-  while (c >= 0 && c != 10) {
-    if (c != 13) {
+  while (c != -1 && c != 10) {
+    if (c >= 0 && c != 13) {
       buf_addb(b, c);
     }
     c = sys_read_byte();
+    if (c == -2) {
+      sys_sleep_ms(2);
+    }
   }
   return buf_take(b);
 }
@@ -1551,6 +1622,7 @@ fn shx_start(ss: ShxSess*) -> bool {
   var sb: ShellBuild* = ss->sb;
   var pidf: string = ss->dir + "/pid";
   sys_remove_file(pidf);
+  sys_remove_file(ss->exitf);
   var prog: string = sh_quote(sb->exe);
   var i: int64 = 0;
   while (i < sb->p->opts->passthrough->len) {
@@ -1563,7 +1635,7 @@ fn shx_start(ss: ShxSess*) -> bool {
   if (ss->fd >= 0) {
     to = ">" + sh_quote(ss->fifo) + " 2>&1 3>&1";
   }
-  var line: string = "mb=$PPID; ( ( " + prog + " </dev/null 2>&1 1>&3 3>&- & p=$!; echo $p > " + sh_quote(pidf) + "; " + watch + " wait $p 2>/dev/null ) | grep --line-buffered -Ev " + drop + " >&2 ) " + to + " &";
+  var line: string = "mb=$PPID; ( ( " + prog + " </dev/null 2>&1 1>&3 3>&- & p=$!; echo $p > " + sh_quote(pidf) + "; " + watch + " wait $p 2>/dev/null; echo $? > " + sh_quote(ss->exitf) + " ) | grep --line-buffered -Ev " + drop + " >&2 ) " + to + " &";
   var c: Cmd* = cmd_new(shx_tool("/bin/sh"));
   defer free(c);
   cmd_arg(c, "-c");
@@ -1642,8 +1714,10 @@ export fn shell_cmd(p: Project*) -> int32 {
   ss->pend = buf_new();
   ss->pend_ms = 0;
   ss->log = sl_new();
-  ss->muted = false;
+  ss->muted = !sl_has(p->opts->rest, "--stream");
   ss->held = 0;
+  ss->exitf = ss->dir + "/exit";
+  ss->ended = false;
   ss->lead = s_empty();
   sys_remove_tree(ss->out);
   fs_mkdirs(ss->out);
@@ -1686,7 +1760,12 @@ export fn shell_cmd(p: Project*) -> int32 {
       sys_fd_close(ss->fd);
       return 1;
     }
-    status("Running", p_rel(sys_cwd(), ss->sb->exe) + "; help for help, :q to leave");
+    var how: string = "; its output is held (:log to see it, :unmute to stream it). help for help, :q to leave";
+    if (!ss->muted) {
+      how = "; its output streams above the prompt (:mute holds it). help for help, :q to leave";
+    }
+    var ran: string = p_rel(sys_cwd(), ss->sb->exe) + how;
+    status("Running", ran);
     if (!shx_start(ss)) {
       error_msg("could not start " + ss->sb->exe);
       sys_fd_close(ss->fd);
@@ -1696,6 +1775,9 @@ export fn shell_cmd(p: Project*) -> int32 {
   while (true) {
     var eof: bool = false;
     var line: string = shx_read(ss, &eof);
+    if (ss->ended) {
+      break;
+    }
     if (eof && slen(s_trim(line)) == 0) {
       break;
     }

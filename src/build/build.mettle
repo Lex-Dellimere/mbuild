@@ -4671,10 +4671,12 @@ fn bx_init_cmds() {
   bx_ex("mbuild live", "");
   bx_ex("mbuild use render=gl", "in another terminal: switch a component");
   bx_note("saved files patch the running program at its next `quiesce;`. host target only.");
-  bx_def("shell", "a prompt inside the running program", "mbuild shell [BIN] [-p PROFILE] [--local] [-- ARGS...]", "project.md");
+  bx_def("shell", "a prompt inside the running program", "mbuild shell [BIN] [-p PROFILE] [--local] [--stream] [-- ARGS...]", "project.md");
   bx_ex("mbuild shell", "build, start, then type at `mettle> `");
   bx_ex("mbuild shell --local", "no program: each input runs on its own");
   bx_fl("--local", "evaluate in a small program that imports the project's code");
+  bx_fl("--stream", "show the program's output above the prompt (it is held by default)");
+  bx_note("the program's output is held: `(N new lines held, :log)` before a prompt, `:log [N]` shows it, `:unmute` streams it, `:mute` holds it again. when the program exits, its last lines and exit code print and the shell ends.");
   bx_note("the program calls `shell_point();` (import \"mbuild/shell\") next to its `quiesce;`; elsewhere it is an empty function.");
   bx_note("inputs: an expression prints its value, a statement runs, `fn NAME(...) {{...}` redefines NAME; `h NAME`, `i EXPR`, `r`, `undo`, `:q`. type `help` at the prompt.");
   bx_note("globals and functions are in scope, locals of running functions are not. Linux only.");

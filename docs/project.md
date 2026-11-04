@@ -431,13 +431,16 @@ builds everywhere. Each input runs once at the next `shell_point()`:
 | `apropos TEXT` | the same lines for names and doc comments containing TEXT, any case |
 | `explain NAME` (`h NAME`) | a function's signature, doc and file:line; a global's type, doc and current value; a struct's fields with their comments |
 | `i EXPR` | type, and the fields of a struct |
-| `:mute` / `:unmute` / `:log [N]` | hold the program's output / let it through / its last N lines (20) |
+| `:log [N]` / `:unmute` / `:mute` | the program's last N output lines (20) / stream its output above the prompt / hold it again |
 | `help` | every command, grouped, with an example each |
 | `:q`, Ctrl-D | quit; the program stops too |
 
-The program's stdout and stderr come through the shell: on a terminal they
-print above the prompt and the line being typed is drawn again under them;
-tab completes names and commands, Ctrl-C clears the line. Globals and
+The program's stdout and stderr come through the shell and are held: a dim
+`(N new lines held, :log)` before a prompt says how many arrived, `:log`
+shows them. `:unmute` (or `mbuild shell --stream`) prints them above the
+prompt instead, and the line being typed is drawn again under them. When the
+program exits, its last 5 lines and its exit code print and the shell ends.
+Tab completes names and commands, Ctrl-C clears the line. Globals and
 functions of every module are in scope; locals of running functions are not. Redefinitions go to a copy of the sources in
 `.mbuild/shell/tree`, never to `src/`. An input that doesn't answer within
 5 seconds (`MBUILD_SHELL_TIMEOUT`, ms) means the program never reached

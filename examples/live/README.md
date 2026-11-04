@@ -50,47 +50,32 @@ mbuild shell
 ```text
 $ mbuild shell
    Compiling live_demo (linux, debug)
-     Running build/linux/debug/shell/live_demo; help for help, :q to leave
-tick 0  pop 11  food 94  (steady)
-tick 1  pop 12  food 87  (steady)
-tick 2  pop 13  food 80  (steady)
-mettle> ls rules
-src/rules.mettle
-  fn rule_name() -> string                   the name shown on each tick
-  fn harvest(pop: int32) -> int32            food gathered this tick
-  fn grow(pop: int32, food: int32) -> int32  population next tick
-mettle> apropos food
-src/rules.mettle
-  fn harvest(pop: int32) -> int32  food gathered this tick
-tick 3  pop 14  food 72  (steady)
-mettle> explain world
-var world: World  src/main.mettle:16
-  the one world, a global so `mbuild shell` can reach it
-tick 4  pop 15  food 64  (steady)
-  = World { tick: 4, pop: 14, food: 72 }
+     Running build/linux/debug/shell/live_demo; its output is held (:log to see it, :unmute to stream it). help for help, :q to leave
+  (6 new lines held, :log)
+mettle> world
+World { tick: 6, pop: 16, food: 55 }
+  (3 new lines held, :log)
 mettle> world.food = 1000;
-tick 5  pop 16  food 991  (steady)
 ok
-mettle> fn harvest(pop: int32) -> int32 { return pop * 3; }
-redefined harvest
-mettle> :mute
-muted: the program's output is held; :log shows it, :unmute shows it again
-mettle> harvest(world.pop)
-48
-mettle> undo
-undone
-mettle> :log 2
-tick 5  pop 16  food 991  (steady)
-tick 6  pop 17  food 1022  (steady)
+  (2 new lines held, :log)
+mettle> explain harvest
+fn harvest(pop: int32) -> int32  src/rules.mettle:10
+  food gathered this tick
+  (3 new lines held, :log)
+mettle> :log 3
+tick 11  pop 22  food 966  (steady)
+tick 12  pop 23  food 954  (steady)
+tick 13  pop 24  food 941  (steady)
+  (2 new lines held, :log)
 mettle> :q
 ```
 
-on a terminal the program's lines scroll by above the prompt and what you are typing stays put (here the input was piped in, so they interleave).
+the program's prints don't flood the prompt: they are held, and a dim line says how many are waiting. `:log [N]` shows the last N, `:unmute` streams them above the prompt (`mbuild shell --stream` starts that way), `:mute` holds them again. when the program exits, its last 5 lines and its exit code print and the shell ends.
 
 - an expression prints its value, a struct field by field. a statement runs and prints `ok`.
 - `fn NAME(...) { ... }` replaces `NAME` in the running program; `undo` puts the old one back, `r` patches in the files on disk. `src/` is never touched.
 - `ls [FILE]` lists functions, globals and structs by file with the first line of their comment, `apropos TEXT` searches names and comments, `explain NAME` (or `h`) shows a function's signature and comment, a global's value or a struct's fields. `i EXPR` gives a type.
-- `:mute` holds the program's output, `:log [N]` shows its last lines, `:unmute` lets it through again. tab completes names and commands, up and down walk the history, Ctrl-C clears the line.
+- tab completes names and commands, up and down walk the history, Ctrl-C clears the line.
 - `help` lists it all. `:q` or Ctrl-D quits and stops the program. without `mbuild shell`, `shell_point()` is an empty function.
 
 ## how it works

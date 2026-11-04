@@ -237,11 +237,19 @@ export fn sys_wait_input(fd: int32, ms: int64) -> int32 {
   return r;
 }
 
-// One byte from stdin, unbuffered; -1 at its end.
+// One byte from stdin, unbuffered; -1 at its end or on an error, -2 when
+// there is none yet (EAGAIN). An interrupted read (EINTR) is retried.
 export fn sys_read_byte() -> int32 {
   var b: uint8[1];
   b[0] = (uint8)0;
-  if (syscall(0, 0, &b[0], 1) != 1) {
+  var n: int64 = syscall(0, 0, &b[0], 1);
+  while (n == -4) {
+    n = syscall(0, 0, &b[0], 1);
+  }
+  if (n == -11) {
+    return -2;
+  }
+  if (n != 1) {
     return -1;
   }
   return (int32)b[0];

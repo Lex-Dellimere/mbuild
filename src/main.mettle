@@ -22,7 +22,7 @@ import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
 fn mx_flag_names() -> StrList* {
-  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --no-compiler --readme", 32);
+  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --stream --no-compiler --readme", 32);
 }
 
 fn mx_bad_flag(a: string) {
@@ -69,7 +69,7 @@ fn mx_add_targets(o: Options*, v: string) {
 
 // Value-less command flags: they go to rest as written.
 fn mx_is_cmd_flag(name: string) -> bool {
-  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services --local --no-compiler --readme", 32);
+  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services --local --stream --no-compiler --readme", 32);
   var has: bool = sl_has(l, name);
   free(l);
   return has;
