@@ -254,6 +254,9 @@ sed -i 's/1.1.0/1.1.1/' mbuild.mettle
 printf 'export fn strx_a() -> int32 { return 1; }\nexport fn strx_c() -> int32 { return 3; }\n' > strx.mettle
 mb publish --to "$S/reg-$mode" --dry-run
 check "added exports in a patch: warning" has "warning: strx v1.1.1 adds exports with only a patch bump over v1.1.0"
+mb -q publish --to "$S/reg-$mode"
+check "-q publish publishes" [ -f "$S/reg-$mode/pkg/strx/strx-v1.1.1.tar.gz" ]
+check "-q publish: no status or next line" sh -c '! grep -q "Published\|next:" "$0/last.out"' "$S"
 mb yank strx@v1.1.0 --to "$S/reg-$mode"
 check "yank" grep -q "v1.1.0 .*yanked" "$S/reg-$mode/index/strx"
 mkdir -p "$W/user/src" && cd "$W/user"

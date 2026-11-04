@@ -1268,7 +1268,7 @@ fn inx_apply(src: InxSrc*, w: InxWork*, r: IniRequest*, root: string, prefix: st
     status("Command", sl_get(cmds, i));
     i = i + 1;
   }
-  if (w->next->len > 0 && !r->dry_run) {
+  if (w->next->len > 0 && !r->dry_run && !g_quiet) {
     say("");
     i = 0;
     while (i < w->next->len) {

@@ -2645,8 +2645,10 @@ export fn build_cmd_init(opts: Options*) -> int32 {
       return rc;
     }
   }
-  say("");
-  say("  next: " + bold("mbuild run"));
+  if (!g_quiet) {
+    say("");
+    say("  next: " + bold("mbuild run"));
+  }
   return 0;
 }
 
@@ -4640,7 +4642,9 @@ export fn build_cmd_publish(p: Project*) -> int32 {
     sha = s_sub(sha, 0, 8);
   }
   status("Published", name + " " + version + " to " + dir + " (sha256 " + sha + ")");
-  say("  next: upload " + dir + " to the host that serves it");
+  if (!g_quiet) {
+    say("  next: upload " + dir + " to the host that serves it");
+  }
   return 0;
 }
 
