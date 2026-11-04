@@ -530,7 +530,7 @@ fn natx_sources(c: NatCtx*, i: int64) -> StrList* {
       var files: StrList* = sl_new();
       var dirs: StrList* = sl_new();
       if (!sys_list_dir(p_join(dir, sub), files, dirs)) {
-        fail_hint("C sources '" + e + "' of " + c->pkgs[i].label + ": no such directory", "fix [c] sources in " + natx_manifest_file(c, i));
+        fail_hint("C sources '" + e + "' of " + c->pkgs[i].label + ": no such directory", "fix mb_c_sources in " + natx_manifest_file(c, i));
       }
       sl_sort(files);
       var f: int64 = 0;
@@ -553,7 +553,7 @@ fn natx_sources(c: NatCtx*, i: int64) -> StrList* {
     } else if (fs_is_file(abs)) {
       sl_add_uniq(srcs, p_clean(e));
     } else {
-      fail_hint("C source '" + e + "' of " + c->pkgs[i].label + " does not exist", "fix [c] sources in " + natx_manifest_file(c, i));
+      fail_hint("C source '" + e + "' of " + c->pkgs[i].label + " does not exist", "fix mb_c_sources in " + natx_manifest_file(c, i));
     }
     k = k + 1;
   }
@@ -987,7 +987,7 @@ fn natx_pkgconfig_tool(c: NatCtx*) -> Tool {
 // pkg-config --libs NAME: its -L and -l words.
 fn natx_pkgconfig(c: NatCtx*, i: int64, pc_name: string, t: Tool) {
   if (!tool_found(t)) {
-    fail_hint("[link] pkgconfig = [\"" + pc_name + "\"] in " + natx_manifest_file(c, i) + " needs pkg-config, which is not installed", "install pkg-config (and the package's development files), or name the library under [link] libs");
+    fail_hint("mb_pkgconfig(\"" + pc_name + "\") in " + natx_manifest_file(c, i) + " needs pkg-config, which is not installed", "install pkg-config (and the package's development files), or name the library with mb_link_libs");
   }
   var cm: Cmd* = cmd_new(t);
   cmd_arg(cm, "--libs");
@@ -1063,7 +1063,7 @@ fn natx_gather(c: NatCtx*) {
     while (k < paths->len) {
       var d: string = p_clean(p_join(pk->dir, s_replace_byte(sl_get(paths, k), 92, 47)));
       if (!fs_is_dir(d)) {
-        warn("[link] paths: " + natx_show(c, d) + " (from " + natx_manifest_file(c, i) + ") is not a directory");
+        warn("mb_link_paths: " + natx_show(c, d) + " (from " + natx_manifest_file(c, i) + ") is not a directory");
       }
       sl_add_uniq(c->ldirs, d);
       sl_push(abs_paths, d);
@@ -1095,7 +1095,7 @@ fn natx_gather(c: NatCtx*) {
     k = 0;
     while (k < pcs->len) {
       if (natx_is_windows(c) && !tool_found(pct)) {
-        warn("[link] pkgconfig '" + sl_get(pcs, k) + "' of " + pk->label + " is ignored for the windows target: no x86_64-w64-mingw32-pkg-config (or set PKG_CONFIG_WINDOWS); name the DLL under [link.windows] libs");
+        warn("mb_pkgconfig(\"" + sl_get(pcs, k) + "\") of " + pk->label + " is ignored for the windows target: no x86_64-w64-mingw32-pkg-config (or set PKG_CONFIG_WINDOWS); name the DLL with mb_link_libs after mb_on(\"windows\")");
       } else {
         natx_pkgconfig(c, i, sl_get(pcs, k), pct);
       }
@@ -2244,9 +2244,9 @@ fn natx_report_symbol(c: NatCtx*, e: NatExterns*, sym: string, hits: StrList*, l
     if (f64) {
       prefix = "or, to link it anyway, add";
     }
-    err_line("    " + cyan("help") + ": " + prefix + " to " + natx_show(c, c->p->man->file) + ":");
-    err_line("        [link." + c->os + "]");
-    err_line("        libs = [\"" + lname + "\"]");
+    err_line("    " + cyan("help") + ": " + prefix + " to fn project() in " + natx_show(c, c->p->man->file) + ":");
+    err_line("        mb_on(\"" + c->os + "\");");
+    err_line("        mb_link_libs(\"" + lname + "\");");
     var d: string = p_dir(pick);
     var std_dir: bool = false;
     var stdd: StrList* = natx_linux_std_dirs();
@@ -2259,15 +2259,16 @@ fn natx_report_symbol(c: NatCtx*, e: NatExterns*, sym: string, hits: StrList*, l
     }
     natx_free_list(stdd);
     if (!natx_is_windows(c) && !std_dir && !sl_has(c->ldirs, d)) {
-      err_line("        paths = [\"" + d + "\"]");
+      err_line("        mb_link_paths(\"" + d + "\");");
     }
     if (natx_is_windows(c) && !sl_has(c->ldirs, d) && !s_eq(d, natx_system32())) {
-      err_line("        paths = [\"" + d + "\"]       # so the DLL ships beside the .exe");
+      err_line("        mb_link_paths(\"" + d + "\");  // so the DLL ships beside the .exe");
     }
+    err_line("        mb_on(\"\");");
   } else if (hits->len == 0 && !f64) {
-    err_line("    " + cyan("help") + ": no library searched defines it. Check the `= \"symbol\"` link name and its spelling, or provide it in C ([c] sources in " + natx_show(c, c->p->man->file) + ").");
+    err_line("    " + cyan("help") + ": no library searched defines it. Check the `= \"symbol\"` link name and its spelling, or provide it in C (mb_c_sources in " + natx_show(c, c->p->man->file) + ").");
   } else if (!f64) {
-    err_line("    " + cyan("help") + ": only a C runtime DLL defines it, and Mettle never links one; implement it in Mettle or in a [c] source.");
+    err_line("    " + cyan("help") + ": only a C runtime DLL defines it, and Mettle never links one; implement it in Mettle or in C (mb_c_sources).");
   }
   natx_free_list(decl);
 }
@@ -2302,12 +2303,12 @@ export fn nat_explain_failure(p: Project*, ds: DepState*, t: TargetCtx*, output:
     while (k < c->libs->len) {
       if (s_eq(sl_get(c->libs, k), ml)) {
         var oi: int64 = s_to_int(sl_get(c->lib_owner, k));
-        owner = natx_manifest_file(c, oi) + " ([link] libs of " + c->pkgs[oi].label + ")";
+        owner = natx_manifest_file(c, oi) + " (mb_link_libs of " + c->pkgs[oi].label + ")";
       }
       k = k + 1;
     }
     err_line(red("error") + ": library `" + ml + "` (from " + owner + ") is not installed: no lib" + ml + ".so on the library search path");
-    err_line("  " + cyan("help") + ": install its development package (it provides lib" + ml + ".so), or put the directory holding it under [link] paths");
+    err_line("  " + cyan("help") + ": install its development package (it provides lib" + ml + ".so), or name the directory holding it with mb_link_paths(\"DIR\") in fn project()");
     i = i + 1;
   }
   natx_free_list(missing);

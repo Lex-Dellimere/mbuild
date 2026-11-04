@@ -241,12 +241,10 @@ $ mbuild build
    Compiling lk (linux, debug)
 Error: Could not find shared library 'libnosuch.so' for -lnosuch on the library search path
 Error: The internal ELF linker could not produce 'build/linux/debug/lk'
-error: library `nosuch` (from mbuild.mettle ([link] libs of lk)) is not installed: no libnosuch.so on the library search path
-  help: install its development package (it provides libnosuch.so), or put the directory holding it under [link] paths
+error: library `nosuch` (from mbuild.mettle (mb_link_libs of lk)) is not installed: no libnosuch.so on the library search path
+  help: install its development package (it provides libnosuch.so), or name the directory holding it with mb_link_paths("DIR") in fn project()
 error: could not compile lk (linux, debug)
 ```
-
-(`[link] libs` is `mb_link_libs`, `[link] paths` is `mb_link_paths`.)
 
 ## mbuild doctor
 

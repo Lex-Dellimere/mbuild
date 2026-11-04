@@ -204,7 +204,7 @@ for v in args noargs; do
   "$DRV" "$APP" linux explain "$W/fail-$v.log" >"$W/ex-$v" 2>&1
   check "explain ($v) names vm_missing's extern" has "$W/ex-$v" "src/main.mettle:$MISSLINE"
   check "explain ($v) names cos's extern" has "$W/ex-$v" "src/main.mettle:$COSLINE"
-  check "explain ($v) suggests libm for cos" has "$W/ex-$v" 'libs = \["m"\]'
+  check "explain ($v) suggests libm for cos" has "$W/ex-$v" 'mb_link_libs("m");'
   check "explain ($v) notes std/math" has "$W/ex-$v" "std/math"
 done
 if [ $MINGW = 1 ] && [ $WINE = 1 ]; then
@@ -355,7 +355,9 @@ export MB_RUNTIME_DIR="$RT"
 "$DRV" "$Z" linux doctor >"$W/zd" 2>&1
 check "report: libz listed once" [ "$(grep -c 'defined in .*libz\.so' "$W/zd")" = 1 ]
 check "report: development name with the soname" has "$W/zd" 'defined in .*/libz\.so (libz\.so\.1)$'
-check "report: suggests libs = [\"z\"]" has "$W/zd" 'libs = \["z"\]'
+check "report: suggests mb_link_libs(\"z\")" has "$W/zd" '^        mb_link_libs("z");$'
+check "report: under mb_on" has "$W/zd" '^        mb_on("linux");$'
+check "report: no TOML" hasnt "$W/zd" 'libs = \['
 printf '#!/bin/sh\necho "-lfoo"\n' > "$W/fake-pc"
 chmod +x "$W/fake-pc"
 PKG_CONFIG_WINDOWS="$W/fake-pc" "$DRV" "$Z" windows prepare >"$W/zp1" 2>&1
