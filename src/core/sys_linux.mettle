@@ -216,6 +216,25 @@ export fn sys_fd_drain(fd: int32, b: Buf*) -> int64 {
   return n;
 }
 
+// All of s to fd (a FIFO opened non-blocking: retried while it is full);
+// false on an error.
+export fn sys_fd_write(fd: int32, s: string) -> bool {
+  var off: int64 = 0;
+  var n: int64 = slen(s);
+  while (off < n) {
+    var got: int64 = syscall(1, fd, &s.chars[off], n - off);
+    if (got == -11 || got == -4) {
+      sys_sleep_ms(1);
+      continue;
+    }
+    if (got <= 0) {
+      return false;
+    }
+    off = off + got;
+  }
+  return true;
+}
+
 export fn sys_fd_close(fd: int32) {
   if (fd >= 0) {
     syscall(3, fd);

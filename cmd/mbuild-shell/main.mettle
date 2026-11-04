@@ -1,0 +1,2066 @@
+// mbuild-shell: `mbuild shell` full screen (lib/tui). Started by mbuild on a
+// terminal as `mbuild-shell --dir SESSION -- MBUILD shell ... --serve`; it
+// runs that command with its stdin and stdout on two FIFOs in SESSION and
+// draws what comes back: program output (byte 31 first), status (29), the
+// end of an answer (30), anything else an answer line.
+//
+//   header      program, running/paused, tick, patches
+//   scrollback  ❯ inputs, their answers, program output while streaming
+//   ─────
+//   ❯ input     / opens the command palette, tab completes
+//   ─────
+//   footer      status, key hints
+//
+// Views over it (Esc back): /inspect EXPR, /code [NAME], /watch, /log, F1.
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/core/fs";
+import "../../src/core/sys_linux";
+import "tui/tui";
+
+const V_MAIN = 0;
+const V_INSPECT = 1;
+const V_CODE = 2;
+const V_WATCH = 3;
+const V_LOG = 4;
+const V_HELP = 5;
+
+const P_NONE = 0;
+const P_PALETTE = 1;
+const P_COMPLETE = 2;
+
+// A line being edited: text and the cursor (a byte offset).
+struct Ed {
+  s: string;
+  at: int64;
+}
+
+struct Sh {
+  t: Tui*;
+  dir: string;
+  fin: int32;          // to the backend
+  fout: int32;         // from it
+  pid: int64;
+  rbuf: Buf*;
+  // scrollback: kind ("in", "res", "err", "dim", "out") and text
+  skind: StrList*;
+  stext: StrList*;
+  scroll: int64;       // lines up from the end
+  // program output
+  plog: StrList*;
+  held: int64;
+  stream: bool;
+  // status from the backend
+  name: string;
+  tick: string;
+  paused: bool;
+  why: string;
+  alive: bool;
+  patches: string;
+  cond: string;
+  exitcode: string;
+  wnames: StrList*;
+  wvals: StrList*;
+  // requests in flight, oldest first: kind, argument; the answer so far
+  qkind: StrList*;
+  qarg: StrList*;
+  resp: StrList*;
+  ready: bool;
+  ended: bool;
+  quit: bool;
+  editing: bool;       // an editor has the terminal
+  // input
+  ed: Ed*;
+  hist: StrList*;
+  hpos: int64;
+  pop: int32;
+  plist: TuiList*;
+  pitems: StrList*;
+  pdescs: StrList*;
+  view: int32;
+  // inspect: a row per node
+  nexpr: StrList*;
+  nname: StrList*;
+  ntype: StrList*;
+  nval: StrList*;
+  nkids: StrList*;     // "1": has fields
+  ndepth: StrList*;
+  nopen: StrList*;     // "1": its fields are shown
+  ilist: TuiList*;
+  iroot: string;
+  ierr: string;
+  iedit: bool;
+  ied: Ed*;
+  // code
+  dkind: StrList*;
+  dname: StrList*;
+  dwhere: StrList*;
+  dpatch: StrList*;
+  cshown: StrList*;    // indexes into the decls after the filter
+  clist: TuiList*;
+  cfilter: Ed*;
+  cfiltering: bool;
+  csrc_name: string;
+  csrc: StrList*;
+  chist: bool;
+  cwant: string;       // select this one when the decls come
+  // watch, log
+  wlist: TuiList*;
+  wadd: bool;
+  wed: Ed*;
+  lscroll: int64;
+  accent: int32;
+  red: int32;
+}
+
+var g_sh: Sh*;
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+fn ed_new(s: string) -> Ed* {
+  var e: Ed* = new Ed;
+  e->s = s;
+  e->at = slen(s);
+  return e;
+}
+
+fn ctl(c: int32) -> string {
+  var b: Buf* = buf_new();
+  buf_addb(b, c);
+  return buf_take(b);
+}
+
+fn cp_str(cp: int32) -> string {
+  var u: uint8* = (uint8*)malloc(5);
+  var n: int64 = tui_utf8_put(u, cp);
+  u[n] = (uint8)0;
+  return s_view(u, n);
+}
+
+fn ed_left(e: Ed*) {
+  if (e->at <= 0) {
+    return;
+  }
+  e->at = e->at - 1;
+  while (e->at > 0 && (s_byte(e->s, e->at) & 0xC0) == 0x80) {
+    e->at = e->at - 1;
+  }
+}
+
+fn ed_right(e: Ed*) {
+  if (e->at >= slen(e->s)) {
+    return;
+  }
+  e->at = e->at + 1;
+  while (e->at < slen(e->s) && (s_byte(e->s, e->at) & 0xC0) == 0x80) {
+    e->at = e->at + 1;
+  }
+}
+
+fn ed_insert(e: Ed*, text: string) {
+  var next: string = s_sub(e->s, 0, e->at) + text + s_from(e->s, e->at);
+  e->s = next;
+  e->at = e->at + slen(text);
+}
+
+fn ed_set(e: Ed*, s: string) {
+  e->s = s;
+  e->at = slen(s);
+}
+
+// Editing keys on e; true when the key was one.
+fn ed_key(e: Ed*, ev: TuiEvent*) -> bool {
+  if (ev->kind == TUI_EV_PASTE) {
+    var p: string = s_replace(s_replace(ev->text, "\r\n", " "), "\n", " ");
+    ed_insert(e, p);
+    return true;
+  }
+  var k: int32 = ev->key;
+  var ctrl: bool = (ev->mods & TUI_MOD_CTRL) != 0;
+  if (k == TUI_KEY_CHAR && !ctrl && (ev->mods & TUI_MOD_ALT) == 0) {
+    ed_insert(e, cp_str(ev->cp));
+    return true;
+  }
+  if (k == TUI_KEY_BACKSPACE) {
+    var end: int64 = e->at;
+    ed_left(e);
+    var next: string = s_sub(e->s, 0, e->at) + s_from(e->s, end);
+    e->s = next;
+    return true;
+  }
+  if (k == TUI_KEY_DELETE) {
+    var from: int64 = e->at;
+    ed_right(e);
+    var next2: string = s_sub(e->s, 0, from) + s_from(e->s, e->at);
+    e->s = next2;
+    e->at = from;
+    return true;
+  }
+  if (k == TUI_KEY_LEFT) {
+    ed_left(e);
+    return true;
+  }
+  if (k == TUI_KEY_RIGHT) {
+    ed_right(e);
+    return true;
+  }
+  if (k == TUI_KEY_HOME || (ctrl && ev->cp == 97)) {
+    e->at = 0;
+    return true;
+  }
+  if (k == TUI_KEY_END || (ctrl && ev->cp == 101)) {
+    e->at = slen(e->s);
+    return true;
+  }
+  if (ctrl && ev->cp == 117) {
+    var rest: string = s_from(e->s, e->at);
+    e->s = rest;
+    e->at = 0;
+    return true;
+  }
+  if (ctrl && ev->cp == 107) {
+    var head: string = s_sub(e->s, 0, e->at);
+    e->s = head;
+    return true;
+  }
+  if (ctrl && ev->cp == 119) {
+    var end2: int64 = e->at;
+    while (e->at > 0 && s_byte(e->s, e->at - 1) == 32) {
+      e->at = e->at - 1;
+    }
+    while (e->at > 0 && s_byte(e->s, e->at - 1) != 32) {
+      e->at = e->at - 1;
+    }
+    var next3: string = s_sub(e->s, 0, e->at) + s_from(e->s, end2);
+    e->s = next3;
+    return true;
+  }
+  return false;
+}
+
+// e drawn at x,y in cols columns, scrolled so the cursor shows; the cursor put there.
+fn ed_draw(t: Tui*, e: Ed*, x: int64, y: int64, cols: int64) {
+  var before: string = s_sub(e->s, 0, e->at);
+  var bw: int64 = tui_width(before);
+  var skip: int64 = 0;
+  if (cols > 1 && bw >= cols) {
+    skip = bw - cols + 1;
+  }
+  // drop skip columns from the front
+  var s: string = e->s;
+  var i: int64 = 0;
+  var w: int64 = 0;
+  while (i < slen(s) && w < skip) {
+    var cw: int32 = tui_cp_width(tui_utf8_next(s, &i));
+    if (cw > 0) {
+      w = w + (int64)cw;
+    }
+  }
+  var shown: string = s_from(s, i);
+  tui_print(t, x, y, shown, cols, TUI_DEFAULT, TUI_DEFAULT, 0);
+  tui_cursor(t, x + bw - w, y);
+}
+
+fn lpad(s: string, w: int64) -> string {
+  var n: int64 = tui_width(s);
+  if (n >= w) {
+    return s;
+  }
+  return s + s_repeat(" ", w - n);
+}
+
+fn kv(line: string, key: string) -> string {
+  var k: string = " " + key + "=";
+  var at: int64 = s_find(" " + line, k);
+  if (at < 0) {
+    return s_empty();
+  }
+  var rest: string = s_from(line, at + slen(k) - 1);
+  if (s_eq(key, "cond")) {
+    return rest;
+  }
+  var sp: int64 = s_find_byte(rest, 32);
+  if (sp >= 0) {
+    return s_sub(rest, 0, sp);
+  }
+  return rest;
+}
+
+fn tab_field(l: string, n: int64) -> string {
+  var parts: StrList* = s_split(l, 9);
+  var r: string = s_empty();
+  if (n < parts->len) {
+    r = sl_get(parts, n);
+  }
+  free(parts);
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// The backend
+// ---------------------------------------------------------------------------
+
+fn push(sh: Sh*, kind: string, text: string) {
+  sl_push(sh->skind, kind);
+  sl_push(sh->stext, text);
+  if (sh->skind->len > 4000) {
+    var k: StrList* = sl_new();
+    var x: StrList* = sl_new();
+    var i: int64 = sh->skind->len - 3000;
+    while (i < sh->skind->len) {
+      sl_push(k, sl_get(sh->skind, i));
+      sl_push(x, sl_get(sh->stext, i));
+      i = i + 1;
+    }
+    sh->skind = k;
+    sh->stext = x;
+  }
+}
+
+fn send(sh: Sh*, kind: string, arg: string, text: string) {
+  if (sh->ended) {
+    push(sh, "err", "the shell has ended; ctrl+d exits");
+    return;
+  }
+  sl_push(sh->qkind, kind);
+  sl_push(sh->qarg, arg);
+  var line: string = text + "\n";
+  sys_fd_write(sh->fin, line);
+}
+
+fn answer_kind(l: string) -> string {
+  var t: string = s_trim(l);
+  if (s_starts(t, "error") || s_starts(t, "FAIL")) {
+    return "err";
+  }
+  if (s_starts(t, "help:") || s_starts(t, "warning") || s_starts(t, "note:")) {
+    return "dim";
+  }
+  return "res";
+}
+
+fn on_status(sh: Sh*, l: string) {
+  if (s_starts(l, "name ")) {
+    sh->name = s_from(l, 5);
+  } else if (s_starts(l, "s ")) {
+    sh->tick = kv(l, "tick");
+    sh->paused = s_eq(kv(l, "paused"), "1");
+    sh->why = kv(l, "why");
+    sh->alive = s_eq(kv(l, "alive"), "1");
+    sh->patches = kv(l, "patches");
+    sh->cond = kv(l, "cond");
+  } else if (s_eq(l, "W")) {
+    sh->wnames = sl_new();
+    sh->wvals = sl_new();
+  } else if (s_starts(l, "w ")) {
+    var tab: int64 = s_find_byte(l, 9);
+    if (tab > 2) {
+      sl_push(sh->wnames, s_sub(l, 2, tab));
+      sl_push(sh->wvals, s_from(l, tab + 1));
+    }
+  } else if (s_starts(l, "exit ")) {
+    sh->exitcode = s_from(l, 5);
+    sh->alive = false;
+    push(sh, "dim", "the program exited with code " + sh->exitcode + " · ctrl+d exits");
+  }
+}
+
+fn decls_done(sh: Sh*) {
+  sh->dkind = sl_new();
+  sh->dname = sl_new();
+  sh->dwhere = sl_new();
+  sh->dpatch = sl_new();
+  var i: int64 = 0;
+  while (i < sh->resp->len) {
+    var l: string = sl_get(sh->resp, i);
+    i = i + 1;
+    if (s_find_byte(l, 9) < 0) {
+      continue;
+    }
+    sl_push(sh->dkind, tab_field(l, 0));
+    sl_push(sh->dname, tab_field(l, 1));
+    sl_push(sh->dwhere, tab_field(l, 2));
+    sl_push(sh->dpatch, tab_field(l, 3));
+  }
+  code_filter(sh);
+  if (slen(sh->cwant) > 0) {
+    var k: int64 = 0;
+    while (k < sh->cshown->len) {
+      if (s_eq(sl_get(sh->dname, s_to_int(sl_get(sh->cshown, k))), sh->cwant)) {
+        sh->clist->sel = k;
+      }
+      k = k + 1;
+    }
+    sh->cwant = s_empty();
+  }
+  sh->csrc_name = s_empty();
+}
+
+// Inspect: the answer to :fields for node at (-1: a new root).
+fn fields_done(sh: Sh*, at: int64) {
+  if (sh->resp->len == 0 || s_find_byte(sl_get(sh->resp, 0), 9) != 0) {
+    var msg: string = "no answer";
+    if (sh->resp->len > 0) {
+      msg = s_trim(sl_get(sh->resp, 0));
+    }
+    sh->ierr = msg;
+    return;
+  }
+  sh->ierr = s_empty();
+  var root: string = sl_get(sh->resp, 0);
+  var depth: int64 = 0;
+  var expr: string = sh->iroot;
+  var ins: int64 = 0;
+  if (at < 0) {
+    sh->nexpr = sl_new();
+    sh->nname = sl_new();
+    sh->ntype = sl_new();
+    sh->nval = sl_new();
+    sh->nkids = sl_new();
+    sh->ndepth = sl_new();
+    sh->nopen = sl_new();
+    sl_push(sh->nexpr, expr);
+    sl_push(sh->nname, expr);
+    sl_push(sh->ntype, tab_field(root, 1));
+    sl_push(sh->nval, tab_field(root, 2));
+    var has: string = s_empty();
+    if (sh->resp->len > 1) {
+      has = "1";
+    }
+    sl_push(sh->nkids, has);
+    sl_push(sh->ndepth, "0");
+    sl_push(sh->nopen, has);
+    ins = 1;
+    depth = 1;
+  } else {
+    expr = sl_get(sh->nexpr, at);
+    sl_set(sh->nval, at, tab_field(root, 2));
+    sl_set(sh->nopen, at, "1");
+    depth = s_to_int(sl_get(sh->ndepth, at)) + 1;
+    ins = at + 1;
+    // drop rows already under it
+    while (ins < sh->nexpr->len && s_to_int(sl_get(sh->ndepth, ins)) >= depth) {
+      sl_remove_at(sh->nexpr, ins);
+      sl_remove_at(sh->nname, ins);
+      sl_remove_at(sh->ntype, ins);
+      sl_remove_at(sh->nval, ins);
+      sl_remove_at(sh->nkids, ins);
+      sl_remove_at(sh->ndepth, ins);
+      sl_remove_at(sh->nopen, ins);
+    }
+  }
+  var ptype: string = tab_field(root, 1);
+  var arrow: string = ".";
+  if (s_ends(ptype, "*")) {
+    arrow = "->";
+  }
+  // rows go in at ins, in order: build the tail and put it back after
+  var tail_e: StrList* = sl_new();
+  var tail_n: StrList* = sl_new();
+  var tail_t: StrList* = sl_new();
+  var tail_v: StrList* = sl_new();
+  var tail_k: StrList* = sl_new();
+  var tail_d: StrList* = sl_new();
+  var tail_o: StrList* = sl_new();
+  while (sh->nexpr->len > ins) {
+    var last: int64 = ins;
+    sl_push(tail_e, sl_get(sh->nexpr, last));
+    sl_push(tail_n, sl_get(sh->nname, last));
+    sl_push(tail_t, sl_get(sh->ntype, last));
+    sl_push(tail_v, sl_get(sh->nval, last));
+    sl_push(tail_k, sl_get(sh->nkids, last));
+    sl_push(tail_d, sl_get(sh->ndepth, last));
+    sl_push(tail_o, sl_get(sh->nopen, last));
+    sl_remove_at(sh->nexpr, last);
+    sl_remove_at(sh->nname, last);
+    sl_remove_at(sh->ntype, last);
+    sl_remove_at(sh->nval, last);
+    sl_remove_at(sh->nkids, last);
+    sl_remove_at(sh->ndepth, last);
+    sl_remove_at(sh->nopen, last);
+  }
+  var i: int64 = 1;
+  while (i < sh->resp->len) {
+    var l: string = sl_get(sh->resp, i);
+    i = i + 1;
+    var fname: string = tab_field(l, 0);
+    sl_push(sh->nexpr, member(expr, arrow, fname));
+    sl_push(sh->nname, fname);
+    sl_push(sh->ntype, tab_field(l, 1));
+    sl_push(sh->nval, tab_field(l, 2));
+    var kid: string = s_empty();
+    if (slen(tab_field(l, 3)) > 0 && !s_eq(tab_field(l, 2), "null")) {
+      kid = "1";
+    }
+    sl_push(sh->nkids, kid);
+    sl_push(sh->ndepth, s_int(depth));
+    sl_push(sh->nopen, s_empty());
+  }
+  sl_extend(sh->nexpr, tail_e);
+  sl_extend(sh->nname, tail_n);
+  sl_extend(sh->ntype, tail_t);
+  sl_extend(sh->nval, tail_v);
+  sl_extend(sh->nkids, tail_k);
+  sl_extend(sh->ndepth, tail_d);
+  sl_extend(sh->nopen, tail_o);
+  free(tail_e);
+  free(tail_n);
+  free(tail_t);
+  free(tail_v);
+  free(tail_k);
+  free(tail_d);
+  free(tail_o);
+}
+
+// A path of names (world.a->b) is used as it is, anything else in parentheses.
+fn is_path(e: string) -> bool {
+  var i: int64 = 0;
+  while (i < slen(e)) {
+    var c: int32 = s_byte(e, i);
+    if (!is_ident_b(c) && c != 46 && c != 45 && c != 62) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return slen(e) > 0;
+}
+
+fn member(e: string, arrow: string, f: string) -> string {
+  if (is_path(e)) {
+    return e + arrow + f;
+  }
+  return "(" + e + ")" + arrow + f;
+}
+
+fn changes_code(text: string) -> bool {
+  var t: string = s_trim(text);
+  return s_starts(t, "fn ") || s_starts(t, "export fn ") || s_eq(t, "r") || s_eq(t, "undo") || s_starts(t, "undo ") || s_starts(t, "edit ");
+}
+
+// The answer to the oldest request is complete.
+fn done(sh: Sh*) {
+  if (sh->qkind->len == 0) {
+    sh->ready = true;
+    send(sh, "decls", "", ":decls");
+    return;
+  }
+  var kind: string = sl_get(sh->qkind, 0);
+  var arg: string = sl_get(sh->qarg, 0);
+  sl_remove_at(sh->qkind, 0);
+  sl_remove_at(sh->qarg, 0);
+  if (s_eq(kind, "decls")) {
+    decls_done(sh);
+  } else if (s_eq(kind, "source")) {
+    sh->csrc = sh->resp;
+    sh->csrc_name = arg;
+  } else if (s_eq(kind, "fields")) {
+    fields_done(sh, s_to_int(arg));
+  } else if (s_eq(kind, "edit")) {
+    sh->editing = false;
+  }
+  if ((s_eq(kind, "input") || s_eq(kind, "edit")) && changes_code(arg)) {
+    send(sh, "decls", "", ":decls");
+  }
+  if (s_eq(kind, "input") && sh->view == V_INSPECT && sh->nexpr->len > 0) {
+    send(sh, "fields", "-1", ":fields " + sh->iroot);
+  }
+  sh->resp = sl_new();
+}
+
+fn on_line(sh: Sh*, l: string) {
+  if (slen(l) == 0) {
+    if (sh->qkind->len > 0 && !s_eq(sl_get(sh->qkind, 0), "input") && !s_eq(sl_get(sh->qkind, 0), "edit")) {
+      sl_push(sh->resp, l);
+    }
+    return;
+  }
+  var c: int32 = s_byte(l, 0);
+  if (c == 31) {
+    var text: string = s_from(l, 1);
+    sl_push(sh->plog, text);
+    if (sh->plog->len > 5000) {
+      var kept: StrList* = sl_new();
+      var i: int64 = sh->plog->len - 4000;
+      while (i < sh->plog->len) {
+        sl_push(kept, sl_get(sh->plog, i));
+        i = i + 1;
+      }
+      sh->plog = kept;
+    }
+    if (sh->stream) {
+      push(sh, "out", text);
+    } else {
+      sh->held = sh->held + 1;
+    }
+    return;
+  }
+  if (c == 29) {
+    on_status(sh, s_from(l, 1));
+    return;
+  }
+  if (c == 30) {
+    done(sh);
+    return;
+  }
+  if (!sh->ready) {
+    // the build's own lines: Compiling, Running, errors
+    var k0: string = answer_kind(l);
+    if (s_eq(k0, "res")) {
+      k0 = "dim";
+    }
+    push(sh, k0, s_trim(l));
+    return;
+  }
+  if (sh->qkind->len == 0 || s_eq(sl_get(sh->qkind, 0), "input") || s_eq(sl_get(sh->qkind, 0), "edit")) {
+    push(sh, answer_kind(l), s_trim_right(l));
+    return;
+  }
+  sl_push(sh->resp, l);
+}
+
+fn s_trim_right(s: string) -> string {
+  var n: int64 = slen(s);
+  while (n > 0 && (s_byte(s, n - 1) == 32 || s_byte(s, n - 1) == 13)) {
+    n = n - 1;
+  }
+  return s_sub(s, 0, n);
+}
+
+// Whole lines from the backend, handled.
+fn drain(sh: Sh*) {
+  if (sys_fd_drain(sh->fout, sh->rbuf) == 0) {
+    return;
+  }
+  var data: string = buf_str(sh->rbuf);
+  var start: int64 = 0;
+  var i: int64 = 0;
+  while (i < slen(data)) {
+    if (s_byte(data, i) == 10) {
+      var line: string = s_dup(s_sub(data, start, i));
+      on_line(sh, line);
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  var rest: string = s_dup(s_from(data, start));
+  sh->rbuf->len = 0;
+  buf_add(sh->rbuf, rest);
+}
+
+fn check_ended(sh: Sh*) {
+  if (sh->ended || sys_pid_alive(sh->pid)) {
+    return;
+  }
+  sys_sleep_ms(20);
+  drain(sh);
+  sh->ended = true;
+  sh->alive = false;
+  push(sh, "dim", "the shell has ended · ctrl+d exits");
+}
+
+// Starts CMD... with stdin and stdout on the FIFOs.
+fn start_backend(sh: Sh*, cmd: StrList*) -> bool {
+  sh->fin = sys_fifo_open(sh->dir + "/tui.in");
+  sh->fout = sys_fifo_open(sh->dir + "/tui.out");
+  if (sh->fin < 0 || sh->fout < 0) {
+    return false;
+  }
+  var pidf: string = sh->dir + "/tui.pid";
+  sys_remove_file(pidf);
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < cmd->len) {
+    buf_add(b, sh_quote(sl_get(cmd, i)) + " ");
+    i = i + 1;
+  }
+  buf_add(b, "<" + sh_quote(sh->dir + "/tui.in") + " >" + sh_quote(sh->dir + "/tui.out") + " 2>&1 & echo $! >" + sh_quote(pidf));
+  var line: string = buf_take(b);
+  var c: Cmd* = cmd_new(tool_none());
+  c->tool.path = "/bin/sh";
+  cmd_arg(c, "-c");
+  cmd_arg(c, line);
+  var code: int32 = sys_run(c);
+  free(c);
+  if (code != 0) {
+    return false;
+  }
+  var t0: int64 = sys_now_ms();
+  while (sys_now_ms() - t0 < 3000) {
+    var r: FsRead = fs_read(pidf);
+    if (r.ok && s_ends(r.data, "\n")) {
+      sh->pid = s_to_int(s_trim(r.data));
+      return sh->pid > 0;
+    }
+    sys_sleep_ms(5);
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+fn palette_names() -> StrList* {
+  return s_split("inspect code watch unwatch log pause step pause-when edit undo reload ls apropos explain status stream help quit", 32);
+}
+
+fn palette_desc(n: string) -> string {
+  if (s_eq(n, "inspect")) { return "EXPR as a tree: ↑↓ move, enter expands, e edits"; }
+  if (s_eq(n, "code")) { return "[NAME] functions and structs, patched ones marked; e edits"; }
+  if (s_eq(n, "watch")) { return "[EXPR] the watch list, live; with EXPR: add it"; }
+  if (s_eq(n, "unwatch")) { return "EXPR take it off the watch list"; }
+  if (s_eq(n, "log")) { return "the program's output, scrollable"; }
+  if (s_eq(n, "pause")) { return "pause or resume at shell_point() (ctrl+p)"; }
+  if (s_eq(n, "step")) { return "one tick, then paused again (ctrl+n)"; }
+  if (s_eq(n, "pause-when")) { return "[EXPR] pause where EXPR turns true; none: clear"; }
+  if (s_eq(n, "edit")) { return "NAME in $EDITOR, patched in when saved"; }
+  if (s_eq(n, "undo")) { return "[NAME] the last change, or NAME's"; }
+  if (s_eq(n, "reload")) { return "patch in the files on disk (r)"; }
+  if (s_eq(n, "ls")) { return "[FILE] declarations by file"; }
+  if (s_eq(n, "apropos")) { return "TEXT names and docs with TEXT"; }
+  if (s_eq(n, "explain")) { return "NAME signature, doc, a global's value"; }
+  if (s_eq(n, "status")) { return "running or paused, tick, patches"; }
+  if (s_eq(n, "stream")) { return "show program output here, or hold it (ctrl+o)"; }
+  if (s_eq(n, "help")) { return "keys and commands (F1)"; }
+  return "leave (ctrl+d)";
+}
+
+fn needs_arg(n: string) -> bool {
+  return s_eq(n, "inspect") || s_eq(n, "unwatch") || s_eq(n, "edit") || s_eq(n, "apropos") || s_eq(n, "explain");
+}
+
+fn toggle_pause(sh: Sh*) {
+  if (sh->paused) {
+    push(sh, "in", "resume");
+    send(sh, "input", "resume", "resume");
+  } else {
+    push(sh, "in", "pause");
+    send(sh, "input", "pause", "pause");
+  }
+}
+
+fn toggle_stream(sh: Sh*) {
+  sh->stream = !sh->stream;
+  if (sh->stream) {
+    push(sh, "dim", "streaming the program's output here (ctrl+o holds it)");
+    sh->held = 0;
+  } else {
+    push(sh, "dim", "holding the program's output (/log shows it, ctrl+o streams it)");
+  }
+}
+
+fn open_inspect(sh: Sh*, expr: string) {
+  sh->iroot = expr;
+  sh->nexpr = sl_new();
+  sh->ierr = "…";
+  sh->ilist->sel = 0;
+  sh->ilist->top = 0;
+  sh->view = V_INSPECT;
+  send(sh, "fields", "-1", ":fields " + expr);
+}
+
+fn open_code(sh: Sh*, name: string) {
+  sh->view = V_CODE;
+  sh->cwant = name;
+  sh->csrc_name = s_empty();
+  send(sh, "decls", "", ":decls");
+}
+
+// The editor gets the terminal until the backend answers.
+fn edit(sh: Sh*, name: string) {
+  push(sh, "in", "edit " + name);
+  tui_suspend(sh->t);
+  sh->editing = true;
+  send(sh, "edit", "edit " + name, "edit " + name);
+  while (sh->editing && !sh->ended) {
+    var fds: int32[2];
+    fds[0] = sh->fout;
+    fds[1] = 1;
+    syscall(7, &fds[0], 1, 100);
+    drain(sh);
+    check_ended(sh);
+  }
+  tui_resume(sh->t);
+}
+
+fn run_slash(sh: Sh*, cmd: string, arg: string) {
+  if (s_eq(cmd, "inspect")) {
+    if (slen(arg) == 0) {
+      push(sh, "err", "/inspect needs an expression: /inspect world");
+      return;
+    }
+    open_inspect(sh, arg);
+  } else if (s_eq(cmd, "code")) {
+    open_code(sh, arg);
+  } else if (s_eq(cmd, "watch")) {
+    if (slen(arg) == 0) {
+      sh->view = V_WATCH;
+      return;
+    }
+    push(sh, "in", "watch " + arg);
+    send(sh, "input", "watch " + arg, "watch " + arg);
+  } else if (s_eq(cmd, "log")) {
+    sh->view = V_LOG;
+    sh->lscroll = 0;
+    sh->held = 0;
+  } else if (s_eq(cmd, "pause")) {
+    toggle_pause(sh);
+  } else if (s_eq(cmd, "pause-when")) {
+    var t: string = "pause when " + arg;
+    push(sh, "in", t);
+    send(sh, "input", t, s_trim(t));
+  } else if (s_eq(cmd, "edit")) {
+    edit(sh, arg);
+  } else if (s_eq(cmd, "reload")) {
+    push(sh, "in", "r");
+    send(sh, "input", "r", "r");
+  } else if (s_eq(cmd, "stream")) {
+    toggle_stream(sh);
+  } else if (s_eq(cmd, "help")) {
+    sh->view = V_HELP;
+  } else if (s_eq(cmd, "quit")) {
+    sh->quit = true;
+  } else if (sl_has(palette_names(), cmd)) {
+    var line: string = s_trim(cmd + " " + arg);
+    push(sh, "in", line);
+    send(sh, "input", line, line);
+  } else {
+    push(sh, "err", "no command /" + cmd + "; / lists them");
+  }
+}
+
+fn submit(sh: Sh*, text: string) {
+  var t: string = s_trim(text);
+  if (slen(t) == 0) {
+    return;
+  }
+  if (sh->hist->len == 0 || !s_eq(sl_get(sh->hist, sh->hist->len - 1), t)) {
+    sl_push(sh->hist, t);
+    fs_write(sh->dir + "/history", sl_join(sh->hist, "\n") + "\n");
+  }
+  sh->hpos = sh->hist->len;
+  sh->scroll = 0;
+  if (s_eq(t, ":q") || s_eq(t, ":quit") || s_eq(t, "q")) {
+    sh->quit = true;
+    return;
+  }
+  if (s_starts(t, "/")) {
+    var sp: int64 = s_find_byte(t, 32);
+    var cmd: string = s_from(t, 1);
+    var arg: string = s_empty();
+    if (sp > 0) {
+      cmd = s_sub(t, 1, sp);
+      arg = s_trim(s_from(t, sp + 1));
+    }
+    run_slash(sh, cmd, arg);
+    return;
+  }
+  if (s_starts(t, "edit ")) {
+    edit(sh, s_trim(s_from(t, 5)));
+    return;
+  }
+  if (s_eq(t, ":log")) {
+    run_slash(sh, "log", "");
+    return;
+  }
+  push(sh, "in", t);
+  send(sh, "input", t, t);
+}
+
+// ---------------------------------------------------------------------------
+// Popups under the input: the palette, completions
+// ---------------------------------------------------------------------------
+
+fn palette_update(sh: Sh*) {
+  var s: string = sh->ed->s;
+  if (!s_starts(s, "/") || s_find_byte(s, 32) >= 0) {
+    if (sh->pop == P_PALETTE) {
+      sh->pop = P_NONE;
+    }
+    return;
+  }
+  var want: string = s_from(s, 1);
+  sh->pitems = sl_new();
+  sh->pdescs = sl_new();
+  var names: StrList* = palette_names();
+  var i: int64 = 0;
+  while (i < names->len) {
+    var n: string = sl_get(names, i);
+    if (s_starts(n, want)) {
+      sl_push(sh->pitems, n);
+      sl_push(sh->pdescs, palette_desc(n));
+    }
+    i = i + 1;
+  }
+  free(names);
+  sh->pop = P_PALETTE;
+  tui_list_fit(sh->plist, sh->pitems->len, 8);
+}
+
+fn word_start(s: string, at: int64) -> int64 {
+  var k: int64 = at;
+  while (k > 0) {
+    var c: int32 = s_byte(s, k - 1);
+    if (is_ident_b(c) || c == 58) {
+      k = k - 1;
+    } else {
+      break;
+    }
+  }
+  return k;
+}
+
+fn complete(sh: Sh*) {
+  var e: Ed* = sh->ed;
+  var from: int64 = word_start(e->s, e->at);
+  var word: string = s_sub(e->s, from, e->at);
+  if (slen(word) == 0) {
+    return;
+  }
+  var pool: StrList* = sl_new();
+  if (from == 0) {
+    sl_extend(pool, s_split("help ls apropos explain undo pause resume step status watch unwatch edit r :log :q", 32));
+  }
+  sl_extend(pool, sh->dname);
+  sl_extend(pool, sh->wnames);
+  var cands: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < pool->len) {
+    var n: string = sl_get(pool, i);
+    if (s_starts(n, word)) {
+      sl_add_uniq(cands, n);
+    }
+    i = i + 1;
+  }
+  free(pool);
+  if (cands->len == 0) {
+    return;
+  }
+  var common: string = sl_get(cands, 0);
+  i = 1;
+  while (i < cands->len) {
+    var c: string = sl_get(cands, i);
+    var k: int64 = 0;
+    while (k < slen(common) && k < slen(c) && s_byte(common, k) == s_byte(c, k)) {
+      k = k + 1;
+    }
+    common = s_sub(common, 0, k);
+    i = i + 1;
+  }
+  if (slen(common) > slen(word)) {
+    ed_insert(e, s_from(common, slen(word)));
+    if (cands->len == 1) {
+      sh->pop = P_NONE;
+    }
+    if (cands->len == 1) {
+      return;
+    }
+  }
+  if (cands->len > 1) {
+    sl_sort(cands);
+    sh->pitems = cands;
+    sh->pdescs = sl_new();
+    i = 0;
+    while (i < cands->len) {
+      var d: string = s_empty();
+      var at: int64 = sl_index(sh->dname, sl_get(cands, i));
+      if (at >= 0) {
+        d = sl_get(sh->dkind, at) + "  " + sl_get(sh->dwhere, at);
+      }
+      sl_push(sh->pdescs, d);
+      i = i + 1;
+    }
+    sh->pop = P_COMPLETE;
+    sh->plist->sel = 0;
+    sh->plist->top = 0;
+    tui_list_fit(sh->plist, cands->len, 8);
+  }
+}
+
+fn accept_pop(sh: Sh*) {
+  var pick: string = sl_get(sh->pitems, sh->plist->sel);
+  if (sh->pop == P_PALETTE) {
+    sh->pop = P_NONE;
+    if (needs_arg(pick) || s_eq(pick, "code") || s_eq(pick, "undo") || s_eq(pick, "pause-when") || s_eq(pick, "ls")) {
+      if (needs_arg(pick)) {
+        ed_set(sh->ed, "/" + pick + " ");
+        return;
+      }
+    }
+    ed_set(sh->ed, "");
+    submit(sh, "/" + pick);
+    return;
+  }
+  var e: Ed* = sh->ed;
+  var from: int64 = word_start(e->s, e->at);
+  var next: string = s_sub(e->s, 0, from) + pick + s_from(e->s, e->at);
+  e->s = next;
+  e->at = from + slen(pick);
+  sh->pop = P_NONE;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+fn state_word(sh: Sh*) -> string {
+  if (sh->ended || !sh->alive && sh->ready) {
+    return "■ stopped";
+  }
+  if (!sh->ready) {
+    return "◌ starting";
+  }
+  if (sh->paused) {
+    return "⏸ paused at tick " + sh->tick;
+  }
+  return "● running";
+}
+
+fn status_text(sh: Sh*) -> string {
+  var s: string = state_word(sh);
+  if (sh->ready && !sh->paused && !sh->ended) {
+    s = s + " · tick " + sh->tick;
+  }
+  var pl: string = " patches";
+  if (s_eq(sh->patches, "1")) {
+    pl = " patch";
+  }
+  s = s + " · " + sh->patches + pl;
+  if (slen(sh->cond) > 0) {
+    s = s + " · pause when " + sh->cond;
+  }
+  return s;
+}
+
+fn draw_status(sh: Sh*, x: int64, y: int64, cols: int64, at: int32) -> int64 {
+  var t: Tui* = sh->t;
+  var s: string = status_text(sh);
+  // the glyph in the accent colour, the rest as asked
+  var at0: int64 = 0;
+  var g: int32 = tui_utf8_next(s, &at0);
+  var col: int32 = sh->accent;
+  if (sh->paused) {
+    col = tui_rgb(229, 192, 123);
+  }
+  if (sh->ended || !sh->alive && sh->ready) {
+    col = sh->red;
+  }
+  tui_set(t, x, y, g, col, TUI_DEFAULT, 0);
+  var w: int64 = tui_print(t, x + 1, y, s_from(s, at0), cols - 1, TUI_DEFAULT, TUI_DEFAULT, at);
+  return w + 1;
+}
+
+fn draw_header(sh: Sh*, title: string) {
+  var t: Tui* = sh->t;
+  var x: int64 = 1;
+  x = x + tui_print(t, x, 0, title, t->w - 2, TUI_DEFAULT, TUI_DEFAULT, TUI_BOLD);
+  x = x + 2;
+  if (x < t->w - 4) {
+    draw_status(sh, x, 0, t->w - x - 1, TUI_DIM);
+  }
+}
+
+fn draw_footer(sh: Sh*, hints: string) {
+  var t: Tui* = sh->t;
+  var y: int64 = t->h - 1;
+  var w: int64 = draw_status(sh, 1, y, t->w - 2, 0);
+  if (sh->qkind->len > 0 && sh->ready) {
+    w = w + tui_print(t, 1 + w, y, " · …", t->w - 2 - w, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+  }
+  var room: int64 = t->w - 2 - w - 3;
+  var h: string = fit_hints(hints, room);
+  if (slen(h) == 0) {
+    return;
+  }
+  tui_print(t, t->w - 1 - tui_width(h), y, h, room, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+}
+
+// As many of the " · " separated hints as fit in room, the last one kept.
+fn fit_hints(hints: string, room: int64) -> string {
+  if (tui_width(hints) <= room) {
+    return hints;
+  }
+  var parts: StrList* = sl_new();
+  var rest: string = hints;
+  var at: int64 = s_find(rest, " · ");
+  while (at >= 0) {
+    sl_push(parts, s_sub(rest, 0, at));
+    rest = s_from(rest, at + slen(" · "));
+    at = s_find(rest, " · ");
+  }
+  var last: string = rest;
+  var out: string = last;
+  if (tui_width(out) > room) {
+    free(parts);
+    return s_empty();
+  }
+  var i: int64 = 0;
+  var head: string = s_empty();
+  while (i < parts->len) {
+    var next: string = sl_get(parts, i);
+    if (slen(head) > 0) {
+      next = head + " · " + next;
+    }
+    var all: string = next + " · " + last;
+    if (tui_width(all) > room) {
+      break;
+    }
+    head = next;
+    out = all;
+    i = i + 1;
+  }
+  free(parts);
+  return out;
+}
+
+fn draw_scroll_line(sh: Sh*, y: int64, kind: string, text: string) {
+  var t: Tui* = sh->t;
+  if (s_eq(kind, "in")) {
+    tui_print(t, 1, y, "❯", 1, sh->accent, TUI_DEFAULT, TUI_BOLD);
+    tui_print(t, 3, y, text, t->w - 4, TUI_DEFAULT, TUI_DEFAULT, TUI_BOLD);
+  } else if (s_eq(kind, "err")) {
+    tui_print(t, 3, y, text, t->w - 4, sh->red, TUI_DEFAULT, 0);
+  } else if (s_eq(kind, "out") || s_eq(kind, "dim")) {
+    tui_print(t, 3, y, text, t->w - 4, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+  } else {
+    tui_print(t, 3, y, text, t->w - 4, TUI_DEFAULT, TUI_DEFAULT, 0);
+  }
+}
+
+fn hints_main(sh: Sh*) -> string {
+  var p: string = "ctrl+p pause";
+  if (sh->paused) {
+    p = "ctrl+p resume";
+  }
+  return p + " · ctrl+n step · ctrl+o output · / commands · ctrl+d exit";
+}
+
+fn draw_main(sh: Sh*) {
+  var t: Tui* = sh->t;
+  var W: int64 = t->w;
+  var H: int64 = t->h;
+  var name: string = sh->name;
+  if (slen(name) == 0) {
+    name = "mbuild shell";
+  }
+  draw_header(sh, name);
+  var npop: int64 = 0;
+  if (sh->pop != P_NONE) {
+    npop = sh->pitems->len;
+    if (npop > 8) {
+      npop = 8;
+    }
+    if (npop > H - 8) {
+      npop = H - 8;
+    }
+    if (npop < 0) {
+      npop = 0;
+    }
+  }
+  var y_rule1: int64 = H - 4 - npop;
+  var y_in: int64 = H - 3 - npop;
+  var y_rule2: int64 = H - 2 - npop;
+  if (y_rule1 < 1) {
+    // too short: the input and the footer only
+    y_in = H - 2;
+    y_rule1 = -1;
+    y_rule2 = -1;
+    npop = 0;
+  }
+  if (y_rule1 >= 1) {
+    tui_hline(t, y_rule1, TUI_DEFAULT, TUI_DIM);
+    tui_hline(t, y_rule2, TUI_DEFAULT, TUI_DIM);
+  }
+  tui_print(t, 1, y_in, "❯", 1, sh->accent, TUI_DEFAULT, TUI_BOLD);
+  ed_draw(t, sh->ed, 3, y_in, W - 4);
+  if (!sh->ready && slen(sh->ed->s) == 0) {
+    tui_print(t, 3, y_in, "starting…", W - 4, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+  }
+  // the popup
+  var k: int64 = 0;
+  while (k < npop) {
+    var i: int64 = sh->plist->top + k;
+    if (i >= sh->pitems->len) {
+      break;
+    }
+    var y: int64 = y_rule2 + 1 + k;
+    var item: string = sl_get(sh->pitems, i);
+    if (sh->pop == P_PALETTE) {
+      item = "/" + item;
+    }
+    var at: int32 = 0;
+    var fg: int32 = TUI_DEFAULT;
+    if (i == sh->plist->sel) {
+      tui_print(t, 1, y, "›", 1, sh->accent, TUI_DEFAULT, 0);
+      fg = sh->accent;
+      at = TUI_BOLD;
+    }
+    tui_print(t, 3, y, item, 18, fg, TUI_DEFAULT, at);
+    if (W > 26) {
+      tui_print(t, 22, y, sl_get(sh->pdescs, i), W - 23, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    }
+    k = k + 1;
+  }
+  // scrollback
+  var top: int64 = 1;
+  var bottom: int64 = y_rule1 - 1;
+  if (y_rule1 < 1) {
+    bottom = y_in - 1;
+  }
+  if (sh->held > 0 && !sh->stream && bottom >= top) {
+    var note: string = s_int(sh->held) + " lines held · ctrl+o streams · /log shows";
+    if (sh->held == 1) {
+      note = "1 line held · ctrl+o streams · /log shows";
+    }
+    tui_print(t, 3, bottom, note, W - 4, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    bottom = bottom - 1;
+  }
+  var rows: int64 = bottom - top + 1;
+  if (rows > 0) {
+    var n: int64 = sh->skind->len;
+    if (sh->scroll > n - rows) {
+      sh->scroll = n - rows;
+    }
+    if (sh->scroll < 0) {
+      sh->scroll = 0;
+    }
+    var first: int64 = n - rows - sh->scroll;
+    if (first < 0) {
+      first = 0;
+    }
+    var y2: int64 = top;
+    var j: int64 = first;
+    while (j < n - sh->scroll && y2 <= bottom) {
+      draw_scroll_line(sh, y2, sl_get(sh->skind, j), sl_get(sh->stext, j));
+      j = j + 1;
+      y2 = y2 + 1;
+    }
+  }
+  var hints: string = hints_main(sh);
+  if (sh->pop != P_NONE) {
+    hints = "↑↓ choose · enter pick · esc close";
+  }
+  if (sh->scroll > 0) {
+    hints = "pgup/pgdn scroll · end live";
+  }
+  draw_footer(sh, hints);
+}
+
+fn view_frame(sh: Sh*, title: string, hints: string) {
+  var t: Tui* = sh->t;
+  draw_header(sh, title);
+  if (t->h > 4) {
+    tui_hline(t, 1, TUI_DEFAULT, TUI_DIM);
+    tui_hline(t, t->h - 2, TUI_DEFAULT, TUI_DIM);
+  }
+  draw_footer(sh, hints);
+}
+
+fn draw_inspect(sh: Sh*) {
+  var t: Tui* = sh->t;
+  var hints: string = "↑↓ move · enter/→ expand · ← collapse · e edit · r refresh · esc back";
+  if (sh->iedit) {
+    hints = "enter set · esc cancel";
+  }
+  view_frame(sh, "Inspect  " + sh->iroot, hints);
+  var top: int64 = 2;
+  var rows: int64 = t->h - 4;
+  if (slen(sh->ierr) > 0) {
+    var col: int32 = sh->red;
+    if (s_eq(sh->ierr, "…")) {
+      col = TUI_DEFAULT;
+    }
+    tui_print(t, 3, top, sh->ierr, t->w - 4, col, TUI_DEFAULT, 0);
+    return;
+  }
+  var n: int64 = sh->nexpr->len;
+  tui_list_fit(sh->ilist, n, rows);
+  // column widths
+  var nw: int64 = 4;
+  var tw: int64 = 4;
+  var i: int64 = 0;
+  while (i < n) {
+    var w: int64 = tui_width(sl_get(sh->nname, i)) + 2 * s_to_int(sl_get(sh->ndepth, i)) + 2;
+    if (w > nw) {
+      nw = w;
+    }
+    var w2: int64 = tui_width(sl_get(sh->ntype, i));
+    if (w2 > tw) {
+      tw = w2;
+    }
+    i = i + 1;
+  }
+  if (nw > t->w / 3) {
+    nw = t->w / 3;
+  }
+  if (tw > t->w / 4) {
+    tw = t->w / 4;
+  }
+  var k: int64 = 0;
+  while (k < rows) {
+    var j: int64 = sh->ilist->top + k;
+    if (j >= n) {
+      break;
+    }
+    var y: int64 = top + k;
+    var d: int64 = s_to_int(sl_get(sh->ndepth, j));
+    var sel: bool = j == sh->ilist->sel;
+    if (sel) {
+      tui_print(t, 1, y, "›", 1, sh->accent, TUI_DEFAULT, 0);
+    }
+    var mark: string = " ";
+    if (slen(sl_get(sh->nkids, j)) > 0) {
+      mark = "▸";
+      if (slen(sl_get(sh->nopen, j)) > 0) {
+        mark = "▾";
+      }
+    }
+    var x: int64 = 3 + 2 * d;
+    tui_print(t, x, y, mark, 1, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    var fg: int32 = TUI_DEFAULT;
+    var at: int32 = 0;
+    if (sel) {
+      fg = sh->accent;
+      at = TUI_BOLD;
+    }
+    tui_print(t, x + 2, y, sl_get(sh->nname, j), nw - 2 * d - 2, fg, TUI_DEFAULT, at);
+    tui_print(t, 3 + nw + 1, y, sl_get(sh->ntype, j), tw, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    var vx: int64 = 3 + nw + 1 + tw + 2;
+    if (sel && sh->iedit) {
+      ed_draw(t, sh->ied, vx, y, t->w - vx - 1);
+    } else {
+      tui_print(t, vx, y, sl_get(sh->nval, j), t->w - vx - 1, TUI_DEFAULT, TUI_DEFAULT, 0);
+    }
+    k = k + 1;
+  }
+}
+
+fn code_filter(sh: Sh*) {
+  sh->cshown = sl_new();
+  var f: string = s_lower(sh->cfilter->s);
+  var i: int64 = 0;
+  while (i < sh->dname->len) {
+    var k: string = sl_get(sh->dkind, i);
+    if (!s_eq(k, "var") && (slen(f) == 0 || s_contains(s_lower(sl_get(sh->dname, i)), f))) {
+      sl_push(sh->cshown, s_int(i));
+    }
+    i = i + 1;
+  }
+  tui_list_fit(sh->clist, sh->cshown->len, 1000);
+}
+
+fn code_selected(sh: Sh*) -> string {
+  if (sh->cshown->len == 0) {
+    return s_empty();
+  }
+  return sl_get(sh->dname, s_to_int(sl_get(sh->cshown, sh->clist->sel)));
+}
+
+fn draw_code(sh: Sh*) {
+  var t: Tui* = sh->t;
+  var hints: string = "↑↓ select · / filter · e edit · u undo · h history · esc back";
+  if (sh->cfiltering) {
+    hints = "type to filter · enter done · esc clear";
+  }
+  var title: string = "Code";
+  if (slen(sh->cfilter->s) > 0) {
+    title = "Code  /" + sh->cfilter->s;
+  }
+  view_frame(sh, title, hints);
+  if (sh->cfiltering) {
+    tui_print(t, 1, t->h - 2, " /", 2, sh->accent, TUI_DEFAULT, 0);
+    ed_draw(t, sh->cfilter, 4, t->h - 2, 30);
+  }
+  var top: int64 = 2;
+  var rows: int64 = t->h - 4;
+  var lw: int64 = t->w / 3;
+  if (lw > 34) {
+    lw = 34;
+  }
+  if (lw < 14) {
+    lw = 14;
+  }
+  tui_list_fit(sh->clist, sh->cshown->len, rows);
+  var k: int64 = 0;
+  while (k < rows) {
+    var j: int64 = sh->clist->top + k;
+    if (j >= sh->cshown->len) {
+      break;
+    }
+    var i: int64 = s_to_int(sl_get(sh->cshown, j));
+    var y: int64 = top + k;
+    var sel: bool = j == sh->clist->sel;
+    if (sel) {
+      tui_print(t, 1, y, "›", 1, sh->accent, TUI_DEFAULT, 0);
+    }
+    var label: string = sl_get(sh->dname, i);
+    var kind: string = sl_get(sh->dkind, i);
+    if (!s_eq(kind, "fn")) {
+      label = label + " (" + kind + ")";
+    }
+    var fg: int32 = TUI_DEFAULT;
+    var at: int32 = 0;
+    if (sel) {
+      fg = sh->accent;
+      at = TUI_BOLD;
+    }
+    var used: int64 = tui_print(t, 3, y, label, lw - 3, fg, TUI_DEFAULT, at);
+    if (slen(sl_get(sh->dpatch, i)) > 0 && 3 + used + 2 < lw) {
+      tui_print(t, 3 + used + 1, y, "patched", lw - used - 4, sh->accent, TUI_DEFAULT, TUI_DIM);
+    }
+    k = k + 1;
+  }
+  // the source of the selected one
+  var name: string = code_selected(sh);
+  if (slen(name) == 0) {
+    tui_print(t, 3, top, "nothing here", lw, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    return;
+  }
+  if (!s_eq(name, sh->csrc_name) && (sh->qkind->len == 0 || !sl_has(sh->qkind, "source"))) {
+    sh->csrc_name = "…" + name;
+    send(sh, "source", name, ":source " + name);
+  }
+  var sx: int64 = lw + 2;
+  var sw: int64 = t->w - sx - 1;
+  if (sw < 8 || !s_eq(name, sh->csrc_name)) {
+    return;
+  }
+  var y2: int64 = top;
+  var hist: int64 = 0;
+  var i2: int64 = 0;
+  while (i2 < sh->csrc->len && y2 < top + rows) {
+    var l: string = s_replace(sl_get(sh->csrc, i2), "\t", "  ");
+    if (i2 == 0) {
+      tui_print(t, sx, y2, l, sw, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    } else if (s_starts(l, "@@ ")) {
+      hist = hist + 1;
+      if (hist > 1 && !sh->chist) {
+        break;
+      }
+      y2 = y2 + 1;
+      if (y2 >= top + rows) {
+        break;
+      }
+      tui_print(t, sx, y2, s_from(l, 3), sw, sh->accent, TUI_DEFAULT, TUI_DIM);
+    } else if (hist > 0) {
+      tui_print(t, sx + 2, y2, l, sw - 2, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    } else {
+      tui_print(t, sx, y2, l, sw, TUI_DEFAULT, TUI_DEFAULT, 0);
+    }
+    y2 = y2 + 1;
+    i2 = i2 + 1;
+  }
+}
+
+fn draw_watch(sh: Sh*) {
+  var t: Tui* = sh->t;
+  var hints: string = "↑↓ select · a add · d remove · i inspect · esc back";
+  if (sh->wadd) {
+    hints = "enter add · esc cancel";
+  }
+  view_frame(sh, "Watch", hints);
+  var top: int64 = 2;
+  var rows: int64 = t->h - 4;
+  if (sh->wadd) {
+    tui_print(t, 1, t->h - 2, " watch ", 7, sh->accent, TUI_DEFAULT, 0);
+    ed_draw(t, sh->wed, 8, t->h - 2, t->w - 9);
+  }
+  var n: int64 = sh->wnames->len;
+  if (n == 0) {
+    tui_print(t, 3, top, "watching nothing · a adds an expression", t->w - 4, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
+    return;
+  }
+  tui_list_fit(sh->wlist, n, rows);
+  var nw: int64 = 6;
+  var i: int64 = 0;
+  while (i < n) {
+    var w: int64 = tui_width(sl_get(sh->wnames, i));
+    if (w > nw) {
+      nw = w;
+    }
+    i = i + 1;
+  }
+  if (nw > t->w / 3) {
+    nw = t->w / 3;
+  }
+  var k: int64 = 0;
+  while (k < rows) {
+    var j: int64 = sh->wlist->top + k;
+    if (j >= n) {
+      break;
+    }
+    var y: int64 = top + k;
+    var sel: bool = j == sh->wlist->sel;
+    var fg: int32 = TUI_DEFAULT;
+    if (sel) {
+      tui_print(t, 1, y, "›", 1, sh->accent, TUI_DEFAULT, 0);
+      fg = sh->accent;
+    }
+    tui_print(t, 3, y, sl_get(sh->wnames, j), nw, fg, TUI_DEFAULT, 0);
+    tui_print(t, 3 + nw + 2, y, sl_get(sh->wvals, j), t->w - nw - 6, TUI_DEFAULT, TUI_DEFAULT, 0);
+    k = k + 1;
+  }
+}
+
+fn draw_log(sh: Sh*) {
+  var t: Tui* = sh->t;
+  var n: int64 = sh->plog->len;
+  var rows: int64 = t->h - 4;
+  if (sh->lscroll > n - rows) {
+    sh->lscroll = n - rows;
+  }
+  if (sh->lscroll < 0) {
+    sh->lscroll = 0;
+  }
+  var last: int64 = n - sh->lscroll;
+  var first: int64 = last - rows;
+  if (first < 0) {
+    first = 0;
+  }
+  var pos: string = s_int(first + 1) + "-" + s_int(last) + " of " + s_int(n);
+  if (sh->lscroll == 0) {
+    pos = pos + " · live";
+  }
+  if (n == 0) {
+    pos = "no output yet";
+  }
+  view_frame(sh, "Program output  " + pos, "pgup/pgdn ↑↓ scroll · end live · esc back");
+  var j: int64 = first;
+  var y: int64 = 2;
+  while (j < last && y < t->h - 2) {
+    tui_print(t, 3, y, sl_get(sh->plog, j), t->w - 4, TUI_DEFAULT, TUI_DEFAULT, 0);
+    j = j + 1;
+    y = y + 1;
+  }
+  sh->held = 0;
+}
+
+fn draw_help(sh: Sh*) {
+  var t: Tui* = sh->t;
+  view_frame(sh, "Help", "esc back");
+  var l: StrList* = sl_new();
+  sl_push(l, "EXPR                its value at the next shell_point(): world.pop + 1");
+  sl_push(l, "STATEMENT;          runs it there: world.food = 1000;");
+  sl_push(l, "fn NAME(...) {{...}  redefines NAME, kept until undo");
+  sl_push(l, "edit NAME           NAME in $EDITOR, patched in when saved");
+  sl_push(l, "");
+  sl_push(l, "ctrl+p              pause at shell_point() / resume");
+  sl_push(l, "ctrl+n              step: one tick, paused again");
+  sl_push(l, "ctrl+o              stream the program's output here / hold it");
+  sl_push(l, "/                   commands: /inspect /code /watch /log /pause-when ...");
+  sl_push(l, "tab                 complete a name   ↑↓ history   pgup/pgdn scroll");
+  sl_push(l, "ctrl+l              redraw            ctrl+d, /quit  leave (the program stops)");
+  sl_push(l, "");
+  sl_push(l, "A pause stops the thread that calls shell_point(); the program's other");
+  sl_push(l, "threads keep running. While paused, inputs, watches and patches still work.");
+  var i: int64 = 0;
+  while (i < l->len && 2 + i < t->h - 2) {
+    tui_print(t, 3, 2 + i, sl_get(l, i), t->w - 4, TUI_DEFAULT, TUI_DEFAULT, 0);
+    i = i + 1;
+  }
+  free(l);
+}
+
+fn draw(sh: Sh*) {
+  var t: Tui* = sh->t;
+  tui_clear(t);
+  if (sh->view == V_INSPECT) {
+    draw_inspect(sh);
+  } else if (sh->view == V_CODE) {
+    draw_code(sh);
+  } else if (sh->view == V_WATCH) {
+    draw_watch(sh);
+  } else if (sh->view == V_LOG) {
+    draw_log(sh);
+  } else if (sh->view == V_HELP) {
+    draw_help(sh);
+  } else {
+    draw_main(sh);
+  }
+  tui_present(t);
+}
+
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+fn is_ctrl(ev: TuiEvent*, c: int32) -> bool {
+  return ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_CHAR && (ev->mods & TUI_MOD_CTRL) != 0 && ev->cp == c;
+}
+
+fn is_char(ev: TuiEvent*, c: int32) -> bool {
+  return ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_CHAR && ev->mods == 0 && ev->cp == c;
+}
+
+// Keys every view shares; true when handled.
+fn global_key(sh: Sh*, ev: TuiEvent*) -> bool {
+  if (is_ctrl(ev, 100)) {
+    sh->quit = true;
+    return true;
+  }
+  if (is_ctrl(ev, 112) || (ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_F1 + 4)) {
+    toggle_pause(sh);
+    return true;
+  }
+  if (is_ctrl(ev, 110) || (ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_F1 + 5)) {
+    push(sh, "in", "step");
+    send(sh, "input", "step", "step");
+    return true;
+  }
+  if (is_ctrl(ev, 111)) {
+    toggle_stream(sh);
+    return true;
+  }
+  if (is_ctrl(ev, 108)) {
+    tui_invalidate(sh->t);
+    return true;
+  }
+  if (ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_F1) {
+    sh->view = V_HELP;
+    return true;
+  }
+  return false;
+}
+
+fn key_main(sh: Sh*, ev: TuiEvent*) {
+  var k: int32 = ev->key;
+  if (sh->pop != P_NONE && ev->kind == TUI_EV_KEY) {
+    if (k == TUI_KEY_UP || k == TUI_KEY_DOWN || (k == TUI_KEY_TAB && sh->pop == P_COMPLETE)) {
+      if (k == TUI_KEY_UP) {
+        sh->plist->sel = sh->plist->sel - 1;
+      } else {
+        sh->plist->sel = sh->plist->sel + 1;
+        if (sh->plist->sel >= sh->pitems->len) {
+          sh->plist->sel = 0;
+          sh->plist->top = 0;
+        }
+      }
+      tui_list_fit(sh->plist, sh->pitems->len, 8);
+      return;
+    }
+    if (k == TUI_KEY_ENTER && sh->pitems->len > 0) {
+      accept_pop(sh);
+      return;
+    }
+    if (k == TUI_KEY_TAB && sh->pop == P_PALETTE && sh->pitems->len > 0) {
+      var pick: string = sl_get(sh->pitems, sh->plist->sel);
+      ed_set(sh->ed, "/" + pick + " ");
+      sh->pop = P_NONE;
+      return;
+    }
+    if (k == TUI_KEY_ESC) {
+      sh->pop = P_NONE;
+      return;
+    }
+  }
+  if (ev->kind == TUI_EV_KEY) {
+    if (k == TUI_KEY_ENTER) {
+      var text: string = sh->ed->s;
+      ed_set(sh->ed, "");
+      sh->pop = P_NONE;
+      submit(sh, text);
+      return;
+    }
+    if (k == TUI_KEY_TAB) {
+      complete(sh);
+      return;
+    }
+    if (k == TUI_KEY_UP) {
+      if (sh->hpos > 0) {
+        sh->hpos = sh->hpos - 1;
+        ed_set(sh->ed, sl_get(sh->hist, sh->hpos));
+      }
+      return;
+    }
+    if (k == TUI_KEY_DOWN) {
+      if (sh->hpos < sh->hist->len) {
+        sh->hpos = sh->hpos + 1;
+        var h: string = s_empty();
+        if (sh->hpos < sh->hist->len) {
+          h = sl_get(sh->hist, sh->hpos);
+        }
+        ed_set(sh->ed, h);
+      }
+      return;
+    }
+    if (k == TUI_KEY_PGUP) {
+      sh->scroll = sh->scroll + sh->t->h / 2;
+      return;
+    }
+    if (k == TUI_KEY_PGDN) {
+      sh->scroll = sh->scroll - sh->t->h / 2;
+      return;
+    }
+    if (k == TUI_KEY_END && sh->scroll > 0) {
+      sh->scroll = 0;
+      return;
+    }
+    if (k == TUI_KEY_ESC) {
+      ed_set(sh->ed, "");
+      return;
+    }
+    if (is_ctrl(ev, 99)) {
+      ed_set(sh->ed, "");
+      return;
+    }
+  }
+  if (ed_key(sh->ed, ev)) {
+    palette_update(sh);
+    if (sh->pop == P_COMPLETE) {
+      sh->pop = P_NONE;
+    }
+  }
+}
+
+fn key_inspect(sh: Sh*, ev: TuiEvent*) {
+  var k: int32 = ev->key;
+  if (sh->iedit) {
+    if (k == TUI_KEY_ESC) {
+      sh->iedit = false;
+      return;
+    }
+    if (k == TUI_KEY_ENTER) {
+      sh->iedit = false;
+      var e: string = sl_get(sh->nexpr, sh->ilist->sel);
+      var line: string = e + " = " + s_trim(sh->ied->s) + ";";
+      if (!is_path(e)) {
+        line = "var _e = &(" + e + "); *_e = " + s_trim(sh->ied->s) + ";";
+      }
+      push(sh, "in", line);
+      send(sh, "input", line, line);
+      return;
+    }
+    ed_key(sh->ied, ev);
+    return;
+  }
+  if (k == TUI_KEY_ESC || is_char(ev, 113)) {
+    sh->view = V_MAIN;
+    return;
+  }
+  if (sh->nexpr->len == 0) {
+    return;
+  }
+  if (tui_list_key(sh->ilist, ev, sh->t->h - 4)) {
+    return;
+  }
+  var i: int64 = sh->ilist->sel;
+  if (k == TUI_KEY_ENTER || k == TUI_KEY_RIGHT) {
+    if (slen(sl_get(sh->nkids, i)) > 0 && slen(sl_get(sh->nopen, i)) == 0) {
+      send(sh, "fields", s_int(i), ":fields " + sl_get(sh->nexpr, i));
+    }
+    return;
+  }
+  if (k == TUI_KEY_LEFT) {
+    if (slen(sl_get(sh->nopen, i)) > 0 && i > 0) {
+      var d: int64 = s_to_int(sl_get(sh->ndepth, i));
+      sl_set(sh->nopen, i, s_empty());
+      while (i + 1 < sh->nexpr->len && s_to_int(sl_get(sh->ndepth, i + 1)) > d) {
+        sl_remove_at(sh->nexpr, i + 1);
+        sl_remove_at(sh->nname, i + 1);
+        sl_remove_at(sh->ntype, i + 1);
+        sl_remove_at(sh->nval, i + 1);
+        sl_remove_at(sh->nkids, i + 1);
+        sl_remove_at(sh->ndepth, i + 1);
+        sl_remove_at(sh->nopen, i + 1);
+      }
+    } else {
+      // to the parent
+      var d2: int64 = s_to_int(sl_get(sh->ndepth, i));
+      while (i > 0 && s_to_int(sl_get(sh->ndepth, i)) >= d2) {
+        i = i - 1;
+      }
+      sh->ilist->sel = i;
+    }
+    return;
+  }
+  if (is_char(ev, 101)) {
+    sh->iedit = true;
+    sh->ied = ed_new(sl_get(sh->nval, i));
+    return;
+  }
+  if (is_char(ev, 114)) {
+    send(sh, "fields", "-1", ":fields " + sh->iroot);
+  }
+}
+
+fn key_code(sh: Sh*, ev: TuiEvent*) {
+  var k: int32 = ev->key;
+  if (sh->cfiltering) {
+    if (k == TUI_KEY_ESC) {
+      ed_set(sh->cfilter, "");
+      sh->cfiltering = false;
+    } else if (k == TUI_KEY_ENTER) {
+      sh->cfiltering = false;
+    } else if (k == TUI_KEY_UP || k == TUI_KEY_DOWN) {
+      tui_list_key(sh->clist, ev, sh->t->h - 4);
+      return;
+    } else {
+      ed_key(sh->cfilter, ev);
+    }
+    sh->clist->sel = 0;
+    sh->clist->top = 0;
+    code_filter(sh);
+    return;
+  }
+  if (k == TUI_KEY_ESC || is_char(ev, 113)) {
+    sh->view = V_MAIN;
+    return;
+  }
+  if (tui_list_key(sh->clist, ev, sh->t->h - 4)) {
+    return;
+  }
+  var name: string = code_selected(sh);
+  if (is_char(ev, 47)) {
+    sh->cfiltering = true;
+  } else if (is_char(ev, 101) && slen(name) > 0) {
+    var at: int64 = sl_index(sh->dname, name);
+    if (at >= 0 && !s_eq(sl_get(sh->dkind, at), "fn")) {
+      push(sh, "err", "edit works on functions; " + name + " is a " + sl_get(sh->dkind, at));
+      return;
+    }
+    edit(sh, name);
+    sh->csrc_name = s_empty();
+  } else if (is_char(ev, 117) && slen(name) > 0) {
+    var line: string = "undo " + name;
+    push(sh, "in", line);
+    send(sh, "input", line, line);
+    sh->csrc_name = s_empty();
+  } else if (is_char(ev, 104)) {
+    sh->chist = !sh->chist;
+  }
+}
+
+fn key_watch(sh: Sh*, ev: TuiEvent*) {
+  var k: int32 = ev->key;
+  if (sh->wadd) {
+    if (k == TUI_KEY_ESC) {
+      sh->wadd = false;
+    } else if (k == TUI_KEY_ENTER) {
+      sh->wadd = false;
+      var e: string = s_trim(sh->wed->s);
+      if (slen(e) > 0) {
+        push(sh, "in", "watch " + e);
+        send(sh, "input", "watch " + e, "watch " + e);
+      }
+    } else {
+      ed_key(sh->wed, ev);
+    }
+    return;
+  }
+  if (k == TUI_KEY_ESC || is_char(ev, 113)) {
+    sh->view = V_MAIN;
+    return;
+  }
+  if (tui_list_key(sh->wlist, ev, sh->t->h - 4)) {
+    return;
+  }
+  if (is_char(ev, 97)) {
+    sh->wadd = true;
+    sh->wed = ed_new("");
+  } else if (is_char(ev, 100) && sh->wnames->len > 0) {
+    var n: string = sl_get(sh->wnames, sh->wlist->sel);
+    push(sh, "in", "unwatch " + n);
+    send(sh, "input", "unwatch " + n, "unwatch " + n);
+  } else if ((is_char(ev, 105) || k == TUI_KEY_ENTER) && sh->wnames->len > 0) {
+    open_inspect(sh, sl_get(sh->wnames, sh->wlist->sel));
+  }
+}
+
+fn key_log(sh: Sh*, ev: TuiEvent*) {
+  var k: int32 = ev->key;
+  var page: int64 = sh->t->h - 5;
+  if (k == TUI_KEY_ESC || is_char(ev, 113)) {
+    sh->view = V_MAIN;
+  } else if (k == TUI_KEY_PGUP) {
+    sh->lscroll = sh->lscroll + page;
+  } else if (k == TUI_KEY_PGDN) {
+    sh->lscroll = sh->lscroll - page;
+  } else if (k == TUI_KEY_UP) {
+    sh->lscroll = sh->lscroll + 1;
+  } else if (k == TUI_KEY_DOWN) {
+    sh->lscroll = sh->lscroll - 1;
+  } else if (k == TUI_KEY_END) {
+    sh->lscroll = 0;
+  } else if (k == TUI_KEY_HOME) {
+    sh->lscroll = sh->plog->len;
+  }
+}
+
+fn on_key(sh: Sh*, ev: TuiEvent*) {
+  var typing: bool = (sh->view == V_INSPECT && sh->iedit) || (sh->view == V_CODE && sh->cfiltering) || (sh->view == V_WATCH && sh->wadd);
+  if (!typing || ev->kind != TUI_EV_KEY || ev->key != TUI_KEY_CHAR || (ev->mods & TUI_MOD_CTRL) != 0) {
+    if (global_key(sh, ev)) {
+      return;
+    }
+  }
+  if (sh->view == V_INSPECT) {
+    key_inspect(sh, ev);
+  } else if (sh->view == V_CODE) {
+    key_code(sh, ev);
+  } else if (sh->view == V_WATCH) {
+    key_watch(sh, ev);
+  } else if (sh->view == V_LOG) {
+    key_log(sh, ev);
+  } else if (sh->view == V_HELP) {
+    if (ev->kind == TUI_EV_KEY && (ev->key == TUI_KEY_ESC || is_char(ev, 113) || ev->key == TUI_KEY_ENTER)) {
+      sh->view = V_MAIN;
+    }
+  } else {
+    key_main(sh, ev);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+fn sh_new(dir: string) -> Sh* {
+  var sh: Sh* = new Sh;
+  sh->dir = dir;
+  sh->rbuf = buf_new();
+  sh->skind = sl_new();
+  sh->stext = sl_new();
+  sh->scroll = 0;
+  sh->plog = sl_new();
+  sh->held = 0;
+  sh->stream = false;
+  sh->name = s_empty();
+  sh->tick = "0";
+  sh->paused = false;
+  sh->why = s_empty();
+  sh->alive = true;
+  sh->patches = "0";
+  sh->cond = s_empty();
+  sh->exitcode = s_empty();
+  sh->wnames = sl_new();
+  sh->wvals = sl_new();
+  sh->qkind = sl_new();
+  sh->qarg = sl_new();
+  sh->resp = sl_new();
+  sh->ready = false;
+  sh->ended = false;
+  sh->quit = false;
+  sh->editing = false;
+  sh->ed = ed_new("");
+  sh->hist = sl_new();
+  var hr: FsRead = fs_read(dir + "/history");
+  if (hr.ok) {
+    sh->hist = s_lines(hr.data);
+  }
+  sh->hpos = sh->hist->len;
+  sh->pop = P_NONE;
+  sh->plist = tui_list_new();
+  sh->pitems = sl_new();
+  sh->pdescs = sl_new();
+  sh->view = V_MAIN;
+  sh->nexpr = sl_new();
+  sh->nname = sl_new();
+  sh->ntype = sl_new();
+  sh->nval = sl_new();
+  sh->nkids = sl_new();
+  sh->ndepth = sl_new();
+  sh->nopen = sl_new();
+  sh->ilist = tui_list_new();
+  sh->iroot = s_empty();
+  sh->ierr = s_empty();
+  sh->iedit = false;
+  sh->ied = ed_new("");
+  sh->dkind = sl_new();
+  sh->dname = sl_new();
+  sh->dwhere = sl_new();
+  sh->dpatch = sl_new();
+  sh->cshown = sl_new();
+  sh->clist = tui_list_new();
+  sh->cfilter = ed_new("");
+  sh->cfiltering = false;
+  sh->csrc_name = s_empty();
+  sh->csrc = sl_new();
+  sh->chist = false;
+  sh->cwant = s_empty();
+  sh->wlist = tui_list_new();
+  sh->wadd = false;
+  sh->wed = ed_new("");
+  sh->lscroll = 0;
+  sh->accent = tui_rgb(215, 119, 87);
+  sh->red = tui_rgb(224, 108, 117);
+  return sh;
+}
+
+fn usage() -> int32 {
+  err_line("usage: mbuild-shell --dir SESSION_DIR -- MBUILD shell [ARGS...] --serve");
+  err_line("  (mbuild shell starts it on a terminal; it is not meant to be run by hand)");
+  return 2;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  var dir: string = s_empty();
+  var cmd: StrList* = sl_new();
+  var i: int32 = 1;
+  while (i < argc) {
+    var a: string = s_from_c(argv[i]);
+    i = i + 1;
+    if (s_eq(a, "--dir") && i < argc) {
+      dir = s_from_c(argv[i]);
+      i = i + 1;
+    } else if (s_eq(a, "--")) {
+      while (i < argc) {
+        sl_push(cmd, s_from_c(argv[i]));
+        i = i + 1;
+      }
+    }
+  }
+  if (slen(dir) == 0 || cmd->len == 0) {
+    return usage();
+  }
+  fs_mkdirs(dir);
+  var sh: Sh* = sh_new(dir);
+  g_sh = sh;
+  if (!start_backend(sh, cmd)) {
+    err_line("mbuild-shell: could not start " + sl_join(cmd, " "));
+    return 1;
+  }
+  var t: Tui* = tui_open();
+  if (t == (Tui*)0) {
+    err_line("mbuild-shell: stdin and stdout must be a terminal");
+    sys_kill(sh->pid);
+    return 1;
+  }
+  sh->t = t;
+  var ev: TuiEvent;
+  while (!sh->quit) {
+    draw(sh);
+    var k: int32 = tui_poll(t, 100, sh->fout, &ev);
+    drain(sh);
+    check_ended(sh);
+    if (k == TUI_EV_KEY || k == TUI_EV_PASTE) {
+      on_key(sh, &ev);
+    } else if (k == TUI_EV_QUIT) {
+      sh->quit = true;
+    }
+  }
+  // leave: the backend stops the program
+  if (!sh->ended) {
+    sys_fd_write(sh->fin, ":q\n");
+    var t0: int64 = sys_now_ms();
+    while (sys_pid_alive(sh->pid) && sys_now_ms() - t0 < 3000) {
+      drain(sh);
+      sys_sleep_ms(10);
+    }
+    if (sys_pid_alive(sh->pid)) {
+      sys_kill(sh->pid);
+    }
+  }
+  tui_close(t);
+  tui_free(t);
+  sys_fd_close(sh->fin);
+  sys_fd_close(sh->fout);
+  sys_remove_file(dir + "/tui.in");
+  sys_remove_file(dir + "/tui.out");
+  sys_remove_file(dir + "/tui.pid");
+  return 0;
+}

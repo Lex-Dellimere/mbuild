@@ -4,14 +4,16 @@ fn project() {
   mb_package("mbuild", "0.2.0");
   mb_targets("linux, windows");
   mb_bin("mbuild", "src/main.mettle");
+  mb_bin("mbuild-shell", "cmd/mbuild-shell/main.mettle");
   mb_profile("release");
   mb_set("optimize", "full");
 }
 
 fn deps() {
+  mb_dep_path("tui", "lib/tui");
 }
 
-// install: build a release mbuild, copy it to --to DIR (default ~/.local/bin), then run its setup (--home, --from, --no-compiler, --yes)
+// install: build a release mbuild and mbuild-shell, copy them to --to DIR (default ~/.local/bin), then run mbuild's setup (--home, --from, --no-compiler, --yes)
 fn cmd_install(a: MbArgs*) -> int32 {
   var dir: string = mb_opt(a, "--to", mb_home() + "/.local/bin");
   if (mb_mbuild("build -r -t host") != 0) { return 1; }
@@ -19,6 +21,11 @@ fn cmd_install(a: MbArgs*) -> int32 {
   var dst: string = dir + "/mbuild" + mb_exe_ext();
   if (!mb_copy(mb_out("mbuild", mb_os(), "release"), dst)) { mb_fail("cannot copy to " + dst); }
   mb_say("installed " + dst);
+  if (mb_os() == "linux") {
+    var tui: string = dir + "/mbuild-shell";
+    if (!mb_copy(mb_out("mbuild-shell", "linux", "release"), tui)) { mb_fail("cannot copy to " + tui); }
+    mb_say("installed " + tui);
+  }
   var c: MbCmd* = mb_cmd(dst);
   mb_cmd_arg(c, "setup");
   var home: string = mb_opt(a, "--home", "");
@@ -37,10 +44,11 @@ fn cmd_selfcheck(a: MbArgs*) -> int32 {
 
 // dist: release builds for every target, packed into dist/mbuild-VERSION-OS-x64.tar.gz
 fn cmd_dist(a: MbArgs*) -> int32 {
-  if (mb_mbuild("build -r -t all") != 0) { return 1; }
+  if (mb_mbuild("build mbuild -r -t all") != 0) { return 1; }
+  if (mb_mbuild("build mbuild-shell -r -t linux") != 0) { return 1; }
   mb_mkdirs("dist");
   var v: string = mb_version();
-  var rc: int32 = mb_sh("tar -czf dist/mbuild-" + v + "-linux-x64.tar.gz -C build/linux/release mbuild");
+  var rc: int32 = mb_sh("tar -czf dist/mbuild-" + v + "-linux-x64.tar.gz -C build/linux/release mbuild mbuild-shell");
   if (rc != 0) { return rc; }
   return mb_sh("tar -czf dist/mbuild-" + v + "-windows-x64.tar.gz -C build/windows/release mbuild.exe");
 }

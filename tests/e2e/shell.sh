@@ -282,6 +282,28 @@ answers=$(awk '/^mettle> harvest\(10\)/ { f = 1; next } f && !/^tick / { print; 
 cp "$here/examples/live/src/rules.mettle" "$W/src/"
 gone "the program stops (r session)" "$EXE"
 
+echo "== the full screen (mbuild-shell in a pty)"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "note: tui pty test skipped (no python3)"
+else
+  ( cd "$here" && "$MB" build mbuild-shell -t host --quiet ) >"$T/tui-build.log" 2>&1 && cp "$here/build/linux/debug/mbuild-shell" "$T/mbuild-shell"
+  [ -x "$T/mbuild-shell" ] && ok "mbuild builds mbuild-shell (lib/tui by path)" || bad "mbuild builds mbuild-shell" "$(cat "$T/tui-build.log")"
+  for r in "" --release; do
+    "$METTLE" --build $r "$here/cmd/mbuild-shell/main.mettle" -o "$T/mbuild-shell.chk" >"$T/tui-chk.log" 2>&1
+    n=$(grep -c '^warning' "$T/tui-chk.log")
+    [ "$n" = 0 ] && ok "mbuild-shell ${r:-debug}: no warnings" || bad "mbuild-shell ${r:-debug}: no warnings" "$(cat "$T/tui-chk.log")"
+  done
+  rm -f "$T/mbuild-shell.chk"
+  mkdir -p "$T/cap"
+  timeout 240 python3 -I "$here/tests/e2e/shell_tui.py" "$MB" "$W" "$T/cap" >"$T/tui.pty.out" 2>&1
+  sed 's/^/  /' "$T/tui.pty.out" | grep -v '^  PASS' | grep -v 'shell_tui:'
+  p=$(grep -c '^PASS ' "$T/tui.pty.out"); f=$(grep -c '^FAIL ' "$T/tui.pty.out")
+  pass=$((pass + p)); failn=$((failn + f))
+  grep -q '^shell_tui: [0-9]* passed, 0 failed$' "$T/tui.pty.out" && ok "tui pty session ran to the end" || bad "tui pty session ran to the end" "$(tail -20 "$T/tui.pty.out")"
+  gone "the program stops (tui)" "$EXE"
+  rm -f "$T/mbuild-shell"
+fi
+
 echo "== a program without shell_point"
 sed -e '/shell_point();/d' "$W/src/main.mettle" >"$T/main.tmp" && cp "$T/main.tmp" "$W/src/main.mettle"
 printf 'world.pop\n:q\n' >"$T/in3"

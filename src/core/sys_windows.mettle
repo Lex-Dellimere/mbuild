@@ -205,6 +205,10 @@ export fn sys_fd_drain(fd: int32, b: Buf*) -> int64 {
   return 0;
 }
 
+export fn sys_fd_write(fd: int32, s: string) -> bool {
+  return false;
+}
+
 export fn sys_fd_close(fd: int32) {
 }
 
