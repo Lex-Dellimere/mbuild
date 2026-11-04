@@ -799,6 +799,11 @@ fn bx_unit_add(us: BxUnits*, b: BinInfo*, file: string, ti: int64, target: strin
 // compiler, whatever -t says.
 fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
   var us: BxUnits* = bx_units_new();
+  var ci: int64 = 0;
+  while (ci < bs->n) {
+    bx_check_bin(s, &bs->items[ci]);
+    ci = ci + 1;
+  }
   var ti: int64 = 0;
   while (ti < s->targets->len) {
     var bi: int64 = 0;
@@ -815,7 +820,6 @@ fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
   while (fi < bs->n) {
     var fb: BinInfo* = &bs->items[fi];
     if (bx_freestanding(fb)) {
-      bx_check_freestanding(s->p, fb);
       bx_unit_add(us, fb, fb->entry, -1, fb->triple, bx_host_mettle(s));
     }
     fi = fi + 1;
@@ -823,26 +827,23 @@ fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
   return us;
 }
 
-// A freestanding bin has no runtime: no C, no libraries (15.7).
-fn bx_check_freestanding(p: Project*, b: BinInfo*) {
-  var why: string = "";
-  if (man_has_c(p->man)) {
-    why = "this package has C code (mb_c_sources)";
-  }
-  var os: StrList* = sl_of("linux");
-  sl_push(os, "windows");
+// A bin that cannot be built as declared stops the command (15.7).
+fn bx_check_bin(s: BxSess*, b: BinInfo*) {
   var i: int64 = 0;
-  while (slen(why) == 0 && i < os->len) {
-    var libs: StrList* = man_os_list(p->man, "link.libs", sl_get(os, i));
-    if (libs->len > 0) {
-      why = "this package links libraries (mb_link_libs)";
+  while (i < s->p->man->nbins) {
+    var spec: BinSpec* = man_bin(s->p->man, i);
+    if (s_eq(spec->name, b->name)) {
+      var os: string = sl_get(s->targets, 0);
+      if (bx_freestanding(b)) {
+        os = "none";
+      }
+      var why: string = cmp_bin_problem(s->p, spec, bx_settings_of(s->p, s->profile, b->name, os));
+      if (slen(why) > 0) {
+        fail(why);
+      }
+      return;
     }
-    free(libs);
     i = i + 1;
-  }
-  free(os);
-  if (slen(why) > 0) {
-    fail_hint("bin " + b->name + " is freestanding (" + b->triple + ") but " + why, "a freestanding bin has no runtime to link against; build the C parts into another bin");
   }
 }
 
@@ -876,9 +877,6 @@ fn bx_unit_cmp(s: BxSess*, u: BxUnit*, bin_for_files: string) {
   if (!co->ok) {
     error_msg(co->err);
     exit_with(1);
-  }
-  if (co->has_swap && u->ti < 0) {
-    fail("bin " + u->b->name + " is freestanding (" + u->target + "): a swap component needs the runtime it does not have");
   }
   u->cmp = co;
   if (slen(co->entry) > 0) {
@@ -1507,7 +1505,9 @@ fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   var flags: StrList* = man_settings_flags(st, u->target);
   sl_extend(flags, p->opts->flags);
   if (u->ti < 0) {
-    bx_drop_hosted(flags, bin);
+    var kept: StrList* = cmp_freestanding_flags(flags);
+    free(flags);
+    flags = kept;
   }
   bx_check_support(s, u, st, flags, bin);
   if (s_eq(st->pgo, "use") && !fs_is_file(p_join(p->root, st->pgo_file))) {
@@ -1519,22 +1519,6 @@ fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   cmd_args(c, flags);
   free(flags);
   return st;
-}
-
-// The compiler refuses --safe and --check-effects on *-none targets (15.7).
-fn bx_drop_hosted(flags: StrList*, bin: string) {
-  var drop: StrList* = sl_of("--safe");
-  sl_push(drop, "--check-effects");
-  var i: int64 = 0;
-  while (i < drop->len) {
-    var at: int64 = sl_index(flags, sl_get(drop, i));
-    if (at >= 0) {
-      sl_remove_at(flags, at);
-      verbose("bin " + bin + " is freestanding: dropped " + sl_get(drop, i));
-    }
-    i = i + 1;
-  }
-  free(drop);
 }
 
 // The recorded profile a pgo = "use" build reads is an input of it.
@@ -1725,13 +1709,10 @@ struct BxJob {
 }
 
 // The compiler arguments that make the output of the unit's bin kind.
-fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, outp: string, st: Settings*) {
+fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, outp: string) {
   var b: BinInfo* = u->b;
   var file: string = bx_rel(p, u->entry);
   if (s_eq(b->kind, "flat")) {
-    if (slen(st->image_base) == 0) {
-      fail_hint("bin " + b->name + " is flat but has no image-base", "set it in mbuild.mettle: mb_for_bin(\"" + b->name + "\"); mb_set(\"image-base\", \"0x100000\");");
-    }
     cmd_path(c, file);
     cmd_arg(c, "--target");
     cmd_arg(c, b->triple);
@@ -1779,7 +1760,7 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   var st: Settings* = bx_add_flags(c, s, u);
   bx_add_include(c, p, s->ds, bx_unit_gen(u));
   cmd_args(c, nl->mettle_args);
-  bx_kind_args(c, p, u, j->outp, st);
+  bx_kind_args(c, p, u, j->outp);
   sl_extend(c->env, nl->env);
   bx_diag_env(c);
   c->cwd = p->root;
