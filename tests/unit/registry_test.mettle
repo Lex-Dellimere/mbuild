@@ -125,6 +125,10 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     }
     i = i + 1;
   }
+  // absent arguments read as empty, not past the list
+  while (args->len < 8) {
+    sl_push(args, s_empty());
+  }
   var cmd: string = sl_get(args, 0);
   if (s_eq(cmd, "sha-string")) {
     say(sha_string(sl_get(args, 1)));
