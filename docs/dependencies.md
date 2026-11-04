@@ -73,7 +73,11 @@ error: strutil@main: registry packages have versions only (v1.2.0, v1, latest)
 ```
 
 A path package's `mbuild.mettle` is read for its dependencies, C code and
-components; its commands, hooks, profiles and registries are ignored.
+components; its commands, hooks, profiles and registries are ignored. A
+directory with no `mbuild.mettle` works too, as plain source: no
+dependencies, no C code, no bins. The name you give must match the
+package's `mb_package` name; the directory name doesn't matter. An absolute
+path stays absolute in `mettle.deps`.
 
 ## Minimal version selection
 
