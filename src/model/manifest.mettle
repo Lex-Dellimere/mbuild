@@ -81,6 +81,8 @@ export struct Manifest {
   targets: StrList*;
   flags: StrList*;
   prelude: bool;
+  live_watch: StrList*;   // [live] watch: globs `mbuild live` / `mbuild shell` poll
+  live_preview: string;   // [live] preview: left|right|top|bottom|off, "" unset
   bins: BinSpec*;
   nbins: int64;
   deps: DepSpec*;
@@ -535,6 +537,11 @@ fn mnx_deps(m: Manifest*) {
 // Unknown names
 // ---------------------------------------------------------------------------
 
+// A preview side: mb_preview / --preview.
+export fn man_preview_side(s: string) -> bool {
+  return s_eq(s, "left") || s_eq(s, "right") || s_eq(s, "top") || s_eq(s, "bottom") || s_eq(s, "off");
+}
+
 fn mnx_known_keys(section: string) -> StrList* {
   if (s_eq(section, "package")) { return mnx_list("name version mettle toolchain include description license repository authors import-root"); }
   if (s_eq(section, "build")) { return mnx_list("targets flags prelude agents"); }
@@ -554,6 +561,7 @@ fn mnx_known_keys(section: string) -> StrList* {
   if (s_starts(section, "registry.")) { return mnx_list("url"); }
   if (s_starts(section, "service.")) { return mnx_list("cmd port wait env"); }
   if (s_eq(section, "rules")) { return mnx_list("files"); }
+  if (s_eq(section, "live")) { return mnx_list("watch preview"); }
   if (s_eq(section, "tools")) { return mnx_list("cc cc-windows mettle-linux mettle-windows pkg-config"); }
   if (s_eq(section, "c") || s_eq(section, "c.linux") || s_eq(section, "c.windows")) {
     return mnx_list("sources include cflags libs");
@@ -586,7 +594,7 @@ fn mnx_is_named(section: string, head: string) -> bool {
 }
 
 fn mnx_section_known(section: string) -> bool {
-  if (sl_has(mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins test-bins"), section)) {
+  if (sl_has(mnx_list("package build live dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins test-bins"), section)) {
     return true;
   }
   if (mnx_is_os_profile(section)) {
@@ -1717,6 +1725,8 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->targets = sl_new();
   m->flags = sl_new();
   m->prelude = false;
+  m->live_watch = sl_new();
+  m->live_preview = s_empty();
   m->bins = (BinSpec*)0;
   m->nbins = 0;
   m->deps = (DepSpec*)0;
@@ -1778,7 +1788,13 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   m->targets = mnx_strs(m, "build", "targets");
   m->flags = mnx_strs(m, "build", "flags");
   m->prelude = mnx_bool(m, "build", "prelude");
+  m->live_watch = mnx_strs(m, "live", "watch");
+  m->live_preview = mnx_str(m, "live", "preview");
   if (slen(m->error) > 0) {
+    return m;
+  }
+  if (slen(m->live_preview) > 0 && !man_preview_side(m->live_preview)) {
+    mnx_error(m, toml_get(doc, "live", "preview")->line, "mb_preview(\"" + m->live_preview + "\"): the side is left, right, top, bottom or off");
     return m;
   }
   var t: int64 = 0;

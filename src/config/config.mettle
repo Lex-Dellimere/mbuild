@@ -47,6 +47,7 @@ fn cfx_write_api(dir: string) {
   fs_write_if_changed(dir + "/api_linux.mettle", import_str "../mbapi/api_linux.mettle");
   fs_write_if_changed(dir + "/api_windows.mettle", import_str "../mbapi/api_windows.mettle");
   fs_write_if_changed(dir + "/shell.mettle", import_str "../mbapi/shell.mettle");
+  fs_write_if_changed(dir + "/live.mettle", import_str "../mbapi/live.mettle");
 }
 
 // A path as the user sees it from the working directory.
@@ -197,6 +198,9 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     sl_push(c, "mb_test_bin|" + key + "|");
   } else if (s_eq(section, "rules")) {
     sl_push(c, "mb_rule||");
+  } else if (s_eq(section, "live")) {
+    if (s_eq(key, "watch")) { sl_push(c, "mb_watch||"); }
+    if (s_eq(key, "preview")) { sl_push(c, "mb_preview||"); }
   } else if (s_eq(section, "tools")) {
     sl_push(c, "mb_tool|" + key + "|");
   } else if (s_eq(section, "components")) {

@@ -31,6 +31,9 @@ import "complete";
 import "services";
 import "services_linux" if linux;
 import "services_windows" if windows;
+import "live";
+import "live_linux" if linux;
+import "live_windows" if windows;
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -2372,6 +2375,8 @@ export fn build_cmd_run(p: Project*) -> int32 {
 // setup, host target only (15.4).
 export fn build_cmd_live(p: Project*) -> int32 {
   var bs: BinSet* = bx_run_bin(p, "live");
+  var lv: LiveSess* = lv_open(p, bs->items[0].name);
+  defer free(lv);
   if (p->opts->targets->len > 0 && !(p->opts->targets->len == 1 && (s_eq(sl_get(p->opts->targets, 0), sys_os()) || s_eq(sl_get(p->opts->targets, 0), "host")))) {
     fail("mbuild live runs on the host target only (" + sys_os() + ")");
   }
@@ -2394,16 +2399,24 @@ export fn build_cmd_live(p: Project*) -> int32 {
     // runs between (it then builds again, unchanged).
     var fc: Cmd* = bx_live_cmd(s, u, nl, outp, true);
     defer free(fc);
-    if (proc_run(fc) != 0) {
+    var fr: Captured = proc_capture_all(fc);
+    print(fr.out);
+    if (fr.code != 0) {
+      if (!lv_errors(lv, "build-error", fr.out)) {
+        lv_emit(lv, "build-error", "could not build " + u->b->name);
+      }
       return 1;
     }
+    lv_emit(lv, "built", s_empty());
+    lv->built = true;
     var bins: StrList* = sl_of(u->b->name);
     bx_hook(s, "post_build", t->target, t->out_dir, bins, bins);
   }
   var c: Cmd* = bx_live_cmd(s, u, nl, outp, false);
   defer free(c);
+  lv_env(lv, c->env);
   status("Live", bx_label(s, u->b, t));
-  return proc_run(c);
+  return lv_run(lv, c);
 }
 
 // The command of `mettle live`, or (first) of the build it starts with.
@@ -4667,20 +4680,25 @@ fn bx_init_cmds() {
   bx_fl("--no-services", "don't start the mb_service processes");
   bx_note("the exit code is the program's.");
   bx_note("mb_service processes start first, in order, each waited for on its port; they stop when the program exits. output in .mbuild/logs/NAME.log.");
-  bx_def("live", "run a program and patch it as you edit", "mbuild live [BIN] [-p PROFILE] [-- ARGS...]", "components.md");
+  bx_def("live", "run a program and patch it as you edit", "mbuild live [BIN] [-p PROFILE] [--preview SIDE] [-- ARGS...]", "project.md");
   bx_ex("mbuild live", "");
+  bx_ex("mbuild live --preview right", "MBUILD_PREVIEW=right for the program");
   bx_ex("mbuild use render=gl", "in another terminal: switch a component");
+  bx_fl("--preview SIDE", "left, right, top, bottom or off: MBUILD_PREVIEW for the program (default: mb_preview)");
   bx_note("saved files patch the running program at its next `quiesce;`. host target only.");
-  bx_def("shell", "a shell inside the running program", "mbuild shell [BIN] [-p PROFILE] [--plain] [--local] [--stream] [-- ARGS...]", "project.md");
+  bx_note("events go to .mbuild/live/BIN.events, one line each: changed PATH, removed PATH (the mb_watch files, polled every 150 ms), patched NAME, patch-error MSG, built, build-error MSG, paused, resumed, exited CODE. the program reads them with mblive_next (import \"mbuild/live\"); MBUILD_LIVE_EVENTS names the file.");
+  bx_def("shell", "a shell inside the running program", "mbuild shell [BIN] [-p PROFILE] [--plain] [--local] [--stream] [--preview SIDE] [-- ARGS...]", "project.md");
   bx_ex("mbuild shell", "build, start, then type at the prompt");
   bx_ex("mbuild shell --plain", "the line shell, also what a pipe gets");
   bx_ex("mbuild shell --local", "no program: each input runs on its own");
   bx_fl("--plain", "the line shell on a terminal too");
   bx_fl("--local", "evaluate in a small program that imports the project's code");
   bx_fl("--stream", "line shell: show the program's output above the prompt (it is held by default)");
+  bx_fl("--preview SIDE", "MBUILD_PREVIEW for the program, as for mbuild live");
   bx_note("on a terminal it is full screen (mbuild-shell, beside mbuild): ctrl+p pause/resume, ctrl+n step, ctrl+o stream output, / commands (/inspect EXPR, /code, /watch, /log), tab completes, ctrl+d quits.");
   bx_note("the program calls `shell_point();` (import \"mbuild/shell\") next to its `quiesce;`; elsewhere it is an empty function.");
   bx_note("inputs: an expression prints its value, a statement runs, `fn NAME(...) {{...}` redefines NAME; `edit NAME`, `undo [NAME]`, `r`, `pause`, `resume`, `step`, `pause when EXPR`, `watch EXPR`, `status`, `h NAME`, `i EXPR`, `:log`, `:q`. type `help` at the prompt.");
+  bx_note("it writes the same events as mbuild live (paused and resumed too) for mbuild/live.");
   bx_note("a pause holds the thread calling shell_point(), between ticks; inputs and patches still run. other threads keep running. globals and functions are in scope, locals are not. Linux only.");
   bx_def("test", "run @test functions and test programs", "mbuild test [NAMES | FILES...] [--filter S] [-r]", "project.md");
   bx_ex("mbuild test", "every file with an @test, then every test program");

@@ -22,7 +22,7 @@ import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
 fn mx_flag_names() -> StrList* {
-  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --stream --plain --serve --no-compiler --readme", 32);
+  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --stream --plain --serve --no-compiler --readme --preview", 32);
 }
 
 fn mx_bad_flag(a: string) {

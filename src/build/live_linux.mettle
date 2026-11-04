@@ -1,0 +1,104 @@
+// live_linux: `mettle live` as a child of one alph actor, its stdout and
+// stderr passed through and read for events, the mb_watch files polled on
+// a 150 ms timer.
+
+import "std/mem";
+import "../core/base";
+import "live";
+import "../core/sys_linux" if linux;
+import "../../third_party/alph/core/node" if linux;
+
+const LVL_TAG_TICK: int64 = 210;
+const LVL_TAG_SIGINT: int64 = 211;
+
+struct LvlRun {
+  lv: LiveSess*;
+  c: Cmd*;
+  h: int64;
+  out_h: int64;
+  err_h: int64;
+  buf: uint8*;
+  code: int64;
+}
+
+// What h has now: to fd and the event parser. False at its end.
+fn lvl_drain(ctx: AlphCtx*, s: LvlRun*, h: int64, fd: int32, b: Buf*) -> bool {
+  while (true) {
+    var n: int64 = alph_io_read(ctx, h, (rawptr)s->buf, 8192);
+    if (n == ALPH_IO_AGAIN) {
+      alph_io_arm(ctx, h, ALPH_IO_IN);
+      return true;
+    }
+    if (n <= 0) {
+      return false;
+    }
+    sys_fd_write(fd, s_view(s->buf, n));
+    buf_add(b, s_view(s->buf, n));
+    lv_feed(s->lv, b, false);
+  }
+  return true;
+}
+
+fn lvl_io(ctx: AlphCtx*, s: LvlRun*, h: int64) {
+  if (h == s->out_h && s->out_h != 0) {
+    if (!lvl_drain(ctx, s, h, 1, s->lv->outb)) {
+      alph_io_close(ctx, h);
+      s->out_h = 0;
+    }
+  } else if (h == s->err_h && s->err_h != 0) {
+    if (!lvl_drain(ctx, s, h, 2, s->lv->errb)) {
+      alph_io_close(ctx, h);
+      s->err_h = 0;
+    }
+  }
+}
+
+fn lvl_handle(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
+  var s: LvlRun* = (LvlRun*)ctx->state;
+  if (m->tag == ALPH_TAG_INIT) {
+    alph_trap_exits(ctx, true);
+    s->h = sys_proc_start_piped(ctx, s->c, &s->out_h, &s->err_h);
+    if (s->h <= 0) {
+      lv_emit(s->lv, "build-error", "cannot run " + s->c->tool.path);
+      alph_halt(ctx, 127);
+      return ALPH_CONTINUE;
+    }
+    alph_io_arm(ctx, s->out_h, ALPH_IO_IN);
+    alph_io_arm(ctx, s->err_h, ALPH_IO_IN);
+    alph_start_timer(ctx, 150, LVL_TAG_TICK, 0);
+  } else if (m->tag == ALPH_TAG_IO) {
+    lvl_io(ctx, s, m->ref);
+  } else if (m->tag == LVL_TAG_TICK) {
+    lv_poll(s->lv);
+    alph_start_timer(ctx, 150, LVL_TAG_TICK, 0);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT && m->ref == s->h) {
+    if (s->out_h != 0) {
+      lvl_io(ctx, s, s->out_h);
+    }
+    if (s->err_h != 0) {
+      lvl_io(ctx, s, s->err_h);
+    }
+    lv_feed(s->lv, s->lv->outb, true);
+    lv_feed(s->lv, s->lv->errb, true);
+    var code: int64 = m->arg;
+    if (s->lv->code >= 0) {
+      code = s->lv->code;
+    }
+    lv_emit(s->lv, "exited", s_int(code));
+    alph_halt(ctx, m->arg);
+  }
+  // Ctrl-C reaches `mettle live` too (same group); its end halts us
+  return ALPH_CONTINUE;
+}
+
+// Runs c (`mettle live ...`) to its end with lv's events; its exit code.
+export fn lv_run(lv: LiveSess*, c: Cmd*) -> int32 {
+  var s: LvlRun;
+  memset((rawptr)&s, 0, (int64)sizeof(LvlRun));
+  s.lv = lv;
+  s.c = c;
+  s.buf = (uint8*)malloc(8192);
+  var code: int64 = sys_node_run((rawptr)&s, (int64)sizeof(LvlRun), 8, LVL_TAG_SIGINT, &lvl_handle);
+  free(s.buf);
+  return (int32)code;
+}

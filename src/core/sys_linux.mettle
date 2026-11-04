@@ -426,6 +426,41 @@ export fn sys_list_dir(p: string, files: StrList*, dirs: StrList*) -> bool {
   return true;
 }
 
+// sys_list_dir without a process: getdents64, in the order the directory
+// gives (for polling: `mbuild live` scans mb_watch every 150 ms).
+export fn sys_scan_dir(p: string, files: StrList*, dirs: StrList*) -> bool {
+  var fd: int64 = syscall(257, -100, s_c(p), 0x90000, 0);   // O_RDONLY|O_DIRECTORY|O_CLOEXEC
+  if (fd < 0) {
+    return false;
+  }
+  var buf: uint8* = (uint8*)malloc(8192);
+  while (true) {
+    var n: int64 = syscall(217, fd, buf, 8192);
+    if (n <= 0) {
+      break;
+    }
+    var off: int64 = 0;
+    while (off < n) {
+      var reclen: int64 = (int64)buf[off + 16] | ((int64)buf[off + 17] << 8);
+      var kind: int64 = (int64)buf[off + 18];
+      var name: string = s_from_c((cstring)&buf[off + 19]);
+      if (!s_eq(name, ".") && !s_eq(name, "..")) {
+        if (kind == 4) {
+          sl_push(dirs, name);
+        } else if (kind == 0 && sys_stat(p + "/" + name).is_dir) {
+          sl_push(dirs, name);
+        } else {
+          sl_push(files, name);
+        }
+      }
+      off = off + reclen;
+    }
+  }
+  free(buf);
+  syscall(3, fd);
+  return true;
+}
+
 export fn sys_remove_file(p: string) -> bool {
   if (lx_is_dir(s_c(p)) != 0) {
     return false;
@@ -766,6 +801,30 @@ export fn sys_proc_start(ctx: AlphCtx*, c: Cmd*, log: string, keep_group: bool) 
   var h: int64 = alph_proc_spawn(ctx, &spec);
   free(spec.argv);
   free(spec.envp);
+  return h;
+}
+
+// sys_proc_start with stdout and stderr piped to *out_h and *err_h (IO
+// handles of the calling actor), stdin inherited, in mbuild's process group.
+export fn sys_proc_start_piped(ctx: AlphCtx*, c: Cmd*, out_h: int64*, err_h: int64*) -> int64 {
+  var args: StrList* = sl_new();
+  defer free(args);
+  sl_push(args, c->tool.path);
+  sl_extend(args, c->args);
+  var spec: AlphProcSpec;
+  memset((rawptr)&spec, 0, (int64)sizeof(AlphProcSpec));
+  spec.argv = lx_cstrs(args);
+  spec.envp = lx_cstrs(lx_child_env(c->env));
+  if (slen(c->cwd) > 0) {
+    spec.cwd = s_c(c->cwd);
+  }
+  spec.flags = ALPH_PROC_OUT | ALPH_PROC_ERR | ALPH_PROC_KEEP_GROUP;
+  flush_out();
+  var h: int64 = alph_proc_spawn(ctx, &spec);
+  free(spec.argv);
+  free(spec.envp);
+  *out_h = spec.stdout_h;
+  *err_h = spec.stderr_h;
   return h;
 }
 

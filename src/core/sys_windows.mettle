@@ -328,6 +328,10 @@ fn w_sl_free(l: StrList*) {
   free(l);
 }
 
+export fn sys_scan_dir(p: string, files: StrList*, dirs: StrList*) -> bool {
+  return sys_list_dir(p, files, dirs);
+}
+
 export fn sys_list_dir(p: string, files: StrList*, dirs: StrList*) -> bool {
   if (!w_is_dir(p)) {
     return false;

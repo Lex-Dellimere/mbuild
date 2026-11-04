@@ -885,6 +885,25 @@ export fn mb_tool(key: string, path: string) {
   mbi_put("tools", key, mbi_quote(path));
 }
 
+// Files `mbuild live` and `mbuild shell` watch beside the code, as globs from
+// the root ("shaders/**, assets/*.png"); each change is a line in the
+// program's events file (mbuild/live). Calls add up.
+export fn mb_watch(csv: string) {
+  var parts: MbiList* = mbi_split(csv, 44);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    mbi_append("live", "watch", mbi_quote(parts->items[i]));
+    i = i + 1;
+  }
+}
+
+// Where the program should put its preview window: "left", "right", "top",
+// "bottom" or "off"; `mbuild live` and `mbuild shell` pass it as MBUILD_PREVIEW.
+export fn mb_preview(side: string) {
+  mbi_put("live", "preview", mbi_quote(side));
+}
+
 // A file of @rule functions applied to every bin and test.
 export fn mb_rule(file: string) {
   mbi_append("rules", "files", mbi_quote(file));

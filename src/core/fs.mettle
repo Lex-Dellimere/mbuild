@@ -155,6 +155,20 @@ export fn fs_write(p: string, data: string) -> bool {
   return true;
 }
 
+// data added at the end of p in one write; false on an error.
+export fn fs_append(p: string, data: string) -> bool {
+  var fp: cstring = fopen(s_c(p), "ab");
+  if (fp == 0) {
+    return false;
+  }
+  var n: int64 = slen(data);
+  var put: int64 = 0;
+  if (n > 0) {
+    put = fwrite((cstring)data.chars, 1, n, fp);
+  }
+  return fclose(fp) == 0 && put == n;
+}
+
 export fn fs_write_if_changed(p: string, data: string) -> bool {
   var cur: FsRead = fs_read(p);
   if (cur.ok && s_eq(cur.data, data)) {

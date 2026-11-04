@@ -1,0 +1,9 @@
+// live_windows: `mettle live` run plainly; no events yet (reports/mbuild/missing.md).
+
+import "../core/base";
+import "../core/proc";
+import "live";
+
+export fn lv_run(lv: LiveSess*, c: Cmd*) -> int32 {
+  return proc_run(c);
+}

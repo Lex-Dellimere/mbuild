@@ -23,6 +23,7 @@ import "graph";
 import "toolchain";
 import "build";
 import "shell_term";
+import "live";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -83,6 +84,9 @@ struct ShxSess {
   exitf: string;       // the program's exit code, written when it ends
   ended: bool;         // it has exited and the shell leaves
   lead: string;        // in front of an answer
+  lv: LiveSess*;       // the events file and mb_watch (0: --local)
+  ev_paused: bool;     // what the last paused/resumed event said
+  ev_flips: int64;     // paused/resumed events so far
 }
 
 // ---------------------------------------------------------------------------
@@ -705,7 +709,9 @@ fn shx_define(ss: ShxSess*, line: string) {
   fs_write(file, next);
   var r2: Captured;
   var before: int64 = shx_patch_count(ss);
-  if (!shx_compile(ss, "", false, &r2)) {
+  var dok: bool = shx_compile(ss, "", false, &r2);
+  shx_ev_patch(ss, dok, r2.out, name);
+  if (!dok) {
     fs_write(file, old);
     shx_show_errors(r2.out);
     return;
@@ -832,7 +838,9 @@ fn shx_undo_at(ss: ShxSess*, k: int64) -> bool {
     }
   }
   var r: Captured;
-  if (!shx_compile(ss, "", false, &r)) {
+  var uok: bool = shx_compile(ss, "", false, &r);
+  shx_ev_patch(ss, uok, r.out, name);
+  if (!uok) {
     var i: int64 = 0;
     while (i < undo_files->len) {
       fs_write(sl_get(undo_files, i), sl_get(undo_texts, i));
@@ -917,7 +925,11 @@ fn shx_reload(ss: ShxSess*) {
   var changed: int64 = shx_copy_tree(ss, true);
   var before: int64 = shx_patch_count(ss);
   var r: Captured;
-  if (!shx_compile(ss, "", false, &r)) {
+  var rok: bool = shx_compile(ss, "", false, &r);
+  if (!rok || changed > 0) {
+    shx_ev_patch(ss, rok, r.out, s_empty());
+  }
+  if (!rok) {
     shx_show_errors(r.out);
     return;
   }
@@ -1354,6 +1366,10 @@ fn shx_report_exit(ss: ShxSess*) {
     }
     sys_sleep_ms(10);
   }
+  if (ss->lv != (LiveSess*)0) {
+    lv_poll(ss->lv);
+    lv_emit(ss->lv, "exited", code);
+  }
   sys_sleep_ms(60);
   ss->pend_ms = 0;
   shx_relay(ss);
@@ -1404,12 +1420,66 @@ fn shx_state(ss: ShxSess*) -> string {
       ss->paused = s_eq(s_from(l, 7), "1");
     }
   }
+  shx_ev_pause(ss, ss->paused);
   ss->why = "user";
   var pr: FsRead = fs_read(ss->pausef);
   if (pr.ok && s_starts(pr.data, "when")) {
     ss->why = "when";
   }
   return r.data;
+}
+
+// paused / resumed when the program's state turned.
+fn shx_ev_pause(ss: ShxSess*, paused: bool) {
+  if (ss->lv == (LiveSess*)0 || paused == ss->ev_paused) {
+    return;
+  }
+  ss->ev_paused = paused;
+  ss->ev_flips = ss->ev_flips + 1;
+  if (paused) {
+    lv_emit(ss->lv, "paused", s_empty());
+  } else {
+    lv_emit(ss->lv, "resumed", s_empty());
+  }
+}
+
+// Beside the prompt's wait: the mb_watch files and the state, every 150 ms.
+fn shx_live_tick(ss: ShxSess*) {
+  if (ss->lv == (LiveSess*)0 || sys_now_ms() - ss->lv->last_ms < 150) {
+    return;
+  }
+  if (ss->lv->globs->len == 0) {
+    ss->lv->last_ms = sys_now_ms();
+  }
+  lv_poll(ss->lv);
+  shx_state(ss);
+}
+
+// After a patch compile: a patched event per function ("Patch N: a, b" in
+// its output, else name), or the first error as patch-error.
+fn shx_ev_patch(ss: ShxSess*, ok: bool, out: string, name: string) {
+  if (ss->lv == (LiveSess*)0) {
+    return;
+  }
+  if (!ok) {
+    if (!lv_errors(ss->lv, "patch-error", out)) {
+      lv_emit(ss->lv, "patch-error", "could not patch " + name);
+    }
+    return;
+  }
+  var lines: StrList* = s_lines(out);
+  defer free(lines);
+  var any: bool = false;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    if (lv_patch_line(ss->lv, s_trim(sl_get(lines, i)))) {
+      any = true;
+    }
+    i = i + 1;
+  }
+  if (!any && slen(name) > 0) {
+    lv_emit(ss->lv, "patched", name);
+  }
 }
 
 // Up to the timeout for the state to show paused (want) at a tick past
@@ -1509,8 +1579,14 @@ fn shx_step(ss: ShxSess*) {
     return;
   }
   var at: int64 = ss->tick;
+  var flips: int64 = ss->ev_flips;
   fs_write(ss->stepf, "1\n");
   if (shx_await(ss, true, at)) {
+    if (ss->lv != (LiveSess*)0 && ss->ev_flips == flips) {
+      lv_emit(ss->lv, "resumed", s_empty());
+      lv_emit(ss->lv, "paused", s_empty());
+      ss->ev_flips = ss->ev_flips + 2;
+    }
     say("paused at tick " + s_int(ss->tick));
   }
 }
@@ -2112,6 +2188,7 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   while (true) {
     while (true) {
       var w: int32 = sys_wait_input(ss->fd, 100);
+      shx_live_tick(ss);
       var text: string = shx_take(ss);
       if (slen(text) > 0) {
         print(shx_term_above(prompt, line, at, text));
@@ -2216,6 +2293,7 @@ fn shx_read_plain(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   var c: int32 = -2;
   while (c == -2) {
     while ((sys_wait_input(ss->fd, 100) & 1) == 0) {
+      shx_live_tick(ss);
       shx_relay(ss);
       if (ss->serve) {
         shx_send_status(ss, false);
@@ -2334,6 +2412,17 @@ fn shx_start(ss: ShxSess*) -> bool {
   sys_remove_file(pidf);
   sys_remove_file(ss->exitf);
   var prog: string = sh_quote(sb->exe);
+  if (ss->lv != (LiveSess*)0) {
+    var env: StrList* = sl_new();
+    lv_env(ss->lv, env);
+    var k: int64 = env->len - 1;
+    while (k >= 0) {
+      prog = sh_quote(sl_get(env, k)) + " " + prog;
+      k = k - 1;
+    }
+    prog = "env " + prog;
+    free(env);
+  }
   var i: int64 = 0;
   while (i < sb->p->opts->passthrough->len) {
     prog = prog + " " + sh_quote(sl_get(sb->p->opts->passthrough, i));
@@ -2530,6 +2619,9 @@ export fn shell_cmd(p: Project*) -> int32 {
   ss->paused = false;
   ss->why = "user";
   ss->sent = s_empty();
+  ss->lv = (LiveSess*)0;
+  ss->ev_paused = false;
+  ss->ev_flips = 0;
   if (ss->serve) {
     ss->tty = false;
     ss->muted = false;
@@ -2560,8 +2652,11 @@ export fn shell_cmd(p: Project*) -> int32 {
   } else {
     ss->hook = ss->dir + "/gen/mbuild/shell.mettle";
     ss->entry = shx_tree_path(ss, ss->sb->entry);
+    ss->lv = lv_open(p, p_base(ss->sb->exe));
+    ss->lv->tree = ss->tree;
     shx_make_tree(ss);
     fs_write(ss->hook, shx_hook_text(ss, ""));
+    fs_write(ss->dir + "/gen/mbuild/live.mettle", import_str "../mbapi/live.mettle");
     status("Compiling", ss->sb->label);
     var c: Cmd* = shx_cmd(ss);
     cmd_arg(c, "--build");
@@ -2574,11 +2669,16 @@ export fn shell_cmd(p: Project*) -> int32 {
     var r: Captured = proc_capture_all(c);
     free(c);
     if (r.code != 0) {
+      if (!lv_errors(ss->lv, "build-error", r.out)) {
+        lv_emit(ss->lv, "build-error", "could not build " + ss->sb->label);
+      }
       shx_show_errors(r.out);
       error_msg("could not build " + ss->sb->label);
       sys_fd_close(ss->fd);
       return 1;
     }
+    lv_emit(ss->lv, "built", s_empty());
+    ss->lv->built = true;
     var how: string = "; its output is held (:log to see it, :unmute to stream it). help for help, :q to leave";
     if (!ss->muted) {
       how = "; its output streams above the prompt (:mute holds it). help for help, :q to leave";

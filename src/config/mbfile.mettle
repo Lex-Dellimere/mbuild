@@ -1034,6 +1034,7 @@ fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
   if (s_eq(f, "mb_replace_path") || s_eq(f, "mb_replace_version")) { return "replace"; }
   if (s_eq(f, "mb_component") || s_eq(f, "mb_component_on")) { return "component." + a0; }
   if (s_eq(f, "mb_rule")) { return "rules"; }
+  if (s_eq(f, "mb_watch") || s_eq(f, "mb_preview")) { return "live"; }
   if (s_eq(f, "mb_raw")) { return a0; }
   if (s_starts(f, "mb_c_")) { return mfx_os_section(cur, "c"); }
   if (s_starts(f, "mb_link_") || s_eq(f, "mb_pkgconfig")) { return mfx_os_section(cur, "link"); }

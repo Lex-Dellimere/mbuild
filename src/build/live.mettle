@@ -1,0 +1,462 @@
+// live: the preview side of `mbuild live` and `mbuild shell`: the mb_watch
+// files polled for changes, the events file the program reads through
+// mbuild/live, and the preview hint (docs/project.md#live-preview).
+//
+// The events file is .mbuild/live/<bin>.events, emptied at start; each
+// event is one whole line "KIND PAYLOAD" (KIND alone when there is none),
+// added in one write.
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../model/manifest";
+import "../model/project";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+export struct LiveSess {
+  root: string;
+  events: string;     // the events file, absolute
+  preview: string;    // MBUILD_PREVIEW, "" none
+  globs: StrList*;
+  snap: StrList*;     // "REL\tSTAMP" of the watched files, sorted
+  last_ms: int64;
+  tree: string;       // mbuild shell: errors name files here; "" none
+  loc: string;        // the "-- FILE:LINE:COL" an error line follows
+  built: bool;
+  code: int64;        // from "[live] ... exited with N", -1 none
+  outb: Buf*;         // partial lines of the child's stdout, stderr
+  errb: Buf*;
+}
+
+// --preview SIDE (taken out of rest), else mb_preview; "" none.
+fn lv_preview(p: Project*) -> string {
+  var v: string = s_empty();
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_starts(a, "--preview=")) {
+      v = s_from(a, 10);
+      sl_remove_at(p->opts->rest, i);
+    } else {
+      i = i + 1;
+    }
+  }
+  if (slen(v) == 0 && p->man != (Manifest*)0) {
+    v = p->man->live_preview;
+  }
+  if (slen(v) > 0 && !man_preview_side(v)) {
+    fail_hint("--preview takes left, right, top, bottom or off, not `" + v + "`", "mbuild live --preview right");
+  }
+  return v;
+}
+
+// The session for bin: its events file emptied, the watched files' state.
+export fn lv_open(p: Project*, bin: string) -> LiveSess* {
+  var lv: LiveSess* = new LiveSess;
+  lv->root = p->root;
+  lv->preview = lv_preview(p);
+  fs_mkdirs(p->state_dir + "/live");
+  lv->events = p->state_dir + "/live/" + bin + ".events";
+  fs_write(lv->events, s_empty());
+  lv->globs = sl_new();
+  if (p->man != (Manifest*)0) {
+    sl_extend(lv->globs, p->man->live_watch);
+  }
+  lv->snap = lv_scan(lv);
+  lv->last_ms = sys_now_ms();
+  lv->tree = s_empty();
+  lv->loc = s_empty();
+  lv->built = false;
+  lv->code = -1;
+  lv->outb = buf_new();
+  lv->errb = buf_new();
+  return lv;
+}
+
+// The program's environment: the events file and the preview hint.
+export fn lv_env(lv: LiveSess*, env: StrList*) {
+  if (s_eq(sys_os(), "linux")) {
+    var ev: string = "MBUILD_LIVE_EVENTS=" + lv->events;
+    sl_push(env, ev);
+  }
+  if (slen(lv->preview) > 0) {
+    var pv: string = "MBUILD_PREVIEW=" + lv->preview;
+    sl_push(env, pv);
+  }
+}
+
+// One event line; payload "" for a bare KIND. Newlines in it become spaces.
+export fn lv_emit(lv: LiveSess*, kind: string, payload: string) {
+  var b: Buf* = buf_new();
+  buf_add(b, kind);
+  if (slen(payload) > 0) {
+    buf_addb(b, 32);
+    var i: int64 = 0;
+    while (i < slen(payload)) {
+      var c: int32 = s_byte(payload, i);
+      if (c == 10 || c == 13) {
+        c = 32;
+      }
+      buf_addb(b, c);
+      i = i + 1;
+    }
+  }
+  buf_addb(b, 10);
+  var line: string = buf_take(b);
+  fs_append(lv->events, line);
+  free(line.chars);
+}
+
+// ---------------------------------------------------------------------------
+// mb_watch: globs, polled
+// ---------------------------------------------------------------------------
+
+fn lv_wild(s: string) -> bool {
+  return s_find_byte(s, 42) >= 0 || s_find_byte(s, 63) >= 0;
+}
+
+// * and ? within a segment, ** across any number of them.
+fn lv_glob(p: string, pi: int64, s: string, si: int64) -> bool {
+  var np: int64 = slen(p);
+  var ns: int64 = slen(s);
+  while (pi < np) {
+    var c: int32 = s_byte(p, pi);
+    if (c == 42 && pi + 1 < np && s_byte(p, pi + 1) == 42) {
+      var rest: int64 = pi + 2;
+      var whole: bool = rest < np && s_byte(p, rest) == 47;
+      if (whole) {
+        rest = rest + 1;
+      }
+      var k: int64 = si;
+      while (k <= ns) {
+        if ((!whole || k == si || s_byte(s, k - 1) == 47) && lv_glob(p, rest, s, k)) {
+          return true;
+        }
+        k = k + 1;
+      }
+      return false;
+    }
+    if (c == 42) {
+      var j: int64 = si;
+      while (true) {
+        if (lv_glob(p, pi + 1, s, j)) {
+          return true;
+        }
+        if (j >= ns || s_byte(s, j) == 47) {
+          return false;
+        }
+        j = j + 1;
+      }
+    }
+    if (si >= ns) {
+      return false;
+    }
+    var b: int32 = s_byte(s, si);
+    if (c == 63) {
+      if (b == 47) {
+        return false;
+      }
+    } else if (c != b) {
+      return false;
+    }
+    pi = pi + 1;
+    si = si + 1;
+  }
+  return si == ns;
+}
+
+// Files below root/rel into out as "REL\tSTAMP" when pat matches; dot
+// directories and the root's build/ are not entered.
+fn lv_walk(lv: LiveSess*, rel: string, pat: string, out: StrList*) {
+  var dir: string = lv->root;
+  if (slen(rel) > 0) {
+    dir = lv->root + "/" + rel;
+  }
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  sys_scan_dir(dir, files, dirs);
+  var i: int64 = 0;
+  while (i < files->len) {
+    var f: string = p_join(rel, sl_get(files, i));
+    if (lv_glob(pat, 0, f, 0)) {
+      var full: string = lv->root + "/" + f;
+      var fi: FileInfo = sys_stat(full);
+      if (fi.exists) {
+        var e: string = f + "\t" + s_int(fi.mtime) + "." + s_int(fi.size);
+        sl_add_uniq(out, e);
+      }
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < dirs->len) {
+    var d: string = sl_get(dirs, i);
+    if (!s_starts(d, ".") && !(slen(rel) == 0 && s_eq(d, "build"))) {
+      var sub: string = p_join(rel, d);
+      lv_walk(lv, sub, pat, out);
+    }
+    i = i + 1;
+  }
+  free(files);
+  free(dirs);
+}
+
+// The watched files now, sorted.
+fn lv_scan(lv: LiveSess*) -> StrList* {
+  var out: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < lv->globs->len) {
+    var g: string = p_clean(s_replace_byte(s_trim(sl_get(lv->globs, i)), 92, 47));
+    i = i + 1;
+    if (slen(g) == 0 || p_is_abs(g) || s_starts(g, "../")) {
+      continue;
+    }
+    // the walk starts at the segments before the first wildcard
+    var parts: StrList* = s_split(g, 47);
+    var base: StrList* = sl_new();
+    var k: int64 = 0;
+    while (k < parts->len && !lv_wild(sl_get(parts, k))) {
+      sl_push(base, sl_get(parts, k));
+      k = k + 1;
+    }
+    var pat: string = g;
+    var rel: string = sl_join(base, "/");
+    if (k == parts->len) {
+      // no wildcard: a directory means all below it, a file itself
+      if (fs_is_dir(lv->root + "/" + g)) {
+        pat = g + "/**";
+      } else {
+        rel = p_dir(g);
+        if (s_eq(rel, ".")) {
+          rel = s_empty();
+        }
+      }
+    }
+    if (s_eq(rel, ".")) {
+      rel = s_empty();
+    }
+    lv_walk(lv, rel, pat, out);
+    free(parts);
+    free(base);
+  }
+  sl_sort(out);
+  return out;
+}
+
+fn lv_key(e: string) -> string {
+  return s_sub(e, 0, s_find_byte(e, 9));
+}
+
+// At most every 150 ms: changed and removed events since the last scan.
+export fn lv_poll(lv: LiveSess*) {
+  if (lv->globs->len == 0 || sys_now_ms() - lv->last_ms < 150) {
+    return;
+  }
+  lv->last_ms = sys_now_ms();
+  var now: StrList* = lv_scan(lv);
+  var was: StrList* = lv->snap;
+  var i: int64 = 0;
+  var j: int64 = 0;
+  while (i < was->len || j < now->len) {
+    var c: int32 = 0;
+    if (i >= was->len) {
+      c = 1;
+    } else if (j >= now->len) {
+      c = -1;
+    } else {
+      c = s_cmp(lv_key(sl_get(was, i)), lv_key(sl_get(now, j)));
+    }
+    if (c < 0) {
+      lv_emit(lv, "removed", lv_key(sl_get(was, i)));
+      i = i + 1;
+    } else if (c > 0) {
+      lv_emit(lv, "changed", lv_key(sl_get(now, j)));
+      j = j + 1;
+    } else {
+      if (!s_eq(sl_get(was, i), sl_get(now, j))) {
+        lv_emit(lv, "changed", lv_key(sl_get(now, j)));
+      }
+      i = i + 1;
+      j = j + 1;
+    }
+  }
+  free(was);
+  lv->snap = now;
+}
+
+// ---------------------------------------------------------------------------
+// The compiler's output
+// ---------------------------------------------------------------------------
+
+// s without ANSI escapes.
+fn lv_plain(s: string) -> string {
+  if (s_find_byte(s, 27) < 0) {
+    return s;
+  }
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 27 && i + 1 < slen(s) && s_byte(s, i + 1) == 91) {
+      i = i + 2;
+      while (i < slen(s) && !((s_byte(s, i) >= 64 && s_byte(s, i) <= 126))) {
+        i = i + 1;
+      }
+    } else {
+      buf_addb(b, c);
+    }
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// A path the compiler printed, from the root (or the shell's tree).
+export fn lv_rel(lv: LiveSess*, f: string) -> string {
+  if (slen(lv->tree) > 0 && p_has_prefix_dir(f, lv->tree)) {
+    return p_rel(lv->tree, f);
+  }
+  if (p_has_prefix_dir(f, lv->root)) {
+    return p_rel(lv->root, f);
+  }
+  return f;
+}
+
+// "Patch N: a, b (600 bytes)": a patched line per function.
+export fn lv_patch_line(lv: LiveSess*, l: string) -> bool {
+  if (!s_starts(l, "Patch ")) {
+    return false;
+  }
+  var colon: int64 = s_find(l, ": ");
+  var paren: int64 = s_rfind_byte(l, 40);
+  if (colon < 0 || paren < colon) {
+    return false;
+  }
+  var names: StrList* = s_split(s_sub(l, colon + 2, paren), 44);
+  var i: int64 = 0;
+  while (i < names->len) {
+    var n: string = s_trim(sl_get(names, i));
+    if (slen(n) > 0) {
+      lv_emit(lv, "patched", n);
+    }
+    i = i + 1;
+  }
+  free(names);
+  return true;
+}
+
+// An error's first line as "FILE:LINE:COL: MESSAGE" (the location when the
+// "-- FILE:LINE:COL" line came first); "" when l is no error line.
+fn lv_error(lv: LiveSess*, l: string) -> string {
+  if (s_starts(l, "-- ")) {
+    // "-- FILE:LINE:COL", ruled out to the width on some terminals
+    var at: string = s_trim(s_from(l, 3));
+    var sp: int64 = s_find_byte(at, 32);
+    if (sp > 0) {
+      at = s_sub(at, 0, sp);
+    }
+    lv->loc = s_dup(at);
+    return s_empty();
+  }
+  var msg: string = s_empty();
+  if (s_starts(l, "error[")) {
+    var e: int64 = s_find(l, "]: ");
+    if (e > 0) {
+      msg = s_from(l, e + 3);
+    }
+  } else if (s_starts(l, "error: ") && !s_contains(l, "could not compile")) {
+    msg = s_from(l, 7);
+  }
+  if (slen(msg) == 0) {
+    return s_empty();
+  }
+  var out: string = s_dup(msg);
+  if (slen(lv->loc) > 0) {
+    // FILE:LINE:COL with FILE from the root
+    var at: string = lv->loc;
+    var c2: int64 = s_rfind_byte(at, 58);
+    var c1: int64 = -1;
+    if (c2 > 0) {
+      c1 = s_rfind_byte(s_sub(at, 0, c2), 58);
+    }
+    if (c1 > 0) {
+      var f: string = lv_rel(lv, s_sub(at, 0, c1));
+      out = f + s_from(at, c1) + ": " + msg;
+    } else {
+      out = at + ": " + msg;
+    }
+  }
+  lv->loc = s_empty();
+  return out;
+}
+
+// One line of `mettle live`'s stdout or stderr.
+fn lv_line(lv: LiveSess*, raw: string) {
+  var l: string = s_trim(lv_plain(raw));
+  if (lv_patch_line(lv, l)) {
+    return;
+  }
+  if (s_starts(l, "Built executable")) {
+    if (!lv->built) {
+      lv->built = true;
+      lv_emit(lv, "built", s_empty());
+    }
+    return;
+  }
+  if (s_starts(l, "[live] ") && s_contains(l, " exited with ")) {
+    var n: string = s_from(l, s_find(l, " exited with ") + 13);
+    if (s_is_int(n)) {
+      lv->code = s_to_int(n);
+    }
+    return;
+  }
+  var err: string = lv_error(lv, l);
+  if (slen(err) > 0) {
+    if (lv->built) {
+      lv_emit(lv, "patch-error", err);
+    } else {
+      lv_emit(lv, "build-error", err);
+    }
+  }
+}
+
+// Output in b so far: the whole lines parsed and taken out (flush: all).
+export fn lv_feed(lv: LiveSess*, b: Buf*, flush: bool) {
+  var start: int64 = 0;
+  var i: int64 = 0;
+  while (i < b->len) {
+    if (b->data[i] == (uint8)10) {
+      lv_line(lv, s_view(&b->data[start], i - start));
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if (flush && start < b->len) {
+    lv_line(lv, s_view(&b->data[start], b->len - start));
+    start = b->len;
+  }
+  var k: int64 = 0;
+  while (start + k < b->len) {
+    b->data[k] = b->data[start + k];
+    k = k + 1;
+  }
+  b->len = k;
+}
+
+// The first error of a compiler's output as an error event; true when one.
+export fn lv_errors(lv: LiveSess*, kind: string, out: string) -> bool {
+  var lines: StrList* = s_lines(lv_plain(out));
+  defer free(lines);
+  lv->loc = s_empty();
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var err: string = lv_error(lv, s_trim(sl_get(lines, i)));
+    if (slen(err) > 0) {
+      lv_emit(lv, kind, err);
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
