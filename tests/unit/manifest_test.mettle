@@ -108,6 +108,8 @@ fn test_settings() {
   var f: Manifest* = man_of(pkg("[profile.fast]\ninherits = \"release\"\ncheck-overflow = true\n"));
   t_eq("fast: valid", f->error, "");
   t_eq("fast: no warnings", sl_join(f->warnings, "|"), "");
+  var ag: Manifest* = man_of(pkg("[build]\nagents = false\n"));
+  t_eq("build agents: no warnings", sl_join(ag->warnings, "|"), "");
   t_eq("fast inherits release", flags_of(f, "fast"), "--release,--check-overflow");
   var fs: Settings* = man_settings(f, query("fast", "", "linux", (StrList*)0));
   keep(fs);

@@ -572,7 +572,7 @@ fn mnx_deps(m: Manifest*) {
 
 fn mnx_known_keys(section: string) -> StrList* {
   if (s_eq(section, "package")) { return mnx_list("name version mettle include description license repository authors"); }
-  if (s_eq(section, "build")) { return mnx_list("targets flags prelude"); }
+  if (s_eq(section, "build")) { return mnx_list("targets flags prelude agents"); }
   // bound to locals: mnx_list keeps views into its argument (DESIGN.md 2, issue 6)
   if (s_starts(section, "profile.")) {
     var pw: string = "flags cflags inherits components " + mnx_typed_words();
