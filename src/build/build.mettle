@@ -1495,7 +1495,7 @@ fn bx_check_support(s: BxSess*, u: BxUnit*, st: Settings*, flags: StrList*, bin:
         fname = "--pgo-use";
       }
       error_msg(what + " needs a Mettle compiler that has " + fname + "; the " + target + " compiler (" + m->path + ", " + ver + ") does not");
-      err_line("  " + cyan("help") + ": build a newer compiler from ../Mettle, or set " + off);
+      err_line("  " + cyan("help") + ": install a newer compiler (mbuild toolchain install), or set " + off);
     } else {
       error_msg("flags: the " + target + " compiler does not accept " + f + " (" + bx_raw_where(p, s->profile, bin, f) + ")");
     }
@@ -4444,11 +4444,15 @@ fn bx_init_cmds() {
   bx_def("doctor", "check the environment", "mbuild doctor [-t T]", "native.md");
   bx_ex("mbuild doctor", "tools, compilers, the native-code audit");
   bx_ex("mbuild doctor -t windows", "");
-  bx_def("toolchain", "list or install Mettle compilers", "mbuild toolchain [list | install V [-t T] | use V | remove V [-t T]]", "platforms.md");
-  bx_ex("mbuild toolchain", "the compiler per target");
-  bx_ex("mbuild toolchain install VERSION -t windows", "");
-  bx_ex("mbuild toolchain use VERSION", "this machine's compiler");
-  bx_note("releases up to v0.17.0 can't build current projects: use a compiler built from ../Mettle.");
+  bx_def("toolchain", "install, pin and update Mettle compilers", "mbuild toolchain [list | install V|latest|--from DIR | use V [--local] | default V | remove V | update]", "platforms.md");
+  bx_ex("mbuild toolchain", "installed toolchains, the compiler per target and why");
+  bx_ex("mbuild toolchain install latest", "the newest release");
+  bx_ex("mbuild toolchain install --from ../Mettle", "build a source checkout");
+  bx_ex("mbuild toolchain use v0.18.0", "pin this project (mb_toolchain)");
+  bx_ex("mbuild toolchain default v0.18.0", "this machine's default");
+  bx_def("setup", "set up mbuild's home, a compiler and PATH", "mbuild setup [--home DIR] [--from DIR | --no-compiler] [--yes]", "platforms.md");
+  bx_ex("mbuild setup", "~/.mbuild, the latest release as the default compiler");
+  bx_ex("mbuild setup --from ../Mettle", "a source build instead");
   bx_def("mettle", "run the selected compiler", "mbuild mettle [-t T] -- ARGS...", "platforms.md");
   bx_ex("mbuild mettle -- --version", "");
   bx_ex("mbuild mettle -t windows -- --version", "");

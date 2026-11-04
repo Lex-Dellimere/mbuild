@@ -143,14 +143,14 @@ check "use logger=quiet then run" hasnt "stdout: hi"
 mb components
 check "components shows mbuild.local.mettle" has "mbuild.local.mettle"
 
-# --- toolchain use (11): an installed release becomes mb_tool in mbuild.local.mettle
-TC="$MBUILD_HOME/toolchains/v0.99.0/linux"
+# --- toolchain use --local (9): an installed toolchain becomes mb_tool in mbuild.local.mettle
+TC="$MBUILD_HOME/toolchains/v0.99.0"
 mkdir -p "$TC/bin" && cp "$METTLE" "$TC/bin/mettle"
-mb toolchain use v0.99.0
-check "toolchain use writes mb_tool" grep -qF "mb_tool(\"mettle-linux\", \"$TC/bin/mettle\");" mbuild.local.mettle
-check "toolchain use keeps mb_use" grep -qF 'mb_use("logger", "quiet");' mbuild.local.mettle
-mb toolchain
-check "toolchain lists it" has "$TC/bin/mettle  (mb_tool(\"mettle-linux\") in mbuild.local.mettle)"
+mb toolchain use v0.99.0 --local
+check "toolchain use --local writes mb_tool" grep -qF "mb_tool(\"mettle-linux\", \"$TC/bin/mettle\");" mbuild.local.mettle
+check "toolchain use --local keeps mb_use" grep -qF 'mb_use("logger", "quiet");' mbuild.local.mettle
+(unset METTLE; mb toolchain)
+check "toolchain lists it" has "$TC/bin/mettle  (mb_tool(\"mettle-linux\") in mbuild.local.mettle: v0.99.0)"
 
 # --- rules (15.8)
 mkdir -p "$W/rules/src" "$W/rules/rules" && cd "$W/rules"
@@ -559,7 +559,7 @@ check "doctor" sh -c 'grep -qF "host" "$0/last.out" && grep -qF "cc windows" "$0
 proj "$W/tools" </dev/null
 cd "$W/tools" && printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
 printf 'import "mbuild/api";\n\nfn local() {\n  mb_tool("mettle-linux", "%s");\n}\n' "$METTLE" > mbuild.local.mettle
-mb doctor
+(unset METTLE; mb doctor)
 check "doctor names mbuild.local.mettle" has "mb_tool(\"mettle-linux\") in mbuild.local.mettle"
 ln -s "$METTLE" "$S/mettle-link"
 MBUILD_METTLE_LINUX="$S/mettle-link" mb doctor

@@ -1,6 +1,5 @@
-// toolchain: finds and runs Mettle compilers per target, and installs
-// explicit releases (DESIGN.md section 11). Only a dev compiler built from
-// ../Mettle builds current projects; nothing is downloaded on its own.
+// toolchain: finds and runs Mettle compilers per target, and installs,
+// pins and updates toolchains (DESIGN.md section 9).
 //
 // A Windows .exe is built by the Windows compiler and a Linux binary by the
 // Linux one, so each target has its own compiler: on Linux the Windows
@@ -8,11 +7,12 @@
 // host program. tc_select never starts a compiler (wine takes about a second
 // to start); tc_version asks it lazily and caches the answer by identity.
 //
-// Installed toolchains live in $MBUILD_HOME/toolchains/<version>/<os>/, laid
-// out like the release archives: linux/bin/mettle, windows/mettle.exe, each
-// with stdlib/ and runtime/. An archive is unpacked into a temporary
-// directory beside them and renamed into place, so a half-finished download
-// never looks installed.
+// Installed toolchains are host compilers in $MBUILD_HOME/toolchains/<id>/
+// (a release tag, or dev-<git describe> for a source build), laid out like
+// the release archives: bin/mettle (mettle.exe on Windows), stdlib/,
+// runtime/ and toolchain.toml. Each is put together in a temporary directory
+// beside them and renamed into place, so a half-finished install never
+// looks installed.
 
 import "std/io";
 import "std/mem";
@@ -20,6 +20,7 @@ import "../core/base";
 import "../core/path";
 import "../core/fs";
 import "../core/proc";
+import "../core/sha256";
 import "../model/semver";
 import "../model/toml";
 import "../model/manifest";
@@ -74,8 +75,8 @@ fn tcx_root() -> string {
   return tcx_home() + "/toolchains";
 }
 
-fn tcx_dir(v: string, target: string) -> string {
-  return tcx_root() + "/" + v + "/" + target;
+fn tcx_dir(id: string) -> string {
+  return tcx_root() + "/" + id;
 }
 
 fn tcx_rel_exe(target: string) -> string {
@@ -85,12 +86,15 @@ fn tcx_rel_exe(target: string) -> string {
   return "bin/mettle";
 }
 
-fn tcx_exe_in(dir: string, target: string) -> string {
-  return dir + "/" + tcx_rel_exe(target);
+fn tcx_exe_in(dir: string) -> string {
+  return dir + "/" + tcx_rel_exe(sys_os());
 }
 
-fn tcx_installed(v: string, target: string) -> bool {
-  return fs_is_file(tcx_exe_in(tcx_dir(v, target), target));
+fn tcx_installed(id: string) -> bool {
+  if (slen(id) == 0 || s_starts(id, ".") || s_find_byte(id, 47) >= 0 || s_find_byte(id, 92) >= 0) {
+    return false;
+  }
+  return fs_is_file(tcx_exe_in(tcx_dir(id)));
 }
 
 fn tcx_upper(target: string) -> string {
@@ -109,49 +113,170 @@ fn tcx_norm(v: string) -> string {
   return t;
 }
 
-fn tcx_sort_desc(l: StrList*) {
-  var i: int64 = 1;
-  while (i < l->len) {
-    var cur: string = sl_get(l, i);
-    var j: int64 = i - 1;
-    while (j >= 0 && sv_cmp(sl_get(l, j), cur) < 0) {
-      sl_set(l, j + 1, sl_get(l, j));
-      j = j - 1;
-    }
-    sl_set(l, j + 1, cur);
-    i = i + 1;
+// Releases first, newest first, then dev builds by id.
+fn tcx_id_before(a: string, b: string) -> bool {
+  var ra: bool = sv_is(a);
+  var rb: bool = sv_is(b);
+  if (ra != rb) {
+    return ra;
   }
+  if (ra) {
+    return sv_cmp(a, b) > 0;
+  }
+  return s_cmp(a, b) > 0;
 }
 
-// Installed versions holding a compiler for target ("" = for any target),
-// newest first.
-fn tcx_versions(target: string) -> StrList* {
+// The installed toolchain ids.
+fn tcx_ids() -> StrList* {
   var found: StrList* = sl_new();
   var files: StrList* = sl_new();
   var dirs: StrList* = sl_new();
   sys_list_dir(tcx_root(), files, dirs);
   var i: int64 = 0;
   while (i < dirs->len) {
-    var v: string = sl_get(dirs, i);
-    if (sv_is(v)) {
-      var ok: bool = false;
-      if (slen(target) > 0) {
-        ok = tcx_installed(v, target);
-      } else {
-        ok = tcx_installed(v, "linux") || tcx_installed(v, "windows");
+    var id: string = sl_get(dirs, i);
+    if (tcx_installed(id)) {
+      var j: int64 = found->len;
+      sl_push(found, id);
+      while (j > 0 && tcx_id_before(id, sl_get(found, j - 1))) {
+        sl_set(found, j, sl_get(found, j - 1));
+        j = j - 1;
       }
-      if (ok) {
-        sl_push(found, v);
-      }
+      sl_set(found, j, id);
     }
     i = i + 1;
   }
-  free(files->items);
-  free(files);
-  free(dirs->items);
-  free(dirs);
-  tcx_sort_desc(found);
+  tcx_sl_free(files);
+  tcx_sl_free(dirs);
   return found;
+}
+
+// toolchains/<id>/toolchain.toml.
+struct TcxInfo {
+  id: string;
+  version: string;    // as the compiler reports it
+  source: string;     // "release", or the checkout it was built from
+  describe: string;   // the release tag, or git describe of the checkout
+  installed: string;  // YYYY-MM-DD
+}
+
+fn tcx_info(id: string) -> TcxInfo {
+  var t: TcxInfo;
+  t.id = id;
+  var file: string = tcx_dir(id) + "/toolchain.toml";
+  var r: FsRead = fs_read(file);
+  var doc: Toml* = toml_parse(r.data, file);
+  t.version = toml_str(doc, "toolchain", "version");
+  t.source = toml_str(doc, "toolchain", "source");
+  t.describe = toml_str(doc, "toolchain", "describe");
+  t.installed = toml_str(doc, "toolchain", "installed");
+  return t;
+}
+
+fn tcx_info_text(t: TcxInfo) -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "# written by mbuild toolchain install");
+  buf_line(b, "[toolchain]");
+  buf_line(b, "id = " + toml_quote(t.id));
+  buf_line(b, "version = " + toml_quote(t.version));
+  buf_line(b, "source = " + toml_quote(t.source));
+  buf_line(b, "describe = " + toml_quote(t.describe));
+  buf_line(b, "installed = " + toml_quote(t.installed));
+  return buf_take(b);
+}
+
+fn tcx_two(n: int64) -> string {
+  if (n < 10) {
+    return "0" + s_int(n);
+  }
+  return s_int(n);
+}
+
+// The modification day of file as YYYY-MM-DD (UTC).
+fn tcx_date_of(file: string) -> string {
+  var fi: FileInfo = sys_stat(file);
+  var secs: int64 = fi.mtime / 1000000000;
+  if (s_eq(sys_os(), "windows")) {
+    secs = fi.mtime / 10000000 - 11644473600;
+  }
+  var z: int64 = secs / 86400 + 719468;
+  var era: int64 = z / 146097;
+  var doe: int64 = z - era * 146097;
+  var yoe: int64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  var doy: int64 = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  var mp: int64 = (5 * doy + 2) / 153;
+  var d: int64 = doy - (153 * mp + 2) / 5 + 1;
+  var m: int64 = mp + 3;
+  var y: int64 = yoe + era * 400;
+  if (m > 12) {
+    m = m - 12;
+    y = y + 1;
+  }
+  return s_int(y) + "-" + tcx_two(m) + "-" + tcx_two(d);
+}
+
+// The machine default, [toolchain] default in $MBUILD_HOME/config.toml.
+fn tcx_config_file() -> string {
+  return tcx_home() + "/config.toml";
+}
+
+fn tcx_default() -> string {
+  var file: string = tcx_config_file();
+  var r: FsRead = fs_read(file);
+  if (!r.ok) {
+    return s_empty();
+  }
+  return toml_str(toml_parse(r.data, file), "toolchain", "default");
+}
+
+fn tcx_set_default(id: string) -> bool {
+  var text: string = "# written by mbuild toolchain default\n[toolchain]\n";
+  if (slen(id) > 0) {
+    text = text + "default = " + toml_quote(id) + "\n";
+  }
+  fs_mkdirs(tcx_home());
+  return fs_write(tcx_config_file(), text);
+}
+
+// An installed toolchain named by id or version ("0.18" too), "" when none.
+// A version names the most recently installed toolchain reporting it.
+fn tcx_find(name: string) -> string {
+  var n: string = tcx_norm(name);
+  if (tcx_installed(n)) {
+    return n;
+  }
+  var ids: StrList* = tcx_ids();
+  var best: string = s_empty();
+  var best_day: string = s_empty();
+  var i: int64 = 0;
+  while (i < ids->len) {
+    var t: TcxInfo = tcx_info(sl_get(ids, i));
+    if (s_eq(tcx_norm(t.version), n) && (slen(best) == 0 || s_cmp(t.installed, best_day) > 0)) {
+      best = t.id;
+      best_day = t.installed;
+    }
+    i = i + 1;
+  }
+  tcx_sl_free(ids);
+  return best;
+}
+
+fn tcx_mbfile(p: Project*) -> string {
+  if (slen(p->mbfile) > 0) {
+    return p->mbfile;
+  }
+  return p->root + "/mbuild.mettle";
+}
+
+// mb_toolchain("...") in fn project(), read as text: it chooses the
+// compiler that compiles mbuild.mettle itself.
+fn tcx_pin(p: Project*) -> string {
+  var file: string = tcx_mbfile(p);
+  var r: FsRead = fs_read(file);
+  if (!r.ok) {
+    return s_empty();
+  }
+  return s_trim(mbf_call_arg(r.data, "mb_toolchain", s_empty(), 0));
 }
 
 // The compiler's own rule: <exe dir>/../leaf when it exists, else
@@ -260,10 +385,18 @@ fn tcx_cmd_free(c: Cmd*) {
   free(c);
 }
 
-// The tools KEY of mbuild.local.mettle (m->local->tools, "key=value");
-// "" when it does not set it.
+// The tools KEY of mbuild.local.mettle (m->local->tools, "key=value"; read
+// as text before the file is evaluated); "" when it does not set it.
 fn tcx_tools_value(p: Project*, key: string) -> string {
-  if (p->man == (Manifest*)0 || p->man->local == (Manifest*)0 || p->man->local->tools == (StrList*)0) {
+  if (p->man == (Manifest*)0 || p->man->local == (Manifest*)0) {
+    var file: string = p->root + "/mbuild.local.mettle";
+    var r: FsRead = fs_read(file);
+    if (!r.ok) {
+      return s_empty();
+    }
+    return mbf_call_arg(r.data, "mb_tool", key, 1);
+  }
+  if (p->man->local->tools == (StrList*)0) {
     return s_empty();
   }
   var l: StrList* = p->man->local->tools;
@@ -335,12 +468,25 @@ fn tcx_make(target: string, exe: string, source: string) -> Mettle* {
   m->version = s_empty();
   m->source = source;
   m->installed = s_empty();
+  var root: string = tcx_root() + "/";
+  if (s_starts(real, root)) {
+    var rest: string = s_from(real, slen(root));
+    var slash: int64 = s_find_byte(rest, 47);
+    if (slash > 0 && tcx_installed(s_sub(rest, 0, slash))) {
+      m->installed = s_sub(rest, 0, slash);
+    }
+  }
   return m;
 }
 
-// The compiler for target, or 0 with g_tcx_err/g_tcx_hint set:
-// MBUILD_METTLE_<T>, mbuild.local.mettle tools mettle-<t>, --mettle (host),
-// then for the host $METTLE and mettle on PATH.
+fn tcx_make_installed(target: string, id: string, source: string) -> Mettle* {
+  return tcx_make(target, tcx_exe_in(tcx_dir(id)), source);
+}
+
+// The compiler for target, or 0 with g_tcx_err/g_tcx_hint set: --mettle
+// (host), MBUILD_METTLE_<T>, $METTLE (host), mb_tool("mettle-<t>") in
+// mbuild.local.mettle, then for the host the project's mb_toolchain pin,
+// the default toolchain and mettle on PATH.
 fn tcx_pick(p: Project*, target: string) -> Mettle* {
   tcx_set_err(s_empty(), s_empty());
   if (!target_valid(target)) {
@@ -353,34 +499,57 @@ fn tcx_pick(p: Project*, target: string) -> Mettle* {
   if (s_eq(host, "linux") && s_eq(target, "windows") && !tool_found(tcx_wine())) {
     return tcx_wine_missing();
   }
+  var is_host: bool = s_eq(target, host);
   var env_name: string = "MBUILD_METTLE_" + tcx_upper(target);
   var ev: string = env_get(env_name);
   var tools_key: string = "mettle-" + target;
   var tools_val: string = tcx_tools_value(p, tools_key);
-  if (slen(tools_val) > 0 && (slen(ev) == 0 || s_eq(ev, tools_val))) {
-    return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), "mb_tool(\"" + tools_key + "\") in mbuild.local.mettle");
-  }
-  if (slen(ev) > 0) {
-    return tcx_make(target, tcx_resolve(ev), env_name);
-  }
-  if (s_eq(target, host) && p->opts != (Options*)0 && slen(p->opts->mettle) > 0) {
+  var local_src: string = "mb_tool(\"" + tools_key + "\") in mbuild.local.mettle";
+  if (is_host && p->opts != (Options*)0 && slen(p->opts->mettle) > 0) {
     return tcx_make(target, tcx_resolve(p->opts->mettle), "--mettle");
   }
-  if (s_eq(target, host)) {
+  if (slen(ev) > 0) {
+    if (s_eq(ev, tools_val)) {
+      return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), local_src);
+    }
+    return tcx_make(target, tcx_resolve(ev), env_name);
+  }
+  if (is_host) {
     var me: string = env_get("METTLE");
     if (slen(me) > 0) {
       return tcx_make(target, tcx_resolve(me), "$METTLE");
     }
-    var on_path: Tool = sys_find_tool("mettle");
-    if (tool_found(on_path) && !on_path.unix) {
-      return tcx_make(target, on_path.path, "mettle on PATH");
+  }
+  if (slen(tools_val) > 0) {
+    return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), local_src);
+  }
+  if (!is_host) {
+    return tcx_none("no Mettle compiler for " + target, "set " + env_name + ", or mb_tool(\"mettle-" + target + "\", PATH) in mbuild.local.mettle, to a " + target + " build of Mettle");
+  }
+  var pin: string = tcx_pin(p);
+  if (slen(pin) > 0) {
+    var id: string = tcx_find(pin);
+    if (slen(id) == 0) {
+      var hint: string = "mbuild toolchain install " + pin;
+      if (s_starts(pin, "dev-")) {
+        hint = "mbuild toolchain install --from DIR (the Mettle checkout at " + s_from(pin, 4) + ")";
+      }
+      return tcx_none("this project pins Mettle " + pin + " (mb_toolchain in mbuild.mettle), which is not installed", hint);
     }
+    return tcx_make_installed(target, id, "mb_toolchain(\"" + pin + "\") in mbuild.mettle");
   }
-
-  if (!s_eq(target, host)) {
-    return tcx_none("no Mettle compiler for " + target, "set " + env_name + ", or mb_tool(\"mettle-" + target + "\", PATH) in mbuild.local.mettle, to a " + target + " build of ../Mettle");
+  var def: string = tcx_default();
+  if (slen(def) > 0) {
+    if (tcx_installed(def)) {
+      return tcx_make_installed(target, def, "the default toolchain");
+    }
+    verbose("the default toolchain " + def + " is not installed any more");
   }
-  return tcx_none("no Mettle compiler for " + target, "build ../Mettle (make) and put bin/mettle on PATH, or set " + env_name);
+  var on_path: Tool = sys_find_tool("mettle");
+  if (tool_found(on_path) && !on_path.unix) {
+    return tcx_make(target, on_path.path, "mettle on PATH");
+  }
+  return tcx_none("no Mettle compiler for " + target, "run `mbuild toolchain install latest`, or `mbuild toolchain install --from DIR` for a Mettle checkout, or set METTLE");
 }
 
 fn tcx_fail_last() {
@@ -485,7 +654,7 @@ export fn tc_require_minimum(m: Mettle*, need: string, who: string) -> string {
   if (sv_cmp(have, want) >= 0) {
     return s_empty();
   }
-  return who + " needs Mettle " + want + " or newer; the " + m->target + " compiler is " + have + " (" + m->path + ")\n  help: build a newer compiler from ../Mettle";
+  return who + " needs Mettle " + want + " or newer; the " + m->target + " compiler is " + have + " (" + m->path + ")\n  help: install a newer compiler (mbuild toolchain install)";
 }
 
 // ---------------------------------------------------------------------------
@@ -722,15 +891,21 @@ export fn tc_run_program_cmd(target: string, exe_path: string) -> Cmd* {
 }
 
 // ---------------------------------------------------------------------------
-// Downloads
+// Releases
 // ---------------------------------------------------------------------------
 
-fn tcx_repo() -> string {
-  var r: string = env_get("MBUILD_METTLE_REPO");
-  if (slen(r) > 0) {
-    return r;
+// The GitHub API of the Mettle repository; MBUILD_METTLE_API replaces it
+// (mirrors, tests).
+fn tcx_api() -> string {
+  var a: string = env_get("MBUILD_METTLE_API");
+  if (slen(a) > 0) {
+    return a;
   }
-  return "suidvandiewereld/Mettle";
+  return "https://api.github.com/repos/The-Mettle-Project/Mettle";
+}
+
+fn tcx_releases_page() -> string {
+  return "https://github.com/The-Mettle-Project/Mettle/releases";
 }
 
 fn tcx_asset(v: string, target: string) -> string {
@@ -738,16 +913,6 @@ fn tcx_asset(v: string, target: string) -> string {
     return "mettle-" + v + "-windows-x64.zip";
   }
   return "mettle-" + v + "-linux-x64.tar.gz";
-}
-
-// MBUILD_METTLE_BASE_URL (a mirror holding <version>/<asset>) replaces
-// GitHub's download URL.
-fn tcx_url(v: string, asset: string) -> string {
-  var base: string = env_get("MBUILD_METTLE_BASE_URL");
-  if (slen(base) > 0) {
-    return base + "/" + v + "/" + asset;
-  }
-  return "https://github.com/" + tcx_repo() + "/releases/download/" + v + "/" + asset;
 }
 
 fn tcx_curl() -> Tool {
@@ -762,71 +927,114 @@ fn tcx_curl_cmd(t: Tool) -> Cmd* {
   return c;
 }
 
-// The value of "tag_name" in GitHub's release JSON, "" when absent.
-fn tcx_json_tag(json: string) -> string {
-  var at: int64 = s_find(json, "\"tag_name\"");
+// The first JSON string `"key": "..."` at or after from: at = -1 when there
+// is none, val = "" when it is not a string (null).
+struct TcxJson {
+  val: string;
+  at: int64;
+}
+
+fn tcx_json_str(json: string, key: string, from: int64) -> TcxJson {
+  var r: TcxJson;
+  r.val = s_empty();
+  r.at = -1;
+  var needle: string = "\"" + key + "\"";
+  var at: int64 = s_find_from(json, needle, from);
   if (at < 0) {
-    return s_empty();
+    return r;
   }
-  var i: int64 = at + 10;
+  r.at = at;
+  var i: int64 = at + slen(needle);
   while (i < slen(json) && (is_space_b(s_byte(json, i)) || s_byte(json, i) == 58)) {
     i = i + 1;
   }
   if (i >= slen(json) || s_byte(json, i) != 34) {
-    return s_empty();
+    return r;
   }
-  var start: int64 = i + 1;
-  var end: int64 = start;
-  while (end < slen(json) && s_byte(json, end) != 34) {
-    end = end + 1;
+  var b: Buf* = buf_new();
+  var j: int64 = i + 1;
+  while (j < slen(json) && s_byte(json, j) != 34) {
+    if (s_byte(json, j) == 92 && j + 1 < slen(json)) {
+      j = j + 1;
+    }
+    buf_addb(b, s_byte(json, j));
+    j = j + 1;
   }
-  return s_sub(json, start, end);
+  r.val = buf_take(b);
+  return r;
 }
 
-// The newest release tag, "" (with g_tcx_err set) when it cannot be found.
-// MBUILD_METTLE_LATEST answers without the network (mirrors, tests).
-fn tcx_latest() -> string {
-  var fixed: string = env_get("MBUILD_METTLE_LATEST");
-  if (slen(fixed) > 0) {
-    return tcx_norm(fixed);
-  }
+// A release and this host's archive in it.
+struct TcxRelease {
+  tag: string;      // "" when it could not be read (g_tcx_err says why)
+  url: string;
+  digest: string;   // "sha256:<hex>", "" when the release lists none
+  soft: bool;       // the lookup failed for want of curl or the network
+}
+
+// The release `tag` ("latest" = the newest) from the GitHub API.
+fn tcx_release(tag: string) -> TcxRelease {
+  var rel: TcxRelease;
+  rel.tag = s_empty();
+  rel.url = s_empty();
+  rel.digest = s_empty();
+  rel.soft = true;
   var curl: Tool = tcx_curl();
-  var page: string = "https://github.com/" + tcx_repo() + "/releases";
   if (!tool_found(curl)) {
-    tcx_tool_missing("cannot look up the latest Mettle release", "curl", "MBUILD_CURL", "install curl");
-    return s_empty();
+    tcx_tool_missing("cannot look up Mettle releases", "curl", "MBUILD_CURL", "install curl");
+    return rel;
   }
-  var api: string = "https://api.github.com/repos/" + tcx_repo() + "/releases/latest";
+  var what: string = "releases/tags/" + tag;
+  if (s_eq(tag, "latest")) {
+    what = "releases/latest";
+  }
+  var url: string = tcx_api() + "/" + what;
   var c: Cmd* = tcx_curl_cmd(curl);
   cmd_arg(c, "-H");
   cmd_arg(c, "Accept: application/vnd.github+json");
-  cmd_arg(c, api);
+  cmd_arg(c, url);
   var r: Captured = proc_capture(c);
   tcx_cmd_free(c);
-  var tag: string = s_empty();
-  if (r.code == 0) {
-    tag = tcx_json_tag(r.out);
+  if (r.code == 22) {
+    rel.soft = false;
+    tcx_set_err("no Mettle release " + tag + " (" + url + " answered an error)", "the releases are listed at " + tcx_releases_page());
+    return rel;
   }
-  if (slen(tag) == 0) {
-    // The API is rate limited; the releases page redirects to the tag.
-    var c2: Cmd* = tcx_curl_cmd(curl);
-    cmd_arg(c2, "-o");
-    cmd_path(c2, fs_temp_dir() + "/mettle-latest.html");
-    cmd_arg(c2, "-w");
-    cmd_arg(c2, "%{{url_effective}");
-    cmd_arg(c2, page + "/latest");
-    var r2: Captured = proc_capture(c2);
-    tcx_cmd_free(c2);
-    var tag_at: int64 = s_find(r2.out, "/releases/tag/");
-    if (r2.code == 0 && tag_at >= 0) {
-      tag = s_trim(s_from(r2.out, tag_at + 14));
+  if (r.code != 0) {
+    tcx_set_err("cannot reach " + url + " (curl exit " + s_int(r.code) + ")", "check the network, or install a source checkout with --from DIR");
+    return rel;
+  }
+  rel.soft = false;
+  var t: TcxJson = tcx_json_str(r.out, "tag_name", 0);
+  if (!sv_is(t.val)) {
+    tcx_set_err("unexpected answer from " + url + ": no release tag", "check MBUILD_METTLE_API");
+    return rel;
+  }
+  var asset: string = tcx_asset(t.val, sys_os());
+  var from: int64 = 0;
+  while (true) {
+    var n: TcxJson = tcx_json_str(r.out, "name", from);
+    if (n.at < 0) {
+      break;
     }
+    from = n.at + 6;
+    if (!s_eq(n.val, asset)) {
+      continue;
+    }
+    var u: TcxJson = tcx_json_str(r.out, "browser_download_url", from);
+    var d: TcxJson = tcx_json_str(r.out, "digest", from);
+    rel.url = u.val;
+    if (d.at >= 0 && d.at < u.at) {
+      rel.digest = d.val;
+    }
+    break;
   }
-  if (!sv_is(tag)) {
-    tcx_set_err("could not determine the latest Mettle release of " + tcx_repo(), "name a version instead (see " + page + "), or check the network");
-    return s_empty();
+  if (slen(rel.url) == 0) {
+    tcx_set_err("Mettle " + t.val + " has no " + asset, "see " + tcx_releases_page());
+    return rel;
   }
-  return tcx_norm(tag);
+  rel.tag = tcx_norm(t.val);
+  return rel;
 }
 
 // Runs and frees c.
@@ -919,8 +1127,8 @@ fn tcx_extract(archive: string, dir: string, target: string) -> bool {
 
 // The directory of an unpacked archive that holds the compiler: dir itself,
 // or its only subdirectory (the Linux tarball has a top-level folder).
-fn tcx_find_top(dir: string, target: string) -> string {
-  if (fs_is_file(tcx_exe_in(dir, target))) {
+fn tcx_find_top(dir: string) -> string {
+  if (fs_is_file(tcx_exe_in(dir))) {
     return dir;
   }
   var files: StrList* = sl_new();
@@ -929,97 +1137,246 @@ fn tcx_find_top(dir: string, target: string) -> string {
   var found: string = s_empty();
   if (dirs->len == 1) {
     var sub: string = dir + "/" + sl_get(dirs, 0);
-    if (fs_is_file(tcx_exe_in(sub, target))) {
+    if (fs_is_file(tcx_exe_in(sub))) {
       found = sub;
     }
   }
-  free(files->items);
-  free(files);
-  free(dirs->items);
-  free(dirs);
+  tcx_sl_free(files);
+  tcx_sl_free(dirs);
   return found;
 }
 
 fn tcx_download_failed(url: string, http: string) {
-  if (s_eq(http, "404")) {
-    if (slen(env_get("MBUILD_METTLE_BASE_URL")) > 0) {
-      tcx_set_err("downloading " + url + " failed: not found (404)", "check the version and the mirror in MBUILD_METTLE_BASE_URL");
-      return;
-    }
-    tcx_set_err("downloading " + url + " failed: not found (404)", "check the version (releases: https://github.com/" + tcx_repo() + "/releases); to download from another repository set MBUILD_METTLE_REPO=owner/repo");
-    return;
-  }
   var why: string = "";
-  if (slen(http) > 0 && !s_eq(http, "000")) {
+  if (s_eq(http, "404")) {
+    why = ": not found (404)";
+  } else if (slen(http) > 0 && !s_eq(http, "000")) {
     why = " (HTTP " + http + ")";
   }
-  tcx_set_err("downloading " + url + " failed" + why, "check the version (releases: https://github.com/" + tcx_repo() + "/releases, or MBUILD_METTLE_REPO for another repository) and the network");
+  tcx_set_err("downloading " + url + " failed" + why, "check the network and the releases at " + tcx_releases_page());
 }
 
-// Downloads release v for target into toolchains/<v>/<target>. False with
-// g_tcx_err set on failure; nothing half-installed is left behind.
-fn tcx_download(v: string, target: string) -> bool {
-  if (tcx_installed(v, target)) {
-    return true;
+// The version the compiler exe reports, "" when it cannot say.
+fn tcx_exe_version(exe: string) -> string {
+  var t: Tool = sys_find_tool(exe);
+  if (!tool_found(t)) {
+    return s_empty();
   }
-  var curl: Tool = tcx_curl();
-  if (!tool_found(curl)) {
-    tcx_tool_missing("cannot download Mettle " + v, "curl", "MBUILD_CURL", "install curl");
+  var c: Cmd* = cmd_new(t);
+  cmd_arg(c, "--version");
+  var cap: Captured = proc_capture_all(c);
+  tcx_cmd_free(c);
+  if (cap.code != 0) {
+    return s_empty();
+  }
+  return tcx_parse_version(cap.out);
+}
+
+// Writes dir/toolchain.toml.
+fn tcx_finish(dir: string, id: string, source: string, describe: string) {
+  var file: string = dir + "/toolchain.toml";
+  var t: TcxInfo;
+  t.id = id;
+  t.version = tcx_exe_version(tcx_exe_in(dir));
+  t.source = source;
+  t.describe = describe;
+  t.installed = s_empty();
+  fs_write(file, tcx_info_text(t));
+  t.installed = tcx_date_of(file);
+  fs_write(file, tcx_info_text(t));
+}
+
+// Renames the finished top (inside tmp) to toolchains/<id>, replacing an
+// older one, and removes tmp.
+fn tcx_move_in(tmp: string, top: string, id: string) -> bool {
+  var dest: string = tcx_dir(id);
+  if (fs_exists(dest)) {
+    tcx_forget(dest);
+    sys_remove_tree(dest);
+  }
+  var moved: bool = sys_rename(top, dest);
+  sys_remove_tree(tmp);
+  if (!moved || !tcx_installed(id)) {
+    tcx_set_err("cannot move the new toolchain into " + dest, "check that " + tcx_root() + " is writable");
     return false;
   }
-  var dest: string = tcx_dir(v, target);
-  var tmp: string = tcx_root() + "/.tmp-" + v + "-" + target + "-" + s_int(sys_now_ms());
+  return true;
+}
+
+fn tcx_tmp(id: string) -> string {
+  return tcx_root() + "/.tmp-" + id + "-" + s_int(sys_now_ms());
+}
+
+// Downloads, verifies and unpacks rel into toolchains/<tag>. False with
+// g_tcx_err set; nothing half-installed is left behind.
+fn tcx_install_release(rel: TcxRelease) -> bool {
+  var curl: Tool = tcx_curl();
+  if (!tool_found(curl)) {
+    tcx_tool_missing("cannot download Mettle " + rel.tag, "curl", "MBUILD_CURL", "install curl");
+    return false;
+  }
+  var tmp: string = tcx_tmp(rel.tag);
   var unpack: string = tmp + "/x";
-  sys_remove_tree(tmp);
   if (!fs_mkdirs(unpack)) {
     tcx_set_err("cannot create " + unpack, "check that " + tcx_root() + " is writable");
     return false;
   }
-  var asset: string = tcx_asset(v, target);
-  var archive: string = tmp + "/" + asset;
-  var url: string = tcx_url(v, asset);
+  var archive: string = tmp + "/" + p_base(rel.url);
   var c: Cmd* = tcx_curl_cmd(curl);
   cmd_arg(c, "-o");
   cmd_path(c, archive);
   cmd_arg(c, "-w");
   cmd_arg(c, "%{{http_code}");
-  cmd_arg(c, url);
+  cmd_arg(c, rel.url);
   var got: Captured = proc_capture(c);
   tcx_cmd_free(c);
   if (got.code != 0 || !fs_is_file(archive)) {
     sys_remove_tree(tmp);
-    tcx_download_failed(url, s_trim(got.out));
+    tcx_download_failed(rel.url, s_trim(got.out));
     return false;
   }
-  if (!tcx_extract(archive, unpack, target)) {
+  if (s_starts(rel.digest, "sha256:")) {
+    var want: string = s_lower(s_from(rel.digest, 7));
+    var have: string = sha_file(archive);
+    if (!s_eq(want, have)) {
+      sys_remove_tree(tmp);
+      tcx_set_err(p_base(archive) + " does not match the release's sha256 (got " + have + ", the release lists " + want + ")", "the download is damaged or was altered; nothing was installed");
+      return false;
+    }
+  } else {
+    note("the release lists no sha256 for " + p_base(archive) + "; it is not verified");
+  }
+  if (!tcx_extract(archive, unpack, sys_os())) {
     sys_remove_tree(tmp);
     return false;
   }
-  var top: string = tcx_find_top(unpack, target);
+  var top: string = tcx_find_top(unpack);
   if (slen(top) == 0) {
     sys_remove_tree(tmp);
-    tcx_set_err(asset + " does not contain " + tcx_rel_exe(target) + " (unexpected layout)", "report this, or install the compiler by hand and set MBUILD_METTLE_" + tcx_upper(target));
+    tcx_set_err(p_base(archive) + " does not contain " + tcx_rel_exe(sys_os()) + " (unexpected layout)", "report this, or set METTLE to a compiler");
     return false;
   }
-  if (s_eq(target, "linux")) {
-    sys_set_executable(tcx_exe_in(top, target));
-  }
-  fs_mkdirs(p_dir(dest));
-  if (fs_exists(dest)) {
-    if (tcx_installed(v, target)) {
-      // Another mbuild finished first.
-      sys_remove_tree(tmp);
-      return true;
-    }
-    sys_remove_tree(dest);
-  }
-  var moved: bool = sys_rename(top, dest);
-  sys_remove_tree(tmp);
-  if (!moved || !tcx_installed(v, target)) {
-    tcx_set_err("cannot move the unpacked compiler into " + dest, "check that " + tcx_root() + " is writable");
+  sys_set_executable(tcx_exe_in(top));
+  tcx_finish(top, rel.tag, "release", rel.tag);
+  return tcx_move_in(tmp, top, rel.tag);
+}
+
+fn tcx_copy_tree(src: string, dst: string) -> bool {
+  if (!fs_mkdirs(dst)) {
     return false;
   }
-  return true;
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  sys_list_dir(src, files, dirs);
+  var ok: bool = true;
+  var i: int64 = 0;
+  while (ok && i < files->len) {
+    ok = fs_copy(src + "/" + sl_get(files, i), dst + "/" + sl_get(files, i));
+    i = i + 1;
+  }
+  i = 0;
+  while (ok && i < dirs->len) {
+    ok = tcx_copy_tree(src + "/" + sl_get(dirs, i), dst + "/" + sl_get(dirs, i));
+    i = i + 1;
+  }
+  tcx_sl_free(files);
+  tcx_sl_free(dirs);
+  return ok;
+}
+
+// git describe --tags of a checkout, "" when git cannot say.
+fn tcx_describe(dir: string) -> string {
+  var git: Tool = tcx_host_tool("git", "MBUILD_GIT");
+  if (!tool_found(git)) {
+    return s_empty();
+  }
+  var c: Cmd* = cmd_new(git);
+  cmd_arg(c, "-C");
+  cmd_path(c, dir);
+  cmd_arg(c, "describe");
+  cmd_arg(c, "--tags");
+  cmd_arg(c, "--always");
+  var r: Captured = proc_capture(c);
+  tcx_cmd_free(c);
+  if (r.code != 0) {
+    return s_empty();
+  }
+  return s_trim(r.out);
+}
+
+fn tcx_abs(dir: string) -> string {
+  var d: string = s_replace_byte(dir, 92, 47);
+  if (!p_is_abs(d)) {
+    d = p_join(s_replace_byte(sys_cwd(), 92, 47), d);
+  }
+  return p_clean(d);
+}
+
+fn tcx_is_checkout(dir: string) -> bool {
+  return fs_is_file(dir + "/Makefile") && fs_is_dir(dir + "/src") && fs_is_dir(dir + "/stdlib/std");
+}
+
+// Builds the Mettle checkout at given with make and installs its compiler
+// as dev-<git describe>: the id, or "" with g_tcx_err set.
+fn tcx_install_source(given: string) -> string {
+  var dir: string = tcx_abs(given);
+  if (!tcx_is_checkout(dir)) {
+    tcx_set_err(dir + " is not a Mettle source checkout (it needs a Makefile, src/ and stdlib/std/)", "pass the directory of a clone of https://github.com/The-Mettle-Project/Mettle");
+    return s_empty();
+  }
+  var desc: string = tcx_describe(dir);
+  if (slen(desc) == 0) {
+    tcx_set_err("cannot name the build: `git describe --tags` fails in " + dir, "install --from takes a git clone of Mettle");
+    return s_empty();
+  }
+  var make: Tool = tcx_host_tool("make", "MBUILD_MAKE");
+  if (!tool_found(make)) {
+    tcx_tool_missing("building Mettle from source needs make", "make", "MBUILD_MAKE", "install make");
+    return s_empty();
+  }
+  var jobs: string = s_int(proc_jobs());
+  status("Building", "Mettle " + desc + " in " + dir + " (make -j " + jobs + ")");
+  var c: Cmd* = cmd_new(make);
+  cmd_arg(c, "-j");
+  cmd_arg(c, jobs);
+  c->cwd = dir;
+  var r: Captured = proc_capture_all(c);
+  tcx_cmd_free(c);
+  if (r.code != 0) {
+    flush_out();
+    print_err(r.out);
+    tcx_set_err("make failed in " + dir, "fix the build there and run this again");
+    return s_empty();
+  }
+  var exe: string = tcx_exe_in(dir);
+  if (!fs_is_file(exe)) {
+    tcx_set_err("make in " + dir + " built no " + tcx_rel_exe(sys_os()), "is it a Mettle checkout?");
+    return s_empty();
+  }
+  var id: string = "dev-" + desc;
+  var tmp: string = tcx_tmp(id);
+  var top: string = tmp + "/t";
+  var dst: string = tcx_exe_in(top);
+  var ok: bool = fs_mkdirs(p_dir(dst)) && fs_copy(exe, dst);
+  var sd: string = tcx_sibling(exe, "stdlib");
+  if (ok && slen(sd) > 0) {
+    ok = tcx_copy_tree(sd, top + "/stdlib");
+  }
+  var rd: string = tcx_sibling(exe, "runtime");
+  if (ok && slen(rd) > 0) {
+    ok = tcx_copy_tree(rd, top + "/runtime");
+  }
+  if (!ok) {
+    sys_remove_tree(tmp);
+    tcx_set_err("cannot copy the compiler into " + top, "check that " + tcx_root() + " is writable");
+    return s_empty();
+  }
+  sys_set_executable(dst);
+  tcx_finish(top, id, dir, desc);
+  if (!tcx_move_in(tmp, top, id)) {
+    return s_empty();
+  }
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,121 +1390,164 @@ fn tcx_err_last() {
   }
 }
 
-fn tcx_add_target(l: StrList*, t: string) -> bool {
-  if (s_eq(t, "all")) {
-    sl_add_uniq(l, "linux");
-    sl_add_uniq(l, "windows");
-    return true;
-  }
-  if (s_eq(t, "host")) {
-    sl_add_uniq(l, sys_os());
-    return true;
-  }
-  if (!target_valid(t)) {
-    error_msg("unknown target '" + t + "' (use linux, windows, all or host)");
-    return false;
-  }
-  sl_add_uniq(l, t);
-  return true;
+fn tcx_help(hint: string) {
+  err_line("  " + cyan("help") + ": " + hint);
 }
 
-// -t targets; else the manifest's [build] targets when use_manifest; else
-// every target this host can build: the host OS, plus windows on Linux with
-// wine and linux under wine. 0 after an unknown target.
-fn tcx_targets(p: Project*, use_manifest: bool) -> StrList* {
-  var l: StrList* = sl_new();
-  var given: StrList* = l;
-  if (p->opts != (Options*)0 && p->opts->targets->len > 0) {
-    given = p->opts->targets;
-  } else if (use_manifest && p->man != (Manifest*)0 && p->man->targets != (StrList*)0) {
-    given = p->man->targets;
-  }
+fn tcx_offline(p: Project*) -> bool {
+  return p->opts != (Options*)0 && p->opts->offline;
+}
+
+// The value of "--name=VALUE" (or "--name VALUE") among the command's
+// arguments, "" when absent.
+fn tcx_opt(p: Project*, name: string) -> string {
+  var rest: StrList* = p->opts->rest;
+  var eq: string = name + "=";
   var i: int64 = 0;
-  while (given != l && i < given->len) {
-    if (!tcx_add_target(l, sl_get(given, i))) {
-      return (StrList*)0;
+  while (i < rest->len) {
+    var a: string = sl_get(rest, i);
+    if (s_starts(a, eq)) {
+      return s_from(a, slen(eq));
+    }
+    if (s_eq(a, name) && i + 1 < rest->len) {
+      return sl_get(rest, i + 1);
     }
     i = i + 1;
   }
-  if (l->len == 0) {
-    sl_push(l, sys_os());
-    if (s_eq(sys_os(), "linux") && tool_found(tcx_wine())) {
-      sl_push(l, "windows");
+  return s_empty();
+}
+
+fn tcx_flag(p: Project*, name: string) -> bool {
+  return sl_has(p->opts->rest, name);
+}
+
+// The arguments that are not flags (nor the value of "--from DIR").
+fn tcx_positional(p: Project*) -> StrList* {
+  var rest: StrList* = p->opts->rest;
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < rest->len) {
+    var a: string = sl_get(rest, i);
+    if (s_eq(a, "--from") || s_eq(a, "--home")) {
+      i = i + 1;
+    } else if (!s_starts(a, "-")) {
+      sl_push(l, a);
     }
-    if (sys_is_wine()) {
-      sl_push(l, "linux");
-    }
+    i = i + 1;
   }
   return l;
 }
 
-// Resolves "latest"; "" after printing an error.
-fn tcx_version_arg(p: Project*, given: string) -> string {
-  var v: string = tcx_norm(given);
-  if (s_eq(v, "latest")) {
-    if (p->opts != (Options*)0 && p->opts->offline) {
-      error_msg("--offline: cannot look up the latest Mettle release");
-      err_line("  " + cyan("help") + ": name a version, or run without --offline");
+// Installs "latest", a release, or (from != "") a source checkout; the id,
+// or "" after printing the error. soft (may be 0) is set when only the
+// network or curl was missing.
+fn tcx_install(p: Project*, given: string, from: string, soft: bool*) -> string {
+  if (slen(from) > 0) {
+    var id: string = tcx_install_source(from);
+    if (slen(id) == 0) {
+      tcx_err_last();
       return s_empty();
     }
-    v = tcx_latest();
-    if (slen(v) == 0) {
-      tcx_err_last();
-    }
-    return v;
+    status("Installed", "Mettle " + id + " in " + tcx_dir(id));
+    return id;
   }
-  if (!sv_is(v)) {
-    error_msg("'" + given + "' is not a Mettle version (expected vX.Y.Z or latest)");
+  var v: string = tcx_norm(given);
+  if (!s_eq(v, "latest") && !sv_is(v)) {
+    error_msg("'" + given + "' is not a Mettle release (expected vX.Y.Z or latest)");
+    tcx_help("a source checkout installs with `mbuild toolchain install --from DIR`");
     return s_empty();
   }
-  return v;
+  if (tcx_installed(v)) {
+    status("Installed", "Mettle " + v + " is already in " + tcx_dir(v));
+    return v;
+  }
+  if (tcx_offline(p)) {
+    tcx_set_err("--offline: not downloading Mettle " + v, "run `mbuild toolchain install " + v + "` without --offline");
+    if (soft != (bool*)0) {
+      *soft = true;
+      return s_empty();
+    }
+    tcx_err_last();
+    return s_empty();
+  }
+  var rel: TcxRelease = tcx_release(v);
+  if (slen(rel.tag) == 0) {
+    if (soft != (bool*)0 && rel.soft) {
+      *soft = true;
+      return s_empty();
+    }
+    tcx_err_last();
+    return s_empty();
+  }
+  if (tcx_installed(rel.tag)) {
+    status("Installed", "Mettle " + rel.tag + " is already in " + tcx_dir(rel.tag));
+    return rel.tag;
+  }
+  status("Downloading", "Mettle " + rel.tag + " (" + p_base(rel.url) + ")");
+  if (!tcx_install_release(rel)) {
+    tcx_err_last();
+    return s_empty();
+  }
+  status("Installed", "Mettle " + rel.tag + " in " + tcx_dir(rel.tag));
+  if (sv_cmp(rel.tag, "v0.17.0") <= 0) {
+    warn("releases up to v0.17.0 cannot build current projects; install a source build with `mbuild toolchain install --from DIR`");
+  }
+  return rel.tag;
 }
 
-// Installs v for each target that lacks it. True when all are installed.
-fn tcx_ensure(p: Project*, v: string, targets: StrList*) -> bool {
-  var ok: bool = true;
-  var i: int64 = 0;
-  while (i < targets->len) {
-    var t: string = sl_get(targets, i);
-    if (tcx_installed(v, t)) {
-      status("Installed", "Mettle " + v + " for " + t + " is already in " + tcx_dir(v, t));
-    } else if (p->opts != (Options*)0 && p->opts->offline) {
-      error_msg("--offline: not downloading Mettle " + v + " for " + t);
-      err_line("  " + cyan("help") + ": run `mbuild toolchain install " + v + " -t " + t + "` without --offline");
-      ok = false;
-    } else {
-      status("Downloading", "Mettle " + v + " for " + t);
-      if (tcx_download(v, t)) {
-        status("Installed", "Mettle " + v + " for " + t + " in " + tcx_dir(v, t));
-      } else {
-        tcx_err_last();
-        ok = false;
-      }
-    }
-    i = i + 1;
+fn tcx_source_text(t: TcxInfo) -> string {
+  if (s_eq(t.source, "release")) {
+    return "release";
   }
-  return ok;
+  return "from " + t.source;
 }
 
 fn tcx_cmd_list(p: Project*) -> int32 {
+  var ids: StrList* = tcx_ids();
+  defer tcx_sl_free(ids);
+  var def: string = tcx_default();
+  var pin: string = tcx_pin(p);
+  var pin_id: string = s_empty();
+  if (slen(pin) > 0) {
+    pin_id = tcx_find(pin);
+  }
+  var hm: Mettle* = tcx_pick(p, sys_os());
+  var sel: string = s_empty();
+  if (hm != (Mettle*)0) {
+    sel = hm->installed;
+  }
   say(bold("Installed toolchains") + " (" + tcx_root() + "):");
-  var all_v: StrList* = tcx_versions(s_empty());
-  defer tcx_sl_free(all_v);
-  if (all_v->len == 0) {
+  if (ids->len == 0) {
     say("  (none)");
   }
+  var w: int64 = 0;
   var i: int64 = 0;
-  while (i < all_v->len) {
-    var v: string = sl_get(all_v, i);
-    var oses: StrList* = sl_new();
-    if (tcx_installed(v, "linux")) {
-      sl_push(oses, "linux");
+  while (i < ids->len) {
+    if (slen(sl_get(ids, i)) > w) {
+      w = slen(sl_get(ids, i));
     }
-    if (tcx_installed(v, "windows")) {
-      sl_push(oses, "windows");
+    i = i + 1;
+  }
+  i = 0;
+  while (i < ids->len) {
+    var t: TcxInfo = tcx_info(sl_get(ids, i));
+    var mark: string = "  ";
+    if (s_eq(t.id, sel)) {
+      mark = "* ";
     }
-    say("  " + s_pad_right(v, 10) + " " + sl_join(oses, ", "));
-    tcx_sl_free(oses);
+    var tags: StrList* = sl_new();
+    if (s_eq(t.id, def)) {
+      sl_push(tags, "default");
+    }
+    if (s_eq(t.id, pin_id)) {
+      sl_push(tags, "pinned");
+    }
+    var line: string = "  " + mark + s_pad_right(t.id, w) + "  mettle " + s_pad_right(t.version, 8) + "  " + tcx_source_text(t) + ", " + t.installed;
+    if (tags->len > 0) {
+      line = line + "  [" + sl_join(tags, ", ") + "]";
+    }
+    say(line);
+    tcx_sl_free(tags);
     i = i + 1;
   }
   say("");
@@ -1157,18 +1557,24 @@ fn tcx_cmd_list(p: Project*) -> int32 {
   sl_push(targets, "windows");
   i = 0;
   while (i < targets->len) {
-    var t: string = sl_get(targets, i);
-    var m: Mettle* = tcx_pick(p, t);
+    var tg: string = sl_get(targets, i);
+    var m: Mettle* = hm;
+    if (!s_eq(tg, sys_os())) {
+      m = tcx_pick(p, tg);
+    }
     if (m != (Mettle*)0) {
       var how: string = s_empty();
-      if (m->via_wine) {
-        how = ", through wine";
-      } else if (m->tool.unix) {
-        how = ", as a host program";
+      if (slen(m->installed) > 0) {
+        how = ": " + m->installed;
       }
-      say("  " + s_pad_right(t, 8) + " " + m->path + "  (" + m->source + how + ")");
+      if (m->via_wine) {
+        how = how + ", through wine";
+      } else if (m->tool.unix) {
+        how = how + ", as a host program";
+      }
+      say("  " + s_pad_right(tg, 8) + " " + m->path + "  (" + m->source + how + ")");
     } else {
-      say("  " + s_pad_right(t, 8) + " none: " + g_tcx_err);
+      say("  " + s_pad_right(tg, 8) + " none: " + g_tcx_err);
       if (slen(g_tcx_hint) > 0) {
         say("  " + s_pad_right("", 8) + " " + dim(g_tcx_hint));
       }
@@ -1178,50 +1584,55 @@ fn tcx_cmd_list(p: Project*) -> int32 {
   return 0;
 }
 
-fn tcx_cmd_install(p: Project*, given: string) -> int32 {
-  var targets: StrList* = tcx_targets(p, false);
-  if (targets == (StrList*)0) {
-    return 2;
+fn tcx_not_installed(given: string) -> int32 {
+  error_msg("Mettle " + given + " is not installed");
+  var v: string = tcx_norm(given);
+  if (sv_is(v)) {
+    tcx_help("mbuild toolchain install " + v);
+  } else {
+    tcx_help("see `mbuild toolchain list`; a source build installs with `mbuild toolchain install --from DIR`");
   }
-  var v: string = tcx_version_arg(p, given);
-  if (slen(v) == 0) {
-    return 1;
-  }
-  if (!sv_is(v) || sv_cmp(v, "v0.17.0") <= 0) {
-    warn("releases up to v0.17.0 cannot build current projects; build ../Mettle instead");
-  }
-  if (!tcx_ensure(p, v, targets)) {
-    return 1;
-  }
-  return 0;
+  return 1;
 }
 
-// Installs v for the host when missing and writes its compiler as
-// mb_tool("mettle-<host>", PATH) into mbuild.local.mettle (DESIGN.md 9).
-fn tcx_cmd_use(p: Project*, given: string) -> int32 {
-  var v: string = tcx_version_arg(p, given);
-  if (slen(v) == 0) {
-    return 1;
+// Pins the project to an installed toolchain (mb_toolchain in fn
+// project()); --local writes its compiler as mb_tool("mettle-<host>", PATH)
+// into mbuild.local.mettle instead.
+fn tcx_cmd_use(p: Project*, given: string, local: bool) -> int32 {
+  var id: string = tcx_find(given);
+  if (slen(id) == 0) {
+    return tcx_not_installed(given);
   }
   var host: string = sys_os();
-  var targets: StrList* = sl_of(host);
-  defer tcx_sl_free(targets);
-  if (!tcx_ensure(p, v, targets)) {
+  var file: string = tcx_mbfile(p);
+  var label: string = "mbuild.mettle";
+  var call: string = "mb_toolchain";
+  var key: string = s_empty();
+  var args: StrList* = sl_of(id);
+  defer tcx_sl_free(args);
+  if (local) {
+    file = p->root + "/mbuild.local.mettle";
+    label = "mbuild.local.mettle";
+    call = "mb_tool";
+    key = "mettle-" + host;
+    sl_set(args, 0, key);
+    sl_push(args, tcx_exe_in(tcx_dir(id)));
+  }
+  var r: FsRead = fs_read(file);
+  if (!r.ok && !local) {
+    error_msg("no mbuild.mettle in " + p->root);
+    tcx_help("`mbuild toolchain default " + id + "` sets this machine's default instead");
     return 1;
   }
-  var file: string = p->root + "/mbuild.local.mettle";
-  var r: FsRead = fs_read(file);
   var text: string = s_empty();
   if (r.ok) {
     text = r.data;
   }
-  var args: StrList* = sl_of("mettle-" + host);
-  defer tcx_sl_free(args);
-  sl_push(args, tcx_exe_in(tcx_dir(v, host), host));
-  var e: MbfEdit = mbf_set_call(text, "mb_tool", "mettle-" + host, args);
+  var e: MbfEdit = mbf_set_call(text, call, key, args);
   if (!e.ok) {
-    error_msg("mbuild.local.mettle:" + s_int(e.line) + " sets mettle-" + host + " in a way mbuild cannot edit (" + e.why + ")");
-    err_line("  " + cyan("help") + ": change it to: mb_tool(\"mettle-" + host + "\", \"" + sl_get(args, 1) + "\");");
+    var want: string = call + "(\"" + sl_join(args, "\", \"") + "\");";
+    error_msg(label + ":" + s_int(e.line) + " sets the compiler in a way mbuild cannot edit (" + e.why + ")");
+    tcx_help("change it to: " + want);
     return 1;
   }
   if (!s_eq(e.text, text)) {
@@ -1229,8 +1640,21 @@ fn tcx_cmd_use(p: Project*, given: string) -> int32 {
       error_msg("cannot write " + file);
       return 1;
     }
-    status("Updating", "mbuild.local.mettle: " + mbf_call_at(e.text, e.line));
+    status("Updating", label + ": " + mbf_call_at(e.text, e.line));
   }
+  return 0;
+}
+
+fn tcx_cmd_default(given: string) -> int32 {
+  var id: string = tcx_find(given);
+  if (slen(id) == 0) {
+    return tcx_not_installed(given);
+  }
+  if (!tcx_set_default(id)) {
+    error_msg("cannot write " + tcx_config_file());
+    return 1;
+  }
+  status("Default", "Mettle " + id);
   return 0;
 }
 
@@ -1243,10 +1667,11 @@ fn tcx_forget(dir: string) {
   }
   var keep: Buf* = buf_new();
   var lines: StrList* = s_lines(r.data);
+  var prefix: string = dir + "/";
   var i: int64 = 0;
   while (i < lines->len) {
     var line: string = sl_get(lines, i);
-    if (!s_starts(line, dir + "/")) {
+    if (!s_starts(line, prefix)) {
       buf_line(keep, line);
     }
     i = i + 1;
@@ -1255,91 +1680,323 @@ fn tcx_forget(dir: string) {
   fs_write(cache, buf_take(keep));
 }
 
-fn tcx_cmd_remove(p: Project*, given: string) -> int32 {
-  var v: string = tcx_norm(given);
-  if (!sv_is(v)) {
-    error_msg("'" + given + "' is not a Mettle version (expected vX.Y.Z)");
-    return 2;
+fn tcx_cmd_remove(given: string) -> int32 {
+  var id: string = tcx_find(given);
+  if (slen(id) == 0) {
+    return tcx_not_installed(given);
   }
-  var vdir: string = tcx_root() + "/" + v;
-  if (!fs_is_dir(vdir)) {
-    error_msg("Mettle " + v + " is not installed (" + vdir + ")");
+  var dir: string = tcx_dir(id);
+  tcx_forget(dir);
+  if (!sys_remove_tree(dir)) {
+    error_msg("cannot remove " + dir);
     return 1;
   }
-  var given_t: bool = p->opts != (Options*)0 && p->opts->targets->len > 0;
-  if (given_t) {
-    var targets: StrList* = tcx_targets(p, false);
-    if (targets == (StrList*)0) {
-      return 2;
-    }
-    var i: int64 = 0;
-    while (i < targets->len) {
-      var t: string = sl_get(targets, i);
-      var d: string = vdir + "/" + t;
-      if (fs_is_dir(d)) {
-        tcx_forget(d);
-        if (!sys_remove_tree(d)) {
-          error_msg("cannot remove " + d);
-          return 1;
-        }
-        status("Removed", "Mettle " + v + " for " + t);
-      } else {
-        note("Mettle " + v + " is not installed for " + t);
-      }
-      i = i + 1;
-    }
-    var files: StrList* = sl_new();
-    var dirs: StrList* = sl_new();
-    sys_list_dir(vdir, files, dirs);
-    var empty: bool = files->len == 0 && dirs->len == 0;
-    tcx_sl_free(files);
-    tcx_sl_free(dirs);
-    if (empty) {
-      sys_remove_tree(vdir);
-    }
-  } else {
-    tcx_forget(vdir);
-    if (!sys_remove_tree(vdir)) {
-      error_msg("cannot remove " + vdir);
-      return 1;
-    }
-    status("Removed", "Mettle " + v);
+  status("Removed", "Mettle " + id);
+  if (s_eq(tcx_default(), id)) {
+    tcx_set_default(s_empty());
+    note(id + " was the default toolchain; there is no default now");
   }
   return 0;
 }
 
+// Rebuilds source toolchains whose checkout moved on and tells of a newer
+// release than the newest installed one.
+fn tcx_cmd_update(p: Project*) -> int32 {
+  var ids: StrList* = tcx_ids();
+  defer tcx_sl_free(ids);
+  var rc: int32 = 0;
+  var newest: string = s_empty();
+  var def: string = tcx_default();
+  if (ids->len == 0) {
+    say("no toolchains installed (" + tcx_root() + ")");
+    return 0;
+  }
+  var i: int64 = 0;
+  while (i < ids->len) {
+    var t: TcxInfo = tcx_info(sl_get(ids, i));
+    i = i + 1;
+    if (s_eq(t.source, "release") || slen(t.source) == 0) {
+      if (sv_is(t.id) && (slen(newest) == 0 || sv_cmp(t.id, newest) > 0)) {
+        newest = t.id;
+      }
+      continue;
+    }
+    if (!tcx_is_checkout(t.source)) {
+      note(t.id + ": its checkout " + t.source + " is gone; not updated");
+      continue;
+    }
+    var desc: string = tcx_describe(t.source);
+    if (s_eq(desc, t.describe)) {
+      status("Fresh", t.id + " (" + t.source + ")");
+      continue;
+    }
+    var cur: string = "dev-" + desc;
+    if (tcx_installed(cur)) {
+      status("Fresh", t.id + ": its checkout's build " + cur + " is installed");
+      continue;
+    }
+    var nid: string = tcx_install_source(t.source);
+    if (slen(nid) == 0) {
+      tcx_err_last();
+      rc = 1;
+      continue;
+    }
+    status("Installed", "Mettle " + nid + " in " + tcx_dir(nid));
+    if (s_eq(def, t.id)) {
+      tcx_set_default(nid);
+      def = nid;
+      status("Default", "Mettle " + nid);
+    }
+  }
+  if (slen(newest) > 0) {
+    if (tcx_offline(p)) {
+      note("--offline: not looking for a newer Mettle release");
+      return rc;
+    }
+    var rel: TcxRelease = tcx_release("latest");
+    if (slen(rel.tag) == 0) {
+      tcx_err_last();
+      return 1;
+    }
+    if (sv_cmp(rel.tag, newest) > 0) {
+      status("Available", "Mettle " + rel.tag + " (newest installed: " + newest + "): mbuild toolchain install " + rel.tag);
+    } else {
+      status("Fresh", newest + " is the latest release");
+    }
+  }
+  return rc;
+}
+
 fn tcx_usage() {
   err_line("usage: mbuild toolchain [list]");
-  err_line("       mbuild toolchain install VERSION|latest [-t linux|windows|all]");
-  err_line("       mbuild toolchain use VERSION|latest");
-  err_line("       mbuild toolchain remove VERSION [-t ...]");
+  err_line("       mbuild toolchain install VERSION|latest");
+  err_line("       mbuild toolchain install --from DIR");
+  err_line("       mbuild toolchain use ID|VERSION [--local]");
+  err_line("       mbuild toolchain default ID|VERSION");
+  err_line("       mbuild toolchain remove ID|VERSION");
+  err_line("       mbuild toolchain update");
+}
+
+fn tcx_bad_args(sub: string, what: string) -> int32 {
+  error_msg("mbuild toolchain " + sub + " takes " + what);
+  tcx_usage();
+  return 2;
 }
 
 export fn tc_cmd_toolchain(p: Project*) -> int32 {
-  var rest: StrList* = p->opts->rest;
+  var pos: StrList* = tcx_positional(p);
+  defer tcx_sl_free(pos);
   var sub: string = "list";
-  if (rest->len > 0) {
-    sub = sl_get(rest, 0);
+  if (pos->len > 0) {
+    sub = sl_get(pos, 0);
   }
   if (s_eq(sub, "list") || s_eq(sub, "ls")) {
     return tcx_cmd_list(p);
   }
-  if (s_eq(sub, "install") || s_eq(sub, "use") || s_eq(sub, "remove") || s_eq(sub, "rm")) {
-    if (rest->len != 2) {
-      error_msg("mbuild toolchain " + sub + " takes one VERSION");
-      tcx_usage();
-      return 2;
+  if (s_eq(sub, "install")) {
+    var from: string = tcx_opt(p, "--from");
+    if (slen(from) > 0 && pos->len != 1) {
+      return tcx_bad_args(sub, "a VERSION or --from DIR, not both");
     }
-    var v: string = sl_get(rest, 1);
-    if (s_eq(sub, "install")) {
-      return tcx_cmd_install(p, v);
+    if (slen(from) == 0 && pos->len != 2) {
+      return tcx_bad_args(sub, "one VERSION (or --from DIR)");
     }
+    var v: string = s_empty();
+    if (pos->len == 2) {
+      v = sl_get(pos, 1);
+    }
+    if (slen(tcx_install(p, v, from, (bool*)0)) == 0) {
+      return 1;
+    }
+    return 0;
+  }
+  if (s_eq(sub, "update")) {
+    if (pos->len != 1) {
+      return tcx_bad_args(sub, "no arguments");
+    }
+    return tcx_cmd_update(p);
+  }
+  if (s_eq(sub, "use") || s_eq(sub, "default") || s_eq(sub, "remove") || s_eq(sub, "rm")) {
+    if (pos->len != 2) {
+      return tcx_bad_args(sub, "one ID or VERSION");
+    }
+    var v2: string = sl_get(pos, 1);
     if (s_eq(sub, "use")) {
-      return tcx_cmd_use(p, v);
+      return tcx_cmd_use(p, v2, tcx_flag(p, "--local"));
     }
-    return tcx_cmd_remove(p, v);
+    if (s_eq(sub, "default")) {
+      return tcx_cmd_default(v2);
+    }
+    return tcx_cmd_remove(v2);
   }
   error_msg("unknown toolchain command '" + sub + "'");
   tcx_usage();
   return 2;
+}
+
+// ---------------------------------------------------------------------------
+// Self-setup
+// ---------------------------------------------------------------------------
+
+fn tcx_show_home(h: string) -> string {
+  var home: string = s_replace_byte(sys_home(), 92, 47);
+  var hp: string = home + "/";
+  if (slen(home) > 1 && s_starts(h, hp)) {
+    return "~" + s_from(h, slen(home));
+  }
+  return h;
+}
+
+fn tcx_layout(home: string) -> bool {
+  return fs_mkdirs(home + "/toolchains") && fs_mkdirs(home + "/tmp");
+}
+
+// On the first run (no $MBUILD_HOME yet) creates it and says so once.
+export fn tc_first_run() {
+  var home: string = tcx_home();
+  if (fs_is_dir(home)) {
+    return;
+  }
+  if (tcx_layout(home) && !g_quiet) {
+    err_line(green(s_pad_left("Created", 12)) + " " + tcx_show_home(home));
+  }
+}
+
+fn tcx_setup_tool(label: string, name: string, env_override: string, why: string) -> bool {
+  var t: Tool = tcx_host_tool(name, env_override);
+  if (tool_found(t)) {
+    say("  " + s_pad_right(label, 10) + green("found") + "    " + t.path);
+    return true;
+  }
+  say("  " + s_pad_right(label, 10) + yellow("missing") + "  " + why);
+  return false;
+}
+
+// The Mettle checkout a compiler was built in (<checkout>/bin/mettle), "".
+fn tcx_checkout_of(exe: string) -> string {
+  var real: string = sys_realpath(exe);
+  if (slen(real) == 0) {
+    return s_empty();
+  }
+  var dir: string = p_dir(p_dir(real));
+  if (tcx_is_checkout(dir)) {
+    return dir;
+  }
+  return s_empty();
+}
+
+fn tcx_on_path(dir: string) -> bool {
+  var parts: StrList* = s_split(env_get("PATH"), sys_list_sep());
+  var found: bool = false;
+  var i: int64 = 0;
+  while (i < parts->len && !found) {
+    var d: string = sl_get(parts, i);
+    if (slen(d) > 0) {
+      found = s_eq(p_clean(s_replace_byte(d, 92, 47)), dir);
+    }
+    i = i + 1;
+  }
+  tcx_sl_free(parts);
+  return found;
+}
+
+// mbuild setup [--home DIR] [--from DIR | --no-compiler] [--yes]
+export fn tc_cmd_setup(p: Project*) -> int32 {
+  var rc: int32 = 0;
+  var given: string = tcx_opt(p, "--home");
+  var why: string = s_empty();
+  if (slen(given) > 0) {
+    var h: string = tcx_abs(given);
+    var hf: string = fs_home_file();
+    if (!fs_write(hf, h + "\n")) {
+      error_msg("cannot write " + hf);
+      tcx_help("install mbuild in a directory you can write to, or set MBUILD_HOME");
+      return 1;
+    }
+    sys_setenv("MBUILD_HOME", h);
+    why = "--home, saved in " + hf;
+  } else {
+    why = fs_home_origin();
+    if (!s_eq(why, "the default") && !s_eq(why, "MBUILD_HOME")) {
+      why = "from " + why;
+    }
+  }
+  var home: string = tcx_home();
+  var fresh: bool = !fs_is_dir(home);
+  if (!tcx_layout(home)) {
+    error_msg("cannot create " + home);
+    return 1;
+  }
+  var made: string = s_empty();
+  if (fresh) {
+    made = ", created";
+  }
+  say(bold("home") + "  " + tcx_show_home(home) + " (" + why + made + ")");
+
+  say(bold("compilers"));
+  var checkout: string = s_empty();
+  var me: string = env_get("METTLE");
+  if (slen(me) > 0) {
+    say("  $METTLE      " + me);
+    checkout = tcx_checkout_of(tcx_resolve(me));
+  }
+  var on_path: Tool = sys_find_tool("mettle");
+  if (tool_found(on_path)) {
+    say("  on PATH      " + on_path.path);
+    if (slen(checkout) == 0) {
+      checkout = tcx_checkout_of(on_path.path);
+    }
+  }
+  var ids: StrList* = tcx_ids();
+  if (ids->len > 0) {
+    say("  installed    " + sl_join(ids, ", "));
+  }
+  tcx_sl_free(ids);
+  if (slen(checkout) > 0) {
+    say("  checkout     " + checkout);
+  }
+  if (!tcx_flag(p, "--no-compiler")) {
+    var from: string = tcx_opt(p, "--from");
+    if (slen(from) == 0 && tcx_flag(p, "--yes")) {
+      from = checkout;
+    }
+    var soft: bool = false;
+    var id: string = tcx_install(p, "latest", from, &soft);
+    if (slen(id) == 0) {
+      if (soft) {
+        note(g_tcx_err + "; no compiler installed: run `mbuild toolchain install latest` when online");
+      } else {
+        rc = 1;
+      }
+    } else {
+      var def: string = tcx_default();
+      if (slen(def) == 0 || !tcx_installed(def) || (tcx_flag(p, "--yes") && slen(from) > 0)) {
+        tcx_set_default(id);
+        status("Default", "Mettle " + id);
+      } else if (!s_eq(def, id)) {
+        note("the default toolchain stays " + def + " (`mbuild toolchain default " + id + "` switches)");
+      }
+    }
+  }
+
+  say(bold("tools"));
+  tcx_setup_tool("curl", "curl", "MBUILD_CURL", "needed to download packages and compilers");
+  tcx_setup_tool("tar", "tar", "MBUILD_TAR", "needed to unpack packages and compilers");
+  tcx_setup_tool("gcc", "gcc", "CC", "needed for packages with C code");
+  tcx_setup_tool("make", "make", "MBUILD_MAKE", "needed for toolchain install --from");
+  tcx_setup_tool("git", "git", "MBUILD_GIT", "needed for toolchain install --from");
+  if (s_eq(sys_os(), "linux")) {
+    tcx_setup_tool("wine", "wine", "MBUILD_WINE", "optional: builds for windows");
+  }
+
+  var bin: string = p_dir(s_replace_byte(sys_self_exe(), 92, 47));
+  if (tcx_on_path(bin)) {
+    say(bold("PATH") + "  " + bin + " is on PATH");
+  } else if (s_eq(sys_os(), "windows")) {
+    say(bold("PATH") + "  " + bin + " is not on PATH: add it to your user PATH (Settings > System > About > Advanced system settings > Environment Variables)");
+  } else {
+    say(bold("PATH") + "  " + bin + " is not on PATH; add this line to ~/.bashrc (or your shell's rc file):");
+    say("  export PATH=\"" + bin + ":$PATH\"");
+  }
+  return rc;
 }

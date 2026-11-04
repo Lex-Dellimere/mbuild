@@ -18,7 +18,7 @@ import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
 fn mx_flag_names() -> StrList* {
-  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services", 32);
+  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --no-compiler", 32);
 }
 
 fn mx_bad_flag(a: string) {
@@ -65,7 +65,7 @@ fn mx_add_targets(o: Options*, v: string) {
 
 // Value-less command flags: they go to rest as written.
 fn mx_is_cmd_flag(name: string) -> bool {
-  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services", 32);
+  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services --local --no-compiler", 32);
   var has: bool = sl_has(l, name);
   free(l);
   return has;
@@ -73,7 +73,7 @@ fn mx_is_cmd_flag(name: string) -> bool {
 
 // Command flags with a value: they go to rest as "--name=VALUE".
 fn mx_is_cmd_opt(name: string) -> bool {
-  return s_eq(name, "--to") || s_eq(name, "--registry") || s_eq(name, "--name") || s_eq(name, "--from") || s_eq(name, "--opt");
+  return s_eq(name, "--to") || s_eq(name, "--registry") || s_eq(name, "--name") || s_eq(name, "--from") || s_eq(name, "--opt") || s_eq(name, "--home");
 }
 
 fn main(argc: int32, argv: cstring*) -> int32 {
@@ -241,9 +241,13 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
     say("mbuild " + build_version_text + " (" + host + ")");
     return 0;
   }
+  if (s_eq(command, "setup")) { return tc_cmd_setup(build_find(o)); }
+  tc_first_run();
   if (!build_is_builtin(command)) {
     return build_cmd_project(build_find(o), command);
   }
+  // No project evaluation: a missing pinned toolchain must still install.
+  if (s_eq(command, "toolchain")) { return tc_cmd_toolchain(build_find(o)); }
   if (s_eq(command, "init")) { return build_cmd_init(o); }
   if (s_eq(command, "new")) { return build_cmd_new(build_find(o)); }
   if (s_eq(command, "registry")) { return build_cmd_registry(build_find(o)); }
@@ -279,6 +283,5 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "components")) { return build_cmd_components(p); }
   if (s_eq(command, "use")) { return build_cmd_use(p); }
   if (s_eq(command, "agents")) { return build_cmd_agents(p); }
-  if (s_eq(command, "toolchain")) { return tc_cmd_toolchain(p); }
   return build_help(p, command);
 }
