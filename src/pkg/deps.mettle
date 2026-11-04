@@ -486,7 +486,7 @@ fn dx_lock_new() -> DxLock* {
   return l;
 }
 
-// A lock of round 2 ("module version commit"): its pins are dropped.
+// A git-era lock ("module version commit"): its pins are dropped.
 fn dx_git_era(lines: StrList*) -> bool {
   var i: int64 = 0;
   while (i < lines->len) {
@@ -3096,7 +3096,7 @@ export fn deps_cmd_fetch(p: Project*) -> int32 {
 }
 
 // ---------------------------------------------------------------------------
-// Interface types (DESIGN.md 12.9, 17.2)
+// Interface types (DESIGN.md 12.9)
 // ---------------------------------------------------------------------------
 
 export struct DepSnap {
