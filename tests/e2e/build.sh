@@ -24,6 +24,13 @@ code_is() { [ "$(cat "$S/last.code")" = "$1" ]; }
 # mb ARGS: runs mbuild in the current directory into last.out / last.code.
 mb() { "$MB" "$@" >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
 
+# unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
+unit() { if out=$(METTLE="$METTLE" TMPDIR="$S" sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
+
+echo "== unit tests"
+unit graph_test
+unit scan_test
+
 for mode in debug release; do
 flag=""
 [ $mode = release ] && flag="--release"

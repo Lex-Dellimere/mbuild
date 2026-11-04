@@ -32,6 +32,14 @@ want:
 $3"; fi
 }
 
+# unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
+unit() { if out=$(METTLE="$METTLE" TMPDIR="$T" sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
+
+echo "== unit tests"
+unit toml_test
+unit manifest_test
+unit mbfile_test
+
 echo "== building"
 for mode in debug release; do
   flag=""; [ $mode = release ] && flag="--release"

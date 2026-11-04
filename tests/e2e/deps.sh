@@ -47,6 +47,12 @@ proj() {
   printf '%s\n' "${MAIN:-fn main() -> int32 { return 0; \}}" >"$1/src/main.mettle"
 }
 
+# unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
+unit() { if out=$(METTLE="$METTLE" TMPDIR="$S" sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
+
+echo "== unit tests"
+unit semver_test
+
 echo "== auto-add and the lock"
 P="$S/app"
 MAIN='import "strutil/strutil";
