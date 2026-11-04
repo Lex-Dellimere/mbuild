@@ -1700,9 +1700,6 @@ export fn cmp_cmd_use(p: Project*) -> int32 {
   }
   var file: string = p->root + "/mbuild.local.mettle";
   var text: string = cmx_read(file);
-  if (slen(text) == 0) {
-    text = "import \"mbuild/api\";\n\nfn local() {{\n}\n";
-  }
   var e: MbfEdit;
   if (slen(iname) > 0) {
     var args: StrList* = sl_of(name);
@@ -1716,9 +1713,16 @@ export fn cmp_cmd_use(p: Project*) -> int32 {
     error_msg("could not edit " + cmx_show(p, file) + ": " + e.why);
     return 1;
   }
-  if (!s_eq(e.text, text) && !fs_write(file, e.text)) {
-    error_msg("could not write " + file);
-    return 1;
+  if (!s_eq(e.text, text)) {
+    if (!fs_write(file, e.text)) {
+      error_msg("could not write " + file);
+      return 1;
+    }
+    if (slen(iname) > 0) {
+      status("Updating", "mbuild.local.mettle: " + mbf_call_at(e.text, e.line));
+    } else {
+      status("Removing", "mbuild.local.mettle: " + mbf_call_at(text, e.line));
+    }
   }
   cmx_set_local(p, name, iname);
   var rc: int32 = 0;

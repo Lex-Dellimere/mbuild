@@ -124,6 +124,7 @@ mb run comp --use logger=quiet
 check "--use logger=quiet" hasnt "stdout: hi"
 mb build
 mb use logger=quiet
+check "use edits mbuild.local.mettle" has 'Updating mbuild.local.mettle: mb_use("logger", "quiet")'
 mb build
 check "use rebuilds only that bin" sh -c 'grep -qF "Compiling comp (linux, debug)" "$0/last.out" && grep -qF "Fresh other (linux, debug)" "$0/last.out"' "$S"
 mb run comp
