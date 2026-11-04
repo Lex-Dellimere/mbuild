@@ -1,536 +1,455 @@
 # Dependencies
 
-mbuild fetches packages straight from git repositories. There is no registry.
-A package is a git repository, a version is a tag, and the import path says
-where the repository lives.
+Packages come from registries. A registry is a static folder: an index file
+per package and a `.tar.gz` plus a small manifest per version. Any web host,
+a shared folder or a plain local directory can serve one; there's no server
+code. Local packages can also be used straight from a directory.
 
-The transcripts on this page use the local stand-in repositories that
-`tests/fixtures/make-fixtures.sh` builds, with `MBUILD_GIT_BASE` pointing at
-them. Against GitHub the output is the same.
+The transcripts on this page use the fixture registry that
+`sh tests/fixtures/make-registry.sh DIR` builds, with `MBUILD_REGISTRY`
+pointing at it.
 
-## Import paths
+## Importing a package
 
-Import a file from another package by its full path: the repository path, then
-the file inside the repository.
-
-```mettle
-import "github.com/demo/strutil/strutil";      // strutil.mettle at the repository root
-import "github.com/demo/vecmath/vecmath";
-import "github.com/someone/json/codec/read";   // codec/read.mettle
-```
-
-An import is remote when its first component contains a dot. Its module is the
-first three components, `host/owner/repo`: `github.com/demo/strutil`. mbuild
-clones `https://github.com/demo/strutil` and checks out the selected commit in
-`.mbuild/deps/github.com/demo/strutil/`. The compiler finds the file through
-the `mettle.deps` block mbuild maintains ([The manifest](manifest.md#mettledeps)).
-
-Auto-detection assumes `host/owner/repo`. A module whose path is longer has to
-be declared in `[dependencies]` yourself.
-
-An alias imports a module under a short name:
-
-```toml
-[dependencies]
-json2 = { module = "github.com/other/json", version = "v2.0.1" }
-```
+A package import is the package name, then a file inside it:
 
 ```mettle
-import "json2/codec/read";
+import "strutil/strutil";      // strutil.mettle at the package root
+import "webfw/http/server";    // http/server.mettle
 ```
 
-An alias is visible only to the files of the package that declares it. mbuild
-writes a managed `mettle.deps` block into every checkout under `.mbuild/deps`
-and into every local path package's directory, holding the host lines (which
-point at your project's `.mbuild/deps`) and that package's own aliases. The
-compiler reads the nearest `mettle.deps` first, so a dependency that imports
-`su/strutil` gets its own `su`, and two packages can use one alias name for
-different modules. Your project's own block holds only the hosts, your
-aliases and your path packages. In a path package's `mettle.deps`, as in
-yours, lines outside the block are kept; the block points at the project that
-last resolved, so a path package shared by two projects follows whichever ran
-last.
+An import with a single component (`import "logger"`) is never a package:
+it's a file next to yours, or a [component](components.md).
 
-A local package is a directory:
+### Adding a dependency by importing it
 
-```toml
-[dependencies]
-mylib = { path = "../mylib" }
-```
-
-```mettle
-import "mylib/widget";
-```
-
-## Adding a dependency by importing it
-
-Write the import and build. mbuild sees that the import does not resolve,
-picks the newest release tag, writes it into `mbuild.toml`, and resolves
-again:
-
-```mettle
-import "std/io";
-import "github.com/demo/strutil/strutil";
-
-fn main() -> int32 {
-  println(su_shout("hello"));
-  return 0;
-}
-```
+When an import's first component isn't a dependency yet, mbuild looks the
+name up in the registries, adds the newest stable version to `mbuild.mettle`,
+and builds:
 
 ```text
 $ mbuild run
-    Fetching github.com/demo/strutil
-      Adding github.com/demo/strutil v1.1.0
+      Adding strutil v1.1.0 (registry default)
+      Adding mbuild.mettle: mb_dep("strutil", "v1.1.0")
    Resolving dependencies
+    Fetching strutil v1.1.0 (default)
+     Updated AGENT.rules
    Compiling hello (linux, debug)
     Finished in 0.0s
      Running build/linux/debug/hello
-hello!
+hi!
 ```
 
-```toml
-[dependencies]
-"github.com/demo/strutil" = "v1.1.0"
+```mettle
+fn project() {
+  mb_package("hello", "0.1.0");
+  mb_dep("strutil", "v1.1.0");
+}
 ```
 
-This happens in `build`, `run`, `test` and `check`. The version written is a
-concrete one: the highest stable version tag (`v2.0.0-rc.1` lost to `v1.1.0`
-above), else the highest pre-release, else, for a repository with no version
-tags, the name of its default branch:
+A name no registry has is left to the compiler's error. `--locked` refuses
+to add anything.
 
-```text
-    Fetching github.com/demo/nomanifest
-      Adding github.com/demo/nomanifest main
+## Declaring dependencies
+
+```mettle
+  mb_dep("strutil", "v1.1.0");               // from the registries
+  mb_dep_from("corp", "auth", "v2.0.0");     // from one named registry
+  mb_dep_path("widgets", "../widgets");      // a local directory with its own mbuild.mettle
 ```
 
-With `--locked` or `--offline`, mbuild does not add anything. It names the
-import and the command to run:
-
-```text
-$ mbuild build --locked
-error: src/main.mettle:2: cannot find `github.com/demo/nomanifest/greet` (module github.com/demo/nomanifest is not a dependency)
-error: missing dependencies (--locked stops mbuild from adding it)
-  help: run `mbuild get github.com/demo/nomanifest`
-```
-
-A module that is already in the graph because another dependency requires it
-resolves without being declared, since its checkout is present. `mbuild tidy`
-adds such imports to `[dependencies]` at the version already selected (like
-Go, a direct import of a transitive module never moves it), which keeps them
-from disappearing when the dependency that pulled them in changes. Automatic
-additions during a build do the same for a module already in `mbuild.lock`.
-
-## Version specs
-
-| Spec | Meaning |
+| Version | Means |
 |---|---|
-| `"v1.2.3"` | Version 1.2.3 or higher, by minimal version selection. The tag `1.2.3` also matches. |
-| `"v1.2"`, `"v1"` | A partial version: the lowest matching tag (`v1.2.x`, `v1.x.y`) as a minimum. `mbuild get m@v1` picks the highest matching tag instead. |
-| `"v2.0.0-rc.1"` | A pre-release, matched exactly like any version. |
-| `"latest"` | The highest stable version tag, else the highest pre-release, else the head of the default branch. Pinned in the lock on first use. |
-| `"main"` | A branch. Pinned to its current commit in the lock. |
-| `"some-tag"` | A tag that is not a version. |
-| `"8ae2712"` | A commit, 7 to 40 hex digits. |
+| `"v1.2.0"` | 1.2.0 or higher, by minimal version selection (below) |
+| `"v1.2"`, `"v1"` | the newest matching version |
+| `"latest"` | the newest stable version, pinned in the lock on first use |
 
-The lock pins every spec to a commit. A build never moves a pin: a branch that
-gained commits, or a `latest` that has a newer tag, stays where the lock says
-until you run `mbuild get` or `mbuild update`. A tag that was moved in the
-repository keeps its locked commit too, with a warning:
+Branches and commits don't exist here:
 
 ```text
-warning: tag v1.0.0 of github.com/demo/strutil moved upstream (3e687bc -> 9a1f0c2); keeping 3e687bc; run `mbuild update github.com/demo/strutil` to take 9a1f0c2
+$ mbuild get strutil@main
+error: strutil@main: registry packages have versions only (v1.2.0, v1, latest)
 ```
 
-`mbuild update MODULE` then takes the new commit and says so:
-
-```text
-    Updating github.com/demo/strutil v1.0.0 (tag moved upstream: 3e687bc -> 9a1f0c2)
-```
-
-When the error is a version that does not exist, mbuild lists what does:
-
-```text
-$ mbuild get github.com/demo/strutil@v9
-    Fetching github.com/demo/strutil
-error: github.com/demo/strutil has no version v9 (required by the command line)
-  help: available versions: v1.0.0, v1.1.0, v2.0.0-rc.1; branches: main
-```
+A path package's `mbuild.mettle` is read for its dependencies, C code and
+components; its commands, hooks, profiles and registries are ignored.
 
 ## Minimal version selection
 
-Every package can have an `mbuild.toml` with its own `[dependencies]`. mbuild
-walks the requirement graph from your project: for each (module, version) it
-visits, it reads that version's `mbuild.toml` straight from the git mirror and
-queues its requirements. Then it selects, for each module, the highest version
-anyone asked for. Nothing newer than that is chosen, even when it exists.
-
-The fixtures show it. `vecmath v0.2.0` requires `strutil v1.1.0`. The project
-asks for `strutil v1.0.0`:
-
-```toml
-[dependencies]
-"github.com/demo/vecmath" = "v0.2.0"
-"github.com/demo/strutil" = "v1.0.0"
-```
+Each package's manifest lists its own dependencies. mbuild walks them from
+your project and picks, for each package, the highest version anyone asked
+for, never something newer. Here `vecmath v0.2.0` needs `strutil v1.1.0` and
+the project asks for `v1.0.0`:
 
 ```text
 $ mbuild deps --tree
    Resolving dependencies
-      Adding github.com/demo/strutil v1.1.0
-      Adding github.com/demo/vecmath v0.2.0
-conf
-|-- github.com/demo/vecmath v0.2.0 [native: C; c libs: m]
-|   `-- github.com/demo/strutil v1.1.0
-`-- github.com/demo/strutil v1.1.0 (requires v1.0.0)
+      Adding strutil v1.1.0 (registry default)
+      Adding vecmath v0.2.0 (registry default)
+    Fetching vecmath v0.2.0 (default)
+mvs 0.1.0
+|-- vecmath v0.2.0 (default) [native: C; c libs: m]
+|   `-- strutil v1.1.0 (default)
+`-- strutil v1.1.0 (default) (requires v1.0.0)
 ```
 
-`v1.1.0` is selected: it is the highest version required. `v2.0.0-rc.1` exists
-but nobody asked for it.
-
-Versions are compared as semantic versions. A branch, a non-version tag or a
-commit cannot be compared, so a non-version requirement your own manifest
-states wins outright, and mbuild warns when the graph disagrees:
+`mbuild why NAME` says how a version got picked:
 
 ```text
-warning: conflicting requirements for github.com/demo/strutil:
-    mbuild.toml requires main
-    github.com/demo/vecmath v0.2.0 requires v1.1.0
-  using main
+$ mbuild why strutil
+strutil v1.1.0 (selected: the highest of the versions required)
+  required by:
+    mbuild.mettle requires v1.0.0
+    mbuild.mettle -> textfmt v0.1.0 requires v1.1.0
+  imported by:
+    src/main.mettle:2
+    textfmt v0.1.0: textfmt.mettle:1
 ```
 
-When only dependencies state non-version requirements, the version
-requirements still win if there are any; otherwise the first requirement seen
-is kept.
+A program holds one version of a package. Versions in different
+compatibility lines (`v1.x` and `v2.x`, or `v0.1.x` and `v0.2.x`) can't be
+reconciled, and mbuild says what would fix it:
+
+```text
+$ mbuild build
+   Resolving dependencies
+error: apilib is required at incompatible versions:
+    v1.0.0 (line v1) by mbuild.mettle -> old v1.0.0
+    v2.0.0 (line v2) by mbuild.mettle -> new2 v1.0.0
+  a program holds one version of a package: two lines would declare the same exported names twice
+  help: old v1.1.0 requires apilib v2.0.0: run `mbuild get old@v1.1.0`
+  help: or choose one version for the whole build in mbuild.mettle (you take responsibility for the others):
+          mb_replace_version("apilib", "v2.0.0");
+```
+
+`mb_replace_version(name, version)` and `mb_replace_path(name, dir)` in
+`fn project()` override what everyone asks for. Only your project's
+replacements count. For a local checkout you're working on, put
+`mb_replace_path` in `mbuild.local.mettle` instead
+([project](project.md#mbuildlocalmettle)), so it never reaches the lock.
 
 ## The lock
 
-`mbuild.lock` records the selected version and commit of every module
-([format](manifest.md#mbuildlock)). Commit it. With the lock in place, a clone
-on another machine checks out exactly the same commits.
-
-Resolution reuses the lock wherever a pin still matches its requirement: the
-same version for a version spec, the same branch or commit for a named spec,
-any locked entry for `latest`. Change a requirement in `mbuild.toml` and only
-that module gets a new pin. Whenever the lock changes, mbuild says how:
-
 ```text
-      Adding github.com/demo/nomanifest main
-    Updating github.com/demo/strutil v1.1.0 -> v1.0.0
-    Updating github.com/demo/nomanifest main (65769e6 -> 83c3c8f)
+# mbuild.lock: generated by mbuild. Commit it.
+# format 3
+# requirements 637a62ca58776977c2694bb57a2dcc0a
+greet v0.1.0 mine sha256:c64fc9e6735d8f0e392872c8e689109fd568d990be92830f21fbb44a31b1f8ce
+strutil v1.1.0 default sha256:b825cfc54e55df0c00b962c79a59339607e0eb6e725980d9153e27760e3ed812
 ```
 
-Checkouts that are no longer selected are removed from `.mbuild/deps`.
+One line per registry package: name, version, the registry's name and the
+archive's sha256. Path packages aren't in it. Commit it: a clone on another
+machine gets the same bytes, and a build never moves a pin. Only `get`,
+`update`, `remove`, `tidy` and auto-add change it, and each says how.
+
+A lock from the git era is ignored with a note and resolved again.
 
 ## Commands
 
-### mbuild get MODULE[@VERSION]...
+### mbuild get NAME[@VERSION]...
 
-Adds a requirement or changes one, then resolves. `VERSION` is any spec from
-the table above; it defaults to `latest`. mbuild writes the concrete version it
-found, not the word `latest`:
-
-```text
-$ mbuild get github.com/demo/vecmath
-    Fetching github.com/demo/vecmath
-      Adding github.com/demo/vecmath v0.2.0
-   Resolving dependencies
-```
+Adds or changes a dependency (default: the newest version), then checks
+every bin still compiles. If it doesn't, `mbuild.mettle` and `mbuild.lock`
+are put back (`--no-verify` takes it anyway, `--test` runs the tests too).
 
 ```text
-$ mbuild get github.com/demo/strutil@v1.0.0
-    Fetching github.com/demo/strutil
-    Updating github.com/demo/strutil v1.1.0 -> v1.0.0
+$ mbuild get strutil@v1.0.0
+    Updating strutil v1.1.0 -> v1.0.0
+    Updating mbuild.mettle: mb_dep("strutil", "v1.0.0")
    Resolving dependencies
+    Fetching strutil v1.0.0 (default)
+   Verifying 1 bin for linux
+    Verified
+$ mbuild get strutil@v9
+error: strutil has no version v9 (required by the command line)
+  help: available versions: v1.0.0, v1.1.0, v2.0.0-rc.1
 ```
 
-`MODULE` may also be an alias key from `[dependencies]` (`mbuild get
-json2@v2.1.0`). A path dependency cannot be changed this way; edit its `path`.
-
-A repository URL works as well and is turned into its module path:
-`https://github.com/a/b`, `http://...`, `ssh://git@github.com/a/b`,
-`git@github.com:a/b`, each with or without a trailing `.git` or `/`, all mean
-`github.com/a/b` (`mbuild get git@github.com:a/b.git@v1.2.0`). The URL is not
-recorded; to fetch from it, set `url` (see [Where modules come
-from](#where-modules-come-from)).
-
-### mbuild remove MODULE...
-
-Removes the requirement (by module path or key) from `mbuild.toml`, then
-resolves. A module that is still required by another dependency stays in the
-lock, at the version that dependency asks for:
+### mbuild remove NAME...
 
 ```text
-$ mbuild remove github.com/demo/vecmath
-    Removing github.com/demo/vecmath from mbuild.toml
+$ mbuild remove strutil
+    Removing strutil from mbuild.mettle
+    Removing mbuild.mettle: mb_dep("strutil", "v2.0.0-rc.1")
    Resolving dependencies
-    Updating github.com/demo/strutil v1.1.0 -> v1.0.0
+   Verifying 1 bin for linux
+error: removing strutil breaks this project:
+    src/main.mettle:2: Could not resolve imported file 'strutil/strutil' (import chain: main.mettle) (E0006)
+  Restored mbuild.mettle and mbuild.lock
+  help: fix the code first, or run it anyway and fix the code afterwards: `mbuild remove strutil --no-verify`
 ```
 
-Here `vecmath` had raised `strutil` to `v1.1.0`. Without it, the project's own
-`v1.0.0` is the highest requirement left.
+### mbuild update [NAME...]
 
-### mbuild update [MODULE... | --all]
-
-Brings requirements forward to what the remotes have now. For each
-requirement in `mbuild.toml` (or only the named ones), mbuild refreshes the
-mirror and then:
-
-- a full version such as `v1.0.0` moves to the newest tag with the same major
-  version (pre-releases only when the current version is one), and
-  `mbuild.toml` is edited;
-- `latest` and branches are re-resolved, so their pins move to the current
-  tag or commit;
-- partial versions (`v1`, `v1.2`) and commits stay as written.
-
-Then the whole graph is resolved again with the old pins ignored.
+Moves each requirement to the newest version in its compatibility line and
+verifies the build. A version that breaks your code is held back, and the
+newest one that works is taken:
 
 ```text
 $ mbuild update
-    Fetching github.com/demo/strutil
-    Updating github.com/demo/strutil v1.0.0 -> v1.1.0
-   Resolving dependencies
-$ mbuild update
-    Fetching github.com/demo/strutil
-   Resolving dependencies
-     Checked dependencies are up to date
+    Updating mbuild.mettle: mb_dep("apilib", "v1.2.0")
+   Verifying 1 bin for linux
+    Updating mbuild.mettle: mb_dep("apilib", "v1.1.0")
+    Updating mbuild.mettle: mb_dep("apilib", "v1.1.0")
+     Updated apilib v1.0.0 -> v1.1.0
+        Held apilib v1.2.0: src/main.mettle:5: Function 'al_add' expects 3 arguments, got 2 (E0003)
+       Newer apilib v2.0.0 is a new compatibility line (v2): `mbuild update --major apilib`
+     Summary 1 updated, 1 held back, 1 new line available
 ```
 
-A new major version is never picked by `update`. Ask for it with
-`mbuild get MODULE@v2.0.0`.
+`--major` crosses into new lines, `--all` also raises packages only your
+dependencies require (recording them in `mbuild.mettle`), `--dry-run` shows
+the plan.
 
-Modules that only dependencies require stay at the version minimal version
-selection gives them. `mbuild update --all` raises those too: every selected
-module whose version is a tag moves to the newest tag with the same major
-version. Selection only ever picks a version somebody requires, so mbuild
-records each raised module as a requirement in your `mbuild.toml` (repeating
-until nothing more moves, since a raised module may require others):
+### mbuild outdated
 
 ```text
-$ mbuild update --all
-    Fetching github.com/demo/strutil
-    Updating github.com/demo/strutil v1.0.0 -> v1.1.0 (now required in mbuild.toml)
-   Resolving dependencies
+$ mbuild outdated
+NAME     CURRENT  COMPATIBLE  LATEST             REQUIRED BY
+strutil  v1.0.0   v1.1.0      v2.0.0-rc.1 (pre)  vecmath v0.1.0
+vecmath  v0.1.0   -           v0.3.0 (new line)  mbuild.mettle
 ```
-
-`mbuild tidy` removes such a requirement again if nothing in your own code
-imports the module.
 
 ### mbuild tidy
 
-Scans every bin and every file with `@test` functions, for both targets,
-looking at the imports of your own package's files. It adds remote modules
-they import but `mbuild.toml` does not require (at the version already
-selected when the module is in the graph, else the latest), and removes
-requirements they do not import: modules, aliases whose key is not imported,
-and path dependencies:
+Adds packages your files import but `mbuild.mettle` doesn't declare, and
+removes the ones nothing imports:
 
 ```text
 $ mbuild tidy
-    Removing github.com/demo/vecmath (not imported)
+    Removing strutil (not imported)
+    Removing mbuild.mettle: mb_dep("strutil", "v1.1.0")
    Resolving dependencies
+    Updating strutil v1.1.0 -> v1.0.0
+   Verifying 1 bin for linux
+    Verified
 ```
+
+It also moves hand-written `mettle.deps` lines into `mbuild.mettle` as
+`mb_dep_path` calls.
 
 ### mbuild deps [--tree]
 
-Lists the selected modules. Branches and commits show their short commit, and
-`[native: ...]` marks packages with C code or `[link]` libraries, naming the
-libraries the C code links (`c libs`, from `[c]`/`[c.linux]`/`[c.windows]`)
-and those the package's externs bind (`link libs` and `pkgconfig`, from
-`[link]` and its OS sections):
-
 ```text
 $ mbuild deps
-github.com/demo/nomanifest main (65769e6)
-github.com/demo/strutil v1.0.0
-github.com/demo/vecmath v0.1.0 [native: C; c libs: m]
-mylib (path ../mylib) [native: link libs: z]
+strutil v1.1.0 (default)
+textfmt v0.1.0 (default)
 ```
 
-`--tree` shows who requires what. `(requires X)` marks a requirement that was
-raised by selection, `(not selected)` one that was not used, and `(*)` a
-subtree already printed above:
+### mbuild fetch and --offline
 
-```text
-$ mbuild deps --tree
-app 0.1.0
-|-- github.com/demo/vecmath v0.1.0 [native: C; c libs: m]
-|   `-- github.com/demo/strutil v1.0.0
-`-- github.com/demo/nomanifest main (65769e6)
-```
-
-### mbuild fetch
-
-Resolves from the lock, downloads every module it names into the mirror
-cache, and checks them out:
+`mbuild fetch` downloads everything the lock names into the download cache,
+so builds work offline:
 
 ```text
 $ mbuild fetch
    Resolving dependencies
-     Fetched 1 module(s); builds can now run with --offline
+     Fetched 2 package(s); builds can now run with --offline
+$ mbuild --offline build
+   Compiling app (linux, debug)
+    Finished in 0.0s
 ```
 
-With `--force` (on `fetch` or on any build), every selected checkout is
-checked out and cleaned again (`git checkout --force` and `git clean -ffdx`),
-which restores files edited or deleted inside `.mbuild/deps`, and the
-checkouts' `mettle.deps` blocks are rewritten.
-
-## Offline and locked builds
-
-`--offline` never touches the network. Dependencies resolve from the mirrors
-already in `$MBUILD_HOME/git`, and toolchains are never downloaded. A module
-with no mirror is an error that points at `mbuild fetch`:
+`--locked` (for CI) fails instead of changing `mbuild.mettle` or the lock:
 
 ```text
-$ mbuild build --offline
-   Resolving dependencies
-error: github.com/demo/strutil (required by mbuild.toml) is not downloaded and --offline forbids fetching it
-  help: run `mbuild fetch` once while online, or drop --offline
+$ mbuild --locked get strutil@v1.0.0
+error: mbuild get would change mbuild.mettle, and --locked forbids it
+  help: run it without --locked
 ```
 
-A commit missing from an existing mirror is an error too.
+### mbuild vendor
 
-`--locked` refuses every change to `mbuild.toml` and `mbuild.lock`: no
-automatic additions, no `get`, `remove`, `update`, `tidy` or
-`toolchain use`, and a build fails when the lock is missing or out of date:
+Copies every package into `vendor/`. While `vendor/` matches the lock,
+builds use it and never touch a registry. `mbuild vendor --remove` deletes
+it.
 
 ```text
-$ mbuild build --locked
-   Resolving dependencies
-error: mbuild.lock is out of date and --locked forbids changing it
-  help: run the command without --locked (for example `mbuild fetch`) and commit the new mbuild.lock
+$ mbuild vendor
+    Vendored 2 package(s) into vendor/
 ```
 
-For CI, `mbuild fetch` once and then build with `--locked --offline`.
+## Registries
 
-## Where modules come from
-
-For each module, the URL is the first of:
-
-1. the requirement's `url` field;
-2. `$MBUILD_GIT_BASE/<module>`, when `MBUILD_GIT_BASE` is set;
-3. `https://<module>`.
-
-`url` takes anything git accepts: `https://...`, `ssh://...`,
-`git@host:owner/repo.git`, or a local path. When the project and a dependency
-both give a `url` for the same module, the project's wins.
-
-`MBUILD_GIT_BASE` is a directory or URL under which repositories sit at their
-module paths. Point it at a company mirror
-(`https://git.example.com/mirror`, so `github.com/a/b` is fetched from
-`https://git.example.com/mirror/github.com/a/b`) or at a local directory of
-repositories, which is how mbuild's own tests run.
-
-Private repositories: mbuild runs git with `GIT_TERMINAL_PROMPT=0` and,
-unless you set `GIT_SSH_COMMAND` yourself, `GIT_SSH_COMMAND="ssh -o
-BatchMode=yes"`, so git fails instead of asking for a password or a key
-passphrase. Use a URL your credentials already cover, such as an SSH URL with
-a key loaded in `ssh-agent`, or an HTTPS URL with a git credential helper:
-
-```toml
-[dependencies]
-"github.com/acme/internal" = { version = "v1.4.0", url = "git@github.com:acme/internal.git" }
-```
-
-Rather than a `url` in every manifest, you can let git rewrite the default
-HTTPS URLs on your machine, which keeps the manifests portable:
-
-```sh
-git config --global url."git@github.com:acme/".insteadOf "https://github.com/acme/"
-```
-
-mbuild still passes `https://github.com/acme/internal` (and keeps the default
-mirror name); git fetches it over SSH. An HTTPS token works the same way:
-`git config --global url."https://TOKEN@github.com/acme/".insteadOf
-"https://github.com/acme/"`, or a credential helper
-(`git config --global credential.helper store`).
-
-A failed download names the URL and what to change:
+The default registry is `$MBUILD_REGISTRY`. There's no public one yet, so
+without it or an `mb_registry` call:
 
 ```text
-   Resolving dependencies
-    Fetching github.com/demo/nope
-error: cannot download github.com/demo/nope (required by mbuild.toml) from /home/you/gitbase/github.com/demo/nope
-  git: fatal: repository '/home/you/gitbase/github.com/demo/nope' does not exist
-  help: MBUILD_GIT_BASE=/home/you/gitbase is set, so mbuild looked for the repository at /home/you/gitbase/github.com/demo/nope; unset it, or add the repository there
+error: no default registry is configured
+  help: set MBUILD_REGISTRY, or declare one in mbuild.mettle: mb_registry("name", "https://...")
 ```
 
-`MBUILD_GIT` names the git program when it is not on PATH.
+Declare more in `fn project()`; they're searched in call order, then
+`default`:
 
-## The git mirror cache
+```mettle
+  mb_registry("corp", "https://pkgs.example.com/mettle");
+  mb_registry("mine", "../myreg");
+```
 
-Each module is cloned once per machine, as a bare mirror in
-`$MBUILD_HOME/git/<module>.git` (`git clone --mirror`). Every project on the
-machine shares it. A module fetched from any other URL (a `url` field, or
-`MBUILD_GIT_BASE`) gets its own mirror, `$MBUILD_HOME/git/<module>@<hash of
-the URL>.git`, so two projects that fetch one module from different places do
-not overwrite each other's mirror.
+A URL is `https://...`, `http://...`, `file:///abs/dir`, or a plain path
+(relative to the project root). Over `http://` mbuild warns once per
+command:
 
-Cloning and fetching hold a lock directory `<mirror>.lock`, so mbuild runs in
-parallel (two projects, or a build and an editor integration) take turns on a
-mirror. A run that finds the lock waits up to 60 seconds
-(`Waiting for another mbuild using ...`). On Linux a lock older than ten
-minutes, left by a run that was killed, is removed with a warning; elsewhere
-the wait times out with a message naming the lock directory to delete. A new
-mirror is cloned to `<mirror>.new` and renamed into place, so no run ever
-sees a half-made one. A project's checkout in `.mbuild/deps/<module>` is a
-`git clone --shared` of the mirror, so it borrows the mirror's objects instead
-of copying them.
+```text
+warning: registry default uses http://; locked builds are still checked against mbuild.lock, new versions are not
+```
 
-mbuild refreshes a mirror (`git fetch --prune --tags --force`) only when it
-needs something the mirror lacks: a tag or commit it cannot find, a `latest`
-or branch requirement that is not pinned yet, or `mbuild get` and
-`mbuild update`. Each mirror is fetched at most once per command. When nothing
-changed, a build runs no git command at all
-([Incremental builds](incremental.md#dependencies)).
+A package comes from the registry `mb_dep_from` names, else the first one
+that has it; once locked, only the locked registry is asked. A registry that
+fails for any reason other than "not found" stops the search, so a flaky
+private registry never falls through to a public one. **Put private
+registries first**, so a public package with the same name can't take the
+place of yours.
 
-Deleting `$MBUILD_HOME/git` is safe. The next build that needs a mirror clones
-it again, unless `--offline` is given.
+Dependencies' own `mb_registry` calls are ignored: your project decides.
 
-## Writing a package others can use
+### Mirrors
 
-A package is a git repository whose files other projects import. To publish
-one:
+`MBUILD_REGISTRY_<NAME>` (upper case, `-` becomes `_`) or
+`mb_registry(NAME, url)` in `mbuild.local.mettle` points a registry
+somewhere else. The lock records registry names, not URLs, so a mirror that
+serves the same files changes nothing.
 
-1. Give it an `mbuild.toml` with its `name`, its `module` path and its own
-   `[dependencies]`:
+### Private registries
 
-   ```toml
-   [package]
-   name = "vecmath"
-   module = "github.com/demo/vecmath"
-   version = "0.1.0"
+mbuild downloads with `curl --netrc-optional`, so an HTTPS registry behind
+basic auth works with an entry in `~/.netrc` (`_netrc` on Windows):
 
-   [dependencies]
-   "github.com/demo/strutil" = "v1.0.0"
+```text
+machine pkgs.example.com login me password s3cret
+```
 
-   [c]
-   sources = ["csrc"]
-   include = ["csrc/include"]
+## Integrity
 
-   [c.linux]
-   libs = ["m"]
-   ```
+Every archive is checked against the sha256 in the index when downloaded,
+against the lock before every extraction, and the lock against the index on
+every resolve. A published version never changes, so a mismatch means
+something was tampered with:
 
-2. Tag releases as semantic versions: `git tag v0.1.0`. mbuild reads tags,
-   not the `version` key, when it selects versions. A repository with no
-   tags still works; users then get a branch pin.
+```text
+$ mbuild build
+   Resolving dependencies
+error: strutil v1.1.0 from registry default does not match mbuild.lock
+    mbuild.lock   sha256:b825cfc54e55df0c...
+    registry      sha256:e31ca7ac9da53786... (/srv/registry/pkg/strutil/strutil-v1.1.0.tar.gz)
+  a published version never changes; the registry or the download was tampered with
+  help: if you trust the new bytes, delete the strutil line from mbuild.lock and build again (review the change first)
+```
 
-3. Inside the package, import your own files relatively (`import "util";`).
-   Relative imports resolve the same way whether the package is the project
-   being built or a checkout under someone else's `.mbuild/deps`. Import other
-   packages by their full module path.
+Archives holding links, absolute paths or `..` are refused before
+extraction. A registry package's `mbuild.mettle` is never compiled or run on
+your machine; mbuild reads the manifest that was frozen when it was
+published.
 
-4. State the lowest version of each dependency that works, not the newest.
-   Minimal version selection raises it when the user's graph needs more.
+## Yanked versions
 
-5. Leave out `path` dependencies. They are ignored when your package is
-   fetched.
+A yanked version is never picked for a new requirement. One that's already
+in your lock still builds, with a warning:
 
-6. Put C code under `[c]` and libraries under `[link]`
-   ([Native code](native.md)). They are compiled and linked into every program
-   that imports the package, for both targets.
+```text
+warning: yanky v1.0.1 is yanked in registry default; mbuild update yanky moves off it
+```
 
-Users then write `import "github.com/demo/vecmath/vecmath";` and build. A
-package does not need an `mbuild.toml` at all if it has no dependencies and no
-native code; the fixture `github.com/demo/nomanifest` has none.
+## Publishing
+
+A registry you can write to is a directory: the registry itself, or a local
+copy of the site that serves it. Make one:
+
+```text
+$ mbuild registry init ~/www/registry --name mine
+     Created registry mine in /home/you/www/registry
+```
+
+A package needs a version in `mb_package`, an `init.rules` and an
+`AGENT.rules` ([packages](packages.md); `mbuild init --package` writes both).
+`--dry-run` shows what would go in:
+
+```text
+$ mbuild publish --dry-run --to ~/www/registry
+   Verifying 1 bin for linux
+   Packaging greet v0.1.0 (6 files, 1.4 KB)
+
+files:
+  AGENT.rules
+  greet.mettle
+  init.rules
+  mbuild.mettle
+  src/main.mettle
+  templates/main.mettle.tmpl
+
+manifest:
+[package]
+name = "greet"
+version = "0.1.0"
+description = "greeting strings"
+$ mbuild publish --to ~/www/registry
+   Verifying 1 bin for linux
+   Packaging greet v0.1.0 (6 files, 1.4 KB)
+   Published greet v0.1.0 to /home/you/www/registry (sha256 c64fc9e6)
+  next: upload /home/you/www/registry to the host that serves it
+```
+
+Without `--to`, it writes into the registry named by `--registry` (default
+`default`) if that one is a path or `file://` URL.
+
+Before writing, publish checks:
+
+- the version isn't published yet;
+- `init.rules` and `AGENT.rules` exist, and `init.rules` runs with its
+  defaults;
+- no `mb_dep_path` (users couldn't resolve it); replacements get a warning,
+  since users ignore them;
+- the API against the newest earlier version in the same line: a removed or
+  changed export needs a new line;
+- every bin builds for every target that has a compiler (`--no-verify` skips
+  this).
+
+```text
+$ mbuild publish
+    Fetching greet v1.0.0 (registry)
+error: greet v1.1.0 breaks the API of v1.0.0 (inside line v1, which should not break):
+    changed  fn gr_hello(who: string) -> string
+          -> fn gr_hello(who: string, loud: bool) -> string
+  help: a breaking change needs a new line: publish v2.0.0 (or pass --allow-breaking)
+```
+
+What gets packed: `mb_publish_include(csv)` when given, else every file
+except `build/`, `.mbuild/`, `vendor/`, `dist/`, dot-files, `mbuild.lock`,
+`mbuild.local.mettle` and `mettle.deps`. `mbuild.mettle`, `init.rules` and
+`AGENT.rules` always go in. Links and files over 16 MB are refused.
+
+A published version can't be deleted, because locks name it. Yank it
+instead (`--undo` takes it back):
+
+```text
+$ mbuild yank greet@v0.1.1 --to ~/www/registry
+      Yanked greet v0.1.1 in /home/you/www/registry
+```
+
+### The registry layout
+
+```text
+registry.toml                     [registry] format = 1, name = "mine"
+index/greet                       one line per version
+pkg/greet/greet-v0.1.0.tar.gz     the files
+pkg/greet/greet-v0.1.0.toml       the manifest, frozen at publish time
+```
+
+```text
+# mbuild index greet
+v0.1.0 sha256=c64fc9e6735d8f0e392872c8e689109fd568d990be92830f21fbb44a31b1f8ce manifest=6846fc837af47fcb308087b3eec7c30c88d2c51eef2529d7e7ce48add1804b1c
+```
+
+Everything except `index/` is immutable, so a CDN can cache it forever.
+
+## Where things live
+
+| Path | Holds |
+|---|---|
+| `.mbuild/deps/<name>/` | the extracted packages of this project |
+| `$MBUILD_HOME/registry/<registry>@<hash>/` | the download cache: indexes, manifests, archives, kept across projects |
+
+`mbuild clean --all` removes `.mbuild/`; the next build extracts again from
+the cache without downloading.
