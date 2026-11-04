@@ -1,8 +1,9 @@
 #!/bin/sh
 # make-mettle-registry.sh ROOT: a registry in the Mettle project's format at
 # ROOT/mreg: v1/index.json and plain tar archives in v1/archives (tar + sha256sum only).
-# textkit 1.0.0 and 1.1.0, greet 1.0.0 (requires textkit 1.0.0), badsha 1.0.0 (its index
-# hash is wrong), evil 1.0.0 (holds a symlink), old 1.0.0 (yanked).
+# textkit 1.0.0 and 1.1.0 (some functions have doc comments, a README), greet 1.0.0 (requires
+# textkit 1.0.0, no README),
+# badsha 1.0.0 (its index hash is wrong), evil 1.0.0 (holds a symlink), old 1.0.0 (yanked).
 set -eu
 ROOT=$(mkdir -p "$1" && cd "$1" && pwd); REG="$ROOT/mreg"; SRC="$ROOT/msrc"
 rm -rf "$REG" "$SRC"; mkdir -p "$REG/v1/archives" "$SRC"
@@ -26,14 +27,16 @@ mk() {
 
 for v in 1.0.0 1.1.0; do
   mk textkit $v
-  printf 'export fn tk_shout(s: string) -> string {\n  return s + "!";\n}\n\nexport fn tk_version() -> string {\n  return "textkit %s";\n}\n' $v > "$SRC/textkit-$v/textkit.mettle"
-  printf 'export fn tk_twice(s: string) -> string {\n  return s + s;\n}\n' > "$SRC/textkit-$v/extra.mettle"
+  printf '// Appends a bang to s.\n// Keeps the case.\nexport fn tk_shout(s: string) -> string {\n  return s + "!";\n}\n\n/// The version of this textkit.\nexport fn tk_version() -> string {\n  return "textkit %s";\n}\n' $v > "$SRC/textkit-$v/textkit.mettle"
+  printf '// A comment a blank line away is no doc.\n\nexport fn tk_twice(s: string) -> string {\n  return s + s;\n}\n' > "$SRC/textkit-$v/extra.mettle"
 done
+printf '# textkit\n\nSmall text helpers: shout, twice.\nNo allocation.\n\n## Use\n\nimport "textkit/textkit";\n' > "$SRC/textkit-1.1.0/README.md"
 pkg textkit 1.0.0
 pkg textkit 1.1.0
 
 mk greet 1.0.0 'require = textkit 1.0.0
 '
+rm "$SRC/greet-1.0.0/README.md"
 printf 'import "textkit/textkit";\n\nexport fn gr_hello(name: string) -> string {\n  var s: string = "hello " + name;\n  return tk_shout(s);\n}\n' > "$SRC/greet-1.0.0/greet.mettle"
 pkg greet 1.0.0 '{"textkit": "1.0.0"}'
 

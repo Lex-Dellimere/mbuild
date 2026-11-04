@@ -332,6 +332,29 @@ export fn build_open(opts: Options*) -> Project* {
   return p;
 }
 
+// build_open for the commands that only read registries (search, info): with
+// no compiler to evaluate mbuild.mettle, the project stays unloaded, so only
+// the registries that need no evaluation are used.
+export fn build_open_soft(opts: Options*) -> Project* {
+  var p: Project* = build_find(opts);
+  bx_refuse_legacy(p);
+  if (slen(p->mbfile) > 0 && tc_available(p, sys_os())) {
+    bx_load_manifest(p);
+  }
+  return p;
+}
+
+// True after build_open_soft left a project unloaded for want of a compiler.
+export fn build_registries_skipped(p: Project*) -> bool {
+  return slen(p->mbfile) > 0 && !p->has_manifest;
+}
+
+// Loads the project's configuration (fails with the compiler's absence).
+export fn build_load(p: Project*) {
+  bx_refuse_legacy(p);
+  bx_load_manifest(p);
+}
+
 // After an edit of mbuild.mettle (deps_add_missing, cfg_set_dep).
 fn bx_reload(p: Project*) {
   if (slen(p->mbfile) > 0) {
@@ -4593,6 +4616,24 @@ fn bx_init_cmds() {
   bx_def("search", "find packages in the registries", "mbuild search [TEXT]", "dependencies.md");
   bx_ex("mbuild search", "every package");
   bx_ex("mbuild search json", "by name, description or exported function");
+  bx_fl("-q", "names only");
+  bx_note("one block per package, sorted by name: `NAME VERSION  DESCRIPTION`, then `fns:` the exported function names of that version (`fns: unknown (why)` when its archive can't be read).");
+  bx_note("VERSION is the newest that isn't yanked; the same name in two registries is shown for each, with `(registry NAME)`.");
+  bx_note("TEXT matches the name, the description or a function name, in any case.");
+  bx_note("to learn one package from a hit: `mbuild info NAME` gives its signatures, comments and README.");
+  bx_note("with no compiler to read mbuild.mettle, the project's own registries are skipped (a note says so) and MBUILD_REGISTRY or the default is searched.");
+  bx_def("info", "show a package: README, versions, dependencies and API", "mbuild info PKG[@VERSION] [--readme]", "dependencies.md");
+  bx_ex("mbuild info hmac", "the newest version: description, README intro, versions, every function");
+  bx_ex("mbuild info hmac@v1.0.0 --readme", "that version's whole README.md");
+  bx_ex("mbuild info .", "this project the same way; also the name of an mb_dep_path dependency");
+  bx_fl("--readme", "print README.md as is (without one: the exported functions)");
+  bx_fl("--offline", "use the download cache");
+  bx_note("top to bottom: `NAME VERSION` (marked yanked when it is), the description, the first paragraph of the README.md after its title, then License, Source, Authors,");
+  bx_note("Registry, Docs (the registry's page for the package, Mettle registries only), Versions (newest first, yanked ones marked), Path (. or a path dependency),");
+  bx_note("Dependencies (what that version requires), and Functions: every exported fn, file by file, as `fn name(params) -> type`, with the `//` or `///` lines directly above it.");
+  bx_note("VERSION is the newest stable one that isn't yanked; `@v1.2.0` or `@1.2.0` picks one, `@v1` the newest in that line.");
+  bx_note("the archive is fetched and checked like `get` does, or read from the download cache with --offline; a path package is read from its directory.");
+  bx_note("with no compiler, the project's own registries are skipped (a note says so); `.` and path dependencies need mbuild.mettle read.");
   bx_def("get", "add or upgrade a dependency", "mbuild get NAME[@VERSION]... [--test] [--no-verify]", "dependencies.md");
   bx_ex("mbuild get strutil", "the newest version");
   bx_ex("mbuild get strutil@v1.2.0", "");

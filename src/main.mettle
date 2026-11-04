@@ -13,6 +13,7 @@ import "build/build";
 import "build/complete";
 import "pkg/deps";
 import "pkg/search";
+import "pkg/info";
 import "build/toolchain";
 import "config/init";
 import "config/config";
@@ -20,7 +21,7 @@ import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
 fn mx_flag_names() -> StrList* {
-  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --no-compiler", 32);
+  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services --home --local --no-compiler --readme", 32);
 }
 
 fn mx_bad_flag(a: string) {
@@ -67,7 +68,7 @@ fn mx_add_targets(o: Options*, v: string) {
 
 // Value-less command flags: they go to rest as written.
 fn mx_is_cmd_flag(name: string) -> bool {
-  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services --local --no-compiler", 32);
+  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services --local --no-compiler --readme", 32);
   var has: bool = sl_has(l, name);
   free(l);
   return has;
@@ -252,7 +253,16 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "new")) { return build_cmd_new(build_find(o)); }
   if (s_eq(command, "registry")) { return build_cmd_registry(build_find(o)); }
   if (s_eq(command, "yank")) { return build_cmd_yank(build_find(o)); }
-  var p: Project* = build_open(o);
+  var soft: bool = s_eq(command, "search") || s_eq(command, "info");
+  var p: Project* = (Project*)0;
+  if (soft) {
+    p = build_open_soft(o);
+    if (build_registries_skipped(p) && !sl_has(o->rest, ".")) {
+      note("no Mettle compiler to read mbuild.mettle with: its registries are skipped (using $MBUILD_REGISTRY or the default)");
+    }
+  } else {
+    p = build_open(o);
+  }
   if (s_eq(command, "build")) { return build_cmd_build(p); }
   if (s_eq(command, "run")) { return build_cmd_run(p); }
   if (s_eq(command, "live")) { return build_cmd_live(p); }
@@ -276,6 +286,7 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "deps")) { return deps_cmd_list(p); }
   if (s_eq(command, "outdated")) { return deps_cmd_outdated(p); }
   if (s_eq(command, "search")) { return search_cmd(p); }
+  if (s_eq(command, "info")) { return info_cmd(p); }
   if (s_eq(command, "vendor")) { return deps_cmd_vendor(p); }
   if (s_eq(command, "profiles")) { return build_cmd_profiles(p); }
   if (s_eq(command, "services")) { return build_cmd_services(p); }

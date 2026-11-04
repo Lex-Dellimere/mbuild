@@ -31,7 +31,7 @@ fn sr_has(hay: string, needle: string) -> bool {
 }
 
 // The newest version that is not yanked; 0 when there is none.
-fn sr_newest(ix: RegIndex*) -> RegVersion* {
+export fn sr_newest(ix: RegIndex*) -> RegVersion* {
   var best: RegVersion* = (RegVersion*)0;
   var i: int64 = 0;
   while (i < ix->n) {
@@ -44,7 +44,8 @@ fn sr_newest(ix: RegIndex*) -> RegVersion* {
   return best;
 }
 
-fn sr_meta(m: Manifest*, key: string) -> string {
+// A [package] key (description, license, repository, authors) of m, "" when absent.
+export fn sr_meta(m: Manifest*, key: string) -> string {
   var i: int64 = 0;
   while (i < m->meta->len) {
     var kv: string = sl_get(m->meta, i);
@@ -56,7 +57,7 @@ fn sr_meta(m: Manifest*, key: string) -> string {
   return s_empty();
 }
 
-fn sr_first_line(msg: string) -> string {
+export fn sr_first_line(msg: string) -> string {
   var nl: int64 = s_find_byte(msg, 10);
   if (nl >= 0) {
     return s_dup(s_sub(msg, 0, nl));
@@ -64,19 +65,43 @@ fn sr_first_line(msg: string) -> string {
   return s_dup(msg);
 }
 
-// Pushes the `export fn` names of rv's archive into out; "" or why it can't.
-fn sr_fns(p: Project*, ix: RegIndex*, rv: RegVersion*, m: Manifest*, out: StrList*) -> string {
+// An unpacked archive: dir is its package directory, "" when why says it can't be.
+export struct SrUnpacked {
+  dir: string;
+  why: string;
+}
+
+// rv's archive fetched, checked and unpacked under the home's search/
+// directory. The caller removes dir (or the whole search/ directory).
+export fn sr_unpack(p: Project*, ix: RegIndex*, rv: RegVersion*) -> SrUnpacked* {
+  var u: SrUnpacked* = new SrUnpacked;
+  u->dir = s_empty();
+  u->why = s_empty();
   var archive: string = reg_fetch(p, ix, rv->version);
   if (slen(archive) == 0) {
-    return sr_first_line(reg_error());
+    u->why = sr_first_line(reg_error());
+    return u;
   }
   var dest: string = fs_mbuild_home() + "/search/" + ix->name + "@" + rv->version;
   var marker: string = ix->name + " " + rv->version + " " + ix->registry;
   var e: string = reg_extract(archive, rv->sha, dest, marker);
   if (slen(e) > 0) {
     sys_remove_tree(dest);
-    return sr_first_line(e);
+    u->why = sr_first_line(e);
+    return u;
   }
+  u->dir = dest;
+  return u;
+}
+
+// Pushes the `export fn` names of rv's archive into out; "" or why it can't.
+fn sr_fns(p: Project*, ix: RegIndex*, rv: RegVersion*, m: Manifest*, out: StrList*) -> string {
+  var u: SrUnpacked* = sr_unpack(p, ix, rv);
+  defer free(u);
+  if (slen(u->dir) == 0) {
+    return u->why;
+  }
+  var dest: string = u->dir;
   var surf: ApiSurface* = api_surface_dir(man_import_dir(m, dest));
   defer free(surf);
   var i: int64 = 0;
@@ -90,7 +115,8 @@ fn sr_fns(p: Project*, ix: RegIndex*, rv: RegVersion*, m: Manifest*, out: StrLis
   return s_empty();
 }
 
-fn sr_positional(l: StrList*) -> StrList* {
+// The arguments that are not flags.
+export fn sr_positional(l: StrList*) -> StrList* {
   var r: StrList* = sl_new();
   var i: int64 = 0;
   while (i < l->len) {

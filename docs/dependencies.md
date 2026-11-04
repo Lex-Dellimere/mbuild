@@ -168,6 +168,11 @@ registries is shown for each, with `(registry NAME)`. A registry in mbuild's own
 format has no list of its packages, so over http only those already in the
 download cache are searched.
 
+`search` and `info` work without a compiler: when mbuild.mettle can't be
+evaluated, the registries it declares are skipped with one note, and
+`MBUILD_REGISTRY` or the default is used. `mbuild __complete packages` does the
+same, quietly.
+
 ```text
 $ mbuild search banner
 textfmt v0.1.0  text formatting
@@ -177,6 +182,50 @@ vecmath v0.3.0
   fns: vm_banner, vm_one
 $ mbuild search nothing
 error: no package matches nothing
+```
+
+### mbuild info PKG[@VERSION]
+
+Shows one package, like `mix hex.info`: the newest stable version that isn't
+yanked (or the one asked for: `@v1.0.0`, `@1.0.0`, or a line like `@v1`), its
+description and the first paragraph of its README, license, source, registry,
+every version (yanked ones marked), the dependencies of the shown version and
+every exported function with its full signature and the `//` or `///` comment
+directly above it, file by file. The archive is fetched and checked like a
+dependency's. A registry with package pages (the Mettle project's) adds a
+`Docs:` line with the page. `--readme` prints the whole README.md as is, or
+says the package has none and lists the functions. `--offline` uses the cache.
+An unknown name gets the same errors as `get`, with a did-you-mean. `mbuild info .`
+is this project and `mbuild info NAME` an `mb_dep_path` dependency, read from
+their directories the same way (with a `Path:` row and no archive).
+
+```text
+$ mbuild info textkit
+textkit 1.1.0
+
+  textkit test package
+
+  Small text helpers: shout, twice.
+  No allocation.
+
+  License:       MIT
+  Source:        https://example.com/textkit
+  Registry:      default
+  Versions:      1.1.0, 1.0.0
+
+  Functions:
+    extra.mettle
+      fn tk_twice(s: string) -> string
+    textkit.mettle
+      // Appends a bang to s.
+      // Keeps the case.
+      fn tk_shout(s: string) -> string
+
+      /// The version of this textkit.
+      fn tk_version() -> string
+$ mbuild info gret
+error: no registry has a package named gret (searched default)
+  help: did you mean greet? (in registry default)
 ```
 
 ### mbuild get NAME[@VERSION]...

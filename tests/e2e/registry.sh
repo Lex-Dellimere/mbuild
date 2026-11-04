@@ -253,6 +253,35 @@ suite() { # MODE
   mbs --offline search -q textfmt
   check "offline -q needs no archive ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = "textfmt" ]'
 
+  echo "== info ($mode)"
+  mbs info textfmt
+  check "info: description, registry, dependencies, functions ($mode)" eval 'code_is 0 && grep -qx "textfmt v0.1.0" "$S/last.out" && has "  text formatting" && has "  Registry:      default" && has "  Dependencies:  strutil v1.1.0" && has "    textfmt.mettle" && has "      fn tf_banner(s: string) -> string" && hasnt "Docs:"'
+  check "info leaves no unpacked archive ($mode)" sh -c '[ ! -e "$MBUILD_HOME/search" ]'
+  mbs info strutil
+  check "info takes the newest stable version ($mode)" eval 'grep -qx "strutil v1.1.0" "$S/last.out" && has "  Versions:      v2.0.0-rc.1, v1.1.0, v1.0.0"'
+  mbs info strutil@v2.0.0-rc.1
+  check "info PKG@VERSION, a pre-release too ($mode)" eval 'grep -qx "strutil v2.0.0-rc.1" "$S/last.out"'
+  mbs info strutil@v1
+  check "info PKG@v1 is the newest in the line ($mode)" eval 'grep -qx "strutil v1.1.0" "$S/last.out"'
+  mbs info yanky
+  check "info: yanked versions are marked ($mode)" eval 'grep -qx "yanky v1.0.0" "$S/last.out" && has "  Versions:      v1.0.1 (yanked), v1.0.0"'
+  mbs info yanky@v1.0.1
+  check "info of a yanked version ($mode)" eval 'grep -qx "yanky v1.0.1 (yanked)" "$S/last.out"'
+  mbs info strutl
+  check "info of a misspelled name ($mode)" eval 'code_is 1 && has "error: no registry has a package named strutl (searched default)" && has "help: did you mean strutil? (in registry default)"'
+  mbs info strutil@v7
+  check "info of a version that is not there ($mode)" eval 'code_is 1 && has "error: strutil has no version v7" && has "help: available versions: v1.0.0, v1.1.0, v2.0.0-rc.1"'
+  mbs info strutil --readme
+  check "info --readme of a package with none lists its functions ($mode)" eval 'code_is 0 && has "strutil has no README; its exported functions:" && has "      fn su_shout(s: string) -> string"'
+  mbs --offline info textfmt
+  check "offline from the cache ($mode)" eval 'code_is 0 && grep -qx "textfmt v0.1.0" "$S/last.out"'
+  MBUILD_HOME="$T/home-info-cold" mbs --offline info textfmt
+  check "offline with nothing cached ($mode)" eval 'code_is 1 && has "--offline forbids fetching it"'
+  mbs __complete packages
+  check "__complete packages: the cached indexes ($mode)" eval 'code_is 0 && has "strutil" && has "textfmt" && hasnt " "'
+  mbs __complete packages text
+  check "__complete packages with a prefix ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = textfmt ]'
+
   echo "== search, two registries ($mode)"
   rm -rf "$T/regcopy" "$T/two"; cp -r "$REG" "$T/regcopy"
   mkdir -p "$T/two"

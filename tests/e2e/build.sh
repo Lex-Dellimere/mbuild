@@ -221,10 +221,61 @@ bcomp run -
 check "bash: a command's own flags and the global ones" sh -c 'grep -qx -- --no-services "$0/last.out" && grep -qx -- --release "$0/last.out" && grep -qx -- --offline "$0/last.out" && ! grep -qx -- --tree "$0/last.out"' "$S"
 bcomp clean --a
 check "bash: clean --all" lines_are --all
+bcomp info --r
+check "bash: info --readme" lines_are --readme --release
 bcomp update --
 check "bash: update flags" sh -c 'grep -qx -- --major "$0/last.out" && grep -qx -- --dry-run "$0/last.out"' "$S"
 bcomp hello ""
 check "bash: a project command's arguments are left to the shell" empty_out
+
+# --- mbuild info for this project and its path dependencies
+mkdir -p "$W/loc/lib/src" "$W/loc/app/src" "$W/loc/bare"
+cat > "$W/loc/lib/mbuild.mettle" <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("lib2", "0.3.0");
+  mb_meta("description", "a local library");
+  mb_meta("license", "MIT");
+}
+
+fn deps() {
+  mb_dep("textkit", "1.1.0");
+}
+EOF
+printf '# lib2\n\nLocal helper library.\nTwo lines.\n\n## more\n' > "$W/loc/lib/README.md"
+printf '// Doubles n.\nexport fn l2_double(n: int32) -> int32 {\n  return n * 2;\n}\n' > "$W/loc/lib/lib2.mettle"
+cat > "$W/loc/app/mbuild.mettle" <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("app2", "0.1.0");
+  mb_bin("app2", "src/main.mettle");
+}
+
+fn deps() {
+  mb_dep_path("lib2", "../lib");
+  mb_dep_path("bare", "../bare");
+}
+EOF
+printf '/// The entry point.\nfn main() -> int32 {\n  return 0;\n}\n\n/// Entry helper.\nexport fn app_x() -> int32 {\n  return 1;\n}\n' > "$W/loc/app/src/main.mettle"
+printf 'export fn bare_x() -> int32 {\n  return 2;\n}\n' > "$W/loc/bare/bare.mettle"
+cd "$W/loc/app"
+mb info lib2
+check "info of a path dependency: version, description, README intro, license, path, deps, functions" sh -c 'grep -qx "lib2 0.3.0" "$0/last.out" && grep -qx "  a local library" "$0/last.out" && grep -qx "  Local helper library." "$0/last.out" && grep -qx "  License:       MIT" "$0/last.out" && grep -qx "  Path:          ../lib" "$0/last.out" && grep -qx "  Dependencies:  textkit 1.1.0" "$0/last.out" && grep -qx "    lib2.mettle" "$0/last.out" && grep -qx "      // Doubles n." "$0/last.out" && grep -qx "      fn l2_double(n: int32) -> int32" "$0/last.out"' "$S"
+mb info .
+check "info . is the project itself" sh -c 'grep -qx "app2 0.1.0" "$0/last.out" && grep -qx "  Path:          \." "$0/last.out" && grep -qx "  Dependencies:  lib2 (path ../lib), bare (path ../bare)" "$0/last.out" && grep -qx "    src/main.mettle" "$0/last.out" && grep -qx "      /// Entry helper." "$0/last.out" && grep -qx "      fn app_x() -> int32" "$0/last.out"' "$S"
+mb info bare
+check "info of a path dependency with no mbuild.mettle: just its functions" eval 'code_is 0 && grep -qx "bare" "$S/last.out" && has "      fn bare_x() -> int32" && hasnt "License"'
+mb info lib2 --readme
+check "info --readme of a path dependency" cmp -s "$S/last.out" "$W/loc/lib/README.md"
+mb info . --readme
+check "info . --readme of a project with none lists its functions" eval 'code_is 0 && has "app2 has no README; its exported functions:" && has "      fn app_x() -> int32"'
+mb info lib2@1.0.0
+check "a local package has no version to ask for" eval 'code_is 1 && has "lib2 is a local package"'
+cd "$W/noproj"
+mb info .
+check "info . outside a project" eval 'code_is 1 && has "no project here: mbuild.mettle not found"'
 cd "$W/hello"
 
 # --- hooks (13.7)

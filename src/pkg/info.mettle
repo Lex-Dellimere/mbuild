@@ -1,0 +1,481 @@
+// info: mbuild info PKG[@VERSION]: what a package is: description, license,
+// registry, versions, the dependencies of the shown version and every
+// exported function with its signature and the comment above it, file by file.
+//
+// The archive is fetched, checked and unpacked like search does (the download
+// cache, then the unpacked copy removed again).
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../model/semver";
+import "../model/manifest";
+import "../model/project";
+import "registry";
+import "api";
+import "search";
+import "../build/toolchain";
+import "../config/config";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+// The version as its registry spells it (a Mettle registry has no "v"); ix is 0 for a local package.
+fn inf_ver(ix: RegIndex*, version: string) -> string {
+  if (ix != (RegIndex*)0 && s_eq(ix->kind, "json") && s_starts(version, "v")) {
+    return s_from(version, 1);
+  }
+  return version;
+}
+
+// The versions of ix that are versions, oldest first; only the unyanked ones when asked.
+fn inf_versions(ix: RegIndex*, unyanked: bool) -> StrList* {
+  var vs: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < ix->n) {
+    var rv: RegVersion* = &ix->versions[i];
+    i = i + 1;
+    if (!sv_is(rv->version) || (unyanked && rv->yanked)) {
+      continue;
+    }
+    var at: int64 = vs->len;
+    sl_push(vs, rv->version);
+    while (at > 0 && sv_cmp(sl_get(vs, at - 1), rv->version) > 0) {
+      sl_set(vs, at, sl_get(vs, at - 1));
+      at = at - 1;
+    }
+    sl_set(vs, at, rv->version);
+  }
+  return vs;
+}
+
+// Numbers written in a version: "v1" 1, "1.2" 2, "v1.2.3-rc.1" 3.
+fn inf_parts(spec: string) -> int64 {
+  var core: string = spec;
+  var cut: int64 = s_find_byte(core, 45);
+  if (cut >= 0) {
+    core = s_sub(core, 0, cut);
+  }
+  var l: StrList* = s_split(core, 46);
+  var n: int64 = l->len;
+  free(l);
+  return n;
+}
+
+// "1.2" (or "v1", "1") names the newest stable version in that line, as get takes it.
+fn inf_in_line(version: string, spec: string) -> bool {
+  var v: string = version;
+  var w: string = spec;
+  if (s_starts(v, "v")) {
+    v = s_from(v, 1);
+  }
+  if (s_starts(w, "v")) {
+    w = s_from(w, 1);
+  }
+  return slen(w) > 0 && s_starts(v, w + ".") && s_find_byte(v, 45) < 0;
+}
+
+// The version spec names: nothing or "latest" is the newest stable unyanked one (else the
+// newest unyanked, else the newest);
+// "v1.2.0" or "1.2.0" that one, yanked or not; "v1" or "1.2" the newest stable unyanked one in that line.
+fn inf_pick(ix: RegIndex*, spec: string) -> RegVersion* {
+  var vs: StrList* = inf_versions(ix, false);
+  defer free(vs);
+  var i: int64 = vs->len - 1;
+  if (slen(spec) == 0 || s_eq(spec, "latest")) {
+    while (i >= 0) {
+      var rv: RegVersion* = reg_version(ix, sl_get(vs, i));
+      if (!rv->yanked && s_find_byte(rv->version, 45) < 0) {
+        return rv;
+      }
+      i = i - 1;
+    }
+    var pre: RegVersion* = sr_newest(ix);
+    if (pre != (RegVersion*)0) {
+      return pre;
+    }
+    if (vs->len > 0) {
+      return reg_version(ix, sl_get(vs, vs->len - 1));
+    }
+    fail(ix->name + " has no versions in registry " + ix->registry);
+  }
+  if (inf_parts(spec) < 3) {
+    while (i >= 0) {
+      var rv2: RegVersion* = reg_version(ix, sl_get(vs, i));
+      if (!rv2->yanked && inf_in_line(sl_get(vs, i), spec)) {
+        return rv2;
+      }
+      i = i - 1;
+    }
+  } else {
+    var exact: RegVersion* = reg_version(ix, spec);
+    if (exact != (RegVersion*)0) {
+      return exact;
+    }
+  }
+  var shown: StrList* = sl_new();
+  defer free(shown);
+  i = 0;
+  while (i < vs->len) {
+    if (!reg_version(ix, sl_get(vs, i))->yanked) {
+      sl_push(shown, inf_ver(ix, sl_get(vs, i)));
+    }
+    i = i + 1;
+  }
+  if (shown->len > 0) {
+    fail_hint(ix->name + " has no version " + spec, "available versions: " + sl_join(shown, ", "));
+  }
+  fail(ix->name + " has no version " + spec + " (registry " + ix->registry + " has only yanked ones)");
+  return (RegVersion*)0;
+}
+
+// "did you mean greet? (in registry default)" for a name no registry has, or "".
+fn inf_suggest(p: Project*, name: string) -> string {
+  var regs: RegList* = reg_list(p);
+  var names: StrList* = sl_new();
+  var wheres: StrList* = sl_new();
+  var r: int64 = 0;
+  while (r < regs->names->len) {
+    var all: RegAll* = reg_all(p, sl_get(regs->names, r), false);
+    var k: int64 = 0;
+    while (all->ok && k < all->n) {
+      if (!sl_has(names, all->ixs[k]->name)) {
+        sl_push(names, all->ixs[k]->name);
+        sl_push(wheres, sl_get(regs->names, r));
+      }
+      k = k + 1;
+    }
+    r = r + 1;
+  }
+  var sug: string = man_suggest(name, names);
+  var said: string = s_empty();
+  if (slen(sug) > 0) {
+    said = "did you mean " + sug + "? (in registry " + sl_get(wheres, sl_index(names, sug)) + ")";
+  }
+  free(names);
+  free(wheres);
+  free(regs);
+  return said;
+}
+
+// The comment lines directly above the declaration on line `at` (1-based) of
+// lines, trimmed, in order; decorator lines between are skipped.
+fn inf_doc(lines: StrList*, at: int64) -> StrList* {
+  var doc: StrList* = sl_new();
+  var k: int64 = at - 2;
+  while (k >= 0 && s_starts(s_trim(sl_get(lines, k)), "@")) {
+    k = k - 1;
+  }
+  var last: int64 = k;
+  while (k >= 0 && s_starts(s_trim(sl_get(lines, k)), "//")) {
+    k = k - 1;
+  }
+  k = k + 1;
+  while (k <= last) {
+    sl_push(doc, s_trim(sl_get(lines, k)));
+    k = k + 1;
+  }
+  return doc;
+}
+
+// The function list: each file with the signatures and comments of its exported fns;
+// the "Functions:" heading unless the caller has said what the list is.
+fn inf_fns(surf: ApiSurface*, dir: string, heading: bool) {
+  var file: string = s_empty();
+  var lines: StrList* = sl_new();
+  var any: bool = false;
+  var first: bool = true;
+  var i: int64 = 0;
+  while (i < surf->names->len) {
+    if (!s_eq(sl_get(surf->kinds, i), "fn")) {
+      i = i + 1;
+      continue;
+    }
+    if (!s_eq(sl_get(surf->files, i), file)) {
+      file = sl_get(surf->files, i);
+      var rd: FsRead = fs_read(dir + "/" + file);
+      free(lines->items);
+      free(lines);
+      lines = sl_new();
+      if (rd.ok) {
+        lines = s_lines(rd.data);
+      }
+      if (!any && heading) {
+        say("  " + bold("Functions:"));
+      }
+      say("    " + file);
+      first = true;
+      any = true;
+    }
+    var doc: StrList* = inf_doc(lines, s_to_int(sl_get(surf->lines, i)));
+    if (doc->len > 0 && !first) {
+      say("");
+    }
+    var d: int64 = 0;
+    while (d < doc->len) {
+      say(dim("      " + sl_get(doc, d)));
+      d = d + 1;
+    }
+    say("      " + sl_get(surf->sigs, i));
+    first = false;
+    free(doc->items);
+    free(doc);
+    i = i + 1;
+  }
+  if (!any && heading) {
+    say("  " + bold("Functions:") + " (none)");
+  } else if (!any) {
+    say("  (none)");
+  }
+  free(lines->items);
+  free(lines);
+}
+
+fn inf_row(label: string, value: string) {
+  if (slen(value) > 0) {
+    say("  " + s_pad_right(label + ":", 15) + value);
+  }
+}
+
+// The first paragraph of a README: the text after its title up to the first
+// blank line or heading, one line each; "" when there is none.
+fn inf_intro(text: string) -> string {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var out: StrList* = sl_new();
+  defer free(out);
+  var i: int64 = 0;
+  while (i < lines->len && slen(s_trim(sl_get(lines, i))) == 0) {
+    i = i + 1;
+  }
+  if (i < lines->len && s_starts(sl_get(lines, i), "#")) {
+    i = i + 1;
+  }
+  while (i < lines->len && slen(s_trim(sl_get(lines, i))) == 0) {
+    i = i + 1;
+  }
+  while (i < lines->len && slen(s_trim(sl_get(lines, i))) > 0 && !s_starts(sl_get(lines, i), "#")) {
+    sl_push(out, s_trim(sl_get(lines, i)));
+    i = i + 1;
+  }
+  return sl_join(out, "\n  ");
+}
+
+// A [package] key of m, "" when m is 0 (a path package with no mbuild.mettle).
+fn inf_meta(m: Manifest*, key: string) -> string {
+  if (m == (Manifest*)0) {
+    return s_empty();
+  }
+  return sr_meta(m, key);
+}
+
+// The report for one package whose files are in dir: head, description, the
+// README's first paragraph, the rows (labels and values, between the
+// metadata and the dependencies), dependencies, functions. With readme, the
+// README as is instead, or the functions when there is none. m is 0 when
+// there is no manifest; ix is 0 for a package that is not from a registry.
+fn inf_show(name: string, version: string, yanked: bool, m: Manifest*, desc: string, dir: string, labels: StrList*, values: StrList*, ix: RegIndex*, readme: bool) {
+  var root: string = man_import_dir(m, dir);
+  var surf: ApiSurface* = api_surface_dir(root);
+  defer free(surf);
+  var rd: FsRead = fs_read(dir + "/README.md");
+  if (readme) {
+    if (rd.ok) {
+      print(rd.data);
+    } else {
+      say(name + " has no README; its exported functions:");
+      say("");
+      inf_fns(surf, root, false);
+    }
+    return;
+  }
+  var head: string = bold(name);
+  if (slen(version) > 0) {
+    head = head + " " + version;
+  }
+  if (yanked) {
+    head = head + " (yanked)";
+  }
+  say(head);
+  var text: string = s_replace_byte(inf_meta(m, "description"), 10, 32);
+  if (slen(text) == 0) {
+    text = desc;
+  }
+  if (slen(text) > 0) {
+    say("");
+    say("  " + text);
+  }
+  var intro: string = s_empty();
+  if (rd.ok) {
+    intro = inf_intro(rd.data);
+  }
+  if (slen(intro) > 0) {
+    say("");
+    say("  " + intro);
+  }
+  say("");
+  inf_row("License", inf_meta(m, "license"));
+  inf_row("Source", inf_meta(m, "repository"));
+  inf_row("Authors", inf_meta(m, "authors"));
+  var r: int64 = 0;
+  while (r < labels->len) {
+    inf_row(sl_get(labels, r), sl_get(values, r));
+    r = r + 1;
+  }
+  var deps: StrList* = sl_new();
+  defer free(deps);
+  var i: int64 = 0;
+  while (m != (Manifest*)0 && i < m->ndeps) {
+    var d: DepSpec* = &m->deps[i];
+    if (slen(d->path) > 0) {
+      sl_push(deps, d->key + " (path " + d->path + ")");
+    } else if (slen(d->version) > 0) {
+      sl_push(deps, d->key + " " + inf_ver(ix, d->version));
+    } else {
+      sl_push(deps, d->key);
+    }
+    i = i + 1;
+  }
+  inf_row("Dependencies", sl_join(deps, ", "));
+  say("");
+  inf_fns(surf, root, true);
+}
+
+// The package directory arg names in this project: "." is the project, the
+// name of an mb_dep_path dependency its directory; "" for a registry package.
+// rel is how the project spells it.
+fn inf_local(p: Project*, arg: string, rel: StrList*) -> string {
+  if (s_eq(arg, ".")) {
+    sl_push(rel, ".");
+    return p->root;
+  }
+  if (!p->has_manifest) {
+    return s_empty();
+  }
+  var d: DepSpec* = man_dep_find(p->man, arg);
+  if (d == (DepSpec*)0 || slen(d->path) == 0) {
+    return s_empty();
+  }
+  sl_push(rel, d->path);
+  return p_clean(p_join(p->man->dir, d->path));
+}
+
+// mbuild info PKG[@VERSION] [--readme]; PKG may also be . or a path dependency.
+export fn info_cmd(p: Project*) -> int32 {
+  var args: StrList* = sr_positional(p->opts->rest);
+  defer free(args);
+  var readme: bool = sl_has(p->opts->rest, "--readme");
+  if (args->len != 1) {
+    fail_hint("mbuild info takes one PKG[@VERSION]", "mbuild info strutil, mbuild info strutil@v1.0.0, mbuild info strutil --readme or mbuild info . for this project");
+  }
+  var arg: string = s_trim(sl_get(args, 0));
+  var name: string = arg;
+  var spec: string = s_empty();
+  var at: int64 = s_rfind_byte(arg, 64);
+  if (at >= 0) {
+    name = s_sub(arg, 0, at);
+    spec = s_from(arg, at + 1);
+  }
+  if (s_eq(name, ".") && slen(p->mbfile) == 0) {
+    fail_hint("no project here: mbuild.mettle not found", "run mbuild info in a project, or name a package");
+  }
+  if (s_eq(name, ".") && !p->has_manifest) {
+    tc_select(p, sys_os());
+    fail("cannot read mbuild.mettle");
+  }
+  var rel: StrList* = sl_new();
+  defer free(rel);
+  var local: string = inf_local(p, name, rel);
+  if (slen(local) > 0) {
+    if (slen(spec) > 0) {
+      fail(name + " is a local package, which has the one version it has");
+    }
+    var lm: Manifest* = p->man;
+    var lname: string = p->man->name;
+    if (!s_eq(name, ".")) {
+      lname = name;
+      lm = (Manifest*)0;
+      if (fs_is_file(local + "/mbuild.mettle")) {
+        lm = cfg_load_dir(p, local, name);
+      }
+    }
+    var labels: StrList* = sl_of("Path");
+    defer free(labels);
+    var values: StrList* = sl_of(sl_get(rel, 0));
+    defer free(values);
+    var lver: string = s_empty();
+    if (lm != (Manifest*)0) {
+      lver = lm->version;
+    }
+    inf_show(lname, lver, false, lm, s_empty(), local, labels, values, (RegIndex*)0, readme);
+    return 0;
+  }
+  if (!man_is_package_name(name)) {
+    fail("`" + name + "` is not a package name (a lower-case letter, then lower-case letters, digits and '_')");
+  }
+  // the fetches must not write status lines among the report
+  var quiet: bool = g_quiet;
+  g_quiet = true;
+  var ix: RegIndex* = reg_find(p, name, s_empty(), true);
+  if (!ix->ok) {
+    fail(ix->err);
+  }
+  if (!ix->found) {
+    var msg: string = ix->err;
+    if (slen(msg) == 0) {
+      msg = "no registry has a package named " + name;
+    }
+    error_msg(msg);
+    if (!s_contains(msg, "--offline")) {
+      var sug: string = inf_suggest(p, name);
+      if (slen(sug) > 0) {
+        err_line("  " + cyan("help") + ": " + sug);
+      }
+    }
+    exit_with(1);
+  }
+  var rv: RegVersion* = inf_pick(ix, spec);
+  var m: Manifest* = reg_manifest(p, ix, rv->version);
+  if (m == (Manifest*)0) {
+    fail(reg_error());
+  }
+  var u: SrUnpacked* = sr_unpack(p, ix, rv);
+  defer free(u);
+  if (slen(u->dir) == 0) {
+    fail(u->why);
+  }
+  g_quiet = quiet;
+  var labels: StrList* = sl_of("Registry");
+  defer free(labels);
+  var values: StrList* = sl_of(ix->registry);
+  defer free(values);
+  // the Mettle registry has a page per package
+  if (s_eq(ix->kind, "json")) {
+    var base: string = ix->url;
+    while (s_ends(base, "/")) {
+      base = s_sub(base, 0, slen(base) - 1);
+    }
+    if (s_starts(base, "http://") || s_starts(base, "https://")) {
+      sl_push(labels, "Docs");
+      sl_push(values, base + "/" + name + "/");
+    }
+  }
+  var shown: StrList* = sl_new();
+  defer free(shown);
+  var vs: StrList* = inf_versions(ix, false);
+  defer free(vs);
+  var i: int64 = vs->len - 1;
+  while (i >= 0) {
+    var label: string = inf_ver(ix, sl_get(vs, i));
+    if (reg_version(ix, sl_get(vs, i))->yanked) {
+      label = label + " (yanked)";
+    }
+    sl_push(shown, label);
+    i = i - 1;
+  }
+  sl_push(labels, "Versions");
+  sl_push(values, sl_join(shown, ", "));
+  inf_show(name, inf_ver(ix, rv->version), rv->yanked, m, ix->desc, u->dir, labels, values, ix, readme);
+  sys_remove_tree(fs_mbuild_home() + "/search");
+  return 0;
+}
