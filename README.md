@@ -37,6 +37,26 @@ or `./mbuild0 build -r -t host` and then `./build/linux/release/mbuild install -
 
 `install` copies the release into `~/.local/bin` (`--to DIR` for elsewhere) and runs `mbuild setup`: it creates `~/.mbuild` (`%LOCALAPPDATA%\mbuild` on windows; `--home DIR` for elsewhere), installs the compiler (`--from DIR` builds your checkout; without it, the latest release), checks curl, tar, gcc and wine, and prints the line to add to your shell rc if mbuild isn't on PATH. see [docs/platforms.md](docs/platforms.md#toolchains).
 
+### shell completion
+
+`mbuild completion bash|zsh|fish` prints a completion script for commands, flags and values (this project's bins, tests, dependencies, components and profiles, the targets, and package names from the cached registry indexes, never the network):
+
+```bash
+mbuild completion bash > ~/.local/share/bash-completion/completions/mbuild
+mbuild completion zsh > ~/.zsh/completions/_mbuild            # a directory in $fpath
+mbuild completion fish > ~/.config/fish/completions/mbuild.fish
+```
+
+the scripts ask `mbuild __complete KIND [PREFIX]` for the values, which is also how to see what they offer:
+
+```text
+$ mbuild __complete bins
+app
+tool
+$ mbuild __complete deps t
+textkit
+```
+
 the default registry is the Mettle project's, https://the-mettle-project.github.io/Mettle/registry/. point mbuild elsewhere with `MBUILD_REGISTRY` (a URL or a directory) or declare more in `mbuild.mettle`. the transcripts here and in docs/ use the fixture registry from `sh tests/fixtures/make-registry.sh DIR`.
 
 ## a quick tour
@@ -188,6 +208,7 @@ this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_W
 | `mbuild doctor` | check tools, compilers and externs |
 | `mbuild toolchain` | install, pin and update compilers; show which builds each target |
 | `mbuild setup` | set up `~/.mbuild`, a compiler and PATH |
+| `mbuild completion SHELL` | print a bash, zsh or fish completion script |
 | `mbuild mettle -- ...` | run the selected compiler |
 | `mbuild trace` / `explain` | the mettle subcommands, inside the project |
 | `mbuild NAME` | a `cmd_NAME` from your `mbuild.mettle` |

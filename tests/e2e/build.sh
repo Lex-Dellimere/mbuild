@@ -78,6 +78,155 @@ check "cmd_build is shadowed" has "(shadowed by the built-in build; rename cmd_b
 mb three
 check "command exit code" code_is 3
 
+# --- shell completion: the scripts, the hidden mbuild __complete, the bash script run for real
+for sh in bash zsh fish; do
+  "$MB" completion $sh >"$W/comp.$sh" 2>"$W/comp.err"
+  check "completion $sh: a script, nothing on stderr" sh -c '[ -s "$0" ] && [ ! -s "$1" ]' "$W/comp.$sh" "$W/comp.err"
+done
+check "bash completion parses" bash -n "$W/comp.bash"
+if command -v zsh >/dev/null 2>&1; then check "zsh completion parses" zsh -n "$W/comp.zsh"; else echo "note: zsh syntax check skipped (no zsh)"; fi
+if command -v fish >/dev/null 2>&1; then check "fish completion parses" fish -n "$W/comp.fish"; else echo "note: fish syntax check skipped (no fish)"; fi
+check "zsh script is a #compdef file that also registers itself" sh -c 'head -1 "$0" | grep -qx "#compdef mbuild" && grep -qF "compdef _mbuild mbuild" "$0"' "$W/comp.zsh"
+check "fish script completes mbuild" grep -qF "complete -c mbuild" "$W/comp.fish"
+mb completion
+check "completion needs a shell" eval 'code_is 1 && has "mbuild completion takes a shell: bash, zsh or fish"'
+mb completion csh
+check "completion of an unknown shell" eval 'code_is 1 && has "no completion script for csh"'
+mb help completion
+check "help completion has the install hint" has "mbuild completion bash > ~/.local/share/bash-completion/completions/mbuild"
+
+mkdir -p "$W/noproj" "$W/comp/src/render" "$W/comp/cmd/tool" "$W/comp/tests"
+cat > "$W/comp/mbuild.mettle" <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("comp", "0.1.0");
+  mb_bin("app", "src/main.mettle");
+  mb_bin("tool", "cmd/tool/main.mettle");
+  mb_test_bin("smoke", "tests/smoke_test.mettle");
+  mb_component("render", "src/render", "static", "gl,sw");
+  mb_profile("fast");
+}
+
+fn deps() {
+  mb_dep("greet", "1.0.0");
+  mb_dep("textkit", "1.1.0");
+}
+
+// hello: an example command
+fn cmd_hello(a: MbArgs*) -> int32 { return 0; }
+
+// gen-docs: another one
+fn cmd_gen_docs(a: MbArgs*) -> int32 { return 0; }
+EOF
+for f in src/main.mettle cmd/tool/main.mettle tests/smoke_test.mettle; do printf 'fn main() -> int32 {\n  return 0;\n}\n' > "$W/comp/$f"; done
+# lines_are WORD...: last.out is exactly these lines
+lines_are() { [ "$(cat "$S/last.out")" = "$(printf '%s\n' "$@")" ]; }
+empty_out() { [ ! -s "$S/last.out" ]; }
+# bcomp WORD...: what the bash script offers for the last WORD (the one being completed) after the words before it
+bcomp() {
+  bash -c '. "$1"; mbin=$2; shift 2; COMP_WORDS=(mbuild "$@"); COMP_CWORD=$#; COMPREPLY=(); _mbuild "$mbin" "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"; [ ${#COMPREPLY[@]} -eq 0 ] || printf "%s\n" "${COMPREPLY[@]}"' _ "$W/comp.bash" "$MB" "$@" >"$S/last.out" 2>&1
+}
+cd "$W/noproj"
+mb __complete commands
+check "__complete commands outside a project: the help table's commands" sh -c '[ "$("$1" help | awk "/^run .mbuild help/ {exit} /^  [a-z]/ {print \$1}")" = "$(cat "$0/last.out")" ]' "$S" "$MB"
+mb __complete targets
+check "__complete targets" lines_are linux windows all host
+mb __complete targets w
+check "__complete takes a prefix" lines_are windows
+for kind in bins tests deps components profiles; do
+  mb __complete $kind
+  check "__complete $kind outside a project prints nothing" eval 'code_is 0 && empty_out'
+done
+bcomp build ""
+check "bash: bins outside a project: nothing" empty_out
+bcomp -t ""
+check "bash: targets outside a project" lines_are linux windows all host
+bcomp ge
+check "bash: commands outside a project" lines_are get
+cd "$W/comp"
+mb __complete commands se
+check "__complete commands: a prefix" lines_are search services setup
+mb __complete commands
+check "__complete commands: this project's after the built-ins" sh -c 'tail -2 "$0/last.out" | tr "\n" " " | grep -qx "hello gen-docs " && grep -qx info "$0/last.out" && grep -qx completion "$0/last.out"' "$S"
+mb __complete bins
+check "__complete bins" lines_are app tool
+mb __complete tests
+check "__complete tests" lines_are smoke
+mb __complete deps
+check "__complete deps" lines_are greet textkit
+mb __complete deps t
+check "__complete deps with a prefix" lines_are textkit
+mb __complete components
+check "__complete components" lines_are render
+mb __complete profiles
+check "__complete profiles" lines_are debug release fast
+mb __complete packages
+check "__complete packages with no cached index prints nothing" eval 'code_is 0 && empty_out'
+mb __complete nosuch
+check "__complete of an unknown kind prints nothing" eval 'code_is 0 && empty_out'
+cp mbuild.mettle mbuild.good
+printf 'fn broken( {\n' >> mbuild.mettle
+"$MB" __complete bins >"$S/last.out" 2>/dev/null
+check "a project that does not load completes nothing, quietly" empty_out
+"$MB" __complete commands >"$S/last.out" 2>/dev/null
+check "... but its commands still come from the scan" grep -qx hello "$S/last.out"
+cp mbuild.good mbuild.mettle
+rm mbuild.good
+bcomp se
+check "bash: command names" lines_are search services setup
+bcomp ""
+check "bash: every command, the project's too" sh -c 'grep -qx build "$0/last.out" && grep -qx gen-docs "$0/last.out" && grep -qx hello "$0/last.out" && grep -qx completion "$0/last.out"' "$S"
+bcomp build ""
+check "bash: build takes bins" lines_are app tool
+bcomp run a
+check "bash: run takes bins" lines_are app
+bcomp check ""
+check "bash: check takes bins" lines_are app tool
+bcomp test ""
+check "bash: test takes tests" lines_are smoke
+bcomp remove ""
+check "bash: remove takes deps" lines_are greet textkit
+bcomp why t
+check "bash: why takes deps" lines_are textkit
+bcomp update g
+check "bash: update takes deps" lines_are greet
+bcomp use ""
+check "bash: use takes components" lines_are render
+bcomp get zzz
+check "bash: get takes packages" empty_out
+bcomp help se
+check "bash: help takes commands" lines_are search services setup
+bcomp help fl
+check "bash: help flags" lines_are flags
+bcomp completion ""
+check "bash: completion takes shells" lines_are bash zsh fish
+bcomp toolchain us
+check "bash: toolchain subcommands" lines_are use
+bcomp build -p ""
+check "bash: -p takes profiles" lines_are debug release fast
+bcomp build --profile = f
+check "bash: --profile=NAME" lines_are fast
+bcomp build -t ""
+check "bash: -t takes targets" lines_are linux windows all host
+bcomp -t windows bu
+check "bash: a flag's value is not the command" lines_are build
+bcomp -j 2 run a
+check "bash: ... for -j too" lines_are app
+bcomp --color never te
+check "bash: --color's value is not the command" lines_are test
+bcomp --color ""
+check "bash: --color takes auto always never" lines_are auto always never
+bcomp run -
+check "bash: a command's own flags and the global ones" sh -c 'grep -qx -- --no-services "$0/last.out" && grep -qx -- --release "$0/last.out" && grep -qx -- --offline "$0/last.out" && ! grep -qx -- --tree "$0/last.out"' "$S"
+bcomp clean --a
+check "bash: clean --all" lines_are --all
+bcomp update --
+check "bash: update flags" sh -c 'grep -qx -- --major "$0/last.out" && grep -qx -- --dry-run "$0/last.out"' "$S"
+bcomp hello ""
+check "bash: a project command's arguments are left to the shell" empty_out
+cd "$W/hello"
+
 # --- hooks (13.7)
 cat >> mbuild.mettle <<'EOF'
 

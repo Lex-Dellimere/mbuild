@@ -568,6 +568,11 @@ export fn tc_select(p: Project*, target: string) -> Mettle* {
   return m;
 }
 
+// True when a compiler for target is there to be selected (tc_select would not fail).
+export fn tc_available(p: Project*, target: string) -> bool {
+  return tcx_pick(p, target) != (Mettle*)0;
+}
+
 export fn tc_cmd(m: Mettle*) -> Cmd* {
   var c: Cmd* = cmd_new(m->tool);
   if (m->via_wine) {

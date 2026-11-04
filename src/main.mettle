@@ -10,6 +10,7 @@ import "core/base";
 import "model/manifest";
 import "model/project";
 import "build/build";
+import "build/complete";
 import "pkg/deps";
 import "pkg/search";
 import "build/toolchain";
@@ -72,11 +73,6 @@ fn mx_is_cmd_flag(name: string) -> bool {
   return has;
 }
 
-// Command flags with a value: they go to rest as "--name=VALUE".
-fn mx_is_cmd_opt(name: string) -> bool {
-  return s_eq(name, "--to") || s_eq(name, "--registry") || s_eq(name, "--name") || s_eq(name, "--from") || s_eq(name, "--opt") || s_eq(name, "--home");
-}
-
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
   ini_mbuild_version = build_version_text;
@@ -130,7 +126,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
       val = s_from(a, eq + 1);
       has_val = true;
     }
-    var takes: bool = s_eq(name, "-j") || s_eq(name, "--jobs") || s_eq(name, "-t") || s_eq(name, "--target") || s_eq(name, "-p") || s_eq(name, "--profile") || s_eq(name, "--mettle") || s_eq(name, "--filter") || s_eq(name, "--color") || s_eq(name, "--set") || s_eq(name, "--flag") || s_eq(name, "--use") || mx_is_cmd_opt(name);
+    var takes: bool = cmp_takes_value(name);
     if (takes && !has_val) {
       if (s_eq(name, "--color")) {
         val = "always";
@@ -183,7 +179,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
       sl_push(o->uses, val);
     } else if (s_eq(name, "--no-hooks")) {
       o->no_hooks = true;
-    } else if (mx_is_cmd_opt(name)) {
+    } else if (cmp_cmd_opt(name)) {
       sl_push(o->rest, name + "=" + val);
     } else if (mx_is_cmd_flag(name)) {
       sl_push(o->rest, name);
@@ -243,6 +239,9 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
     return 0;
   }
   if (s_eq(command, "setup")) { return tc_cmd_setup(build_find(o)); }
+  // The completion scripts stay clear of first-run setup and its output.
+  if (s_eq(command, "completion")) { return build_cmd_completion(o); }
+  if (s_eq(command, "__complete")) { return build_complete(build_find(o)); }
   tc_first_run();
   if (!build_is_builtin(command)) {
     return build_cmd_project(build_find(o), command);

@@ -1,0 +1,508 @@
+// complete: mbuild completion SHELL: the completion scripts for bash, zsh and fish.
+//
+// A script knows the command and flag names build.mettle takes from its help
+// table (so they never drift) and asks `mbuild __complete KIND [PREFIX]` for
+// the values that depend on the project or the caches.
+
+import "std/mem";
+import "../core/base";
+
+// What a script is made from: the built-in commands in the help table's
+// order, each one's flags (space-separated, parallel to cmds), and the global
+// flags, one each.
+export struct CmpSpec {
+  cmds: StrList*;
+  flags: StrList*;
+  globals: StrList*;
+}
+
+// The flags that take a value (--color's is optional); the second list is the
+// command flags among them, which reach a command as --name=VALUE.
+var g_cpx_valued: string = "-j --jobs -t --target -p --profile --mettle --filter --color --set --flag --use";
+var g_cpx_cmd_opts: string = "--to --registry --name --from --opt --home";
+var g_cpx_all: string = "";
+
+// Both lists as one string (kept, since the pieces split from it are views).
+fn cpx_all_valued() -> string {
+  if (slen(g_cpx_all) == 0) {
+    g_cpx_all = g_cpx_valued + " " + g_cpx_cmd_opts;
+  }
+  return g_cpx_all;
+}
+
+fn cpx_has_word(words: string, word: string) -> bool {
+  var l: StrList* = s_split(words, 32);
+  var has: bool = sl_has(l, word);
+  free(l->items);
+  free(l);
+  return has;
+}
+
+export fn cmp_cmd_opt(name: string) -> bool {
+  return cpx_has_word(g_cpx_cmd_opts, name);
+}
+
+export fn cmp_takes_value(name: string) -> bool {
+  return cpx_has_word(g_cpx_valued, name) || cmp_cmd_opt(name);
+}
+
+// The kind of value a flag takes, as __complete names it; "" when it is free
+// text (a file, a number) and "colors" for --color's fixed words.
+export fn cmp_flag_kind(name: string) -> string {
+  if (s_eq(name, "-t") || s_eq(name, "--target")) {
+    return "targets";
+  }
+  if (s_eq(name, "-p") || s_eq(name, "--profile")) {
+    return "profiles";
+  }
+  if (s_eq(name, "--color")) {
+    return "colors";
+  }
+  return s_empty();
+}
+
+// What the positional arguments of a built-in command are, as __complete
+// names it; "" when they are files or free text.
+export fn cmp_kind(cmd: string) -> string {
+  if (cpx_has_word("build run check live", cmd)) {
+    return "bins";
+  }
+  if (s_eq(cmd, "test")) {
+    return "tests";
+  }
+  if (cpx_has_word("get info", cmd)) {
+    return "packages";
+  }
+  if (cpx_has_word("remove update why outdated agents", cmd)) {
+    return "deps";
+  }
+  if (s_eq(cmd, "use")) {
+    return "components";
+  }
+  if (s_eq(cmd, "help")) {
+    return "commands";
+  }
+  return s_empty();
+}
+
+// Words that can follow a command directly.
+export fn cmp_words(cmd: string) -> string {
+  if (s_eq(cmd, "help")) {
+    return "flags";
+  }
+  if (s_eq(cmd, "completion")) {
+    return "bash zsh fish";
+  }
+  if (s_eq(cmd, "toolchain")) {
+    return "list install use default remove update";
+  }
+  if (s_eq(cmd, "registry")) {
+    return "init";
+  }
+  return s_empty();
+}
+
+// Adds the flags in text (a usage line, a flag row) to out, each once: the
+// pieces between spaces, commas, bars, brackets and '=' that look like -x or --name.
+export fn cmp_flags_in(text: string, out: StrList*) {
+  var n: int64 = slen(text);
+  var start: int64 = 0;
+  var i: int64 = 0;
+  while (i <= n) {
+    var c: int32 = 32;
+    if (i < n) {
+      c = s_byte(text, i);
+    }
+    if (c == 32 || c == 44 || c == 124 || c == 91 || c == 93 || c == 61) {
+      var t: string = s_sub(text, start, i);
+      start = i + 1;
+      var k: int64 = 1;
+      if (s_starts(t, "--")) {
+        k = 2;
+      }
+      if (s_starts(t, "-") && slen(t) > k && is_alpha_b(s_byte(t, k))) {
+        sl_add_uniq(out, s_dup(t));
+      }
+    }
+    i = i + 1;
+  }
+}
+
+// One script line: ' stands for " and ` for ', so the shell code reads as it
+// runs; a literal { is written {{ like in any string.
+fn cpx_ln(b: Buf*, text: string) {
+  var q: string = s_replace_byte(text, 39, 34);
+  buf_line(b, s_replace_byte(q, 96, 39));
+}
+
+// The commands whose positional kind is kind, as a case pattern.
+fn cpx_cmds_of(sp: CmpSpec*, kind: string) -> string {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < sp->cmds->len) {
+    if (s_eq(cmp_kind(sl_get(sp->cmds, i)), kind)) {
+      sl_push(l, sl_get(sp->cmds, i));
+    }
+    i = i + 1;
+  }
+  var r: string = sl_join(l, "|");
+  free(l->items);
+  free(l);
+  return r;
+}
+
+fn cpx_kinds() -> StrList* {
+  return s_split("bins tests packages deps components commands", 32);
+}
+
+// The value flags that have no list of their own, as a case pattern.
+fn cpx_plain_valued() -> string {
+  var all: StrList* = s_split(cpx_all_valued(), 32);
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < all->len) {
+    if (slen(cmp_flag_kind(sl_get(all, i))) == 0) {
+      sl_push(l, sl_get(all, i));
+    }
+    i = i + 1;
+  }
+  var r: string = sl_join(l, "|");
+  free(all->items);
+  free(all);
+  free(l->items);
+  free(l);
+  return r;
+}
+
+// Every value flag but --color (its value is optional), as a case pattern.
+fn cpx_valued_alt() -> string {
+  var all: StrList* = s_split(cpx_all_valued(), 32);
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < all->len) {
+    if (!s_eq(sl_get(all, i), "--color")) {
+      sl_push(l, sl_get(all, i));
+    }
+    i = i + 1;
+  }
+  var r: string = sl_join(l, "|");
+  free(all->items);
+  free(all);
+  free(l->items);
+  free(l);
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// bash
+// ---------------------------------------------------------------------------
+
+fn cpx_bash(sp: CmpSpec*) -> string {
+  var b: Buf* = buf_new();
+  var globals: string = sl_join(sp->globals, " ");
+  var plain: string = cpx_plain_valued();
+  cpx_ln(b, "# bash completion for mbuild, from `mbuild completion bash`");
+  cpx_ln(b, "# install: mbuild completion bash > ~/.local/share/bash-completion/completions/mbuild");
+  cpx_ln(b, "_mbuild() {{");
+  cpx_ln(b, "  local cur=$2 prev=$3 mb=$1 cmd= cmdi=0 skip=0 i w kind= flags= words=");
+  cpx_ln(b, "  [ '$prev' = = ] && prev=${{COMP_WORDS[COMP_CWORD-2]}");
+  cpx_ln(b, "  [ '$cur' = = ] && cur=");
+  cpx_ln(b, "  for ((i = 1; i < COMP_CWORD; i++)); do");
+  cpx_ln(b, "    w=${{COMP_WORDS[i]}");
+  cpx_ln(b, "    if [ $skip = 1 ]; then");
+  cpx_ln(b, "      [ '$w' = = ] || skip=0");
+  cpx_ln(b, "      continue");
+  cpx_ln(b, "    fi");
+  cpx_ln(b, "    case $w in");
+  cpx_ln(b, "      " + cpx_valued_alt() + ") skip=1 ;;");
+  cpx_ln(b, "      --color) case ${{COMP_WORDS[i+1]} in always|never|auto) skip=1 ;; esac ;;");
+  cpx_ln(b, "      -*) ;;");
+  cpx_ln(b, "      *) cmd=$w; cmdi=$i; break ;;");
+  cpx_ln(b, "    esac");
+  cpx_ln(b, "  done");
+  cpx_ln(b, "  case $prev in");
+  cpx_ln(b, "    -t|--target) COMPREPLY=($('$mb' __complete targets '$cur' 2>/dev/null)); return ;;");
+  cpx_ln(b, "    -p|--profile) COMPREPLY=($('$mb' __complete profiles '$cur' 2>/dev/null)); return ;;");
+  cpx_ln(b, "    --color) COMPREPLY=($(compgen -W 'auto always never' -- '$cur')); return ;;");
+  cpx_ln(b, "    " + plain + ") return ;;");
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  if [ -z '$cmd' ]; then");
+  cpx_ln(b, "    case $cur in");
+  cpx_ln(b, "      -*) COMPREPLY=($(compgen -W '" + globals + "' -- '$cur')) ;;");
+  cpx_ln(b, "      *) COMPREPLY=($('$mb' __complete commands '$cur' 2>/dev/null)) ;;");
+  cpx_ln(b, "    esac");
+  cpx_ln(b, "    return");
+  cpx_ln(b, "  fi");
+  cpx_ln(b, "  case $cur in");
+  cpx_ln(b, "    -*)");
+  cpx_ln(b, "      case $cmd in");
+  var i: int64 = 0;
+  while (i < sp->cmds->len) {
+    if (slen(sl_get(sp->flags, i)) > 0) {
+      cpx_ln(b, "        " + sl_get(sp->cmds, i) + ") flags='" + sl_get(sp->flags, i) + "' ;;");
+    }
+    i = i + 1;
+  }
+  cpx_ln(b, "      esac");
+  cpx_ln(b, "      COMPREPLY=($(compgen -W '$flags " + globals + "' -- '$cur'))");
+  cpx_ln(b, "      return ;;");
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  case $cmd in");
+  var kinds: StrList* = cpx_kinds();
+  var k: int64 = 0;
+  while (k < kinds->len) {
+    var pat: string = cpx_cmds_of(sp, sl_get(kinds, k));
+    if (slen(pat) > 0) {
+      cpx_ln(b, "    " + pat + ") kind=" + sl_get(kinds, k) + " ;;");
+    }
+    k = k + 1;
+  }
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  case $cmd in");
+  i = 0;
+  while (i < sp->cmds->len) {
+    if (slen(cmp_words(sl_get(sp->cmds, i))) > 0) {
+      cpx_ln(b, "    " + sl_get(sp->cmds, i) + ") words='" + cmp_words(sl_get(sp->cmds, i)) + "' ;;");
+    }
+    i = i + 1;
+  }
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  [ $cmdi = $((COMP_CWORD - 1)) ] || words=");
+  cpx_ln(b, "  if [ -n '$kind' ]; then");
+  cpx_ln(b, "    COMPREPLY=($('$mb' __complete $kind '$cur' 2>/dev/null))");
+  cpx_ln(b, "  fi");
+  cpx_ln(b, "  if [ -n '$words' ]; then");
+  cpx_ln(b, "    COMPREPLY+=($(compgen -W '$words' -- '$cur'))");
+  cpx_ln(b, "  fi");
+  cpx_ln(b, "}");
+  cpx_ln(b, "complete -o default -F _mbuild mbuild");
+  free(kinds->items);
+  free(kinds);
+  return buf_take(b);
+}
+
+// ---------------------------------------------------------------------------
+// zsh
+// ---------------------------------------------------------------------------
+
+fn cpx_zsh(sp: CmpSpec*) -> string {
+  var b: Buf* = buf_new();
+  var globals: string = sl_join(sp->globals, " ");
+  cpx_ln(b, "#compdef mbuild");
+  cpx_ln(b, "# zsh completion for mbuild, from `mbuild completion zsh`");
+  cpx_ln(b, "# install: mbuild completion zsh > ~/.zsh/completions/_mbuild   (a directory in $fpath, before compinit)");
+  cpx_ln(b, "_mbuild() {{");
+  cpx_ln(b, "  local cur=$words[CURRENT] prev=$words[CURRENT-1] mb=$words[1] cmd= cmdi=0 skip=0 kind= i w");
+  cpx_ln(b, "  local -a flags words_ cand");
+  cpx_ln(b, "  case $cur in");
+  cpx_ln(b, "    --*=*) prev=${{cur%%=*}; compset -P `*=` ;;");
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  for (( i = 2; i < CURRENT; i++ )); do");
+  cpx_ln(b, "    w=$words[i]");
+  cpx_ln(b, "    if (( skip )); then skip=0; continue; fi");
+  cpx_ln(b, "    case $w in");
+  cpx_ln(b, "      --*=*) ;;");
+  cpx_ln(b, "      " + cpx_valued_alt() + ") skip=1 ;;");
+  cpx_ln(b, "      --color) case $words[i+1] in always|never|auto) skip=1 ;; esac ;;");
+  cpx_ln(b, "      -*) ;;");
+  cpx_ln(b, "      *) cmd=$w; cmdi=$i; break ;;");
+  cpx_ln(b, "    esac");
+  cpx_ln(b, "  done");
+  cpx_ln(b, "  case $prev in");
+  cpx_ln(b, "    -t|--target) compadd -- $($mb __complete targets $PREFIX 2>/dev/null); return ;;");
+  cpx_ln(b, "    -p|--profile) compadd -- $($mb __complete profiles $PREFIX 2>/dev/null); return ;;");
+  cpx_ln(b, "    --color) compadd -- auto always never; return ;;");
+  cpx_ln(b, "    " + cpx_plain_valued() + ") _files; return ;;");
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  if [[ -z $cmd ]]; then");
+  cpx_ln(b, "    if [[ $cur == -* ]]; then");
+  cpx_ln(b, "      compadd -- " + globals);
+  cpx_ln(b, "    else");
+  cpx_ln(b, "      compadd -- $($mb __complete commands $PREFIX 2>/dev/null)");
+  cpx_ln(b, "    fi");
+  cpx_ln(b, "    return");
+  cpx_ln(b, "  fi");
+  cpx_ln(b, "  if [[ $cur == -* ]]; then");
+  cpx_ln(b, "    case $cmd in");
+  var i: int64 = 0;
+  while (i < sp->cmds->len) {
+    if (slen(sl_get(sp->flags, i)) > 0) {
+      cpx_ln(b, "      " + sl_get(sp->cmds, i) + ") flags=(" + sl_get(sp->flags, i) + ") ;;");
+    }
+    i = i + 1;
+  }
+  cpx_ln(b, "    esac");
+  cpx_ln(b, "    compadd -- $flags " + globals);
+  cpx_ln(b, "    return");
+  cpx_ln(b, "  fi");
+  cpx_ln(b, "  case $cmd in");
+  var kinds: StrList* = cpx_kinds();
+  var k: int64 = 0;
+  while (k < kinds->len) {
+    var pat: string = cpx_cmds_of(sp, sl_get(kinds, k));
+    if (slen(pat) > 0) {
+      cpx_ln(b, "    " + pat + ") kind=" + sl_get(kinds, k) + " ;;");
+    }
+    k = k + 1;
+  }
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  case $cmd in");
+  i = 0;
+  while (i < sp->cmds->len) {
+    if (slen(cmp_words(sl_get(sp->cmds, i))) > 0) {
+      cpx_ln(b, "    " + sl_get(sp->cmds, i) + ") words_=(" + cmp_words(sl_get(sp->cmds, i)) + ") ;;");
+    }
+    i = i + 1;
+  }
+  cpx_ln(b, "  esac");
+  cpx_ln(b, "  (( cmdi == CURRENT - 1 )) || words_=()");
+  cpx_ln(b, "  cand=($words_)");
+  cpx_ln(b, "  [[ -n $kind ]] && cand+=($($mb __complete $kind $PREFIX 2>/dev/null))");
+  cpx_ln(b, "  if (( $#cand )); then compadd -- $cand; else _files; fi");
+  cpx_ln(b, "}");
+  cpx_ln(b, "if [ '$funcstack[1]' = '_mbuild' ]; then _mbuild '$@'; else compdef _mbuild mbuild; fi");
+  free(kinds->items);
+  free(kinds);
+  return buf_take(b);
+}
+
+// ---------------------------------------------------------------------------
+// fish
+// ---------------------------------------------------------------------------
+
+// complete -c mbuild [-n COND] -s X | -l NAME [-r [-f -a '(mbuild __complete KIND ...)']] for one flag.
+fn cpx_fish_flag(b: Buf*, cond: string, flag: string) {
+  var line: string = "complete -c mbuild";
+  if (slen(cond) > 0) {
+    line = line + " -n `" + cond + "`";
+  }
+  if (s_starts(flag, "--")) {
+    line = line + " -l " + s_from(flag, 2);
+  } else {
+    line = line + " -s " + s_from(flag, 1);
+  }
+  if (cmp_takes_value(flag)) {
+    line = line + " -r";
+    var kind: string = cmp_flag_kind(flag);
+    if (s_eq(kind, "colors")) {
+      line = line + " -f -a `auto always never`";
+    } else if (slen(kind) > 0) {
+      line = line + " -f -a `(mbuild __complete " + kind + " (commandline -ct) 2>/dev/null)`";
+    }
+  }
+  cpx_ln(b, line);
+}
+
+fn cpx_fish(sp: CmpSpec*) -> string {
+  var b: Buf* = buf_new();
+  cpx_ln(b, "# fish completion for mbuild, from `mbuild completion fish`");
+  cpx_ln(b, "# install: mbuild completion fish > ~/.config/fish/completions/mbuild.fish");
+  cpx_ln(b, "function __mbuild_cmd");
+  cpx_ln(b, "    set -l toks (commandline -opc)");
+  cpx_ln(b, "    set -l skip 0");
+  cpx_ln(b, "    set -l i 2");
+  cpx_ln(b, "    while test $i -le (count $toks)");
+  cpx_ln(b, "        set -l w $toks[$i]");
+  cpx_ln(b, "        set i (math $i + 1)");
+  cpx_ln(b, "        if test $skip = 1");
+  cpx_ln(b, "            set skip 0");
+  cpx_ln(b, "            continue");
+  cpx_ln(b, "        end");
+  cpx_ln(b, "        switch $w");
+  var valued: StrList* = s_split(cpx_all_valued(), 32);
+  var v: int64 = 0;
+  var quoted: string = "";
+  while (v < valued->len) {
+    if (!s_eq(sl_get(valued, v), "--color")) {
+      quoted = quoted + " `" + sl_get(valued, v) + "`";
+    }
+    v = v + 1;
+  }
+  cpx_ln(b, "            case" + quoted);
+  cpx_ln(b, "                set skip 1");
+  cpx_ln(b, "            case `--color`");
+  cpx_ln(b, "                if test $i -le (count $toks); and contains -- $toks[$i] always never auto");
+  cpx_ln(b, "                    set skip 1");
+  cpx_ln(b, "                end");
+  cpx_ln(b, "            case `-*`");
+  cpx_ln(b, "            case `*`");
+  cpx_ln(b, "                echo $w");
+  cpx_ln(b, "                return");
+  cpx_ln(b, "        end");
+  cpx_ln(b, "    end");
+  cpx_ln(b, "end");
+  cpx_ln(b, "function __mbuild_none");
+  cpx_ln(b, "    set -l c (__mbuild_cmd)");
+  cpx_ln(b, "    test -z '$c'");
+  cpx_ln(b, "end");
+  cpx_ln(b, "function __mbuild_is");
+  cpx_ln(b, "    set -l c (__mbuild_cmd)");
+  cpx_ln(b, "    test -n '$c'; and contains -- $c $argv");
+  cpx_ln(b, "end");
+  cpx_ln(b, "function __mbuild_first");
+  cpx_ln(b, "    set -l toks (commandline -opc)");
+  cpx_ln(b, "    __mbuild_is $argv; and test '$toks[-1]' = (__mbuild_cmd)");
+  cpx_ln(b, "end");
+  cpx_ln(b, "complete -c mbuild -f -n __mbuild_none -a `(mbuild __complete commands (commandline -ct) 2>/dev/null)`");
+  var i: int64 = 0;
+  while (i < sp->globals->len) {
+    cpx_fish_flag(b, "", sl_get(sp->globals, i));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < sp->cmds->len) {
+    var fl: StrList* = s_fields(sl_get(sp->flags, i));
+    var f: int64 = 0;
+    while (f < fl->len) {
+      if (!sl_has(sp->globals, sl_get(fl, f))) {
+        cpx_fish_flag(b, "__mbuild_is " + sl_get(sp->cmds, i), sl_get(fl, f));
+      }
+      f = f + 1;
+    }
+    free(fl->items);
+    free(fl);
+    i = i + 1;
+  }
+  var kinds: StrList* = cpx_kinds();
+  var k: int64 = 0;
+  while (k < kinds->len) {
+    var kind: string = sl_get(kinds, k);
+    var names: string = s_replace_byte(cpx_cmds_of(sp, kind), 124, 32);
+    if (slen(names) > 0) {
+      // test files are fine arguments too
+      var nof: string = " -f";
+      if (s_eq(kind, "tests")) {
+        nof = "";
+      }
+      cpx_ln(b, "complete -c mbuild" + nof + " -n `__mbuild_is " + names + "` -a `(mbuild __complete " + kind + " (commandline -ct) 2>/dev/null)`");
+    }
+    k = k + 1;
+  }
+  i = 0;
+  while (i < sp->cmds->len) {
+    var words: string = cmp_words(sl_get(sp->cmds, i));
+    if (slen(words) > 0) {
+      cpx_ln(b, "complete -c mbuild -f -n `__mbuild_first " + sl_get(sp->cmds, i) + "` -a `" + words + "`");
+    }
+    i = i + 1;
+  }
+  free(valued->items);
+  free(valued);
+  free(kinds->items);
+  free(kinds);
+  return buf_take(b);
+}
+
+// The script for shell ("bash", "zsh" or "fish"); "" for any other.
+export fn cmp_script(shell: string, sp: CmpSpec*) -> string {
+  if (s_eq(shell, "bash")) {
+    return cpx_bash(sp);
+  }
+  if (s_eq(shell, "zsh")) {
+    return cpx_zsh(sp);
+  }
+  if (s_eq(shell, "fish")) {
+    return cpx_fish(sp);
+  }
+  return s_empty();
+}
