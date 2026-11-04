@@ -25,7 +25,7 @@ mbuild run
 
 mbuild needs a mettle compiler built from the mettle source (the v0.17.0 release and older can't build current projects). build it (`make` in a clone of [Mettle](https://github.com/The-Mettle-Project/Mettle)), then point `METTLE` at its `bin/mettle` for the bootstrap.
 
-mbuild builds itself. with no mbuild around yet, one plain mettle command makes a throwaway one, and that builds and installs the real thing:
+get mbuild with `git clone https://github.com/Lex-Dellimere/mbuild.git`. it builds itself: with no mbuild around yet, one plain mettle command makes a throwaway one, and that builds and installs the real thing:
 
 ```bash
 cd mbuild
