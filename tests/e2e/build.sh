@@ -593,6 +593,7 @@ check "update: Updated" has "Updated apilib v1.0.0 -> v1.1.0"
 check "update: Held" has "Held apilib v1.2.0: src/main.mettle:4: Undefined function 'al_mul'"
 check "update: Summary" has "Summary 1 updated, 1 held back"
 check "update: mbuild.mettle" grep -qF 'mb_dep("apilib", "v1.1.0");' mbuild.mettle
+check "update: the kept edit prints once" [ "$(grep -cF 'Updating mbuild.mettle: mb_dep("apilib", "v1.1.0")' "$S/last.out")" = 1 ]
 proj "$W/dry" <<'EOF'
 mb_dep("apilib", "v1.0.0");
 EOF

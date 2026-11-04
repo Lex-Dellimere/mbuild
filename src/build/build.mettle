@@ -3634,10 +3634,14 @@ fn bx_say_newer(plan: UpdatePlan*) {
   }
 }
 
+// A trial: its edit is undone, so it prints nothing (the kept one prints once).
 fn bx_apply_one(p: Project*, module: string, version: string) {
   var mods: StrList* = sl_of(module);
   var vers: StrList* = sl_of(version);
+  var quiet_was: bool = g_quiet;
+  g_quiet = true;
   g_bx_ds = deps_apply(p, mods, vers);
+  g_quiet = quiet_was;
   free(mods);
   free(vers);
   bx_reload(p);
