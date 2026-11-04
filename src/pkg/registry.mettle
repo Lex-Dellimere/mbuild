@@ -455,12 +455,12 @@ export fn reg_index(p: Project*, registry: string, name: string, refresh: bool) 
     fetch = false;
   }
   if (fetch) {
-    sl_push(g_rgx_fetched, key);
     if (g_verbose) {
       status("Updating", "index of " + name + " (" + registry + ")");
     }
     if (!rgx_get(p, registry, url, "index/" + name, cached)) {
       if (s_eq(g_rgx_kind, "missing")) {
+        sl_push(g_rgx_fetched, key);
         ix->ok = true;
         ix->err = g_rgx_err;
         return ix;
@@ -473,6 +473,13 @@ export fn reg_index(p: Project*, registry: string, name: string, refresh: bool) 
       }
       rgx_clear();
     }
+    sl_push(g_rgx_fetched, key);
+  } else if (!have) {
+    // Already asked in this command and the registry had none.
+    ix->ok = true;
+    rgx_set("missing", "registry " + registry + " has no package named " + name);
+    ix->err = g_rgx_err;
+    return ix;
   }
   var r: FsRead = fs_read(cached);
   if (!r.ok) {
