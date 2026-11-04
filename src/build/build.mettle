@@ -63,6 +63,9 @@ struct BxSess {
   comps: StrList*;     // component names of the build
   has_cmp: bool;       // components or rules: units go through cmp_prepare
   hooks_run: StrList*; // "name target profile" of the hooks already run
+  dep: string;         // "" or the dependency whose bins this session builds (mb_dep_bin)
+  app: Project*;       // the project they are built for (out dirs, profile); s->p itself otherwise
+  app_profile: string;
 }
 
 // Objects other modules may keep pointers to: held here, never freed.
@@ -80,6 +83,7 @@ var g_bx_verify_said: bool = false;
 var g_bx_info: MbfInfo* = (MbfInfo*)0;
 // The units, target contexts and requests of the command.
 var g_bx_units: BxUnits* = (BxUnits*)0;
+var g_bx_dep_bins: BxDepBins* = (BxDepBins*)0;
 var g_bx_tctxs: TargetCtx** = (TargetCtx**)0;
 var g_bx_nls: NatLink** = (NatLink**)0;
 var g_bx_ini: IniRequest* = (IniRequest*)0;
@@ -711,6 +715,9 @@ fn bx_sess_x(p: Project*, targets: StrList*, check_min: bool) -> BxSess* {
   s->ds = bx_deps(p);
   s->host_m = (Mettle*)0;
   s->hooks_run = sl_new();
+  s->dep = s_empty();
+  s->app = p;
+  s->app_profile = s->profile;
   s->mettles = (Mettle**)malloc((targets->len + 1) * 8);
   var i: int64 = 0;
   while (i < targets->len) {
@@ -1678,7 +1685,10 @@ fn bx_stamp_ok(p: Project*, stamp: string, fp: string) -> bool {
   return rd.ok && s_eq(s_trim(rd.data), fp);
 }
 
-fn bx_label(b: BinInfo*, t: TargetCtx*) -> string {
+fn bx_label(s: BxSess*, b: BinInfo*, t: TargetCtx*) -> string {
+  if (slen(s->dep) > 0) {
+    return s->dep + "/" + b->name + " (" + t->target + ", " + t->profile + ")";
+  }
   return b->name + " (" + t->target + ", " + t->profile + ")";
 }
 
@@ -1779,7 +1789,7 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   j->stamp = p->state_dir + "/stamps/" + t->target + "-" + t->profile + "-" + b->name + ".stamp";
 
   if (fs_is_file(j->outp) && bx_stamp_ok(p, j->stamp, j->fp)) {
-    status("Fresh", bx_label(b, t));
+    status("Fresh", bx_label(s, b, t));
     bx_copy_beside(nl, t);
     j->state = 1;
     return j;
@@ -1838,7 +1848,7 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
     var i: int64 = 0;
     while (i < n) {
       var j: BxJob* = jobs[i];
-      status("Compiling", bx_label(j->b, j->t));
+      status("Compiling", bx_label(s, j->b, j->t));
       var cap: Captured = proc_capture_all(j->c);
       if (bx_finish(s, j, cap.code, cap.out) != 0) {
         return 1;
@@ -1867,7 +1877,7 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   while (true) {
     while (active < par && upto < n && rc == 0) {
       var j: BxJob* = jobs[upto];
-      status("Compiling", bx_label(j->b, j->t));
+      status("Compiling", bx_label(s, j->b, j->t));
       verbose(cmd_display(j->c));
       running[upto] = sys_job_start(j->c, sl_get(logs, upto));
       active = active + 1;
@@ -1919,12 +1929,16 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   return rc;
 }
 
-fn bx_targetctx(s: BxSess*, ti: int64) -> TargetCtx* {
-  var m: Mettle* = s->mettles[ti];
-  var t: TargetCtx* = targetctx_new(s->p, sl_get(s->targets, ti), s->profile);
+fn bx_tctx_new(s: BxSess*, target: string, m: Mettle*) -> TargetCtx* {
+  var t: TargetCtx* = targetctx_new(s->p, target, s->profile);
+  t->out_dir = s->app->root + "/build/" + target + "/" + s->app_profile;
   t->compiler_stdlib_dir = m->stdlib_dir;
   t->compiler_runtime_dir = m->runtime_dir;
   return t;
+}
+
+fn bx_targetctx(s: BxSess*, ti: int64) -> TargetCtx* {
+  return bx_tctx_new(s, sl_get(s->targets, ti), s->mettles[ti]);
 }
 
 // The TargetCtx of every session target, then one per freestanding triple
@@ -1940,18 +1954,32 @@ fn bx_unit_tctx(s: BxSess*, u: BxUnit*, ctxs: TargetCtx**, nls: NatLink**) -> in
     }
     k = k + 1;
   }
-  var t: TargetCtx* = targetctx_new(s->p, u->target, s->profile);
-  t->compiler_stdlib_dir = u->m->stdlib_dir;
-  t->compiler_runtime_dir = u->m->runtime_dir;
+  var t: TargetCtx* = bx_tctx_new(s, u->target, u->m);
   ctxs[k] = t;
   nls[k] = natlink_empty();
   return k;
 }
 
-// Builds every unit, then runs the post-build hooks. 0 on success.
+// Builds every unit and the dependencies' bins (mb_dep_bin), then runs the
+// post-build hooks. 0 on success.
 fn bx_build_units(s: BxSess*, us: BxUnits*) -> int32 {
   var t0: int64 = sys_now_ms();
   bx_prepare(s, us, s_empty());
+  var dep_bins: BxDepBins* = bx_dep_bins_prepare(s);
+  g_bx_dep_bins = dep_bins;
+  var built: StrList* = sl_new();
+  if (bx_compile_units(s, us, built) != 0 || bx_dep_bins_build(dep_bins) != 0) {
+    return 1;
+  }
+  bx_post_hooks(s, us, built);
+  free(built);
+  status("Finished", "in " + bx_secs(sys_now_ms() - t0));
+  return 0;
+}
+
+// Compiles the prepared units (Fresh ones are only reported); built gets
+// "target bin" for each one compiled. 0 on success.
+fn bx_compile_units(s: BxSess*, us: BxUnits*, built: StrList*) -> int32 {
   var nt: int64 = s->targets->len + us->n + 1;
   var ctxs: TargetCtx** = (TargetCtx**)malloc(nt * 8);
   var nls: NatLink** = (NatLink**)malloc(nt * 8);
@@ -1987,20 +2015,156 @@ fn bx_build_units(s: BxSess*, us: BxUnits*) -> int32 {
     }
     i = i + 1;
   }
-  var rc: int32 = bx_run_jobs(s, jobs, n);
-  if (rc != 0) {
+  if (bx_run_jobs(s, jobs, n) != 0) {
     return 1;
   }
-  var built: StrList* = sl_new();
   i = 0;
   while (i < n) {
     sl_push(built, jobs[i]->t->target + " " + jobs[i]->b->name);
     i = i + 1;
   }
   free(jobs);
-  bx_post_hooks(s, us, built);
-  free(built);
-  status("Finished", "in " + bx_secs(sys_now_ms() - t0));
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Dependency bins (mb_dep_bin)
+// ---------------------------------------------------------------------------
+
+// The dependency as a project of its own: its directory and manifest, its
+// state under .mbuild/dep-bins/NAME, no hooks.
+fn bx_dep_project(p: Project*, dm: DepModule*) -> Project* {
+  var q: Project* = new Project;
+  q->opts = p->opts;
+  q->root = dm->dir;
+  q->state_dir = p->state_dir + "/dep-bins/" + dm->module;
+  q->mbfile = s_empty();
+  q->legacy_toml = false;
+  q->man = dm->man;
+  if (q->man == (Manifest*)0) {
+    q->man = man_empty(dm->dir, dm->module);
+  }
+  q->has_manifest = true;
+  return q;
+}
+
+// The profile a dependency builds with: the project's, else the nearest
+// ancestor it knows (debug or release at the latest).
+fn bx_dep_profile(p: Project*, q: Project*, prof: string) -> string {
+  var chain: StrList* = bx_profile_chain(p->man, prof);
+  var i: int64 = 0;
+  while (i < chain->len) {
+    if (man_has_profile(q->man, sl_get(chain, i))) {
+      var found: string = sl_get(chain, i);
+      free(chain);
+      return found;
+    }
+    i = i + 1;
+  }
+  free(chain);
+  return "debug";
+}
+
+// The bins of dep the project names, checked against the dependency's bins.
+fn bx_dep_binset(s: BxSess*, q: Project*, dep: string) -> BinSet* {
+  var all: BinSet* = build_bins(q);
+  var known: StrList* = bx_bin_names(all);
+  var mine: StrList* = bx_bin_names(build_bins(s->p));
+  var names: StrList* = man_dep_bins(s->p->man, dep);
+  defer free(names);
+  var i: int64 = 0;
+  while (i < names->len) {
+    var nm: string = sl_get(names, i);
+    var call: string = "mb_dep_bin(\"" + dep + "\", \"" + nm + "\")";
+    i = i + 1;
+    if (known->len == 0) {
+      fail(call + ": " + dep + " has no bins");
+    }
+    if (!sl_has(known, nm)) {
+      var hint: string = dep + "'s bins are: " + sl_join(known, ", ");
+      var sug: string = man_suggest(nm, known);
+      if (slen(sug) > 0) {
+        hint = "did you mean `" + sug + "`? " + hint;
+      }
+      fail_hint(call + ": " + dep + " has no bin `" + nm + "`", hint);
+    }
+    if (sl_has(mine, nm)) {
+      fail(call + ": this project has a bin `" + nm + "` too, and both would build to the same file");
+    }
+  }
+  free(known);
+  free(mine);
+  return bx_select_from(q, all, names);
+}
+
+// One dependency's bins to build: its session and units.
+struct BxDepBins {
+  s: BxSess*;
+  us: BxUnits*;
+}
+
+// The bins mb_dep_bin names, checked and prepared for the session's targets:
+// each dependency as a project with its own manifest, building into this
+// project's output directories. Ends with a zero entry.
+fn bx_dep_bins_prepare(s: BxSess*) -> BxDepBins* {
+  var p: Project* = s->p;
+  var deps: StrList* = sl_new();
+  defer free(deps);
+  var i: int64 = 0;
+  while (i < p->man->dep_bins->len) {
+    var e: string = sl_get(p->man->dep_bins, i);
+    sl_add_uniq(deps, s_sub(e, 0, s_find_byte(e, 61)));
+    i = i + 1;
+  }
+  var all: BxDepBins* = (BxDepBins*)malloc((deps->len + 1) * sizeof(BxDepBins));
+  i = 0;
+  while (i < deps->len) {
+    var dep: string = sl_get(deps, i);
+    var at: int64 = 0;
+    while (at < s->ds->n && !s_eq(s->ds->mods[at].module, dep)) {
+      at = at + 1;
+    }
+    if (at >= s->ds->n) {
+      fail(dep + " is not in the build (mb_dep_bin)");
+    }
+    var q: Project* = bx_dep_project(p, &s->ds->mods[at]);
+    var bs: BinSet* = bx_dep_binset(s, q, dep);
+    var ds: BxSess* = new BxSess;
+    ds->p = q;
+    ds->ds = s->ds;
+    ds->targets = s->targets;
+    ds->mettles = s->mettles;
+    ds->host_m = s->host_m;
+    ds->profile = bx_dep_profile(p, q, s->profile);
+    ds->hooks_run = sl_new();
+    ds->dep = dep;
+    ds->app = p;
+    ds->app_profile = s->profile;
+    ds->comps = bx_comp_names(q, s->ds);
+    ds->has_cmp = ds->comps->len > 0;
+    var us: BxUnits* = bx_bin_units(ds, bs);
+    bx_components(ds, us, s_empty());
+    bx_graphs(ds, us);
+    all[i].s = ds;
+    all[i].us = us;
+    i = i + 1;
+  }
+  all[i].s = (BxSess*)0;
+  all[i].us = (BxUnits*)0;
+  return all;
+}
+
+fn bx_dep_bins_build(all: BxDepBins*) -> int32 {
+  var i: int64 = 0;
+  while (all[i].s != (BxSess*)0) {
+    var built: StrList* = sl_new();
+    var rc: int32 = bx_compile_units(all[i].s, all[i].us, built);
+    free(built);
+    if (rc != 0) {
+      return 1;
+    }
+    i = i + 1;
+  }
   return 0;
 }
 
@@ -2158,7 +2322,7 @@ export fn build_cmd_live(p: Project*) -> int32 {
   sl_extend(c->env, nl->env);
   c->cwd = p->root;
   verbose(cmd_display(c));
-  status("Live", bx_label(u->b, t));
+  status("Live", bx_label(s, u->b, t));
   return proc_run(c);
 }
 
@@ -2492,6 +2656,7 @@ export fn build_cmd_clean(p: Project*) -> int32 {
     bx_remove(p, p->state_dir + "/cache");
     bx_remove(p, p->state_dir + "/stamps");
     bx_remove(p, p->state_dir + "/tmp");
+    bx_remove(p, p->state_dir + "/dep-bins");
   }
   return 0;
 }

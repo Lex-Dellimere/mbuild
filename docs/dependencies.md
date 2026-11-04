@@ -273,6 +273,13 @@ strutil v1.1.0 (default)
 textfmt v0.1.0 (default)
 ```
 
+A dependency whose bins this project builds (`mb_dep_bin`,
+[project](project.md#bins)) says so:
+
+```text
+meosql (path ../meosql) [native: C] [bins built here: server]
+```
+
 ### mbuild fetch and --offline
 
 `mbuild fetch` downloads everything the lock names into the download cache,

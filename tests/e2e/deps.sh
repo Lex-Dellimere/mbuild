@@ -490,7 +490,7 @@ proj "$L" <<'EOF2'
 mb_import_root("src");
 EOF2
 rm "$L/src/main.mettle"
-mkdir -p "$L/src/core" "$L/tools"
+mkdir -p "$L/src/core" "$L/tools" "$L/cmd/render"
 printf 'export fn scale(x: int32) -> int32 { return x * 2; }\n' >"$L/src/core/scale.mettle"
 printf 'import "mistplot/core/scale";\nexport fn plot(x: int32) -> int32 { return scale(x) + 1; }\n' >"$L/src/plot.mettle"
 printf 'export fn gen_x() -> int32 { return 0; }\n' >"$L/tools/gen.mettle"
@@ -526,6 +526,7 @@ check "a wrong file is looked up below the import root" has "$S/last.out" "help:
 mkdir -p "$S/mpinit"
 mb "$S/mpinit" init mistplot --package
 cp -r "$S/mpinit/init.rules" "$S/mpinit/AGENT.rules" "$S/mpinit/templates" "$L/"
+printf 'import "std/io";\nimport "mistplot/plot";\nfn main() -> int32 { println("render {plot(5)}"); return 0; }\n' >"$L/cmd/render/main.mettle"
 mb "$L" registry init "$S/plotreg"
 mb "$L" publish --to "$S/plotreg"
 check "publish a package with an import root" has "$S/last.out" "Published mistplot v0.1.0"
@@ -545,11 +546,16 @@ MAIN='import "std/io";
 import "mistplot/plot";
 fn main() -> int32 { println("app {plot(1)}"); return 0; }' proj "$P" <<'EOF2'
 mb_dep("mistplot", "v0.1.1");
+mb_dep_bin("mistplot", "render");
 EOF2
 mb "$P" run
 check "a registry package with an import root" has "$S/last.out" "app 3"
 check "root mettle.deps: the registry package's import root" has "$P/mettle.deps" "mistplot=./.mbuild/deps/mistplot/src"
 check "its own block too" has "$P/.mbuild/deps/mistplot/mettle.deps" "mistplot=./src"
+check "a registry package's bin is built" has "$S/last.out" "Compiling mistplot/render (linux, debug)"
+check "... beside the project's bins" sh -c '"$0/build/linux/debug/render" | grep -qx "render 11"' "$P"
+mb "$P" deps
+check "deps names the bins built here" has "$S/last.out" "[bins built here: render]"
 MBUILD_REGISTRY="$R"
 
 echo

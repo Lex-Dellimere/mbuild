@@ -698,6 +698,11 @@ export fn mb_dep_path(name: string, path: string) {
   mbi_put("dependencies", name, "{{ path = " + mbi_quote(path) + " }");
 }
 
+// Also build a dependency's bin, for the same target and profile, into this project's output directory.
+export fn mb_dep_bin(dep: string, bin: string) {
+  mbi_append("dep-bins", dep, mbi_quote(bin));
+}
+
 // A registry, searched in call order before the default one.
 export fn mb_registry(name: string, url: string) {
   mbi_put("registry." + mbi_key(name), "url", mbi_quote(url));

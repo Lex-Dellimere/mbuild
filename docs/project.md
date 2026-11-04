@@ -95,6 +95,7 @@ Per-OS settings go through `mb_on(os)` instead.
 | `mb_dep(name, version)` | A package from the registries, `"v1.2.0"` or higher. |
 | `mb_dep_from(registry, name, version)` | The same, from one named registry. |
 | `mb_dep_path(name, path)` | A package in a local directory. |
+| `mb_dep_bin(dep, bin)` | Also build bin `bin` of dependency `dep` (below). |
 | `mb_registry(name, url)` | A registry, searched in call order before `default`. |
 | `mb_replace_version(name, version)` | One version of `name` for the whole build. |
 | `mb_replace_path(name, path)` | Use a local directory instead of `name` everywhere in the build. |
@@ -123,6 +124,35 @@ Without any `mb_bin` or `mb_for_bin`, mbuild looks for programs itself:
 A bin builds to `build/<target>/<profile>/<bin>`, with `.exe` for Windows.
 `mbuild run` with several bins runs the one named after the package, or the
 one you name: `mbuild run tool -- --input data.txt`.
+
+`mb_dep_bin("meosql", "server")` builds a dependency's bin along with
+yours, for the same target and profile, with the dependency's own settings
+and C code, into the same directory. `mbuild run` doesn't start it; your
+program can.
+
+```text
+$ mbuild build
+   Compiling meosql (C, 1 file)
+   Compiling sass (linux, debug)
+   Compiling meosql (C, 1 file)
+   Compiling meosql/server (linux, debug)
+    Finished in 0.0s
+$ ls build/linux/debug
+libmb_meosql.so  sass  server
+$ mbuild build
+       Fresh sass (linux, debug)
+       Fresh meosql/server (linux, debug)
+    Finished in 0.0s
+```
+
+A profile the dependency doesn't have falls back to the nearest one it does
+(`release` for a profile that inherits `release`). A wrong name lists its
+bins:
+
+```text
+error: mb_dep_bin("meosql", "sever"): meosql has no bin `sever`
+  help: did you mean `server`? meosql's bins are: server
+```
 
 A package without bins is a library: `mbuild build` and `mbuild check`
 type-check its `.mettle` files at the top and in `src/` (not `mbuild.mettle`
@@ -399,6 +429,7 @@ deleted`.
 | `build/` | outputs | no |
 | `.mbuild/` | extracted packages, caches, stamps, generated files | no |
 
-`mbuild clean` removes `build/`, the C cache, `.mbuild/stamps` and `.mbuild/tmp`.
+`mbuild clean` removes `build/`, the C cache, `.mbuild/stamps`, `.mbuild/tmp`
+and `.mbuild/dep-bins`.
 `mbuild clean --all` removes all of `.mbuild/` too; packages come back from
 the download cache in `$MBUILD_HOME`, which `clean` never touches.

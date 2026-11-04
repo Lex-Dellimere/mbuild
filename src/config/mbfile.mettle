@@ -855,6 +855,7 @@ fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
     return s_empty();
   }
   if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include") || s_eq(f, "mb_import_root")) { return "package"; }
+  if (s_eq(f, "mb_dep_bin")) { return "dep-bins"; }
   if (s_eq(f, "mb_targets") || s_eq(f, "mb_flags") || s_eq(f, "mb_prelude") || s_eq(f, "mb_agents")) { return "build"; }
   if (s_eq(f, "mb_bin") || s_eq(f, "mb_bin_kind")) { return "bin." + a0; }
   if (mfx_is_dep_fn(f)) { return "dependencies"; }

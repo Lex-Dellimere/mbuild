@@ -91,6 +91,7 @@ export struct Manifest {
   meta: StrList*;         // "key=value": description, license, repository, authors
   local_components: StrList*;  // "name=impl" from mbuild.local.mettle [components]
   import_root: string;    // [package] import-root, cleaned ("" = the package directory)
+  dep_bins: StrList*;     // [dep-bins] as "dep=bin", in call order
 }
 
 export struct SettingsQuery {
@@ -571,7 +572,7 @@ fn mnx_is_named(section: string, head: string) -> bool {
 }
 
 fn mnx_section_known(section: string) -> bool {
-  if (sl_has(mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows replace tools rules"), section)) {
+  if (sl_has(mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins"), section)) {
     return true;
   }
   if (mnx_is_os_profile(section)) {
@@ -594,7 +595,7 @@ fn mnx_section_suggestion(section: string) -> string {
   if (s_eq(section, "bin") || s_eq(section, "profile") || s_eq(section, "component") || s_eq(section, "registry")) {
     return "[" + section + ".NAME]";
   }
-  var plain: StrList* = mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows rules");
+  var plain: StrList* = mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows rules dep-bins");
   var sug: string = man_suggest(section, plain);
   free(plain);
   if (slen(sug) > 0) {
@@ -653,7 +654,7 @@ fn mnx_unknowns(m: Manifest*) {
         msg = msg + " (did you mean " + sug + "?)";
       }
       mnx_warn(m, mnx_section_line(m->doc, sec), msg);
-    } else if (!s_eq(sec, "dependencies") && !s_starts(sec, "dependencies.")) {
+    } else if (!s_eq(sec, "dependencies") && !s_starts(sec, "dependencies.") && !s_eq(sec, "dep-bins")) {
       if (s_eq(sec, "tools")) {
         mnx_warn(m, mnx_section_line(m->doc, sec), "[tools] is machine-specific: move it to mbuild.local.mettle");
       }
@@ -1500,6 +1501,40 @@ fn mnx_comps(m: Manifest*) {
   }
 }
 
+// [dep-bins] dep = ["bin", ...]: each dep must be a dependency.
+fn mnx_dep_bins(m: Manifest*) {
+  var deps: StrList* = toml_keys(m->doc, "dep-bins");
+  var i: int64 = 0;
+  while (i < deps->len && slen(m->error) == 0) {
+    var dep: string = sl_get(deps, i);
+    i = i + 1;
+    if (man_dep_find(m, dep) == (DepSpec*)0) {
+      var names: StrList* = sl_new();
+      var k: int64 = 0;
+      while (k < m->ndeps) {
+        sl_push(names, man_dep(m, k)->key);
+        k = k + 1;
+      }
+      var msg: string = "mb_dep_bin(" + toml_quote(dep) + ", ...): " + dep + " is not a dependency of this package";
+      var sug: string = man_suggest(dep, names);
+      if (slen(sug) > 0) {
+        msg = msg + " (did you mean " + sug + "?)";
+      }
+      free(names);
+      mnx_error(m, toml_get(m->doc, "dep-bins", dep)->line, msg);
+      break;
+    }
+    var bins: StrList* = mnx_strs(m, "dep-bins", dep);
+    var b: int64 = 0;
+    while (b < bins->len) {
+      sl_push(m->dep_bins, dep + "=" + sl_get(bins, b));
+      b = b + 1;
+    }
+    free(bins);
+  }
+  free(deps);
+}
+
 fn mnx_rules(m: Manifest*) {
   var files: StrList* = mnx_strs(m, "rules", "files");
   var i: int64 = 0;
@@ -1624,6 +1659,7 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->meta = sl_new();
   m->local_components = sl_new();
   m->import_root = s_empty();
+  m->dep_bins = sl_new();
   return m;
 }
 
@@ -1726,6 +1762,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   mnx_regs(m);
   mnx_comps(m);
   mnx_rules(m);
+  mnx_dep_bins(m);
   if (slen(m->error) > 0) {
     return m;
   }
@@ -2117,6 +2154,21 @@ export fn man_import_dir(m: Manifest*, dir: string) -> string {
     return dir;
   }
   return dir + "/" + m->import_root;
+}
+
+// The bins of dependency dep that [dep-bins] names, in call order.
+export fn man_dep_bins(m: Manifest*, dep: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var prefix: string = dep + "=";
+  var i: int64 = 0;
+  while (i < m->dep_bins->len) {
+    var e: string = sl_get(m->dep_bins, i);
+    if (s_starts(e, prefix)) {
+      sl_push(l, s_from(e, slen(prefix)));
+    }
+    i = i + 1;
+  }
+  return l;
 }
 
 // The dependency with this key; 0 when absent.

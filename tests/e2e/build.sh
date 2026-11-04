@@ -684,6 +684,73 @@ sed -i 's/v1.0.0/v0.9.0/' mbuild.mettle
 mb build
 check "needs v0.9.0 builds" code_is 0
 
+echo "== dependency bins"
+proj "$W/meosql" <<'EOF'
+mb_c_sources("csrc");
+mb_profile("bench");
+mb_inherits("release");
+EOF
+cd "$W/meosql" || exit 1
+mkdir -p csrc cmd/server cmd/admin
+printf 'int mq_port(void) { return 5433; }\n' > csrc/port.c
+printf 'export extern fn mq_port() -> int32 = "mq_port";\n' > meosql.mettle
+printf 'import "std/io";\nimport "meosql/meosql";\nfn main() -> int32 {\n  println("serving on {mq_port()}");\n  return 0;\n}\n' > cmd/server/main.mettle
+printf 'fn main() -> int32 {\n  return 0;\n}\n' > cmd/admin/main.mettle
+proj "$W/sass" <<'EOF'
+mb_dep_path("meosql", "../meosql");
+mb_dep_bin("meosql", "server");
+EOF
+cd "$W/sass" || exit 1
+printf 'import "meosql/meosql";\nfn main() -> int32 {\n  return mq_port() - 5433;\n}\n' > src/main.mettle
+mb build
+check "a dependency's bin is built" has "Compiling meosql/server (linux, debug)"
+check "... into the project's output directory" sh -c './build/linux/debug/server | grep -qx "serving on 5433"'
+check "... with the library it needs" test -f build/linux/debug/libmb_meosql.so
+check "only the bins named" test ! -e build/linux/debug/admin
+mb build
+check "an unchanged dependency bin is Fresh" has "Fresh meosql/server (linux, debug)"
+printf '// edited\n' >> ../meosql/cmd/server/main.mettle
+mb build
+check "an edit rebuilds it" sh -c 'grep -qF "Compiling meosql/server" "$0/last.out" && grep -qF "Fresh sass" "$0/last.out"' "$S"
+mb run
+check "run does not start it" sh -c '[ "$(cat "$0/last.code")" = 0 ] && ! grep -q "serving on" "$0/last.out"' "$S"
+mb build -r
+check "the same profile: release" sh -c 'grep -qF "Compiling meosql/server (linux, release)" "$0/last.out" && [ -x build/linux/release/server ]' "$S"
+cat > mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("sass", "0.1.0");
+  mb_dep_path("meosql", "../meosql");
+  mb_dep_bin("meosql", "server");
+  mb_profile("bench");
+  mb_inherits("release");
+  mb_profile("prof");
+  mb_inherits("release");
+}
+
+fn hook_post_build() -> int32 {
+  mb_say("post " + mb_bins());
+  return 0;
+}
+EOF
+mb build -p bench
+check "a profile the dependency has" has "Compiling meosql/server (linux, bench)"
+check "the post-build hook runs after it" sh -c 'tail -2 "$0/last.out" | head -1 | grep -qx "post sass"' "$S"
+mb build -p prof
+check "a profile it lacks: its nearest ancestor" sh -c 'grep -qF "Compiling meosql/server (linux, release)" "$0/last.out" && [ -x build/linux/prof/server ]' "$S"
+sed -i 's|mb_dep_bin("meosql", "server");|mb_dep_bin("meosql", "sever");|' mbuild.mettle
+mb build
+check "no such bin" has 'error: mb_dep_bin("meosql", "sever"): meosql has no bin `sever`'
+check "no such bin: its bins" has "help: did you mean \`server\`? meosql's bins are: admin, server"
+check "no such bin: nothing compiled" hasnt "Compiling"
+sed -i 's|mb_dep_bin("meosql", "sever");|mb_dep_bin("meosql", "sass");|' mbuild.mettle
+mkdir -p ../meosql/cmd/sass && printf 'fn main() -> int32 {\n  return 0;\n}\n' > ../meosql/cmd/sass/main.mettle
+mb build
+check "a bin name the project has" has 'error: mb_dep_bin("meosql", "sass"): this project has a bin `sass` too, and both would build to the same file'
+mb clean
+check "clean removes their state" sh -c 'grep -qF "Removed .mbuild/dep-bins" "$0/last.out" && [ ! -e .mbuild/dep-bins ]' "$S"
+
 echo "== bootstrap"
 B="$S/bootstrap"
 mkdir -p "$B"

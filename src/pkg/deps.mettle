@@ -3101,7 +3101,13 @@ export fn deps_cmd_list(p: Project*) -> int32 {
   var i: int64 = 0;
   while (i < ds->n) {
     var dm: DepModule* = &ds->mods[i];
-    say(dx_describe(p, dm) + dx_native_note(dm->man));
+    var bins: StrList* = man_dep_bins(p->man, dm->module);
+    var bins_note: string = "";
+    if (bins->len > 0) {
+      bins_note = " [bins built here: " + sl_join(bins, ", ") + "]";
+    }
+    free(bins);
+    say(dx_describe(p, dm) + dx_native_note(dm->man) + bins_note);
     i = i + 1;
   }
   var need: StrList* = deps_mettle_minimum(ds);

@@ -460,21 +460,26 @@ fn test_basics() {
   t_ok("basics: edit distance", man_edit_distance("kitten", "sitting") == 3 && man_edit_distance("", "abc") == 3);
 }
 
-// mb_import_root.
-fn test_import_root() {
-  var m: Manifest* = man_of(pkg("import-root = \"./src/\"\n[dependencies]\nmeosql = {{ path = \"../meosql\" }"));
+// mb_import_root and mb_dep_bin.
+fn test_import_root_and_dep_bins() {
+  var m: Manifest* = man_of(pkg("import-root = \"./src/\"\n[dependencies]\nmeosql = {{ path = \"../meosql\" }\n[dep-bins]\nmeosql = [\"server\", \"admin\"]\n"));
   t_eq("import root: valid", m->error + sl_join(m->warnings, " / "), "");
   t_eq("import root: cleaned", m->import_root, "src");
   t_eq("import root: dir", man_import_dir(m, "/p"), "/p/src");
   t_eq("import root: none", man_import_dir(man_of(pkg("")), "/p") + " " + man_import_dir((Manifest*)0, "/q"), "/p /q");
   t_eq("import root: \".\" is the package", man_import_dir(man_of(pkg("import-root = \".\"\n")), "/p"), "/p");
+  t_eq("dep bins: list", sl_join(m->dep_bins, ","), "meosql=server,meosql=admin");
+  t_eq("dep bins: of a dep", sl_join(man_dep_bins(m, "meosql"), ","), "server,admin");
+  t_eq("dep bins: of another", sl_join(man_dep_bins(m, "other"), ","), "");
   t_eq("import root: absolute", man_of(pkg("import-root = \"/abs\"\n"))->error, "/p/mbuild.toml:3: mb_import_root(\"/abs\"): the import root is a directory inside the package, relative to it (e.g. \"src\")");
   t_eq("import root: outside", man_of(pkg("import-root = \"src/../..\"\n"))->error, "/p/mbuild.toml:3: mb_import_root(\"src/../..\"): the import root is a directory inside the package, relative to it (e.g. \"src\")");
+  t_eq("dep bins: unknown dep", man_of(pkg("[dependencies]\nmeosql = {{ path = \"../meosql\" }\n[dep-bins]\nmeosq = [\"server\"]\n"))->error, "/p/mbuild.toml:6: mb_dep_bin(\"meosq\", ...): meosq is not a dependency of this package (did you mean meosql?)");
+  t_eq("dep bins: not in mbuild.local.mettle", local_of("[build]\ntargets = [\"linux\"]\n[dep-bins]\nx = [\"y\"]\n")->error, "/p/mbuild.local.mettle:3: [dep-bins] is not allowed here (mbuild.local.mettle holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
 }
 
 fn run_all() -> int64 {
   test_basics();
-  test_import_root();
+  test_import_root_and_dep_bins();
   test_settings();
   test_replace_and_removed();
   test_local();
