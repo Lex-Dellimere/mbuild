@@ -33,7 +33,7 @@ file_lacks() {
 
 # --- fixtures ------------------------------------------------------------------
 
-# The registry fixtures (17.3); W is webfw as a path package.
+# The registry fixtures; W is webfw as a path package.
 sh "$here/tests/fixtures/make-registry.sh" "$T" >/dev/null || exit 1
 REG="$T/registry"
 SRC="$T/src"
