@@ -134,7 +134,8 @@ fn test_basics() {
   var t0: int64 = sys_now_ms();
   sys_sleep_ms(60);
   var dt: int64 = sys_now_ms() - t0;
-  check("sys_sleep_ms/sys_now_ms ({dt} ms)", dt >= 45 && dt < 2000);
+  var sok: bool = dt >= 45 && dt < 2000;
+  check("sys_sleep_ms/sys_now_ms" + why(sok, "{dt} ms"), sok);
   check("fs_mbuild_home", slen(fs_mbuild_home()) > 0);
   check("fs_temp_dir", fs_is_dir(fs_temp_dir()));
   check("proc_jobs", proc_jobs() > 0);
@@ -498,7 +499,8 @@ fn test_jobs(dir: string) {
   var t0: int64 = sys_now_ms();
   var codes: int32* = proc_run_jobs(cmds, n, logs, 4);
   var dt: int64 = sys_now_ms() - t0;
-  check("job pool codes ({codes[0]} {codes[1]} {codes[2]} {codes[3]} {codes[4]} {codes[5]}, {dt} ms)", codes[0] == 0 && codes[1] == 1 && codes[2] == 2 && codes[3] == 0 && codes[4] == 7 && codes[5] == 0);
+  var cok: bool = codes[0] == 0 && codes[1] == 1 && codes[2] == 2 && codes[3] == 0 && codes[4] == 7 && codes[5] == 0;
+  check("job pool codes" + why(cok, "{codes[0]} {codes[1]} {codes[2]} {codes[3]} {codes[4]} {codes[5]}, {dt} ms"), cok);
   free(codes);
   check_eq("job log 0", s_trim(fs_read(dir + "/job0.log").data), "job0");
   check_eq("job log 1 (stderr)", s_trim(fs_read(dir + "/job1.log").data), "job1");
