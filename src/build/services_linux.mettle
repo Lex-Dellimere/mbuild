@@ -1,0 +1,218 @@
+// services_linux: svc_run on Linux as one alph actor (DESIGN.md 12.9). Each
+// service gets its own process group; the app stays in mbuild's, so the
+// terminal's Ctrl-C and reads reach it.
+
+import "std/mem";
+import "../core/base";
+import "../model/project";
+import "services";
+import "../core/sys_linux" if linux;
+import "../../third_party/alph/sys/linux" if linux;
+import "../../third_party/alph/core/mailbox" if linux;
+import "../../third_party/alph/core/node" if linux;
+import "../../third_party/alph/net/port" if linux;
+
+const SVL_TAG_SIGINT: int64 = 200;    // ALPH_TAG_USER + 100
+const SVL_TAG_DEADLINE: int64 = 201;  // a port was not open in time
+const SVL_TAG_KILL: int64 = 202;      // the grace after SIGTERM is over
+
+const SVL_CHECK: int64 = 0;     // is the next service's port in use?
+const SVL_WAIT: int64 = 1;      // waiting for the last started one's port
+const SVL_APP: int64 = 2;
+const SVL_STOP: int64 = 3;
+
+struct SvlRun {
+  p: Project*;
+  items: SvcItem*;
+  n: int64;
+  app: Cmd*;
+  app_shown: string;
+  procs: int64*;    // process handle per service while it runs, else 0
+  pids: int64*;     // its OS pid, which is also its group
+  codes: int64*;    // exit code once it ended
+  started: int64;
+  phase: int64;
+  waiter: int64;    // the port waiter, or 0
+  timer: int64;     // ref of the deadline or kill timer, or 0
+  t0: int64;
+  app_h: int64;
+  stopping: int64;  // the service being stopped
+  code: int64;      // what svc_run answers
+}
+
+fn svl_quiet(ctx: AlphCtx*, s: SvlRun*) {
+  if (s->waiter != 0) {
+    alph_exit_signal(ctx, s->waiter, ALPH_KILL);
+    s->waiter = 0;
+  }
+  if (s->timer != 0) {
+    alph_cancel_timer(ctx, s->timer);
+    s->timer = 0;
+  }
+}
+
+// Stops the services from the newest down; halts with s->code after the oldest.
+fn svl_stop_next(ctx: AlphCtx*, s: SvlRun*) {
+  while (true) {
+    s->stopping = s->stopping - 1;
+    if (s->stopping < 0) {
+      alph_halt(ctx, s->code);
+      return;
+    }
+    var i: int64 = s->stopping;
+    status("Stopping", s->items[i].name);
+    if (s->procs[i] != 0) {
+      alph_proc_kill(ctx, s->procs[i], ALPH_SIGTERM);
+      s->timer = alph_start_timer(ctx, 2000, SVL_TAG_KILL, 0);
+      return;
+    }
+    // it ended already: what is left of its group goes too
+    syscall(ALPH_SYS_KILL, 0 - s->pids[i], ALPH_SIGKILL);
+  }
+}
+
+fn svl_stop_all(ctx: AlphCtx*, s: SvlRun*, code: int64) {
+  svl_quiet(ctx, s);
+  s->code = code;
+  s->phase = SVL_STOP;
+  s->stopping = s->started;
+  svl_stop_next(ctx, s);
+}
+
+fn svl_failed(ctx: AlphCtx*, s: SvlRun*, why: string) {
+  svc_say_failed(s->p, &s->items[s->started - 1], why);
+  svl_stop_all(ctx, s, 1);
+}
+
+fn svl_start(ctx: AlphCtx*, s: SvlRun*) {
+  var i: int64 = s->started;
+  var it: SvcItem* = &s->items[i];
+  status("Starting", it->name + " (" + it->shown + ")");
+  s->t0 = sys_now_ms();
+  var h: int64 = sys_proc_start(ctx, it->cmd, it->log, false);
+  s->started = i + 1;
+  if (h <= 0) {
+    svl_failed(ctx, s, "service " + it->name + " exited (code 127) at once");
+    return;
+  }
+  s->procs[i] = h;
+  s->pids[i] = alph_proc_os_pid(ctx, h);
+  if (it->port > 0) {
+    s->phase = SVL_WAIT;
+    s->waiter = alph_spawn_port_wait(ctx, alph_ip4(127, 0, 0, 1), it->port, 20, (int64)1 << 40);
+    s->timer = alph_start_timer(ctx, it->wait_ms, SVL_TAG_DEADLINE, 0);
+    return;
+  }
+  svl_next(ctx, s);
+}
+
+// The next service, or the app once all run.
+fn svl_next(ctx: AlphCtx*, s: SvlRun*) {
+  if (s->started == s->n) {
+    status("Running", s->app_shown);
+    s->phase = SVL_APP;
+    s->app_h = sys_proc_start(ctx, s->app, s_empty(), true);
+    if (s->app_h <= 0) {
+      svl_stop_all(ctx, s, 127);
+    }
+    return;
+  }
+  var it: SvcItem* = &s->items[s->started];
+  if (it->cmd == (Cmd*)0) {
+    svc_say_missing(it);
+    svl_stop_all(ctx, s, 1);
+    return;
+  }
+  if (it->port > 0) {
+    s->phase = SVL_CHECK;
+    s->waiter = alph_spawn_port_wait(ctx, alph_ip4(127, 0, 0, 1), it->port, 1, 1);
+    return;
+  }
+  svl_start(ctx, s);
+}
+
+fn svl_exited(ctx: AlphCtx*, s: SvlRun*, h: int64, code: int64) {
+  if (s->phase == SVL_APP && h == s->app_h) {
+    svl_stop_all(ctx, s, code);
+    return;
+  }
+  var i: int64 = 0;
+  while (i < s->started) {
+    if (s->procs[i] == h) {
+      s->procs[i] = 0;
+      s->codes[i] = code;
+      if (s->phase == SVL_WAIT && i == s->started - 1) {
+        svl_quiet(ctx, s);
+        var it: SvcItem* = &s->items[i];
+        svl_failed(ctx, s, "service " + it->name + " exited (code " + s_int(code) + ") before port " + s_int(it->port) + " opened");
+      } else if (s->phase == SVL_STOP && i == s->stopping) {
+        svl_quiet(ctx, s);
+        syscall(ALPH_SYS_KILL, 0 - s->pids[i], ALPH_SIGKILL);
+        svl_stop_next(ctx, s);
+      }
+      return;
+    }
+    i = i + 1;
+  }
+}
+
+fn svl_handle(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
+  var s: SvlRun* = (SvlRun*)ctx->state;
+  if (m->tag == ALPH_TAG_INIT) {
+    alph_trap_exits(ctx, true);
+    svl_next(ctx, s);
+  } else if (m->tag == ALPH_TAG_PORT_READY && m->from == s->waiter && s->waiter != 0) {
+    s->waiter = 0;
+    var it: SvcItem* = &s->items[s->started];
+    if (s->phase == SVL_CHECK) {
+      if (m->arg == 1) {
+        svc_say_in_use(it);
+        svl_stop_all(ctx, s, 1);
+      } else {
+        svl_start(ctx, s);
+      }
+    } else if (s->phase == SVL_WAIT && m->arg == 1) {
+      svl_quiet(ctx, s);
+      it = &s->items[s->started - 1];
+      status("Ready", it->name + " on :" + s_int(it->port) + " (" + svc_secs(sys_now_ms() - s->t0) + ")");
+      svl_next(ctx, s);
+    }
+  } else if (m->tag == SVL_TAG_DEADLINE && m->ref == s->timer && s->phase == SVL_WAIT) {
+    s->timer = 0;
+    svl_quiet(ctx, s);
+    var w: SvcItem* = &s->items[s->started - 1];
+    svl_failed(ctx, s, "service " + w->name + ": port " + s_int(w->port) + " not open after " + svc_secs(w->wait_ms));
+  } else if (m->tag == SVL_TAG_KILL && m->ref == s->timer && s->phase == SVL_STOP) {
+    s->timer = 0;
+    alph_proc_kill(ctx, s->procs[s->stopping], ALPH_SIGKILL);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT) {
+    svl_exited(ctx, s, m->ref, m->arg);
+  } else if (m->tag == SVL_TAG_SIGINT && (s->phase == SVL_CHECK || s->phase == SVL_WAIT)) {
+    // during startup Ctrl-C stops what started; while the app runs, the app gets it
+    svl_stop_all(ctx, s, 130);
+  }
+  return ALPH_CONTINUE;
+}
+
+// Starts every service in declaration order (waiting for each port), runs
+// app with stdio inherited, stops the services in reverse order, and answers
+// the app's exit code. A first word in bins runs from out_dir (with ext).
+export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app: Cmd*, app_shown: string) -> int32 {
+  var s: SvlRun;
+  memset((rawptr)&s, 0, (int64)sizeof(SvlRun));
+  s.p = p;
+  s.n = p->man->nservices;
+  s.items = svc_items(p, out_dir, ext, bins);
+  s.app = app;
+  s.app_shown = app_shown;
+  s.procs = (int64*)malloc((s.n + 1) * 8);
+  s.pids = (int64*)malloc((s.n + 1) * 8);
+  s.codes = (int64*)malloc((s.n + 1) * 8);
+  memset((rawptr)s.procs, 0, (s.n + 1) * 8);
+  memset((rawptr)s.pids, 0, (s.n + 1) * 8);
+  var code: int64 = sys_node_run((rawptr)&s, (int64)sizeof(SvlRun), s.n + 4, SVL_TAG_SIGINT, &svl_handle);
+  free(s.procs);
+  free(s.pids);
+  free(s.codes);
+  return (int32)code;
+}

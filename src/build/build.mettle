@@ -28,6 +28,8 @@ import "native";
 import "toolchain";
 import "components";
 import "services";
+import "services_linux" if linux;
+import "services_windows" if windows;
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 

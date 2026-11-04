@@ -1,5 +1,6 @@
 // services: the processes mb_service declares, started around `mbuild run`
-// (DESIGN.md 12.9), and `mbuild services`.
+// (DESIGN.md 12.9), and `mbuild services`. svc_run is in services_linux
+// (alph) and services_windows; this file holds what they share.
 
 import "std/mem";
 import "../core/base";
@@ -9,13 +10,6 @@ import "../model/manifest";
 import "../model/project";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
-
-// One started service.
-struct SvcRun {
-  name: string;
-  cmd: Cmd*;
-  job: Job*;
-}
 
 // cmdline split into words as sh splits them: '...', "..." (\ escapes " \ $ `),
 // \x outside quotes. ok is false on an unclosed quote.
@@ -119,55 +113,28 @@ fn svx_word(w: string) -> string {
   return w;
 }
 
-fn svx_secs(ms: int64) -> string {
-  var tenths: int64 = (ms + 50) / 100;
-  return s_int(tenths / 10) + "." + s_int(tenths % 10) + "s";
+// A service ready to start: its command (0 when prog was not found), the
+// command as shown, and its log.
+export struct SvcItem {
+  name: string;
+  cmd: Cmd*;
+  prog: string;
+  shown: string;
+  port: int64;
+  wait_ms: int64;
+  log: string;
 }
 
-// The last n lines of a log, indented, on stderr.
-fn svx_tail(p: Project*, log: string, n: int64) {
-  var r: FsRead = fs_read(log);
-  var lines: StrList* = s_lines(r.data);
-  defer free(lines);
-  var from: int64 = lines->len - n;
-  if (from < 0) {
-    from = 0;
-  }
-  var shown: string = p_rel(p->root, log);
-  if (lines->len == 0) {
-    err_line("  " + shown + " is empty");
-    return;
-  }
-  err_line("  last lines of " + shown + ":");
-  var i: int64 = from;
-  while (i < lines->len) {
-    err_line("    " + sl_get(lines, i));
-    i = i + 1;
-  }
-}
-
-fn svx_stop_all(runs: SvcRun*, n: int64) {
-  var i: int64 = n - 1;
-  while (i >= 0) {
-    status("Stopping", runs[i].name);
-    sys_spawn_stop(runs[i].job, 2000);
-    i = i - 1;
-  }
-}
-
-// Starts every service in declaration order (waiting for each port), runs
-// app with stdio inherited, stops the services in reverse order, and answers
-// the app's exit code. A first word in bins runs from out_dir (with ext).
-export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app: Cmd*, app_shown: string) -> int32 {
+// The services in start order. A first word in bins runs from out_dir (with ext).
+export fn svc_items(p: Project*, out_dir: string, ext: string, bins: StrList*) -> SvcItem* {
   var m: Manifest* = p->man;
   var logs: string = p->state_dir + "/logs";
   fs_mkdirs(logs);
-  var runs: SvcRun* = (SvcRun*)malloc((m->nservices + 1) * sizeof(SvcRun));
-  defer free(runs);
-  sys_catch_interrupt();
+  var items: SvcItem* = (SvcItem*)malloc((m->nservices + 1) * sizeof(SvcItem));
   var i: int64 = 0;
   while (i < m->nservices) {
     var sv: ServiceSpec* = &m->services[i];
+    var it: SvcItem* = &items[i];
     var words: StrList* = svx_words(sv);
     var prog: string = sl_get(words, 0);
     var t: Tool = tool_none();
@@ -179,78 +146,69 @@ export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app
       t.path = p_join(p->root, prog);
     } else {
       t = sys_find_tool(prog);
-      if (!tool_found(t)) {
-        error_msg("service " + sv->name + ": cannot find `" + prog + "`");
-        err_line("  " + cyan("help") + ": name a bin of this project or of mb_dep_bin, a path, or a program on PATH");
-        svx_stop_all(runs, i);
-        return 1;
+    }
+    it->name = sv->name;
+    it->prog = prog;
+    it->port = sv->port;
+    it->wait_ms = sv->wait_ms;
+    it->log = logs + "/" + sv->name + ".log";
+    it->cmd = (Cmd*)0;
+    if (tool_found(t)) {
+      var c: Cmd* = cmd_new(t);
+      var k: int64 = 1;
+      while (k < words->len) {
+        cmd_arg(c, sl_get(words, k));
+        shown = shown + " " + svx_word(sl_get(words, k));
+        k = k + 1;
       }
+      c->cwd = p->root;
+      sl_extend(c->env, sv->env);
+      it->cmd = c;
     }
-    var c: Cmd* = cmd_new(t);
-    var k: int64 = 1;
-    while (k < words->len) {
-      cmd_arg(c, sl_get(words, k));
-      shown = shown + " " + svx_word(sl_get(words, k));
-      k = k + 1;
-    }
-    c->cwd = p->root;
-    sl_extend(c->env, sv->env);
+    it->shown = shown;
     free(words);
-    if (sv->port > 0 && sys_port_open(sv->port)) {
-      error_msg("service " + sv->name + ": port " + s_int(sv->port) + " is already in use");
-      err_line("  " + cyan("help") + ": stop what listens there, or give " + sv->name + " another port");
-      svx_stop_all(runs, i);
-      return 1;
-    }
-    status("Starting", sv->name + " (" + shown + ")");
-    var log: string = logs + "/" + sv->name + ".log";
-    var t0: int64 = sys_now_ms();
-    runs[i].name = sv->name;
-    runs[i].cmd = c;
-    runs[i].job = sys_spawn(c, log, true);
-    var why: string = s_empty();
-    if (sv->port > 0) {
-      while (true) {
-        if (sys_port_open(sv->port)) {
-          status("Ready", sv->name + " on :" + s_int(sv->port) + " (" + svx_secs(sys_now_ms() - t0) + ")");
-          break;
-        }
-        if (sys_spawn_poll(runs[i].job)) {
-          why = "service " + sv->name + " exited (code " + s_int(runs[i].job->code) + ") before port " + s_int(sv->port) + " opened";
-          break;
-        }
-        if (sys_interrupted()) {
-          why = "interrupted";
-          break;
-        }
-        if (sys_now_ms() - t0 >= sv->wait_ms) {
-          why = "service " + sv->name + ": port " + s_int(sv->port) + " not open after " + svx_secs(sv->wait_ms);
-          break;
-        }
-        sys_sleep_ms(20);
-      }
-    } else if (sys_spawn_poll(runs[i].job)) {
-      why = "service " + sv->name + " exited (code " + s_int(runs[i].job->code) + ") at once";
-    }
     i = i + 1;
-    if (slen(why) > 0) {
-      if (s_eq(why, "interrupted")) {
-        svx_stop_all(runs, i);
-        return 130;
-      }
-      error_msg(why);
-      svx_tail(p, log, 20);
-      flush_out();
-      svx_stop_all(runs, i);
-      return 1;
+  }
+  return items;
+}
+
+export fn svc_secs(ms: int64) -> string {
+  var tenths: int64 = (ms + 50) / 100;
+  return s_int(tenths / 10) + "." + s_int(tenths % 10) + "s";
+}
+
+export fn svc_say_missing(it: SvcItem*) {
+  error_msg("service " + it->name + ": cannot find `" + it->prog + "`");
+  err_line("  " + cyan("help") + ": name a bin of this project or of mb_dep_bin, a path, or a program on PATH");
+}
+
+export fn svc_say_in_use(it: SvcItem*) {
+  error_msg("service " + it->name + ": port " + s_int(it->port) + " is already in use");
+  err_line("  " + cyan("help") + ": stop what listens there, or give " + it->name + " another port");
+}
+
+// why, then the last 20 lines of the service's log, indented, on stderr.
+export fn svc_say_failed(p: Project*, it: SvcItem*, why: string) {
+  error_msg(why);
+  var r: FsRead = fs_read(it->log);
+  var lines: StrList* = s_lines(r.data);
+  defer free(lines);
+  var from: int64 = lines->len - 20;
+  if (from < 0) {
+    from = 0;
+  }
+  var shown: string = p_rel(p->root, it->log);
+  if (lines->len == 0) {
+    err_line("  " + shown + " is empty");
+  } else {
+    err_line("  last lines of " + shown + ":");
+    var i: int64 = from;
+    while (i < lines->len) {
+      err_line("    " + sl_get(lines, i));
+      i = i + 1;
     }
   }
-  status("Running", app_shown);
-  var aj: Job* = sys_spawn(app, s_empty(), false);
-  var code: int32 = sys_spawn_wait(aj);
-  free(aj);
-  svx_stop_all(runs, m->nservices);
-  return code;
+  flush_out();
 }
 
 // `mbuild services`: name, command and port of each, in start order.

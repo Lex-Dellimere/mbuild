@@ -1,0 +1,84 @@
+// services_windows: svc_run on Windows, polling the job code (DESIGN.md 12.9).
+
+import "std/mem";
+import "../core/base";
+import "../model/project";
+import "services";
+import "../core/sys_windows" if windows;
+
+fn svw_stop_all(items: SvcItem*, jobs: Job**, n: int64) {
+  var i: int64 = n - 1;
+  while (i >= 0) {
+    status("Stopping", items[i].name);
+    sys_spawn_stop(jobs[i], 2000);
+    i = i - 1;
+  }
+}
+
+// Starts every service in declaration order (waiting for each port), runs
+// app with stdio inherited, stops the services in reverse order, and answers
+// the app's exit code. A first word in bins runs from out_dir (with ext).
+export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app: Cmd*, app_shown: string) -> int32 {
+  var n: int64 = p->man->nservices;
+  var items: SvcItem* = svc_items(p, out_dir, ext, bins);
+  var jobs: Job** = (Job**)malloc((n + 1) * 8);
+  defer free(jobs);
+  sys_catch_interrupt();
+  var i: int64 = 0;
+  while (i < n) {
+    var it: SvcItem* = &items[i];
+    if (it->cmd == (Cmd*)0) {
+      svc_say_missing(it);
+      svw_stop_all(items, jobs, i);
+      return 1;
+    }
+    if (it->port > 0 && sys_port_open(it->port)) {
+      svc_say_in_use(it);
+      svw_stop_all(items, jobs, i);
+      return 1;
+    }
+    status("Starting", it->name + " (" + it->shown + ")");
+    var t0: int64 = sys_now_ms();
+    jobs[i] = sys_spawn(it->cmd, it->log, true);
+    var why: string = s_empty();
+    if (it->port > 0) {
+      while (true) {
+        if (sys_port_open(it->port)) {
+          status("Ready", it->name + " on :" + s_int(it->port) + " (" + svc_secs(sys_now_ms() - t0) + ")");
+          break;
+        }
+        if (sys_spawn_poll(jobs[i])) {
+          why = "service " + it->name + " exited (code " + s_int(jobs[i]->code) + ") before port " + s_int(it->port) + " opened";
+          break;
+        }
+        if (sys_interrupted()) {
+          why = "interrupted";
+          break;
+        }
+        if (sys_now_ms() - t0 >= it->wait_ms) {
+          why = "service " + it->name + ": port " + s_int(it->port) + " not open after " + svc_secs(it->wait_ms);
+          break;
+        }
+        sys_sleep_ms(20);
+      }
+    } else if (sys_spawn_poll(jobs[i])) {
+      why = "service " + it->name + " exited (code " + s_int(jobs[i]->code) + ") at once";
+    }
+    i = i + 1;
+    if (slen(why) > 0) {
+      if (s_eq(why, "interrupted")) {
+        svw_stop_all(items, jobs, i);
+        return 130;
+      }
+      svc_say_failed(p, it, why);
+      svw_stop_all(items, jobs, i);
+      return 1;
+    }
+  }
+  status("Running", app_shown);
+  var aj: Job* = sys_spawn(app, s_empty(), false);
+  var code: int32 = sys_spawn_wait(aj);
+  free(aj);
+  svw_stop_all(items, jobs, n);
+  return code;
+}
