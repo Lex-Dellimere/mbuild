@@ -1,21 +1,16 @@
 #!/bin/sh
-# r2_api.sh: acceptance tests of src/api.mettle (DESIGN.md 12.21 Group S, S-3)
-# through tests/api_driver.mettle, built with all three compilers (head,
-# v0.17.0 Linux, v0.17.0 Windows under wine) and run with each.
-#
-#   sh tests/r2_api.sh
-#   SKIP_WINE=1 sh tests/r2_api.sh     Linux drivers only
-#
-# Scratch: /tmp/opencode/r2-S. Checkouts of apilib are made with git archive
-# from the round-2 fixtures (tests/fixtures/make-fixtures-r2.sh).
+# api.sh: export surfaces and API diffs of package versions (tests/unit/api_test.mettle).
+#   METTLE=dev-compiler sh tests/e2e/api.sh   (scratch: $MBTEST_TMP; METTLE_WIN: also under wine, SKIP_WINE=1 skips it)
 
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-S=/tmp/opencode/r2-S
-OUT=/tmp/opencode/mcheck
-export WINEDEBUG=-all
+export METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
+S="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-me}/api}"
 rm -rf "$S"
 mkdir -p "$S"
+export TMPDIR="$S" WINEDEBUG=-all
+[ "${SKIP_WINE:-0}" = 1 ] && unset METTLE_WIN
+OUT="$S/mbuild-mcheck"
 
 pass=0
 failn=0
@@ -36,22 +31,13 @@ $3"; fi
 }
 
 echo "== building the driver"
-built=$("$here/tools/mcheck.sh" "$here/tests/unit/api_test.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
-printf '%s\n' "$built"
-if grep -q "warning" "$OUT"/api_driver.head.log "$OUT"/api_driver.headrel.log "$OUT"/api_driver.l017.log "$OUT"/api_driver.w017.log; then
-  bad "driver compiles without warnings"
-else
-  ok "driver compiles without warnings in all four variants"
-fi
+if out=$(sh "$here/tools/mcheck.sh" "$here/tests/unit/api_test.mettle" 2>&1); then ok "driver builds debug and --release without warnings"; else bad "driver builds" "$out"; exit 1; fi
 
-echo "== fixtures"
 F="$S/fx"
-"$here/tests/fixtures/make-fixtures.sh" "$F" >/dev/null || exit 1
-"$here/tests/fixtures/make-fixtures-r2.sh" "$F" >/dev/null || exit 1
-R="$F/gitbase/github.com/demo/apilib"
+sh "$here/tests/fixtures/make-registry.sh" "$F" >/dev/null || exit 1
 for v in v1.0.0 v1.1.0 v1.2.0 v2.0.0; do
-  mkdir -p "$S/$v"
-  git -C "$R" archive "$v" | tar -x -C "$S/$v"
+  cp -r "$F/src/apilib-$v" "$S/$v"
+  rm "$S/$v/manifest.toml"
 done
 
 # A package with files that are not part of its API.
@@ -85,11 +71,11 @@ fn al_mul apilib.mettle:3|fn al_mul(a: int32, b: int32) -> int32"
   expect_line "$L: v1.0.0 -> v1.2.0 removes al_mul" "$out" "removed al_mul"
   expect_line "$L: v1.0.0 -> v1.2.0 changes al_add" "$out" "changed al_add"
   expect_no "$L: v1.0.0 -> v1.2.0 nothing for AlPair" "$out" "AlPair"
-  expect_line "$L: removed line of 12.13 exactly" "$out" "$REMOVED"
+  expect_line "$L: removed line exactly" "$out" "$REMOVED"
   expect_line "$L: changed old line" "$out" "$CHANGED_OLD"
 
   out=$("$@" breaking "$S/v1.0.0" "$S/v1.2.0" "$USE" "al_add src/main.mettle:4" 2>&1)
-  expect_eq "$L: breaking report = the 12.13 block" "$out" "removed al_mul
+  expect_eq "$L: breaking report" "$out" "removed al_mul
 changed al_add
 --
 $REMOVED
@@ -114,12 +100,14 @@ struct FSub sub/sub.mettle:2|struct FSub { x: int64 }
 fn f_top top.mettle:1|fn f_top() -> int32"
 }
 
-run_suite head "$OUT/api_driver.head"
-run_suite l017 "$OUT/api_driver.l017"
-if [ "${SKIP_WINE:-0}" != 1 ]; then
-  run_suite w017 wine "$OUT/api_driver.exe"
+run_suite debug "$OUT/api_test.debug"
+run_suite release "$OUT/api_test.release"
+if [ -n "${METTLE_WIN:-}" ]; then
+  run_suite windows wine "$OUT/api_test.exe"
+else
+  echo "note: wine skipped (METTLE_WIN names no Windows dev compiler)"
 fi
 
 echo
-echo "r2_api: $pass passed, $failn failed"
+echo "api: $pass passed, $failn failed"
 [ "$failn" = 0 ]

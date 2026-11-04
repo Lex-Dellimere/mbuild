@@ -1,10 +1,9 @@
-// api_driver: a command line over src/api.mettle for tests/r2_api.sh.
-// Build it with tools/mcheck.sh (all three compilers).
+// api_test: a command line over src/pkg/api.mettle for tests/e2e/api.sh.
 //
-//   api_driver surface DIR                  one line per export: kind name file:line|sig
-//   api_driver diff OLD_DIR NEW_DIR [USE]...  "what name" lines, then "--", then api_render
+//   api_test surface DIR                  one line per export: kind name file:line|sig
+//   api_test diff OLD_DIR NEW_DIR [USE]...  "what name" lines, then "--", then api_render
 //                                           (each USE is "name file:line")
-//   api_driver breaking OLD_DIR NEW_DIR [USE]...  the same over api_breaking
+//   api_test breaking OLD_DIR NEW_DIR [USE]...  the same over api_breaking
 //
 // Directories may be given in Linux form under wine.
 
