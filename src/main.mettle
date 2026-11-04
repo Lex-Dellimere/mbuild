@@ -12,6 +12,7 @@ import "model/project";
 import "build/build";
 import "pkg/deps";
 import "build/toolchain";
+import "config/init";
 import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
@@ -76,6 +77,7 @@ fn mx_is_cmd_opt(name: string) -> bool {
 
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
+  ini_mbuild_version = build_version_text;
   var mc: string = env_get("MBUILD_COLOR");
   if (s_eq(mc, "always") || s_eq(mc, "never")) {
     mx_set_color(mc);

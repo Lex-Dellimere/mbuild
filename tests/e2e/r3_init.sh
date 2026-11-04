@@ -351,6 +351,7 @@ else
     expect_line "cli new: next line" "$out" "  next: mbuild serve, then open http://localhost:9000"
     expect_has "cli new: fetch line" "$out" "Fetching webfw v1.0.0 (default)"
     file_has "cli new: routes" site/src/routes.mettle 'return "9000";'
+    file_has "cli new: mbuild version" site/src/main.mettle "(mbuild $("$MB" version | cut -d' ' -f2))"
     cd site || exit 1
     out=$("$MB" run 2>&1); rc=$?
     [ $rc -eq 0 ] && ok "cli: mbuild run builds" || bad "cli: mbuild run builds" "$out"
