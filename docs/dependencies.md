@@ -293,13 +293,30 @@ $ mbuild vendor
 
 ## Registries
 
-The default registry is `$MBUILD_REGISTRY`. There's no public one yet, so
-without it or an `mb_registry` call:
+The `default` registry is the Mettle project's,
+<https://the-mettle-project.github.io/Mettle/registry/>, unless
+`$MBUILD_REGISTRY` names another:
 
-```text
-error: no default registry is configured
-  help: set MBUILD_REGISTRY, or declare one in mbuild.mettle: mb_registry("name", "https://...")
+```mettle
+fn deps() {
+  mb_dep("hmac", "1.0.0");
+}
 ```
+
+```mettle
+import "hmac";            // hmac.mettle in the package's root
+import "hmac/other";      // another file in it
+```
+
+mbuild reads both registry kinds: the Mettle one (`v1/index.json` and plain
+tar archives, each with a `mettle.package`) and its own (`mbuild publish`).
+A Mettle package's `require` lines are its dependencies, from the same
+registry; versions there have no `v` (`1.0.0` means `v1.0.0`). Archives are
+checked against the index's SHA-256 and listed before extraction, as for
+mbuild's own. Packages go into the Mettle registry through the Mettle
+repository's `website/registry.py`, so `mbuild publish` and `yank` refuse it.
+The bare `import "hmac";` needs a compiler that loads a package's main
+module; older ones need `import "hmac/hmac";`.
 
 Declare more in `fn project()`; they're searched in call order, then
 `default`:

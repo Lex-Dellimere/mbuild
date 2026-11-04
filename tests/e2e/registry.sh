@@ -85,8 +85,8 @@ suite() { # MODE
   MBUILD_REGISTRY_CORP="file:///env/corp" run dir "$T/corpapp" corp; check "reg_dir_of file:// ($mode)" [ "$(cat "$S/last.out")" = "/env/corp" ]
   MBUILD_REGISTRY_CORP="https://x.invalid/r" run dir "$T/corpapp" corp; check "reg_dir_of https is empty ($mode)" [ "$(cat "$S/last.out")" = "<none>" ]
   rm "$T/corpapp/local.toml"
-  MBUILD_REGISTRY= run index "$T/app" default strutil
-  check "no default registry ($mode)" eval 'code_is 1 && has "no default registry is configured" && has "help: set MBUILD_REGISTRY"'
+  MBUILD_REGISTRY= run list "$T/app"
+  check "the default registry is the Mettle one ($mode)" [ "$(cat "$S/last.out")" = "default https://the-mettle-project.github.io/Mettle/registry/" ]
 
   echo "== index ($mode)"
   run index "$T/app" default strutil

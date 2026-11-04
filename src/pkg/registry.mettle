@@ -23,8 +23,8 @@ import "../model/manifest";
 import "../model/project";
 
 // The registry named `default` when neither MBUILD_REGISTRY nor the project
-// names one. To be decided (DESIGN.md 16).
-const REG_DEFAULT_URL: string = "";
+// names one.
+const REG_DEFAULT_URL: string = "https://the-mettle-project.github.io/Mettle/registry/";
 
 export struct RegVersion {
   version: string;

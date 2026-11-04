@@ -184,7 +184,7 @@ script.
 
 | Variable | Meaning |
 |---|---|
-| `MBUILD_REGISTRY` | the `default` registry: a URL or a directory |
+| `MBUILD_REGISTRY` | the `default` registry: a URL or a directory (else the Mettle registry) |
 | `MBUILD_REGISTRY_<NAME>` | another URL for registry `NAME` (upper case, `-` as `_`): a mirror |
 | `MBUILD_CURL`, `MBUILD_TAR` | the programs that download and unpack (also `MBUILD_UNZIP`, `MBUILD_BSDTAR`, `MBUILD_PYTHON` for release zips) |
 
