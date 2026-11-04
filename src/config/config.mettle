@@ -168,6 +168,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
   if (s_eq(section, "package")) {
     if (s_eq(key, "name") || s_eq(key, "version")) { sl_push(c, "mb_package||"); }
     if (s_eq(key, "include")) { sl_push(c, "mb_publish_include||"); }
+    if (s_eq(key, "import-root")) { sl_push(c, "mb_import_root||"); }
     sl_push(c, "mb_meta|" + key + "|");
   } else if (s_eq(section, "build")) {
     if (s_eq(key, "targets")) { sl_push(c, "mb_targets||"); }
@@ -375,6 +376,14 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
     fail_hint(m->error, "see docs/manifest.md for the mbuild.mettle API");
   }
   m->file = file;
+  if (slen(m->import_root) > 0 && !fs_is_dir(man_import_dir(m, dir))) {
+    var at: int64 = mbf_locate(text, "mb_import_root", "", "");
+    var loc: string = shown + " (in fn project())";
+    if (at > 0) {
+      loc = shown + ":" + s_int(at);
+    }
+    fail(loc + ": mb_import_root(\"" + m->import_root + "\"): " + cfx_show(p, man_import_dir(m, dir)) + " is not a directory");
+  }
   if (slen(local_file) > 0) {
     var lm: Manifest* = man_parse_local(cfx_doc(p, lout, ltext, lshown), dir);
     cfx_relabel_all(lm, dir + "/mbuild.local.mettle", lshown);

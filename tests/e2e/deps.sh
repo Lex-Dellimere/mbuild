@@ -484,6 +484,74 @@ mb "$P" run
 check "a path package with its own API file: one API" code_is 0
 check "... no duplicate declaration" hasnt "$S/last.out" "Duplicate declaration"
 
+echo "== import roots"
+L="$S/mistplot"
+proj "$L" <<'EOF2'
+mb_import_root("src");
+EOF2
+rm "$L/src/main.mettle"
+mkdir -p "$L/src/core" "$L/tools"
+printf 'export fn scale(x: int32) -> int32 { return x * 2; }\n' >"$L/src/core/scale.mettle"
+printf 'import "mistplot/core/scale";\nexport fn plot(x: int32) -> int32 { return scale(x) + 1; }\n' >"$L/src/plot.mettle"
+printf 'export fn gen_x() -> int32 { return 0; }\n' >"$L/tools/gen.mettle"
+mb "$L" check
+check "a package imports its own files from its import root" code_is 0
+check "its mettle.deps maps it to the import root" has "$L/mettle.deps" "mistplot=./src"
+printf 'import "mistplot/core/scale";\nfn main() -> int32 { return scale(2) - 4; }\n' >"$L/src/scale_test.mettle"
+( cd "$L" && "$METTLE" --build src/scale_test.mettle -o "$S/scale_test.bin" && "$S/scale_test.bin" ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"
+check "plain mettle resolves the package's own imports through mettle.deps" code_is 0
+rm "$L/src/scale_test.mettle"
+mkdir -p "$L/integrations"
+printf '# for scripts that call mettle directly\nmistplot=../src\nhelper=../nowhere\n' >"$L/integrations/mettle.deps"
+cp "$L/integrations/mettle.deps" "$S/nested.keep"
+printf 'import "mistplot/plot";\nfn main() -> int32 { return plot(1) - 3; }\n' >"$L/integrations/smoke.mettle"
+mb "$L" check
+check "a nested mettle.deps: no warning" hasnt "$S/last.out" "mettle.deps"
+mb "$L" tidy
+check "a nested mettle.deps: tidy leaves it alone" sh -c 'cmp -s "$0/nested.keep" "$1/integrations/mettle.deps" && ! grep -qF "mettle.deps" "$0/last.out"' "$S" "$L"
+( cd "$L/integrations" && "$METTLE" --build smoke.mettle -o "$S/smoke.bin" && "$S/smoke.bin" ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"
+check "a nested mettle.deps still serves plain mettle" code_is 0
+rm -r "$L/integrations"
+P="$S/plotapp"
+MAIN='import "mistplot/plot";
+fn main() -> int32 { return plot(3) - 7; }' proj "$P" <<'EOF2'
+mb_dep_path("mistplot", "../mistplot");
+EOF2
+mb "$P" run
+check "a path package with an import root" code_is 0
+check "root mettle.deps: the path package's import root" has "$P/mettle.deps" "mistplot=../mistplot/src"
+printf 'import "mistplot/plt";\nfn main() -> int32 { return 0; }\n' >"$P/src/main.mettle"
+mb "$P" build
+check "a wrong file is looked up below the import root" has "$S/last.out" "help: did you mean \`mistplot/plot\`?"
+mkdir -p "$S/mpinit"
+mb "$S/mpinit" init mistplot --package
+cp -r "$S/mpinit/init.rules" "$S/mpinit/AGENT.rules" "$S/mpinit/templates" "$L/"
+mb "$L" registry init "$S/plotreg"
+mb "$L" publish --to "$S/plotreg"
+check "publish a package with an import root" has "$S/last.out" "Published mistplot v0.1.0"
+check "its frozen manifest keeps the import root" has "$S/plotreg/pkg/mistplot/mistplot-v0.1.0.toml" 'import-root = "src"'
+check "the archive keeps the layout" sh -c 'tar -tzf "$0/plotreg/pkg/mistplot/mistplot-v0.1.0.tar.gz" | grep -qx src/core/scale.mettle' "$S"
+rm -r "$L/tools"
+sed -i 's/v0.1.0/v0.1.1/' "$L/mbuild.mettle"
+mb "$L" publish --to "$S/plotreg"
+check "the API is what the import root holds" has "$S/last.out" "Published mistplot v0.1.1"
+sed -i 's/v0.1.1/v0.1.2/' "$L/mbuild.mettle"
+printf 'export fn scale2(x: int32) -> int32 { return x * 2; }\n' >"$L/src/core/scale.mettle"
+mb "$L" publish --to "$S/plotreg"
+check "a removal below the import root breaks" has "$S/last.out" "removed  fn scale(x: int32) -> int32"
+MBUILD_REGISTRY="$S/plotreg"
+P="$S/plotreg-app"
+MAIN='import "std/io";
+import "mistplot/plot";
+fn main() -> int32 { println("app {plot(1)}"); return 0; }' proj "$P" <<'EOF2'
+mb_dep("mistplot", "v0.1.1");
+EOF2
+mb "$P" run
+check "a registry package with an import root" has "$S/last.out" "app 3"
+check "root mettle.deps: the registry package's import root" has "$P/mettle.deps" "mistplot=./.mbuild/deps/mistplot/src"
+check "its own block too" has "$P/.mbuild/deps/mistplot/mettle.deps" "mistplot=./src"
+MBUILD_REGISTRY="$R"
+
 echo
 echo "deps: $pass passed, $failed failed"
 [ "$failed" -eq 0 ]

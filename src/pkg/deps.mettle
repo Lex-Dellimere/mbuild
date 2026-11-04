@@ -787,6 +787,9 @@ fn dx_rpath_find(cx: DxCx*, module: string) -> DxRPath* {
 
 fn dx_hash_manifest(h: Hasher*, m: Manifest*) {
   h_str(h, m->name);
+  if (slen(m->import_root) > 0) {
+    h_str(h, "import-root " + m->import_root);
+  }
   var i: int64 = 0;
   while (i < m->ndeps) {
     var d: DepSpec* = man_dep(m, i);
@@ -2104,6 +2107,8 @@ struct DxBlock {
   selected: StrList*;   // the registry and replaced packages of the build
   is_root: bool;        // the root: also `mbuild=`, with warnings
   local: bool;          // root or a path package: path dependencies apply
+  mods: StrList*;       // the selected registry packages
+  mans: DxMans*;        // their manifests (parallel to mods)
 }
 
 fn dx_path_by_dir(cx: DxCx*, dir: string) -> DxPath* {
@@ -2125,8 +2130,22 @@ fn dx_pkg_dir(cx: DxCx*, name: string) -> string {
   return cx->deps_root + "/" + name;
 }
 
+// The manifest of a selected package, 0 when it has none.
+fn dx_block_man(bl: DxBlock*, name: string) -> Manifest* {
+  var rp: DxRPath* = dx_rpath_find(bl->cx, name);
+  if (rp != (DxRPath*)0) {
+    return rp->man;
+  }
+  var at: int64 = sl_index(bl->mods, name);
+  if (at < 0) {
+    return (Manifest*)0;
+  }
+  return bl->mans->items[at];
+}
+
 // The packages the manifest declares (14.5), its path packages, itself
-// (`name=.`) and, for the root, the mbuild API.
+// (`name=.`) and, for the root, the mbuild API; each names the package's
+// import root.
 fn dx_block_write(bl: DxBlock*) {
   var cx: DxCx* = bl->cx;
   var p: Project* = cx->p;
@@ -2139,7 +2158,7 @@ fn dx_block_write(bl: DxBlock*) {
       var d: DepSpec* = man_dep(m, i);
       i = i + 1;
       if (slen(d->path) == 0 && sl_has(bl->selected, d->key) && !sl_has(used, d->key)) {
-        sl_push(lines, d->key + "=" + dx_rel(bl->dir, dx_pkg_dir(cx, d->key)));
+        sl_push(lines, d->key + "=" + dx_rel(bl->dir, man_import_dir(dx_block_man(bl, d->key), dx_pkg_dir(cx, d->key))));
         sl_push(used, d->key);
       }
     }
@@ -2159,13 +2178,13 @@ fn dx_block_write(bl: DxBlock*) {
           warn("path dependency '" + pd->key + "' uses a name that is already published in mettle.deps");
         }
       } else {
-        sl_push(lines, pd->key + "=" + dx_rel(bl->dir, pp->dir));
+        sl_push(lines, pd->key + "=" + dx_rel(bl->dir, man_import_dir(pp->man, pp->dir)));
         sl_push(used, pd->key);
       }
     }
     var own: bool = !bl->is_root || p->has_manifest;
     if (own && man_is_package_name(m->name) && !sl_has(used, m->name)) {
-      sl_push(lines, m->name + "=.");
+      sl_push(lines, m->name + "=" + dx_rel(bl->dir, man_import_dir(m, bl->dir)));
       sl_push(used, m->name);
     }
   }
@@ -2247,6 +2266,8 @@ fn dx_finish(cx: DxCx*, a: DxLockArgs*, mans: DxMans*) -> DepState* {
   var bl: DxBlock* = new DxBlock;
   bl->cx = cx;
   bl->selected = selected;
+  bl->mods = a->mods;
+  bl->mans = mans;
   bl->dir = p->root;
   bl->man = p->man;
   bl->is_root = true;
@@ -3978,28 +3999,31 @@ fn dx_surface_ix(p: Project*, ix: RegIndex*, version: string) -> ApiSurface* {
     sys_remove_tree(tmp);
     return (ApiSurface*)0;
   }
-  var surf: ApiSurface* = api_surface_dir(tmp);
+  var surf: ApiSurface* = api_surface_dir(man_import_dir(reg_manifest(p, ix, rv->version), tmp));
   sys_remove_tree(tmp);
   return surf;
 }
 
 // The surface of module at version: .mbuild/deps/<name> when it holds that
-// version, else the archive.
+// version, else the archive. Both start at the version's import root.
 fn dx_surface(p: Project*, module: string, version: string) -> ApiSurface* {
   var cur: string = dx_deps_dir(p) + "/" + module;
   var mk: StrList* = s_fields(reg_marker(cur));
   var here: bool = !sys_is_link(cur) && mk->len >= 2 && s_eq(sl_get(mk, 0), module) && s_eq(sl_get(mk, 1), version);
   free(mk);
-  if (here) {
-    return api_surface_dir(cur);
-  }
   var cx: DxCx* = dx_cx_new(p);
   var pin: string = dx_pinned(cx, module);
   free(cx);
   var ix: RegIndex* = reg_find(p, module, pin, false);
   g_dx_last_ix = ix;
   if (!ix->ok || !ix->found) {
+    if (here) {
+      return api_surface_dir(cur);
+    }
     return (ApiSurface*)0;
+  }
+  if (here) {
+    return api_surface_dir(man_import_dir(reg_manifest(p, ix, version), cur));
   }
   return dx_surface_ix(p, ix, version);
 }
@@ -4110,7 +4134,7 @@ export fn deps_api_breaks(p: Project*, name: string, version: string, dir: strin
     warn("cannot compare the API with " + name + " " + prev + " (mbuild -v says why)");
     return s_empty();
   }
-  var all: ApiDiff* = api_diff(old, api_surface_dir(p->root));
+  var all: ApiDiff* = api_diff(old, api_surface_dir(man_import_dir(p->man, p->root)));
   var d: ApiDiff* = api_breaking(all);
   var n: int64 = d->what->len;
   var listed: string = api_render(d, sl_new());

@@ -467,9 +467,9 @@ fn bx_is_lib_file(name: string) -> bool {
   return s_ends(name, ".mettle") && !s_ends(name, "_test.mettle") && !s_starts(name, "test_");
 }
 
-// A library package (a manifest, no bins): its top-level and src/ .mettle
-// files but the project files, each one an entry for `check`. Empty for
-// anything else.
+// A library package (a manifest, no bins): its top-level, src/ and import
+// root .mettle files but the project files, each one an entry for `check`.
+// Empty for anything else.
 fn bx_lib_set(p: Project*) -> BinSet* {
   var bs: BinSet* = new BinSet;
   bs->items = (BinInfo*)0;
@@ -480,6 +480,7 @@ fn bx_lib_set(p: Project*) -> BinSet* {
   }
   var subs: StrList* = sl_of("");
   sl_push(subs, "src");
+  sl_add_uniq(subs, p->man->import_root);
   var si: int64 = 0;
   while (si < subs->len) {
     var sub: string = sl_get(subs, si);
@@ -1145,9 +1146,10 @@ fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
     ver = "path " + bx_show(dm->dir);
   }
   var who: string = dm->module + " (" + ver + ")";
-  var target: string = dm->dir;
+  var top: string = man_import_dir(dm->man, dm->dir);
+  var target: string = top;
   if (slen(rest) > 0) {
-    target = dm->dir + "/" + rest;
+    target = top + "/" + rest;
   }
   if (!fs_is_dir(dm->dir) || bx_dir_is_empty(dm->dir)) {
     error_msg(loc + ": cannot find `" + imp + "`: the copy of " + who + " is missing or empty");
@@ -1175,7 +1177,7 @@ fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
   }
   var sub: string = p_dir(rest);
   var file: string = p_base(rest);
-  var dir: string = dm->dir;
+  var dir: string = top;
   var prefix: string = s_sub(base, 0, slen(base) - slen(file));
   var wanted: string = rest + ".mettle";
   if (s_ends(file, ".mettle")) {
@@ -1183,7 +1185,7 @@ fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
     wanted = rest;
   }
   if (slen(sub) > 0 && !s_eq(sub, ".")) {
-    dir = dm->dir + "/" + sub;
+    dir = top + "/" + sub;
   }
   error_msg(loc + ": cannot find `" + imp + "`: " + who + " has no file '" + wanted + "'");
   if (!fs_is_dir(dir)) {
@@ -4473,7 +4475,7 @@ fn bx_pub_section_kept(sec: string) -> bool {
 }
 
 fn bx_pub_package_key(key: string) -> bool {
-  return s_eq(key, "name") || s_eq(key, "version") || s_eq(key, "description") || s_eq(key, "license") || s_eq(key, "repository") || s_eq(key, "authors") || s_eq(key, "mettle");
+  return s_eq(key, "name") || s_eq(key, "version") || s_eq(key, "description") || s_eq(key, "license") || s_eq(key, "repository") || s_eq(key, "authors") || s_eq(key, "mettle") || s_eq(key, "import-root");
 }
 
 // The emitted TOML reduced to what users read (14.7 step 7).

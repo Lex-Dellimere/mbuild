@@ -21,6 +21,42 @@ import "webfw/http/server";    // http/server.mettle
 An import with a single component (`import "logger"`) is never a package:
 it's a file next to yours, or a [component](components.md).
 
+### Import roots
+
+A package that keeps its code in `src/` says so, and `import
+"mistplot/core/scale"` then means `src/core/scale.mettle`, for its users
+and for its own files:
+
+```mettle
+fn project() {
+  mb_package("mistplot", "0.1.0");
+  mb_import_root("src");
+}
+```
+
+```text
+$ mbuild run
+   Compiling viewer (linux, debug)
+    Finished in 0.0s
+     Running build/linux/debug/viewer
+plot 7
+$ cat mettle.deps
+# >>> mbuild: generated, edits inside this block are overwritten
+mistplot=../mistplot/src
+viewer=.
+mbuild=./.mbuild/api/mbuild
+# <<< mbuild
+```
+
+It's part of the package's manifest, so it holds for path and registry
+packages alike; `publish` packs the files as they are. The directory must
+exist inside the package:
+
+```text
+$ mbuild check
+error: mbuild.mettle:5: mb_import_root("lib"): lib is not a directory
+```
+
 ### Adding a dependency by importing it
 
 When an import's first component isn't a dependency yet, mbuild looks the

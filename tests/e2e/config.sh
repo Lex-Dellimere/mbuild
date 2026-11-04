@@ -155,6 +155,17 @@ hooks pre_build"
   out=$("$D" load 2>&1)
   expect_has "$mode: fn main refused" "$out" "error: mbuild.mettle:7: mbuild.mettle cannot define fn main"
 
+  mkdir -p "$P/iroot/src" && cd "$P/iroot"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("iroot", "0.1.0");\n  mb_import_root("src");\n}\n' > mbuild.mettle
+  "$D" load >/dev/null
+  expect_eq "$mode: mb_import_root emits" "$("$D" text | sed -n '/^import-root/p')" 'import-root = "src"'
+  sed -i 's|mb_import_root("src")|mb_import_root("lib")|' mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: import root must exist" "$out" 'error: mbuild.mettle:5: mb_import_root("lib"): lib is not a directory'
+  sed -i 's|mb_import_root("lib")|mb_import_root("../src")|' mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: import root inside the package" "$out" 'error: mbuild.mettle:5: mb_import_root("../src"): the import root is a directory inside the package, relative to it (e.g. "src")'
+
   echo "== $mode: commands"
   mkdir -p "$P/hello" && cd "$P/hello"
   "$D" inittext hello

@@ -460,8 +460,21 @@ fn test_basics() {
   t_ok("basics: edit distance", man_edit_distance("kitten", "sitting") == 3 && man_edit_distance("", "abc") == 3);
 }
 
+// mb_import_root.
+fn test_import_root() {
+  var m: Manifest* = man_of(pkg("import-root = \"./src/\"\n[dependencies]\nmeosql = {{ path = \"../meosql\" }"));
+  t_eq("import root: valid", m->error + sl_join(m->warnings, " / "), "");
+  t_eq("import root: cleaned", m->import_root, "src");
+  t_eq("import root: dir", man_import_dir(m, "/p"), "/p/src");
+  t_eq("import root: none", man_import_dir(man_of(pkg("")), "/p") + " " + man_import_dir((Manifest*)0, "/q"), "/p /q");
+  t_eq("import root: \".\" is the package", man_import_dir(man_of(pkg("import-root = \".\"\n")), "/p"), "/p");
+  t_eq("import root: absolute", man_of(pkg("import-root = \"/abs\"\n"))->error, "/p/mbuild.toml:3: mb_import_root(\"/abs\"): the import root is a directory inside the package, relative to it (e.g. \"src\")");
+  t_eq("import root: outside", man_of(pkg("import-root = \"src/../..\"\n"))->error, "/p/mbuild.toml:3: mb_import_root(\"src/../..\"): the import root is a directory inside the package, relative to it (e.g. \"src\")");
+}
+
 fn run_all() -> int64 {
   test_basics();
+  test_import_root();
   test_settings();
   test_replace_and_removed();
   test_local();

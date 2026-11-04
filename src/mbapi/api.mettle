@@ -660,6 +660,11 @@ export fn mb_prelude(on: bool) {
   mbi_put("build", "prelude", mbi_bool(on));
 }
 
+// The directory, relative to the package, where imports of name/... start: mb_import_root("src").
+export fn mb_import_root(dir: string) {
+  mbi_put("package", "import-root", mbi_quote(dir));
+}
+
 // A program to build from main ("" = detected).
 export fn mb_bin(name: string, main: string) {
   var sec: string = "bin." + mbi_key(name);

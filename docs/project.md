@@ -85,6 +85,7 @@ Per-OS settings go through `mb_on(os)` instead.
 | `mb_prelude(on)` | Pass `--prelude`, so `std/prelude` is imported everywhere. |
 | `mb_agents(on)` | Keep the dependencies block in `AGENT.rules` ([packages](packages.md#agentrules)). Default `true`. |
 | `mb_publish_include(csv)` | The files `mbuild publish` packs ([dependencies](dependencies.md#publishing)). |
+| `mb_import_root(dir)` | Imports of `name/...` start in `dir` instead of the package root: `mb_import_root("src")` ([dependencies](dependencies.md#import-roots)). |
 | `mb_raw(section, key, toml)` | Escape hatch: a raw key in the generated manifest. |
 
 ### Dependencies

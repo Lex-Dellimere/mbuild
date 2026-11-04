@@ -1738,7 +1738,7 @@ fn natx_import_target(c: NatCtx*, from: string, ip: string, files: StrList*) -> 
     if (mi >= 0) {
       var dm: DepModule* = &c->ds->mods[mi];
       if (s_starts(ip, dm->module + "/")) {
-        sl_push(cands, c->pkgs[i].dir + "/" + s_from(ip, slen(dm->module) + 1));
+        sl_push(cands, man_import_dir(c->pkgs[i].man, c->pkgs[i].dir) + "/" + s_from(ip, slen(dm->module) + 1));
       }
     }
     i = i + 1;
@@ -1746,7 +1746,7 @@ fn natx_import_target(c: NatCtx*, from: string, ip: string, files: StrList*) -> 
   // Importing yourself: the root's own name names the root.
   var own: string = c->p->man->name;
   if (slen(own) > 0 && s_starts(ip, own + "/")) {
-    sl_push(cands, c->p->root + "/" + s_from(ip, slen(own) + 1));
+    sl_push(cands, man_import_dir(c->p->man, c->p->root) + "/" + s_from(ip, slen(own) + 1));
   }
   sl_push(cands, p_join(p_dir(from), ip));
   sl_push(cands, p_join(c->p->root, ip));

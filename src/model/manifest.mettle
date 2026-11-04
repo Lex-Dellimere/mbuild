@@ -90,6 +90,7 @@ export struct Manifest {
   include: StrList*;      // [package] include
   meta: StrList*;         // "key=value": description, license, repository, authors
   local_components: StrList*;  // "name=impl" from mbuild.local.mettle [components]
+  import_root: string;    // [package] import-root, cleaned ("" = the package directory)
 }
 
 export struct SettingsQuery {
@@ -521,7 +522,7 @@ fn mnx_deps(m: Manifest*) {
 // ---------------------------------------------------------------------------
 
 fn mnx_known_keys(section: string) -> StrList* {
-  if (s_eq(section, "package")) { return mnx_list("name version mettle include description license repository authors"); }
+  if (s_eq(section, "package")) { return mnx_list("name version mettle include description license repository authors import-root"); }
   if (s_eq(section, "build")) { return mnx_list("targets flags prelude agents"); }
   // bound to locals: mnx_list keeps views into its argument (DESIGN.md 2, issue 6)
   if (s_starts(section, "profile.")) {
@@ -1165,6 +1166,17 @@ fn mnx_package_extra(m: Manifest*) {
     m->mettle_min = canon;
   }
   m->include = mnx_strs(m, "package", "include");
+  var ir: string = mnx_str(m, "package", "import-root");
+  if (slen(ir) > 0) {
+    var clean: string = p_clean(ir);
+    if (p_is_abs(ir) || s_eq(clean, "..") || s_starts(clean, "../")) {
+      mnx_error(m, toml_get(m->doc, "package", "import-root")->line, "mb_import_root(" + toml_quote(ir) + "): the import root is a directory inside the package, relative to it (e.g. \"src\")");
+      return;
+    }
+    if (!s_eq(clean, ".")) {
+      m->import_root = clean;
+    }
+  }
   var keys: StrList* = mnx_list("description license repository");
   var i: int64 = 0;
   while (i < keys->len) {
@@ -1611,6 +1623,7 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->include = sl_new();
   m->meta = sl_new();
   m->local_components = sl_new();
+  m->import_root = s_empty();
   return m;
 }
 
@@ -2096,6 +2109,14 @@ export fn man_has_c(m: Manifest*) -> bool {
     i = i + 1;
   }
   return false;
+}
+
+// The directory imports of `name/...` start in: dir, or dir/<import-root>.
+export fn man_import_dir(m: Manifest*, dir: string) -> string {
+  if (m == (Manifest*)0 || slen(m->import_root) == 0) {
+    return dir;
+  }
+  return dir + "/" + m->import_root;
 }
 
 // The dependency with this key; 0 when absent.
