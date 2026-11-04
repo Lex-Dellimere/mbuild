@@ -1,0 +1,123 @@
+// "mbuild/live": the events `mbuild live` and `mbuild shell` write for the
+// program (docs/project.md#live-preview). They set MBUILD_LIVE_EVENTS to a
+// file of lines "KIND PAYLOAD"; mblive_next reads the next whole one. Outside
+// them the variable is unset: mblive_active() is false and mblive_next()
+// answers false after one getenv.
+
+import "std/file";
+import "std/mem";
+
+extern fn mblive_c_getenv(name: cstring) -> cstring = "getenv";
+extern fn mblive_c_strlen(s: cstring) -> int64 = "strlen";
+
+// kind: changed, removed, patched, patch-error, built, build-error, paused,
+// resumed, exited (or a newer one: skip what you don't know). path: the
+// file, relative to the project root, for changed and removed. detail: the
+// rest of the line: the function for patched, the message for patch-error
+// and build-error ("FILE:LINE:COL: MESSAGE"), the code for exited. The
+// strings stay valid until the next mblive_next call.
+export struct MbLiveEvent {
+  kind: string;
+  path: string;
+  detail: string;
+}
+
+const MBLIVE_CAP: int64 = 16384;
+
+var g_mblive_state: int32 = 0;   // 0 not looked yet, 1 on, -1 off
+var g_mblive_fd: int64 = -1;
+var g_mblive_off: int64 = 0;     // file offset read up to
+var g_mblive_buf: uint8* = 0;
+var g_mblive_len: int64 = 0;     // bytes held in buf
+var g_mblive_line: uint8* = 0;   // the last event's line
+
+fn mblive_view(p: uint8*, n: int64) -> string {
+  var s: string;
+  s.chars = p;
+  s.length = (uint64)n;
+  return s;
+}
+
+fn mblive_open() -> bool {
+  var c: cstring = mblive_c_getenv("MBUILD_LIVE_EVENTS");
+  if (c == 0 || mblive_c_strlen(c) == 0) {
+    g_mblive_state = -1;
+    return false;
+  }
+  g_mblive_fd = file_open(mblive_view((uint8*)c, mblive_c_strlen(c)), FILE_READ);
+  if (g_mblive_fd < 0) {
+    g_mblive_state = -1;
+    return false;
+  }
+  g_mblive_buf = (uint8*)malloc(MBLIVE_CAP);
+  g_mblive_state = 1;
+  return true;
+}
+
+// True when the program runs under `mbuild live` or `mbuild shell`.
+export fn mblive_active() -> bool {
+  if (g_mblive_state == 0) {
+    mblive_open();
+  }
+  return g_mblive_state == 1;
+}
+
+fn mblive_newline() -> int64 {
+  var i: int64 = 0;
+  while (i < g_mblive_len) {
+    if (g_mblive_buf[i] == (uint8)10) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// The next unread event into ev; false when there is none yet. One read of
+// the file when nothing is buffered, so it can run every frame.
+export fn mblive_next(ev: MbLiveEvent*) -> bool {
+  if (g_mblive_state != 1) {
+    if (g_mblive_state != 0 || !mblive_open()) {
+      return false;
+    }
+  }
+  var nl: int64 = mblive_newline();
+  if (nl < 0) {
+    if (g_mblive_len == MBLIVE_CAP) {
+      g_mblive_len = 0;   // a line longer than the buffer: dropped
+    }
+    var got: int64 = file_read_at(g_mblive_fd, &g_mblive_buf[g_mblive_len], MBLIVE_CAP - g_mblive_len, g_mblive_off);
+    if (got <= 0) {
+      return false;
+    }
+    g_mblive_off = g_mblive_off + got;
+    g_mblive_len = g_mblive_len + got;
+    nl = mblive_newline();
+    if (nl < 0) {
+      return false;
+    }
+  }
+  if (g_mblive_line != 0) {
+    free(g_mblive_line);
+  }
+  g_mblive_line = (uint8*)malloc(nl + 1);
+  memcpy((rawptr)g_mblive_line, (rawptr)g_mblive_buf, nl);
+  memmove((rawptr)g_mblive_buf, (rawptr)&g_mblive_buf[nl + 1], g_mblive_len - nl - 1);
+  g_mblive_len = g_mblive_len - nl - 1;
+  var sp: int64 = 0;
+  while (sp < nl && g_mblive_line[sp] != (uint8)32) {
+    sp = sp + 1;
+  }
+  ev->kind = mblive_view(g_mblive_line, sp);
+  ev->path = mblive_view(g_mblive_line, 0);
+  ev->detail = mblive_view(g_mblive_line, 0);
+  if (sp < nl) {
+    var rest: string = mblive_view(&g_mblive_line[sp + 1], nl - sp - 1);
+    if (ev->kind == "changed" || ev->kind == "removed") {
+      ev->path = rest;
+    } else {
+      ev->detail = rest;
+    }
+  }
+  return true;
+}
