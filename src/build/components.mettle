@@ -1,9 +1,27 @@
-// components: stub, owned by group K (DESIGN.md 15).
+// components: selection, interface checks and the generated modules of a
+// build's components (DESIGN.md 15), the rule wrapper (15.8), `mbuild
+// components` and `mbuild use`.
+//
+// A build's gen dir, .mbuild/gen/<target>-<profile>-<bin>/, holds
+// <component>.mettle per component, entry.mettle when rules apply, and
+// build.info: the build and the dependencies' components, from which `mbuild
+// use` regenerates the dir without resolving dependencies.
 
 import "std/mem";
 import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/proc";
+import "../model/toml";
+import "../config/mbfile";
 import "../model/manifest";
 import "../model/project";
+import "../pkg/api";
+import "scan";
+import "graph";
+import "toolchain";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
 
 export struct CmpBuild {
   target: string;
@@ -13,6 +31,7 @@ export struct CmpBuild {
   settings: Settings*;
 }
 
+// selected and origins hold "name=impl" and "name=origin" per component.
 export struct CmpOut {
   ok: bool;
   err: string;
@@ -23,31 +42,1712 @@ export struct CmpOut {
   has_swap: bool;
 }
 
-export fn cmp_prepare(p: Project*, ds: DepState*, b: CmpBuild*) -> CmpOut* {
+// The root's components first (nroot of them), then the dependencies'.
+struct CmxComps {
+  items: CompSpec**;
+  n: int64;
+  nroot: int64;
+}
+
+struct CmxPick {
+  iname: string;
+  origin: string;
+}
+
+// One swap function: its name, the slot type and the display text.
+struct CmxSlot {
+  name: string;
+  ty: string;
+  shown: string;
+}
+
+struct CmxSlots {
+  items: CmxSlot*;
+  n: int64;
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+fn cmx_free(l: StrList*) {
+  free(l->items);
+  free(l);
+}
+
+fn cmx_show(p: Project*, path: string) -> string {
+  return p_rel(p->root, path);
+}
+
+// A Mettle string literal's body: `\`, `"` and `{` escaped.
+fn cmx_lit(s: string) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 92 || c == 34) {
+      buf_addb(b, 92);
+    } else if (c == 123) {
+      buf_addb(b, 123);
+    }
+    buf_addb(b, c);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+fn cmx_upper(s: string) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c >= 97 && c <= 122) {
+      c = c - 32;
+    }
+    buf_addb(b, c);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// An impl name as an identifier part ('-' -> '_').
+fn cmx_ident(iname: string) -> string {
+  return s_replace_byte(iname, 45, 95);
+}
+
+fn cmx_is_ident(s: string) -> bool {
+  if (slen(s) == 0 || is_digit_b(s_byte(s, 0))) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    if (!is_ident_b(s_byte(s, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn cmx_impl_file(c: CompSpec*, iname: string) -> string {
+  return c->dir + "/" + iname + ".mettle";
+}
+
+fn cmx_label(c: CompSpec*) -> string {
+  if (s_eq(c->mode, "static")) {
+    return "component " + c->name;
+  }
+  return "component " + c->name + " (" + c->mode + ")";
+}
+
+// The value of "key=value" items for key, "" when absent (the last wins).
+fn cmx_kv(items: StrList*, key: string) -> string {
+  var found: string = s_empty();
+  var i: int64 = 0;
+  while (i < items->len) {
+    var it: string = sl_get(items, i);
+    if (s_starts(it, key + "=")) {
+      found = s_from(it, slen(key) + 1);
+    }
+    i = i + 1;
+  }
+  return found;
+}
+
+fn cmx_read(path: string) -> string {
+  var r: FsRead = fs_read(path);
+  if (!r.ok) {
+    return s_empty();
+  }
+  return r.data;
+}
+
+// ---------------------------------------------------------------------------
+// The components of a build
+// ---------------------------------------------------------------------------
+
+fn cmx_push(cs: CmxComps*, c: CompSpec*) {
+  if (cs->n % 8 == 0) {
+    cs->items = (CompSpec**)realloc(cs->items, (cs->n + 9) * 8);
+  }
+  cs->items[cs->n] = c;
+  cs->n = cs->n + 1;
+  cs->items[cs->n] = (CompSpec*)0;
+}
+
+fn cmx_comps_new() -> CmxComps* {
+  var cs: CmxComps* = new CmxComps;
+  cs->items = (CompSpec**)malloc(8);
+  cs->items[0] = (CompSpec*)0;
+  cs->n = 0;
+  cs->nroot = 0;
+  return cs;
+}
+
+fn cmx_add_root(cs: CmxComps*, p: Project*) {
+  var i: int64 = 0;
+  while (i < p->man->ncomps) {
+    cmx_push(cs, &p->man->comps[i]);
+    i = i + 1;
+  }
+  cs->nroot = cs->n;
+}
+
+fn cmx_collect(p: Project*, ds: DepState*) -> CmxComps* {
+  var cs: CmxComps* = cmx_comps_new();
+  cmx_add_root(cs, p);
+  var d: int64 = 0;
+  while (ds != (DepState*)0 && d < ds->n) {
+    var m: Manifest* = ds->mods[d].man;
+    var i: int64 = 0;
+    while (m != (Manifest*)0 && i < m->ncomps) {
+      cmx_push(cs, &m->comps[i]);
+      i = i + 1;
+    }
+    d = d + 1;
+  }
+  return cs;
+}
+
+fn cmx_find(cs: CmxComps*, name: string) -> int64 {
+  var i: int64 = 0;
+  while (i < cs->n) {
+    if (s_eq(cs->items[i]->name, name)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn cmx_names(cs: CmxComps*) -> StrList* {
+  var names: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < cs->n) {
+    sl_push(names, cs->items[i]->name);
+    i = i + 1;
+  }
+  return names;
+}
+
+fn cmx_declarer(p: Project*, cs: CmxComps*, i: int64) -> string {
+  if (i < cs->nroot) {
+    return "this project (" + p_base(p->man->file) + ":" + s_int(cs->items[i]->line) + ")";
+  }
+  return cs->items[i]->owner;
+}
+
+fn cmx_packages(p: Project*, ds: DepState*) -> StrList* {
+  var names: StrList* = sl_new();
+  if (slen(p->man->name) > 0) {
+    sl_push(names, p->man->name);
+  }
+  var i: int64 = 0;
+  while (ds != (DepState*)0 && i < ds->n) {
+    sl_add_uniq(names, ds->mods[i].module);
+    i = i + 1;
+  }
+  return names;
+}
+
+// A component name declared twice, or equal to a package name of the build.
+fn cmx_clashes(p: Project*, cs: CmxComps*, packages: StrList*) -> string {
+  var i: int64 = 0;
+  while (i < cs->n) {
+    var name: string = cs->items[i]->name;
+    var k: int64 = 0;
+    while (k < i) {
+      if (s_eq(cs->items[k]->name, name)) {
+        return "component " + name + " is declared by both " + cmx_declarer(p, cs, k) + " and " + cmx_declarer(p, cs, i) + "; component names are unique across a build";
+      }
+      k = k + 1;
+    }
+    if (sl_has(packages, name)) {
+      return "component " + name + " (declared by " + cmx_declarer(p, cs, i) + ") has the name of the package " + name + "; `import \"" + name + "\"` would be ambiguous, rename the component";
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// Root and dependency components (with owners), 0-terminated. Clashes are
+// reported by cmp_prepare and cmp_check.
+export fn cmp_all(p: Project*, ds: DepState*) -> CompSpec** {
+  var cs: CmxComps* = cmx_collect(p, ds);
+  var all: CompSpec** = cs->items;
+  free(cs);
+  return all;
+}
+
+// ---------------------------------------------------------------------------
+// Selection (15.5)
+// ---------------------------------------------------------------------------
+
+fn cmx_impl_problem(c: CompSpec*, iname: string) -> string {
+  if (sl_has(c->impls, iname)) {
+    return s_empty();
+  }
+  var msg: string = "component " + c->name + " has no impl '" + iname + "'";
+  var sug: string = man_suggest(iname, c->impls);
+  if (slen(sug) > 0) {
+    msg = msg + " (did you mean '" + sug + "'?)";
+  }
+  return msg + "; its impls: " + sl_join(c->impls, ", ");
+}
+
+// Applies one "name=impl" from origin; "" or the problem.
+fn cmx_apply(cs: CmxComps*, picks: CmxPick*, item: string, origin: string) -> string {
+  var eq: int64 = s_find_byte(item, 61);
+  if (eq <= 0 || eq + 1 >= slen(item)) {
+    return origin + ": '" + item + "' is not NAME=IMPL";
+  }
+  var name: string = s_trim(s_sub(item, 0, eq));
+  var iname: string = s_trim(s_from(item, eq + 1));
+  var k: int64 = cmx_find(cs, name);
+  if (k < 0) {
+    var msg: string = origin + ": no component '" + name + "'";
+    var names: StrList* = cmx_names(cs);
+    var sug: string = man_suggest(name, names);
+    cmx_free(names);
+    if (slen(sug) > 0) {
+      msg = msg + " (did you mean '" + sug + "'?)";
+    } else if (cs->n == 0) {
+      msg = msg + " (the build declares none)";
+    }
+    return msg;
+  }
+  var problem: string = cmx_impl_problem(cs->items[k], iname);
+  if (slen(problem) > 0) {
+    return origin + ": " + problem;
+  }
+  picks[k].iname = iname;
+  picks[k].origin = origin;
+  return s_empty();
+}
+
+// Where a "name=impl" of the settings' components comes from: the
+// highest-precedence components list holding it.
+fn cmx_setting_origin(p: Project*, b: CmpBuild*, item: string) -> string {
+  var m: Manifest* = p->man;
+  var secs: StrList* = sl_new();
+  sl_push(secs, "bin." + b->bin);
+  sl_push(secs, "profile." + b->profile + "." + b->target);
+  sl_push(secs, "profile." + b->profile);
+  var profiles: StrList* = toml_sections(m->doc, "profile.");
+  sl_extend(secs, profiles);
+  free(profiles);
+  if (m->local != (Manifest*)0) {
+    var lprofiles: StrList* = toml_sections(m->local->doc, "profile.");
+    sl_extend(secs, lprofiles);
+    free(lprofiles);
+  }
+  var found: string = "profile";
+  var i: int64 = 0;
+  while (i < secs->len && s_eq(found, "profile")) {
+    var sec: string = sl_get(secs, i);
+    var pass: int32 = 0;
+    while (pass < 2 && s_eq(found, "profile")) {
+      var mm: Manifest* = m->local;
+      if (pass == 1 || s_starts(sec, "bin.")) {
+        mm = m;
+      }
+      var v: TomlValue* = (TomlValue*)0;
+      if (mm != (Manifest*)0) {
+        v = toml_get(mm->doc, sec, "components");
+      }
+      if (v != (TomlValue*)0) {
+        var l: StrList* = toml_list(mm->doc, sec, "components");
+        if (sl_has(l, item)) {
+          found = p_base(mm->file) + ":" + s_int(v->line);
+        }
+        cmx_free(l);
+      }
+      pass = pass + 1;
+    }
+    i = i + 1;
+  }
+  cmx_free(secs);
+  return found;
+}
+
+fn cmx_select(p: Project*, cs: CmxComps*, b: CmpBuild*, picks: CmxPick*) -> string {
+  var i: int64 = 0;
+  while (i < cs->n) {
+    var c: CompSpec* = cs->items[i];
+    picks[i].iname = sl_get(c->impls, 0);
+    picks[i].origin = "default";
+    var od: string = cmx_kv(c->os_defaults, b->target);
+    if (slen(od) > 0) {
+      picks[i].iname = od;
+      picks[i].origin = "default for " + b->target;
+    }
+    i = i + 1;
+  }
+  var err: string = s_empty();
+  var st: Settings* = b->settings;
+  i = 0;
+  while (st != (Settings*)0 && i < st->components->len && slen(err) == 0) {
+    var item: string = sl_get(st->components, i);
+    err = cmx_apply(cs, picks, item, cmx_setting_origin(p, b, item));
+    i = i + 1;
+  }
+  var lc: StrList* = p->man->local_components;
+  i = 0;
+  while (i < lc->len && slen(err) == 0) {
+    err = cmx_apply(cs, picks, sl_get(lc, i), "mbuild.local.mettle");
+    i = i + 1;
+  }
+  i = 0;
+  while (p->opts != (Options*)0 && i < p->opts->uses->len && slen(err) == 0) {
+    err = cmx_apply(cs, picks, sl_get(p->opts->uses, i), "--use");
+    i = i + 1;
+  }
+  return err;
+}
+
+// ---------------------------------------------------------------------------
+// Interface checks (15.3, 15.4)
+// ---------------------------------------------------------------------------
+
+// The text an export shows in messages (as api.mettle shows it).
+fn cmx_display(it: ExportItem*) -> string {
+  if (s_eq(it->kind, "fn")) {
+    return "fn " + it->name + it->sig;
+  }
+  if (s_eq(it->kind, "extern")) {
+    if (s_starts(it->sig, "(")) {
+      return "extern fn " + it->name + it->sig;
+    }
+    return "extern var " + it->name + it->sig;
+  }
+  if (s_eq(it->kind, "struct") || s_eq(it->kind, "enum")) {
+    if (slen(it->sig) == 0) {
+      return it->kind + " " + it->name + " {{}";
+    }
+    return it->kind + " " + it->name + " {{ " + it->sig + " }";
+  }
+  if (slen(it->sig) == 0) {
+    return it->kind + " " + it->name;
+  }
+  return it->kind + " " + it->name + ": " + it->sig;
+}
+
+// The export surface of one file.
+fn cmx_surface(path: string, shown: string) -> ApiSurface* {
+  var s: ApiSurface* = new ApiSurface;
+  s->names = sl_new();
+  s->kinds = sl_new();
+  s->sigs = sl_new();
+  s->files = sl_new();
+  s->lines = sl_new();
+  var l: ExportList* = scan_exports(cmx_read(path));
+  var i: int64 = 0;
+  while (i < l->n) {
+    var it: ExportItem* = scan_export(l, i);
+    if (!sl_has(s->names, it->name)) {
+      sl_push(s->names, it->name);
+      sl_push(s->kinds, it->kind);
+      sl_push(s->sigs, cmx_display(it));
+      sl_push(s->files, shown);
+      sl_push(s->lines, s_int(it->line));
+    }
+    i = i + 1;
+  }
+  free(l->items);
+  free(l);
+  return s;
+}
+
+fn cmx_at(s: ApiSurface*, name: string) -> string {
+  var k: int64 = sl_index(s->names, name);
+  return sl_get(s->files, k) + ":" + sl_get(s->lines, k);
+}
+
+// Removed and changed exports of cur against def; with exact, added ones too.
+fn cmx_mismatch(def: ApiSurface*, cur: ApiSurface*, iname: string, exact: bool) -> string {
+  var d: ApiDiff* = api_diff(def, cur);
+  var parts: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < d->what->len) {
+    var what: string = sl_get(d->what, i);
+    var name: string = sl_get(d->names, i);
+    if (s_eq(what, "removed")) {
+      sl_push(parts, "missing " + sl_get(d->old_sigs, i) + " (" + cmx_at(def, name) + ")");
+    } else if (s_eq(what, "changed")) {
+      sl_push(parts, sl_get(d->old_sigs, i) + " (" + cmx_at(def, name) + ") is " + sl_get(d->new_sigs, i) + " in " + iname + " (" + cmx_at(cur, name) + ")");
+    } else if (exact) {
+      sl_push(parts, "extra " + sl_get(d->new_sigs, i) + " (" + cmx_at(cur, name) + ")");
+    }
+    i = i + 1;
+  }
+  var msg: string = sl_join(parts, "; ");
+  cmx_free(parts);
+  free(d);
+  return msg;
+}
+
+fn cmx_check_static(p: Project*, c: CompSpec*, iname: string) -> string {
+  var dflt: string = sl_get(c->impls, 0);
+  if (s_eq(iname, dflt)) {
+    return s_empty();
+  }
+  var df: string = cmx_impl_file(c, dflt);
+  var cf: string = cmx_impl_file(c, iname);
+  var def: ApiSurface* = cmx_surface(df, cmx_show(p, df));
+  var cur: ApiSurface* = cmx_surface(cf, cmx_show(p, cf));
+  var mm: string = cmx_mismatch(def, cur, iname, false);
+  free(def);
+  free(cur);
+  if (slen(mm) > 0) {
+    return "component " + c->name + ": impl " + iname + " does not match " + dflt + ": " + mm;
+  }
+  return s_empty();
+}
+
+// Whether the declaration starting at 1-based line carries the decorator
+// (on the line itself or on the line before).
+fn cmx_decorated(lines: StrList*, line: int64, deco: string) -> bool {
+  if (line < 1 || line > lines->len) {
+    return false;
+  }
+  var t: string = s_trim(sl_get(lines, line - 1));
+  if (s_starts(t, deco + " ") || s_contains(t, " " + deco + " ")) {
+    return true;
+  }
+  var k: int64 = line - 2;
+  while (k >= 0 && slen(s_trim(sl_get(lines, k))) == 0) {
+    k = k - 1;
+  }
+  return k >= 0 && s_eq(s_trim(sl_get(lines, k)), deco);
+}
+
+// "Name" for every `trait Name` declaration, prefixed "!" when it is not
+// `@dyn export`.
+fn cmx_traits(text: string) -> StrList* {
+  var found: StrList* = sl_new();
+  var lines: StrList* = s_lines(text);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var words: StrList* = s_fields(sl_get(lines, i));
+    var k: int64 = sl_index(words, "trait");
+    var lead: bool = words->len > 0 && (s_eq(sl_get(words, 0), "trait") || s_eq(sl_get(words, 0), "export") || s_starts(sl_get(words, 0), "@"));
+    if (k >= 0 && k + 1 < words->len && lead) {
+      var name: string = sl_get(words, k + 1);
+      var cut: int64 = 0;
+      while (cut < slen(name) && is_ident_b(s_byte(name, cut))) {
+        cut = cut + 1;
+      }
+      name = s_dup(s_sub(name, 0, cut));
+      var exported: bool = sl_index(words, "export") >= 0 && sl_index(words, "export") < k;
+      if (exported && cmx_decorated(lines, i + 1, "@dyn")) {
+        sl_push(found, name);
+      } else {
+        sl_push(found, "!" + name);
+      }
+    }
+    cmx_free(words);
+    i = i + 1;
+  }
+  cmx_free(lines);
+  return found;
+}
+
+// The X of every `impl T for X` in text.
+fn cmx_implementors(text: string, trait_name: string) -> StrList* {
+  var found: StrList* = sl_new();
+  var pat: string = "impl " + trait_name + " for ";
+  var at: int64 = s_find(text, pat);
+  while (at >= 0) {
+    var ok: bool = at == 0 || !is_ident_b(s_byte(text, at - 1));
+    var j: int64 = at + slen(pat);
+    var start: int64 = j;
+    while (j < slen(text) && is_ident_b(s_byte(text, j))) {
+      j = j + 1;
+    }
+    if (ok && j > start) {
+      sl_add_uniq(found, s_dup(s_sub(text, start, j)));
+    }
+    at = s_find_from(text, pat, j);
+  }
+  return found;
+}
+
+fn cmx_check_idents(c: CompSpec*) -> string {
+  var i: int64 = 0;
+  while (i < c->impls->len) {
+    var iname: string = sl_get(c->impls, i);
+    if (!cmx_is_ident(cmx_ident(iname))) {
+      return cmx_label(c) + ": impl '" + iname + "' must be an identifier in " + c->mode + " mode (it names Mettle code)";
+    }
+    if (s_eq(iname, c->name) && s_eq(c->mode, "dyn")) {
+      return cmx_label(c) + ": impl '" + iname + "' cannot share the component's name: " + c->name + ".mettle holds the interface";
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// The interface's trait name, or "" with *err set.
+fn cmx_check_dyn(p: Project*, c: CompSpec*, err: string*) -> string {
+  var label: string = cmx_label(c);
+  *err = cmx_check_idents(c);
+  if (slen(*err) > 0) {
+    return s_empty();
+  }
+  var iface: string = c->dir + "/" + c->name + ".mettle";
+  var ishown: string = cmx_show(p, iface);
+  if (!fs_is_file(iface)) {
+    *err = label + ": the interface file " + ishown + " is missing (it holds one @dyn export trait)";
+    return s_empty();
+  }
+  var traits: StrList* = cmx_traits(cmx_read(iface));
+  var good: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < traits->len) {
+    if (!s_starts(sl_get(traits, i), "!")) {
+      sl_push(good, sl_get(traits, i));
+    }
+    i = i + 1;
+  }
+  if (good->len != 1) {
+    var msg: string = label + ": " + ishown + " must hold exactly one @dyn export trait, found " + s_int(good->len);
+    if (good->len == 0 && traits->len > 0) {
+      var bare: string = s_from(sl_get(traits, 0), 1);
+      msg = msg + " (write `@dyn export trait " + bare + "`; the decorator precedes export)";
+    } else if (good->len > 1) {
+      msg = msg + " (" + sl_join(good, ", ") + ")";
+    }
+    *err = msg;
+    cmx_free(traits);
+    cmx_free(good);
+    return s_empty();
+  }
+  var t: string = sl_get(good, 0);
+  cmx_free(traits);
+  cmx_free(good);
+  var structs: StrList* = sl_new();
+  var owners: StrList* = sl_new();
+  i = 0;
+  while (i < c->impls->len && slen(*err) == 0) {
+    var iname: string = sl_get(c->impls, i);
+    var file: string = cmx_impl_file(c, iname);
+    var shown: string = cmx_show(p, file);
+    var text: string = cmx_read(file);
+    var l: ExportList* = scan_exports(text);
+    var ctor: string = c->name + "_" + cmx_ident(iname) + "_new";
+    var want: string = "fn " + ctor + "() -> " + t + "__dyn";
+    var has_ctor: bool = false;
+    var exported: StrList* = sl_new();
+    var k: int64 = 0;
+    while (k < l->n) {
+      var it: ExportItem* = scan_export(l, k);
+      if (s_eq(it->name, ctor) && s_eq(cmx_display(it), want)) {
+        has_ctor = true;
+      }
+      if (s_eq(it->kind, "struct")) {
+        sl_push(exported, it->name);
+      }
+      k = k + 1;
+    }
+    free(l->items);
+    free(l);
+    if (!has_ctor) {
+      *err = label + ": " + shown + " needs `export " + want + "` (how the generated " + c->name + "_new builds it)";
+    }
+    var impls: StrList* = cmx_implementors(text, t);
+    k = 0;
+    while (k < impls->len && slen(*err) == 0) {
+      var sname: string = sl_get(impls, k);
+      var other: int64 = sl_index(structs, sname);
+      if (!sl_has(exported, sname)) {
+        *err = label + ": struct " + sname + " in " + shown + " implements " + t + " but is not exported; export it (`export struct " + sname + "`): @dyn skips an impl for a private struct of another file";
+      } else if (other >= 0) {
+        *err = label + ": struct " + sname + " is declared by both " + sl_get(owners, other) + " and " + shown + "; impl structs need names unique in the program";
+      } else {
+        sl_push(structs, sname);
+        sl_push(owners, shown);
+      }
+      k = k + 1;
+    }
+    cmx_free(impls);
+    cmx_free(exported);
+    i = i + 1;
+  }
+  cmx_free(structs);
+  cmx_free(owners);
+  if (slen(*err) > 0) {
+    return s_empty();
+  }
+  return t;
+}
+
+fn cmx_builtin(ty: string) -> bool {
+  var t: string = s_trim(ty);
+  while (s_ends(t, "*")) {
+    t = s_trim(s_sub(t, 0, slen(t) - 1));
+  }
+  var words: StrList* = s_fields("int8 int16 int32 int64 uint8 uint16 uint32 uint64 float32 float64 bool char string cstring rawptr");
+  var ok: bool = sl_has(words, t);
+  cmx_free(words);
+  return ok;
+}
+
+fn cmx_base_type(ty: string) -> string {
+  var t: string = s_trim(ty);
+  while (s_ends(t, "*")) {
+    t = s_trim(s_sub(t, 0, slen(t) - 1));
+  }
+  return t;
+}
+
+// The slot type of a scanned fn signature: "(n: int32) -> int32" ->
+// "fn(int32) -> int32"; the first non-built-in type in *bad.
+fn cmx_slot_type(sig: string, bad: string*) -> string {
+  *bad = s_empty();
+  var open: int64 = s_find_byte(sig, 40);
+  var depth: int64 = 0;
+  var close: int64 = -1;
+  var i: int64 = open;
+  while (open >= 0 && i < slen(sig) && close < 0) {
+    var c: int32 = s_byte(sig, i);
+    if (c == 40) {
+      depth = depth + 1;
+    } else if (c == 41) {
+      depth = depth - 1;
+      if (depth == 0) {
+        close = i;
+      }
+    }
+    i = i + 1;
+  }
+  if (close < 0) {
+    *bad = sig;
+    return s_empty();
+  }
+  var types: StrList* = sl_new();
+  var params: string = s_trim(s_sub(sig, open + 1, close));
+  if (slen(params) > 0) {
+    var parts: StrList* = s_split(params, 44);
+    var k: int64 = 0;
+    while (k < parts->len) {
+      var part: string = sl_get(parts, k);
+      var colon: int64 = s_find_byte(part, 58);
+      var ty: string = s_trim(s_from(part, colon + 1));
+      if (slen(*bad) == 0 && !cmx_builtin(ty)) {
+        *bad = cmx_base_type(ty);
+      }
+      sl_push(types, ty);
+      k = k + 1;
+    }
+    cmx_free(parts);
+  }
+  var res: string = "fn(" + sl_join(types, ", ") + ")";
+  cmx_free(types);
+  var rest: string = s_trim(s_from(sig, close + 1));
+  if (s_starts(rest, "->")) {
+    var ret: string = s_trim(s_from(rest, 2));
+    if (slen(*bad) == 0 && !cmx_builtin(ret)) {
+      *bad = cmx_base_type(ret);
+    }
+    res = res + " -> " + ret;
+  }
+  return res;
+}
+
+// The swappable functions of one impl file, or *err.
+fn cmx_swap_slots(p: Project*, c: CompSpec*, iname: string, err: string*) -> CmxSlots* {
+  var label: string = cmx_label(c);
+  var file: string = cmx_impl_file(c, iname);
+  var shown: string = cmx_show(p, file);
+  var text: string = cmx_read(file);
+  var lines: StrList* = s_lines(text);
+  var l: ExportList* = scan_exports(text);
+  var out: CmxSlots* = new CmxSlots;
+  out->items = (CmxSlot*)malloc((l->n + 1) * sizeof(CmxSlot));
+  out->n = 0;
+  var k: int64 = 0;
+  while (k < l->n && slen(*err) == 0) {
+    var it: ExportItem* = scan_export(l, k);
+    var at: string = shown + ":" + s_int(it->line);
+    if (!s_eq(it->kind, "fn") || !cmx_decorated(lines, it->line, "@swappable")) {
+      *err = label + ": " + at + ": " + cmx_display(it) + " is not an @swappable export fn; every export of a swap impl is one (`@swappable export fn`, the decorator precedes export)";
+    } else {
+      var bad: string = s_empty();
+      var ty: string = cmx_slot_type(it->sig, &bad);
+      if (slen(bad) > 0) {
+        *err = label + ": " + at + ": fn " + it->name + it->sig + " uses the struct " + bad + "; a swap component's functions take built-in types only (pass a rawptr), see DESIGN.md 15.4";
+      } else {
+        out->items[out->n].name = it->name;
+        out->items[out->n].ty = ty;
+        out->items[out->n].shown = cmx_display(it);
+        out->n = out->n + 1;
+      }
+    }
+    k = k + 1;
+  }
+  free(l->items);
+  free(l);
+  cmx_free(lines);
+  return out;
+}
+
+// The default impl's slots, or 0 with *err set.
+fn cmx_check_swap(p: Project*, c: CompSpec*, err: string*) -> CmxSlots* {
+  var label: string = cmx_label(c);
+  *err = cmx_check_idents(c);
+  if (slen(*err) > 0) {
+    return (CmxSlots*)0;
+  }
+  var dflt: string = sl_get(c->impls, 0);
+  var slots: CmxSlots* = cmx_swap_slots(p, c, dflt, err);
+  if (slen(*err) == 0 && slots->n == 0) {
+    *err = label + ": " + cmx_show(p, cmx_impl_file(c, dflt)) + " exports no @swappable fn";
+  }
+  if (slen(*err) == 0 && slots->n > 256) {
+    *err = label + ": " + s_int(slots->n) + " functions; a swap component has at most 256 (the runtime's staging table)";
+  }
+  var df: string = cmx_impl_file(c, dflt);
+  var def: ApiSurface* = cmx_surface(df, cmx_show(p, df));
+  var i: int64 = 1;
+  while (i < c->impls->len && slen(*err) == 0) {
+    var iname: string = sl_get(c->impls, i);
+    var other: CmxSlots* = cmx_swap_slots(p, c, iname, err);
+    free(other->items);
+    free(other);
+    if (slen(*err) == 0) {
+      var cf: string = cmx_impl_file(c, iname);
+      var cur: ApiSurface* = cmx_surface(cf, cmx_show(p, cf));
+      var mm: string = cmx_mismatch(def, cur, iname, true);
+      free(cur);
+      if (slen(mm) > 0) {
+        *err = label + ": impl " + iname + " does not match " + dflt + " (swap impls have identical signatures): " + mm;
+      }
+    }
+    i = i + 1;
+  }
+  free(def);
+  if (slen(*err) > 0) {
+    free(slots->items);
+    free(slots);
+    return (CmxSlots*)0;
+  }
+  return slots;
+}
+
+fn cmx_check_files(p: Project*, c: CompSpec*) -> string {
+  var i: int64 = 0;
+  while (i < c->impls->len) {
+    var iname: string = sl_get(c->impls, i);
+    var file: string = cmx_impl_file(c, iname);
+    if (!fs_is_file(file)) {
+      return "component " + c->name + ": impl " + iname + " has no file " + cmx_show(p, file);
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// ---------------------------------------------------------------------------
+// Generated modules (15.3, 15.4, 15.8)
+// ---------------------------------------------------------------------------
+
+fn cmx_header(c: CompSpec*, iname: string, b: CmpBuild*) -> string {
+  var what: string = b->target + ", " + b->profile + ", " + b->bin;
+  if (s_eq(c->mode, "static")) {
+    return "// generated by mbuild: component " + c->name + " = " + iname + " (" + what + "); do not edit\n";
+  }
+  return "// generated by mbuild: component " + c->name + " = " + iname + " by default (" + c->mode + "; " + what + "); do not edit\n";
+}
+
+fn cmx_import(path: string) -> string {
+  return "import \"" + cmx_lit(path) + "\";\n";
+}
+
+fn cmx_gen_static(c: CompSpec*, iname: string, b: CmpBuild*) -> string {
+  var g: Buf* = buf_new();
+  buf_add(g, cmx_header(c, iname, b));
+  buf_add(g, cmx_import(cmx_impl_file(c, iname)));
+  buf_add(g, "export const " + cmx_upper(c->name) + "_IMPL: string = \"" + iname + "\";\n");
+  return buf_take(g);
+}
+
+fn cmx_gen_common(g: Buf*, c: CompSpec*, iname: string) {
+  buf_add(g, "export const " + cmx_upper(c->name) + "_IMPL: string = \"" + iname + "\";\n");
+  buf_add(g, "export fn " + c->name + "_impls() -> string {{ return \"" + sl_join(c->impls, " ") + "\"; }\n");
+}
+
+fn cmx_gen_dyn(c: CompSpec*, iname: string, b: CmpBuild*, t: string) -> string {
+  var g: Buf* = buf_new();
+  buf_add(g, cmx_header(c, iname, b));
+  buf_add(g, cmx_import(c->dir + "/" + c->name + ".mettle"));
+  var i: int64 = 0;
+  while (i < c->impls->len) {
+    buf_add(g, cmx_import(cmx_impl_file(c, sl_get(c->impls, i))));
+    i = i + 1;
+  }
+  cmx_gen_common(g, c, iname);
+  var tests: StrList* = sl_new();
+  i = 0;
+  while (i < c->impls->len) {
+    sl_push(tests, "name == \"" + sl_get(c->impls, i) + "\"");
+    i = i + 1;
+  }
+  buf_add(g, "export fn " + c->name + "_has(name: string) -> bool {{ return " + sl_join(tests, " || ") + "; }\n");
+  cmx_free(tests);
+  buf_add(g, "export fn " + c->name + "_new(name: string) -> " + t + "__dyn {{\n");
+  i = 0;
+  while (i < c->impls->len) {
+    var other: string = sl_get(c->impls, i);
+    if (!s_eq(other, iname)) {
+      buf_add(g, "  if (name == \"" + other + "\") {{ return " + c->name + "_" + cmx_ident(other) + "_new(); }\n");
+    }
+    i = i + 1;
+  }
+  buf_add(g, "  return " + c->name + "_" + cmx_ident(iname) + "_new();\n}\n");
+  return buf_take(g);
+}
+
+fn cmx_gen_swap(c: CompSpec*, iname: string, b: CmpBuild*, slots: CmxSlots*) -> string {
+  var g: Buf* = buf_new();
+  buf_add(g, cmx_header(c, iname, b));
+  var i: int64 = 0;
+  while (i < c->impls->len) {
+    var im: string = sl_get(c->impls, i);
+    buf_add(g, "import \"" + cmx_lit(cmx_impl_file(c, im)) + "\" as " + cmx_ident(im) + ";\n");
+    i = i + 1;
+  }
+  buf_add(g, "extern fn mettle_swap_stage(slot: rawptr, replacement: rawptr) -> int32;\n");
+  cmx_gen_common(g, c, iname);
+  var k: int64 = 0;
+  while (k < slots->n) {
+    var s: CmxSlot* = &slots->items[k];
+    buf_add(g, "export var " + s->name + ": " + s->ty + " = &" + cmx_ident(iname) + "." + s->name + ";\n");
+    k = k + 1;
+  }
+  buf_add(g, "export fn " + c->name + "_stage(name: string) -> bool {{\n");
+  i = 0;
+  while (i < c->impls->len) {
+    var id: string = cmx_ident(sl_get(c->impls, i));
+    var cond: string = "  if (name == \"" + sl_get(c->impls, i) + "\") {{";
+    if (slots->n == 1) {
+      buf_add(g, cond + " mettle_swap_stage(&" + slots->items[0].name + ", &" + id + "." + slots->items[0].name + "); return true; }\n");
+    } else {
+      buf_add(g, cond + "\n");
+      k = 0;
+      while (k < slots->n) {
+        buf_add(g, "    mettle_swap_stage(&" + slots->items[k].name + ", &" + id + "." + slots->items[k].name + ");\n");
+        k = k + 1;
+      }
+      buf_add(g, "    return true;\n  }\n");
+    }
+    i = i + 1;
+  }
+  buf_add(g, "  return false;\n}\n");
+  return buf_take(g);
+}
+
+fn cmx_abs(p: Project*, path: string) -> string {
+  if (p_is_abs(path)) {
+    return p_clean(path);
+  }
+  return p_clean(p_join(p->root, path));
+}
+
+// The rule wrapper's text, "" when the root attaches no rules; *err on a missing file.
+fn cmx_gen_entry(p: Project*, b: CmpBuild*, err: string*) -> string {
+  var rules: StrList* = p->man->rules;
+  if (rules->len == 0) {
+    return s_empty();
+  }
+  var g: Buf* = buf_new();
+  buf_add(g, "// generated by mbuild: " + b->bin + " + rules; do not edit\n");
+  buf_add(g, cmx_import(cmx_abs(p, b->entry)));
+  var i: int64 = 0;
+  while (i < rules->len) {
+    var r: string = sl_get(rules, i);
+    var text: FsRead = fs_read(r);
+    if (!text.ok) {
+      *err = "rule file " + cmx_show(p, r) + " does not exist";
+    } else if (!s_contains(text.data, "@rule")) {
+      warn("rule file " + cmx_show(p, r) + " has no @rule function");
+    }
+    buf_add(g, cmx_import(r));
+    i = i + 1;
+  }
+  return buf_take(g);
+}
+
+fn cmx_gen_name(b: CmpBuild*) -> string {
+  return b->target + "-" + b->profile + "-" + b->bin;
+}
+
+fn cmx_info_text(b: CmpBuild*, cs: CmxComps*, packages: StrList*, include_dir: string) -> string {
+  var g: Buf* = buf_new();
+  buf_line(g, "target\t" + b->target);
+  buf_line(g, "profile\t" + b->profile);
+  buf_line(g, "bin\t" + b->bin);
+  buf_line(g, "entry\t" + b->entry);
+  buf_line(g, "deps\t" + include_dir);
+  buf_line(g, "packages\t" + sl_join(packages, " "));
+  var i: int64 = cs->nroot;
+  while (i < cs->n) {
+    var c: CompSpec* = cs->items[i];
+    buf_line(g, "comp\t" + c->name + "\t" + c->mode + "\t" + c->owner + "\t" + c->dir + "\t" + sl_join(c->impls, ",") + "\t" + sl_join(c->os_defaults, ","));
+    i = i + 1;
+  }
+  return buf_take(g);
+}
+
+// Removes the .mettle files of dir that are not in keep.
+fn cmx_remove_stale(dir: string, keep: StrList*) {
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  sys_list_dir(dir, files, dirs);
+  var i: int64 = 0;
+  while (i < files->len) {
+    var f: string = sl_get(files, i);
+    if (s_ends(f, ".mettle") && !sl_has(keep, f)) {
+      sys_remove_file(dir + "/" + f);
+    }
+    i = i + 1;
+  }
+  cmx_free(files);
+  cmx_free(dirs);
+}
+
+fn cmx_out(b: CmpBuild*) -> CmpOut* {
   var o: CmpOut* = new CmpOut;
-  o->err = "not implemented";
+  o->ok = false;
+  o->err = s_empty();
   o->gen_dir = s_empty();
   o->entry = b->entry;
   o->selected = sl_new();
   o->origins = sl_new();
+  o->has_swap = false;
   return o;
 }
 
-export fn cmp_check(p: Project*, ds: DepState*) -> int32 {
-  return 1;
+fn cmx_bin(p: Project*, name: string) -> BinSpec* {
+  var i: int64 = 0;
+  while (i < p->man->nbins) {
+    if (s_eq(p->man->bins[i].name, name)) {
+      return &p->man->bins[i];
+    }
+    i = i + 1;
+  }
+  return (BinSpec*)0;
+}
+
+// Swap components the program imports: their generated files in its graph.
+fn cmx_swap_used(cs: CmxComps*, b: CmpBuild*, gen_dir: string, include_dir: string, entry: string, quiesce: bool*) -> StrList* {
+  var used: StrList* = sl_new();
+  var os: string = b->target;
+  if (!s_eq(os, "linux") && !s_eq(os, "windows")) {
+    os = sys_os();
+  }
+  var ctx: GraphCtx* = graph_ctx_new(os, s_empty());
+  sl_push(ctx->includes, gen_dir);
+  if (slen(include_dir) > 0) {
+    sl_push(ctx->includes, include_dir);
+  }
+  var g: Graph* = graph_build(ctx, entry);
+  var i: int64 = 0;
+  while (i < cs->n) {
+    var c: CompSpec* = cs->items[i];
+    if (s_eq(c->mode, "swap") && graph_has_file(g, gen_dir + "/" + c->name + ".mettle")) {
+      sl_push(used, c->name);
+    }
+    i = i + 1;
+  }
+  var q: StrList* = sl_of("quiesce");
+  i = 0;
+  while (i < g->files->len && !*quiesce) {
+    var hits: StrList* = scan_uses(cmx_read(sl_get(g->files, i)), q);
+    *quiesce = hits->len > 0;
+    cmx_free(hits);
+    i = i + 1;
+  }
+  cmx_free(q);
+  free(g);
+  free(ctx);
+  return used;
+}
+
+fn cmx_prepare(p: Project*, cs: CmxComps*, packages: StrList*, b: CmpBuild*, include_dir: string) -> CmpOut* {
+  var o: CmpOut* = cmx_out(b);
+  o->err = cmx_clashes(p, cs, packages);
+  if (slen(o->err) > 0) {
+    return o;
+  }
+  var picks: CmxPick* = (CmxPick*)malloc((cs->n + 1) * sizeof(CmxPick));
+  o->err = cmx_select(p, cs, b, picks);
+  var gen_dir: string = p->state_dir + "/gen/" + cmx_gen_name(b);
+  var written: StrList* = sl_new();
+  var texts: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < cs->n && slen(o->err) == 0) {
+    var c: CompSpec* = cs->items[i];
+    var iname: string = picks[i].iname;
+    sl_push(o->selected, c->name + "=" + iname);
+    sl_push(o->origins, c->name + "=" + picks[i].origin);
+    o->err = cmx_check_files(p, c);
+    if (slen(o->err) == 0 && s_eq(c->mode, "static")) {
+      o->err = cmx_check_static(p, c, iname);
+      if (slen(o->err) == 0) {
+        sl_push(texts, cmx_gen_static(c, iname, b));
+      }
+    } else if (slen(o->err) == 0 && s_eq(c->mode, "dyn")) {
+      var err: string = s_empty();
+      var t: string = cmx_check_dyn(p, c, &err);
+      o->err = err;
+      if (slen(err) == 0) {
+        sl_push(texts, cmx_gen_dyn(c, iname, b, t));
+      }
+    } else if (slen(o->err) == 0) {
+      var serr: string = s_empty();
+      var slots: CmxSlots* = cmx_check_swap(p, c, &serr);
+      o->err = serr;
+      if (slen(serr) == 0) {
+        sl_push(texts, cmx_gen_swap(c, iname, b, slots));
+        free(slots->items);
+        free(slots);
+      }
+    }
+    sl_push(written, c->name + ".mettle");
+    i = i + 1;
+  }
+  free(picks);
+  var entry_text: string = s_empty();
+  if (slen(o->err) == 0) {
+    var eerr: string = s_empty();
+    entry_text = cmx_gen_entry(p, b, &eerr);
+    o->err = eerr;
+  }
+  if (slen(o->err) > 0) {
+    cmx_free(written);
+    cmx_free(texts);
+    return o;
+  }
+  if (!fs_mkdirs(gen_dir)) {
+    o->err = "could not create " + gen_dir;
+    cmx_free(written);
+    cmx_free(texts);
+    return o;
+  }
+  i = 0;
+  while (i < texts->len) {
+    fs_write_if_changed(gen_dir + "/" + sl_get(written, i), sl_get(texts, i));
+    i = i + 1;
+  }
+  if (slen(entry_text) > 0) {
+    fs_write_if_changed(gen_dir + "/entry.mettle", entry_text);
+    sl_push(written, "entry.mettle");
+    o->entry = gen_dir + "/entry.mettle";
+  }
+  fs_write_if_changed(gen_dir + "/build.info", cmx_info_text(b, cs, packages, include_dir));
+  cmx_remove_stale(gen_dir, written);
+  cmx_free(written);
+  cmx_free(texts);
+  o->gen_dir = gen_dir;
+  var has_swap_comp: bool = false;
+  i = 0;
+  while (i < cs->n) {
+    has_swap_comp = has_swap_comp || s_eq(cs->items[i]->mode, "swap");
+    i = i + 1;
+  }
+  if (has_swap_comp) {
+    var quiesce: bool = false;
+    var used: StrList* = cmx_swap_used(cs, b, gen_dir, include_dir, cmx_abs(p, b->entry), &quiesce);
+    o->has_swap = used->len > 0;
+    var bs: BinSpec* = cmx_bin(p, b->bin);
+    if (o->has_swap && bs != (BinSpec*)0 && cmp_freestanding(bs)) {
+      o->err = "bin " + b->bin + " is freestanding (" + bs->triple + "): component " + sl_get(used, 0) + " is swappable and needs the runtime; use a static or dyn component";
+      cmx_free(used);
+      return o;
+    }
+    i = 0;
+    while (i < used->len && !quiesce) {
+      warn("component " + sl_get(used, i) + " is swappable but the program has no quiesce; a staged swap never applies");
+      i = i + 1;
+    }
+    cmx_free(used);
+  }
+  o->ok = true;
+  return o;
+}
+
+// Writes the gen dir of one build (components, rule wrapper) and answers
+// the -I directory and the entry to compile; selected/origins list every
+// component.
+export fn cmp_prepare(p: Project*, ds: DepState*, b: CmpBuild*) -> CmpOut* {
+  var cs: CmxComps* = cmx_collect(p, ds);
+  var packages: StrList* = cmx_packages(p, ds);
+  var include_dir: string = s_empty();
+  if (ds != (DepState*)0) {
+    include_dir = ds->include_dir;
+  }
+  var o: CmpOut* = cmx_prepare(p, cs, packages, b, include_dir);
+  free(cs->items);
+  free(cs);
+  cmx_free(packages);
+  return o;
+}
+
+// ---------------------------------------------------------------------------
+// Bin kinds and freestanding bins (15.7); B decides the flags
+// ---------------------------------------------------------------------------
+
+export fn cmp_freestanding(b: BinSpec*) -> bool {
+  return s_ends(b->triple, "-none");
+}
+
+// "" or why the bin cannot be built as declared.
+export fn cmp_bin_problem(p: Project*, b: BinSpec*, st: Settings*) -> string {
+  var label: string = "bin " + b->name;
+  if (s_eq(b->kind, "flat") && (!cmp_freestanding(b) || st == (Settings*)0 || slen(st->image_base) == 0)) {
+    return label + ": kind = \"flat\" needs a freestanding triple (triple = \"x86_64-none\") and image-base = \"0x100000\"";
+  }
+  if (cmp_freestanding(b)) {
+    var c: StrList* = man_os_list(p->man, "c.sources", "linux");
+    var cw: StrList* = man_os_list(p->man, "c.sources", "windows");
+    var l: StrList* = man_os_list(p->man, "link.libs", "linux");
+    var lw: StrList* = man_os_list(p->man, "link.libs", "windows");
+    var native: bool = c->len + cw->len + l->len + lw->len > 0;
+    cmx_free(c);
+    cmx_free(cw);
+    cmx_free(l);
+    cmx_free(lw);
+    if (native) {
+      return label + " is freestanding (" + b->triple + "): [c] and [link] need a runtime to link against";
+    }
+  }
+  return s_empty();
+}
+
+// flags without the ones the compiler refuses on *-none triples.
+export fn cmp_freestanding_flags(flags: StrList*) -> StrList* {
+  var out: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < flags->len) {
+    var f: string = sl_get(flags, i);
+    if (s_eq(f, "--safe") || s_eq(f, "--check-effects")) {
+      verbose("dropping " + f + " for a freestanding bin (the compiler refuses it on *-none)");
+    } else {
+      sl_push(out, f);
+    }
+    i = i + 1;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// mbuild components [--check]
+// ---------------------------------------------------------------------------
+
+fn cmx_target(p: Project*) -> string {
+  if (p->opts != (Options*)0 && p->opts->targets->len > 0) {
+    return sl_get(p->opts->targets, 0);
+  }
+  return sys_os();
+}
+
+fn cmx_profile(p: Project*) -> string {
+  if (p->opts == (Options*)0) {
+    return "debug";
+  }
+  if (p->opts->release && s_eq(p->opts->profile, "debug")) {
+    return "release";
+  }
+  return p->opts->profile;
+}
+
+fn cmx_settings(p: Project*, target: string, profile: string, bin: string) -> Settings* {
+  var q: SettingsQuery;
+  q.profile = profile;
+  q.bin = bin;
+  q.target = target;
+  q.sets = (StrList*)0;
+  if (p->opts != (Options*)0) {
+    q.sets = p->opts->sets;
+  }
+  return man_settings(p->man, &q);
+}
+
+fn cmx_row(cols: StrList*, widths: int64*) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < cols->len) {
+    if (i + 1 < cols->len) {
+      buf_add(b, s_pad_right(sl_get(cols, i), widths[i] + 2));
+    } else {
+      buf_add(b, sl_get(cols, i));
+    }
+    i = i + 1;
+  }
+  return buf_take(b);
 }
 
 export fn cmp_cmd_components(p: Project*, ds: DepState*) -> int32 {
-  return 1;
+  if (p->opts != (Options*)0 && sl_has(p->opts->rest, "--check")) {
+    return cmp_check(p, ds);
+  }
+  var cs: CmxComps* = cmx_collect(p, ds);
+  var packages: StrList* = cmx_packages(p, ds);
+  var err: string = cmx_clashes(p, cs, packages);
+  cmx_free(packages);
+  if (cs->n == 0) {
+    say("no components (declare one with mb_component in mbuild.mettle, DESIGN.md 15.2)");
+    free(cs->items);
+    free(cs);
+    return 0;
+  }
+  var b: CmpBuild;
+  b.target = cmx_target(p);
+  b.profile = cmx_profile(p);
+  b.bin = s_empty();
+  b.entry = s_empty();
+  b.settings = cmx_settings(p, b.target, b.profile, "");
+  if (slen(err) == 0) {
+    err = b.settings->error;
+  }
+  var picks: CmxPick* = (CmxPick*)malloc((cs->n + 1) * sizeof(CmxPick));
+  if (slen(err) == 0) {
+    err = cmx_select(p, cs, &b, picks);
+  }
+  if (slen(err) > 0) {
+    error_msg(err);
+    free(picks);
+    free(cs->items);
+    free(cs);
+    return 1;
+  }
+  var rows: StrList** = (StrList**)malloc((cs->n + 1) * 8);
+  rows[0] = sl_new();
+  sl_push(rows[0], "COMPONENT");
+  sl_push(rows[0], "MODE");
+  sl_push(rows[0], "IMPLS");
+  sl_push(rows[0], "SELECTED (" + b.target + ", " + b.profile + ")");
+  sl_push(rows[0], "FROM");
+  var widths: int64* = (int64*)malloc(5 * 8);
+  var i: int64 = 0;
+  while (i < 5) {
+    widths[i] = slen(sl_get(rows[0], i));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < cs->n) {
+    var c: CompSpec* = cs->items[i];
+    var r: StrList* = sl_new();
+    sl_push(r, c->name);
+    sl_push(r, c->mode);
+    sl_push(r, sl_join(c->impls, " "));
+    if (s_eq(c->mode, "static")) {
+      sl_push(r, picks[i].iname);
+    } else {
+      sl_push(r, picks[i].iname + " (all linked)");
+    }
+    sl_push(r, picks[i].origin);
+    var k: int64 = 0;
+    while (k < 5) {
+      if (slen(sl_get(r, k)) > widths[k]) {
+        widths[k] = slen(sl_get(r, k));
+      }
+      k = k + 1;
+    }
+    rows[i + 1] = r;
+    i = i + 1;
+  }
+  i = 0;
+  while (i <= cs->n) {
+    say(cmx_row(rows[i], widths));
+    cmx_free(rows[i]);
+    i = i + 1;
+  }
+  free(rows);
+  free(widths);
+  free(picks);
+  free(cs->items);
+  free(cs);
+  return 0;
 }
 
+fn cmx_json_field(line: string, key: string) -> string {
+  var pat: string = "\"" + key + "\":";
+  var at: int64 = s_find(line, pat);
+  if (at < 0) {
+    return s_empty();
+  }
+  var i: int64 = at + slen(pat);
+  while (i < slen(line) && s_byte(line, i) == 32) {
+    i = i + 1;
+  }
+  var quoted: bool = i < slen(line) && s_byte(line, i) == 34;
+  if (quoted) {
+    i = i + 1;
+  }
+  var b: Buf* = buf_new();
+  while (i < slen(line)) {
+    var c: int32 = s_byte(line, i);
+    if (quoted && c == 34) {
+      break;
+    }
+    if (!quoted && (c == 44 || c == 125)) {
+      break;
+    }
+    if (quoted && c == 92 && i + 1 < slen(line)) {
+      i = i + 1;
+      c = s_byte(line, i);
+      if (c == 110) {
+        c = 10;
+      }
+    }
+    buf_addb(b, c);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// The compiler's errors from --error-format=json output, "file:line: message".
+fn cmx_diag(p: Project*, text: string) -> StrList* {
+  var res: StrList* = sl_new();
+  var lines: StrList* = s_lines(text);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var line: string = s_trim(sl_get(lines, i));
+    if (s_starts(line, "{{") && s_eq(cmx_json_field(line, "severity"), "error")) {
+      var file: string = s_replace_byte(cmx_json_field(line, "file"), 92, 47);
+      sl_push(res, cmx_show(p, cmx_abs(p, file)) + ":" + cmx_json_field(line, "line") + ": " + cmx_json_field(line, "message"));
+    }
+    i = i + 1;
+  }
+  cmx_free(lines);
+  if (res->len == 0 && slen(s_trim(text)) > 0) {
+    sl_push(res, s_trim(text));
+  }
+  return res;
+}
+
+// Interface checks of every component, then every impl of every static
+// component compiled for the host as an object, so unselected impls cannot rot.
+export fn cmp_check(p: Project*, ds: DepState*) -> int32 {
+  var cs: CmxComps* = cmx_collect(p, ds);
+  var packages: StrList* = cmx_packages(p, ds);
+  var b: CmpBuild;
+  b.target = sys_os();
+  b.profile = "debug";
+  b.bin = "check";
+  b.entry = s_empty();
+  b.settings = (Settings*)0;
+  var include_dir: string = s_empty();
+  if (ds != (DepState*)0) {
+    include_dir = ds->include_dir;
+  }
+  var errors: int64 = 0;
+  var prep: CmpOut* = cmx_prepare(p, cs, packages, &b, include_dir);
+  if (!prep->ok) {
+    error_msg(prep->err);
+    errors = errors + 1;
+  }
+  var nimpls: int64 = 0;
+  var i: int64 = 0;
+  while (i < cs->n && prep->ok) {
+    var c: CompSpec* = cs->items[i];
+    var k: int64 = 1;
+    while (s_eq(c->mode, "static") && k < c->impls->len) {
+      var err: string = cmx_check_static(p, c, sl_get(c->impls, k));
+      if (slen(err) > 0) {
+        error_msg(err);
+        errors = errors + 1;
+      }
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  var tc: Mettle* = (Mettle*)0;
+  var tmp: string = p->state_dir + "/tmp";
+  fs_mkdirs(tmp);
+  i = 0;
+  while (i < cs->n && prep->ok) {
+    var c2: CompSpec* = cs->items[i];
+    var k2: int64 = 0;
+    while (s_eq(c2->mode, "static") && k2 < c2->impls->len) {
+      if (tc == (Mettle*)0) {
+        tc = tc_select(p, sys_os());
+      }
+      var iname: string = sl_get(c2->impls, k2);
+      var obj: string = tmp + "/check-" + c2->name + "-" + iname + ".o";
+      var cmd: Cmd* = tc_cmd(tc);
+      cmd_path(cmd, cmx_impl_file(c2, iname));
+      cmd_arg(cmd, "-o");
+      cmd_path(cmd, obj);
+      cmd_arg(cmd, "-I");
+      cmd_path(cmd, prep->gen_dir);
+      if (slen(include_dir) > 0) {
+        cmd_arg(cmd, "-I");
+        cmd_path(cmd, include_dir);
+      }
+      cmd_arg(cmd, "--error-format=json");
+      cmd_env(cmd, "NO_COLOR", "1");
+      cmd->cwd = p->root;
+      status("Checking", c2->name + " = " + iname);
+      var cap: Captured = proc_capture_all(cmd);
+      sys_remove_file(obj);
+      if (cap.code != 0) {
+        var diags: StrList* = cmx_diag(p, cap.out);
+        var d: int64 = 0;
+        while (d < diags->len && d < 3) {
+          error_msg("component " + c2->name + ": impl " + iname + ": " + sl_get(diags, d));
+          d = d + 1;
+        }
+        cmx_free(diags);
+        errors = errors + 1;
+      }
+      free(cmd);
+      nimpls = nimpls + 1;
+      k2 = k2 + 1;
+    }
+    i = i + 1;
+  }
+  free(cs->items);
+  free(cs);
+  cmx_free(packages);
+  if (errors > 0) {
+    return 1;
+  }
+  status("Checked", s_int(nimpls) + " static impls, every component's interface");
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// mbuild use NAME IMPL | NAME
+// ---------------------------------------------------------------------------
+
+struct CmxInfo {
+  b: CmpBuild;
+  include_dir: string;
+  packages: StrList*;
+  deps: CompSpec*;
+  ndeps: int64;
+}
+
+fn cmx_info_read(path: string) -> CmxInfo* {
+  var r: FsRead = fs_read(path);
+  if (!r.ok) {
+    return (CmxInfo*)0;
+  }
+  var info: CmxInfo* = new CmxInfo;
+  info->b.target = s_empty();
+  info->b.profile = s_empty();
+  info->b.bin = s_empty();
+  info->b.entry = s_empty();
+  info->b.settings = (Settings*)0;
+  info->include_dir = s_empty();
+  info->packages = sl_new();
+  info->deps = (CompSpec*)0;
+  info->ndeps = 0;
+  var lines: StrList* = s_lines(r.data);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var f: StrList* = s_split(sl_get(lines, i), 9);
+    var key: string = sl_get(f, 0);
+    var val: string = s_empty();
+    if (f->len > 1) {
+      val = sl_get(f, 1);
+    }
+    if (s_eq(key, "target")) { info->b.target = val; }
+    else if (s_eq(key, "profile")) { info->b.profile = val; }
+    else if (s_eq(key, "bin")) { info->b.bin = val; }
+    else if (s_eq(key, "entry")) { info->b.entry = val; }
+    else if (s_eq(key, "deps")) { info->include_dir = val; }
+    else if (s_eq(key, "packages")) {
+      cmx_free(info->packages);
+      info->packages = s_fields(val);
+    } else if (s_eq(key, "comp") && f->len >= 7) {
+      if (info->ndeps % 8 == 0) {
+        info->deps = (CompSpec*)realloc(info->deps, (info->ndeps + 8) * sizeof(CompSpec));
+      }
+      var c: CompSpec* = &info->deps[info->ndeps];
+      c->name = val;
+      c->mode = sl_get(f, 2);
+      c->owner = sl_get(f, 3);
+      c->dir = sl_get(f, 4);
+      c->impls = s_split(sl_get(f, 5), 44);
+      c->os_defaults = sl_new();
+      if (slen(sl_get(f, 6)) > 0) {
+        cmx_free(c->os_defaults);
+        c->os_defaults = s_split(sl_get(f, 6), 44);
+      }
+      c->line = 0;
+      info->ndeps = info->ndeps + 1;
+    }
+    cmx_free(f);
+    i = i + 1;
+  }
+  cmx_free(lines);
+  return info;
+}
+
+fn cmx_info_comps(p: Project*, info: CmxInfo*) -> CmxComps* {
+  var cs: CmxComps* = cmx_comps_new();
+  cmx_add_root(cs, p);
+  var i: int64 = 0;
+  while (i < info->ndeps) {
+    cmx_push(cs, &info->deps[i]);
+    i = i + 1;
+  }
+  return cs;
+}
+
+// Every gen dir of the project with its build.info, sorted.
+fn cmx_gen_dirs(p: Project*) -> StrList* {
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  sys_list_dir(p->state_dir + "/gen", files, dirs);
+  cmx_free(files);
+  var out: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < dirs->len) {
+    var d: string = p->state_dir + "/gen/" + sl_get(dirs, i);
+    if (fs_is_file(d + "/build.info")) {
+      sl_push(out, d);
+    }
+    i = i + 1;
+  }
+  cmx_free(dirs);
+  sl_sort(out);
+  return out;
+}
+
+// The root's components plus those any gen dir knows of (dependencies').
+fn cmx_known(p: Project*, dirs: StrList*) -> CmxComps* {
+  var cs: CmxComps* = cmx_comps_new();
+  cmx_add_root(cs, p);
+  var i: int64 = 0;
+  while (i < dirs->len) {
+    var info: CmxInfo* = cmx_info_read(sl_get(dirs, i) + "/build.info");
+    var k: int64 = 0;
+    while (info != (CmxInfo*)0 && k < info->ndeps) {
+      if (cmx_find(cs, info->deps[k].name) < 0) {
+        cmx_push(cs, &info->deps[k]);
+      }
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  return cs;
+}
+
+fn cmx_set_local(p: Project*, name: string, iname: string) {
+  var lc: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < p->man->local_components->len) {
+    var it: string = sl_get(p->man->local_components, i);
+    if (!s_starts(it, name + "=")) {
+      sl_push(lc, it);
+    }
+    i = i + 1;
+  }
+  if (slen(iname) > 0) {
+    sl_push(lc, name + "=" + iname);
+  }
+  p->man->local_components = lc;
+  if (p->man->local != (Manifest*)0) {
+    p->man->local->local_components = lc;
+  }
+}
+
+// Writes or removes mb_use(NAME, ...) in mbuild.local.mettle, then
+// regenerates every existing gen dir. Takes NAME IMPL, NAME=IMPL or NAME.
 export fn cmp_cmd_use(p: Project*) -> int32 {
-  return 1;
-}
-
-// 0-terminated.
-export fn cmp_all(p: Project*, ds: DepState*) -> CompSpec** {
-  var all: CompSpec** = (CompSpec**)malloc(8);
-  all[0] = (CompSpec*)0;
-  return all;
+  if (p->opts == (Options*)0 || p->opts->rest->len == 0 || p->opts->rest->len > 2) {
+    error_msg("usage: mbuild use NAME IMPL (or mbuild use NAME to drop the local choice)");
+    return 2;
+  }
+  var arg: string = sl_join(p->opts->rest, "=");
+  var eq: int64 = s_find_byte(arg, 61);
+  var name: string = arg;
+  var iname: string = s_empty();
+  if (eq >= 0) {
+    name = s_trim(s_sub(arg, 0, eq));
+    iname = s_trim(s_from(arg, eq + 1));
+    if (slen(iname) == 0) {
+      error_msg("mbuild use " + arg + ": name an impl (NAME IMPL), or drop the local choice with mbuild use " + name);
+      return 2;
+    }
+  }
+  var dirs: StrList* = cmx_gen_dirs(p);
+  var known: CmxComps* = cmx_known(p, dirs);
+  var k: int64 = cmx_find(known, name);
+  if (k < 0) {
+    var msg: string = "no component '" + name + "'";
+    var names: StrList* = cmx_names(known);
+    var sug: string = man_suggest(name, names);
+    cmx_free(names);
+    if (slen(sug) > 0) {
+      msg = msg + " (did you mean '" + sug + "'?)";
+    }
+    error_msg(msg);
+    return 1;
+  }
+  if (slen(iname) > 0) {
+    var problem: string = cmx_impl_problem(known->items[k], iname);
+    if (slen(problem) > 0) {
+      error_msg(problem);
+      return 1;
+    }
+  }
+  var file: string = p->root + "/mbuild.local.mettle";
+  var text: string = cmx_read(file);
+  if (slen(text) == 0) {
+    text = "import \"mbuild/api\";\n\nfn local() {{\n}\n";
+  }
+  var e: MbfEdit;
+  if (slen(iname) > 0) {
+    var args: StrList* = sl_of(name);
+    sl_push(args, iname);
+    e = mbf_set_call(text, "mb_use", name, args);
+    cmx_free(args);
+  } else {
+    e = mbf_remove_call(text, "mb_use", name);
+  }
+  if (!e.ok) {
+    error_msg("could not edit " + cmx_show(p, file) + ": " + e.why);
+    return 1;
+  }
+  if (!s_eq(e.text, text) && !fs_write(file, e.text)) {
+    error_msg("could not write " + file);
+    return 1;
+  }
+  cmx_set_local(p, name, iname);
+  var rc: int32 = 0;
+  var i: int64 = 0;
+  while (i < dirs->len) {
+    var info: CmxInfo* = cmx_info_read(sl_get(dirs, i) + "/build.info");
+    var cs: CmxComps* = cmx_info_comps(p, info);
+    var st: Settings* = cmx_settings(p, info->b.target, info->b.profile, info->b.bin);
+    info->b.settings = st;
+    var o: CmpOut* = cmx_prepare(p, cs, info->packages, &info->b, info->include_dir);
+    if (!o->ok) {
+      error_msg(o->err);
+      rc = 1;
+    }
+    free(cs->items);
+    free(cs);
+    i = i + 1;
+  }
+  var b: CmpBuild;
+  b.target = cmx_target(p);
+  b.profile = cmx_profile(p);
+  b.bin = s_empty();
+  b.entry = s_empty();
+  b.settings = cmx_settings(p, b.target, b.profile, "");
+  var picks: CmxPick* = (CmxPick*)malloc((known->n + 1) * sizeof(CmxPick));
+  if (slen(b.settings->error) == 0 && slen(cmx_select(p, known, &b, picks)) == 0) {
+    status("Using", name + " = " + picks[k].iname + " (" + picks[k].origin + ")");
+  }
+  free(picks);
+  free(known->items);
+  free(known);
+  cmx_free(dirs);
+  return rc;
 }
