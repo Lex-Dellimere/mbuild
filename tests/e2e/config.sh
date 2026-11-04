@@ -208,7 +208,7 @@ EOF
   expect_line "$mode: failing hook message" "$out" "error: hook_post_build failed (exit 2) for linux debug"
   expect_eq "$mode: failing hook exit" "$code" "2"
   out=$("$D" hook pre_build); expect_eq "$mode: absent hook is 0" "$out" "hook exit 0"
-  out=$("$D" nosuch 2>&1); expect_has "$mode: unknown command" "$out" "error: no command 'nosuch'"
+  out=$("$D" nosuch 2>&1); expect_has "$mode: unknown command" "$out" "error: no command named nosuch"
 
   echo "== $mode: edits"
   cd "$P/viewer"

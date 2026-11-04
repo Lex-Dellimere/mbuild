@@ -4543,10 +4543,10 @@ fn bx_suggest(info: MbfInfo*, name: string) -> string {
   return sug;
 }
 
-// error: no command 'x' + a suggestion over built-ins and project commands.
+// error: no command named x + a suggestion over built-ins and project commands.
 fn bx_unknown_cmd(info: MbfInfo*, name: string) {
   var sug: string = bx_suggest(info, name);
-  var msg: string = "no command '" + name + "'";
+  var msg: string = "no command named " + name;
   if (slen(sug) == 0) {
     fail_hint(msg, "run `mbuild help` for the commands");
   }

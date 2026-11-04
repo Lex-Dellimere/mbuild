@@ -243,7 +243,7 @@ install - build a release and copy it into a bin directory (default ~/.local/bin
   mbuild install --to DIR puts it somewhere else.
 From: mbuild.mettle:19 (fn cmd_install)
 $ mbuild instal
-error: no command 'instal'
+error: no command named instal
   help: did you mean install? (mbuild.mettle)
 ```
 

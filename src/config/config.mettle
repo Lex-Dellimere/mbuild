@@ -528,7 +528,7 @@ export fn cfg_run_command(p: Project*, name: string, args: StrList*) -> int32 {
     }
     i = i + 1;
   }
-  error_msg("no command '" + name + "' in " + cfx_show(p, cfx_mbfile(p)));
+  error_msg("no command named " + name + " in " + cfx_show(p, cfx_mbfile(p)));
   return 1;
 }
 
