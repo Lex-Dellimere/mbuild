@@ -700,6 +700,27 @@ fn dx_req_at(l: DxReqs*, i: int64) -> DxReq* {
   return l->items[i];
 }
 
+// A path package's declared name must be the key it is imported by
+// (directory names never matter). file_dir is the directory of the
+// mbuild.mettle that names it; "" for mbuild.local.mettle.
+fn dx_check_name(p: Project*, m: Manifest*, key: string, rel: string, call: string, file_dir: string) {
+  if (slen(m->name) == 0 || s_eq(m->name, key)) {
+    return;
+  }
+  var file: string = "mbuild.local.mettle";
+  if (slen(file_dir) > 0) {
+    file = dx_rel(p->root, file_dir) + "/mbuild.mettle";
+    if (s_starts(file, "./")) {
+      file = s_from(file, 2);
+    }
+  }
+  var msg: string = rel + " is package `" + m->name + "`, not `" + key + "`";
+  if (s_eq(call, "mb_dep_path")) {
+    dx_fail_hint(msg, "in " + file + ": " + call + "(\"" + m->name + "\", \"" + rel + "\");");
+  }
+  dx_fail_hint(msg, "in " + file + ": point " + call + "(\"" + key + "\", ...) at a package named " + key + ", or remove the replacement");
+}
+
 // Every local path package reachable from the root (nested ones relative to
 // the package that names them).
 fn dx_collect_paths(cx: DxCx*) {
@@ -730,6 +751,9 @@ fn dx_collect_paths(cx: DxCx*) {
           pp->rel = d->path;
           pp->dir = dir;
           pp->man = dx_local_manifest(cx->p, dir, d->key);
+          if (pp->man != (Manifest*)0) {
+            dx_check_name(cx->p, pp->man, d->key, d->path, "mb_dep_path", m->dir);
+          }
           dpa_push(cx->paths, pp);
           if (pp->man != (Manifest*)0) {
             dma_push(mans, pp->man);
@@ -768,6 +792,13 @@ fn dx_collect_rpaths(cx: DxCx*) {
     rp->rel = rs->path;
     rp->dir = dir;
     rp->man = dx_local_manifest(cx->p, dir, rs->module);
+    if (rp->man != (Manifest*)0) {
+      if (rs->local) {
+        dx_check_name(cx->p, rp->man, rs->module, rs->path, "mb_replace_path", "");
+      } else {
+        dx_check_name(cx->p, rp->man, rs->module, rs->path, "mb_replace_path", cx->p->root);
+      }
+    }
     rp->local = rs->local;
     rp->reqs = drq_new();
     drp_push(cx->rpaths, rp);

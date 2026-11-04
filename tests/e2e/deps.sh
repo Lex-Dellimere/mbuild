@@ -325,6 +325,42 @@ mb_dep_path("widgets", "../widgets");
 EOF
 drv "$P" ensure
 check "path package with mbuild.toml" has "$S/last.out" "error: ../widgets has mbuild.toml, which is no longer read; it needs an mbuild.mettle"
+P="$S/raize_web"
+proj "$P" </dev/null
+sed -i 's/"raize_web"/"raize"/' "$P/mbuild.mettle"
+P="$S/webapp"
+proj "$P" <<'EOF'
+mb_dep_path("raize_web", "../raize_web");
+EOF
+drv "$P" ensure
+check "path package under another name exits 1" code_is 1
+check "path package under another name" has "$S/last.out" 'error: ../raize_web is package `raize`, not `raize_web`'
+check "... help names the fix" has "$S/last.out" 'help: in mbuild.mettle: mb_dep_path("raize", "../raize_web");'
+check "... no mettle.deps line" sh -c '! grep -qs "^raize_web=" "$0/mettle.deps"' "$P"
+proj "$P" <<'EOF'
+mb_dep_path("raize", "../raize_web");
+EOF
+drv "$P" ensure
+check "the directory name does not matter" code_is 0
+check "... mapped by its package name" has "$P/mettle.deps" "raize=../raize_web"
+proj "$P" <<'EOF'
+mb_dep("strutil", "v1.0.0");
+mb_replace_path("strutil", "../raize_web");
+EOF
+drv "$P" ensure
+check "path replacement under another name" has "$S/last.out" 'error: ../raize_web is package `raize`, not `strutil`'
+check "... help" has "$S/last.out" 'help: in mbuild.mettle: point mb_replace_path("strutil", ...) at a package named strutil, or remove the replacement'
+rm -rf "$S/badreg" && cp -r "$R" "$S/badreg"
+cp "$R/pkg/strutil/strutil-v1.0.0.toml" "$S/badreg/pkg/textfmt/textfmt-v0.1.0.toml"
+sed -i "s/manifest=.*/manifest=$(sha256sum "$S/badreg/pkg/textfmt/textfmt-v0.1.0.toml" | cut -c1-64)/" "$S/badreg/index/textfmt"
+proj "$P" <<'EOF'
+mb_dep("textfmt", "v0.1.0");
+EOF
+MBUILD_REGISTRY="$S/badreg"
+drv "$P" ensure
+MBUILD_REGISTRY="$R"
+check "registry manifest under another name exits 1" code_is 1
+check "registry manifest under another name" has "$S/last.out" 'textfmt v0.1.0 is package `strutil`, not `textfmt`'
 P="$S/edit"
 proj "$P" <<'EOF'
 mb_dep("apilib", "v1.0.0");

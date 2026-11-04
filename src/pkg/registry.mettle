@@ -635,6 +635,10 @@ export fn reg_manifest(p: Project*, ix: RegIndex*, version: string) -> Manifest*
     rgx_set("other", m->error);
     return (Manifest*)0;
   }
+  if (slen(m->name) > 0 && !s_eq(m->name, ix->name)) {
+    rgx_set("other", "registry " + ix->registry + ": " + rgx_label(ix, v->version) + " is package `" + m->name + "`, not `" + ix->name + "`\n  help: the registry entry is broken; a package can only be published under the name it declares");
+    return (Manifest*)0;
+  }
   return m;
 }
 
