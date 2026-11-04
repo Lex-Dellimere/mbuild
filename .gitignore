@@ -49,3 +49,4 @@ scratch/
 
 # Mettle compiler bug reports: local only, never pushed
 reports/
+/mettle.deps
