@@ -187,6 +187,7 @@ mkdir -p "$W/live/src" && cd "$W/live"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("live", "0.1.0");\n}\n' > mbuild.mettle
 cat > src/main.mettle <<'EOF'
 import "std/io";
+import "std/thread";
 
 fn value() -> int32 { return 1; }
 
@@ -195,7 +196,7 @@ fn main() -> int32 {
   while (i < 60) {
     print("{value()}\n");
     quiesce;
-    mettle_sleep_ms(100);
+    thread_sleep_ms(100);
     i = i + 1;
   }
   return 0;
