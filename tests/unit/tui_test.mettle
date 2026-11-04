@@ -1,0 +1,317 @@
+// tui_test: lib/tui's UTF-8 and widths, its diff renderer played on an
+// in-memory terminal, and its key parser.
+//   tools/mcheck.sh tests/unit/tui_test.mettle --run   (tests/e2e/shell.sh runs it)
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../lib/tui/src/tui";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_ok(name: string, ok: bool, detail: string) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    if (slen(detail) > 0) {
+      say("     " + detail);
+    }
+  }
+}
+
+fn t_eq(name: string, got: string, want: string) {
+  t_ok(name, s_eq(got, want), "got [" + got + "] want [" + want + "]");
+}
+
+fn t_int(name: string, got: int64, want: int64) {
+  t_ok(name, got == want, "got " + s_int(got) + " want " + s_int(want));
+}
+
+// ---------------------------------------------------------------------------
+// An in-memory terminal: CSI H moves, CSI m and other CSIs ignored, the rest
+// is UTF-8 text written at the cursor (a wide character takes two columns).
+// ---------------------------------------------------------------------------
+
+struct Screen {
+  w: int64;
+  h: int64;
+  cells: int32*;
+  x: int64;
+  y: int64;
+}
+
+fn scr_new(w: int64, h: int64) -> Screen* {
+  var s: Screen* = new Screen;
+  s->w = w;
+  s->h = h;
+  s->cells = (int32*)malloc(w * h * 4);
+  var i: int64 = 0;
+  while (i < w * h) {
+    s->cells[i] = 32;
+    i = i + 1;
+  }
+  s->x = 0;
+  s->y = 0;
+  return s;
+}
+
+fn scr_play(s: Screen*, p: uint8*, n: int64) {
+  var data: string = s_view(p, n);
+  var i: int64 = 0;
+  while (i < n) {
+    var c: int32 = (int32)p[i];
+    if (c == 27 && i + 1 < n && (int32)p[i + 1] == 91) {
+      var k: int64 = i + 2;
+      while (k < n && ((int32)p[k] < 0x40 || (int32)p[k] > 0x7E)) {
+        k = k + 1;
+      }
+      var params: string = s_sub(data, i + 2, k);
+      var fin: int32 = (int32)p[k];
+      if (fin == 72) {
+        var semi: int64 = s_find_byte(params, 59);
+        s->y = s_to_int(s_sub(params, 0, semi)) - 1;
+        s->x = s_to_int(s_from(params, semi + 1)) - 1;
+      } else if (fin == 74 && s_eq(params, "2")) {
+        var j: int64 = 0;
+        while (j < s->w * s->h) {
+          s->cells[j] = 32;
+          j = j + 1;
+        }
+      }
+      i = k + 1;
+      continue;
+    }
+    var at: int64 = i;
+    var cp: int32 = tui_utf8_next(data, &at);
+    i = at;
+    if (s->x < s->w && s->y < s->h) {
+      s->cells[s->y * s->w + s->x] = cp;
+      if (tui_cp_width(cp) == 2 && s->x + 1 < s->w) {
+        s->cells[s->y * s->w + s->x + 1] = -1;
+        s->x = s->x + 1;
+      }
+    }
+    s->x = s->x + 1;
+  }
+}
+
+fn scr_row(s: Screen*, y: int64) -> string {
+  var b: Buf* = buf_new();
+  var x: int64 = 0;
+  while (x < s->w) {
+    var cp: int32 = s->cells[y * s->w + x];
+    if (cp >= 0) {
+      var u: uint8[4];
+      var nb: int64 = tui_utf8_put(&u[0], cp);
+      var k: int64 = 0;
+      while (k < nb) {
+        buf_addb(b, (int32)u[k]);
+        k = k + 1;
+      }
+    }
+    x = x + 1;
+  }
+  return buf_take(b);
+}
+
+fn present_on(t: Tui*, s: Screen*) -> int64 {
+  t->olen = 0;
+  var n: int64 = tui_present(t);
+  scr_play(s, t->out, t->olen);
+  t->olen = 0;
+  return n;
+}
+
+fn test_utf8() {
+  var s: string = "aé€😀";
+  var at: int64 = 0;
+  t_int("utf8 ascii", (int64)tui_utf8_next(s, &at), 97);
+  t_int("utf8 2 bytes", (int64)tui_utf8_next(s, &at), 0xE9);
+  t_int("utf8 3 bytes", (int64)tui_utf8_next(s, &at), 0x20AC);
+  t_int("utf8 4 bytes", (int64)tui_utf8_next(s, &at), 0x1F600);
+  t_int("utf8 consumed", at, slen(s));
+  var u: uint8[4];
+  t_int("utf8 put 3", tui_utf8_put(&u[0], 0x20AC), 3);
+  t_ok("utf8 put bytes", (int32)u[0] == 0xE2 && (int32)u[1] == 0x82 && (int32)u[2] == 0xAC, "");
+  var bad: Buf* = buf_new();
+  buf_addb(bad, 0xC3);
+  var bs: string = buf_take(bad);
+  at = 0;
+  t_int("utf8 cut short", (int64)tui_utf8_next(bs, &at), 0xFFFD);
+  t_int("width ascii", tui_width("hello"), 5);
+  t_int("width cjk", tui_width("日本"), 4);
+  t_int("width emoji", tui_width("😀"), 2);
+  t_int("width combining", tui_width("é"), 1);
+  t_int("width box", tui_width("─❯●"), 3);
+  t_eq("clip ascii", tui_clip("abcdef", 3), "abc");
+  t_eq("clip never halves a wide char", tui_clip("a日本", 2), "a");
+  t_eq("clip wide fits", tui_clip("a日本", 3), "a日");
+}
+
+fn test_render() {
+  var t: Tui* = tui_fake(20, 4);
+  var s: Screen* = scr_new(20, 4);
+  tui_clear(t);
+  tui_print(t, 0, 0, "hello world", 20, TUI_DEFAULT, TUI_DEFAULT, 0);
+  tui_print(t, 2, 1, "日本語 text", 20, tui_rgb(255, 0, 0), TUI_DEFAULT, TUI_BOLD);
+  tui_hline(t, 3, TUI_DEFAULT, TUI_DIM);
+  present_on(t, s);
+  t_eq("first frame row 0", scr_row(s, 0), "hello world         ");
+  t_eq("first frame wide row", scr_row(s, 1), "  日本語 text       ");
+  t_eq("first frame rule", scr_row(s, 3), s_repeat("─", 20));
+  t_eq("row text from the grid", tui_row_text(t, 1), "  日本語 text       ");
+  // the same frame again: nothing but the cursor bookkeeping
+  var n0: int64 = present_on(t, s);
+  t_ok("unchanged frame writes almost nothing", n0 < 16, "wrote " + s_int(n0));
+  // one cell changes: one move and one character
+  tui_print(t, 6, 0, "W", 1, TUI_DEFAULT, TUI_DEFAULT, 0);
+  t->olen = 0;
+  var n1: int64 = tui_present(t);
+  var out: string = s_view(t->out, t->olen);
+  t_ok("one change: one run", s_contains(out, "[1;7H") && n1 < 40, "wrote " + s_int(n1));
+  scr_play(s, t->out, t->olen);
+  t->olen = 0;
+  t_eq("one change applied", scr_row(s, 0), "hello World         ");
+  // a narrow char over half of a wide one clears the other half
+  tui_print(t, 3, 1, "x", 1, TUI_DEFAULT, TUI_DEFAULT, 0);
+  present_on(t, s);
+  t_eq("wide overwritten", scr_row(s, 1), "   x本語 text       ");
+  // clipped print never wraps
+  tui_clear(t);
+  tui_print(t, 15, 2, "overflowing", 100, TUI_DEFAULT, TUI_DEFAULT, 0);
+  present_on(t, s);
+  t_eq("clipped at the edge", scr_row(s, 2), "               overf");
+  t_eq("next row untouched", scr_row(s, 3), s_repeat(" ", 20));
+  // a wide char at the last column becomes a space
+  tui_clear(t);
+  tui_print(t, 19, 0, "日", 1, TUI_DEFAULT, TUI_DEFAULT, 0);
+  present_on(t, s);
+  t_eq("wide at the edge", scr_row(s, 0), s_repeat(" ", 20));
+  // resize redraws everything
+  tui_fake_resize(t, 10, 2);
+  var s2: Screen* = scr_new(10, 2);
+  tui_print(t, 0, 0, "abc", 10, TUI_DEFAULT, TUI_DEFAULT, 0);
+  present_on(t, s2);
+  t_eq("after resize", scr_row(s2, 0), "abc       ");
+  // colours
+  t->colors = 256;
+  tui_print(t, 0, 1, "c", 1, tui_rgb(255, 0, 0), TUI_DEFAULT, 0);
+  t->olen = 0;
+  tui_present(t);
+  t_ok("truecolor falls back to 256", s_contains(s_view(t->out, t->olen), "38;5;196"), s_view(t->out, t->olen));
+  t->colors = 16;
+  tui_print(t, 0, 1, "d", 1, tui_rgb(0, 0, 255), TUI_DEFAULT, 0);
+  t->olen = 0;
+  tui_present(t);
+  t_ok("and to 16", s_contains(s_view(t->out, t->olen), ";34m") || s_contains(s_view(t->out, t->olen), ";94m"), s_view(t->out, t->olen));
+  tui_free(t);
+  free(s->cells);
+  free(s);
+  free(s2->cells);
+  free(s2);
+}
+
+fn ev_of(s: string, ev: TuiEvent*) -> int64 {
+  return tui_parse(s.chars, slen(s), ev);
+}
+
+fn esc(rest: string) -> string {
+  return g_esc + rest;
+}
+
+fn test_keys() {
+  var ev: TuiEvent;
+  t_int("plain char", ev_of("a", &ev), 1);
+  t_ok("plain char is a", ev.key == TUI_KEY_CHAR && ev.cp == 97 && ev.mods == 0, "");
+  ev_of("é", &ev);
+  t_ok("utf8 char", ev.key == TUI_KEY_CHAR && ev.cp == 0xE9, "");
+  var p: Buf* = buf_new();
+  buf_addb(p, 0xC3);
+  var half: string = buf_take(p);
+  t_int("utf8 half waits", ev_of(half, &ev), 0);
+  var ctl: Buf* = buf_new();
+  buf_addb(ctl, 16);
+  ev_of(buf_take(ctl), &ev);
+  t_ok("ctrl+p", ev.key == TUI_KEY_CHAR && ev.cp == 112 && ev.mods == TUI_MOD_CTRL, "");
+  var cr: Buf* = buf_new();
+  buf_addb(cr, 13);
+  ev_of(buf_take(cr), &ev);
+  t_ok("enter", ev.key == TUI_KEY_ENTER, "");
+  var del: Buf* = buf_new();
+  buf_addb(del, 127);
+  ev_of(buf_take(del), &ev);
+  t_ok("backspace", ev.key == TUI_KEY_BACKSPACE, "");
+  t_int("lone esc waits", ev_of(g_esc, &ev), 0);
+  t_int("arrow up length", ev_of(esc("[A"), &ev), 3);
+  t_ok("arrow up", ev.key == TUI_KEY_UP && ev.mods == 0, "");
+  ev_of(esc("[1;5C"), &ev);
+  t_ok("ctrl+right", ev.key == TUI_KEY_RIGHT && ev.mods == TUI_MOD_CTRL, "");
+  ev_of(esc("OH"), &ev);
+  t_ok("ss3 home", ev.key == TUI_KEY_HOME, "");
+  ev_of(esc("[5~"), &ev);
+  t_ok("pgup", ev.key == TUI_KEY_PGUP, "");
+  ev_of(esc("[6~"), &ev);
+  t_ok("pgdn", ev.key == TUI_KEY_PGDN, "");
+  ev_of(esc("[3~"), &ev);
+  t_ok("delete", ev.key == TUI_KEY_DELETE, "");
+  ev_of(esc("OP"), &ev);
+  t_ok("f1", ev.key == TUI_KEY_F1, "");
+  ev_of(esc("[15~"), &ev);
+  t_ok("f5", ev.key == TUI_KEY_F1 + 4, "");
+  ev_of(esc("[24~"), &ev);
+  t_ok("f12", ev.key == TUI_KEY_F1 + 11, "");
+  ev_of(esc("[Z"), &ev);
+  t_ok("backtab", ev.key == TUI_KEY_BACKTAB, "");
+  t_int("alt+x length", ev_of(esc("x"), &ev), 2);
+  t_ok("alt+x", ev.key == TUI_KEY_CHAR && ev.cp == 120 && ev.mods == TUI_MOD_ALT, "");
+  t_int("half csi waits", ev_of(esc("[1;"), &ev), 0);
+  var paste: string = esc("[200~") + "fn a() {{}" + esc("[201~") + "z";
+  var used: int64 = ev_of(paste, &ev);
+  t_ok("paste", ev.kind == TUI_EV_PASTE && s_eq(ev.text, "fn a() {{}"), ev.text);
+  t_int("paste length", used, slen(paste) - 1);
+  t_int("paste unfinished waits", ev_of(esc("[200~") + "abc", &ev), 0);
+  // the fake terminal's poll: fed bytes come out as events, a lone ESC too
+  var t: Tui* = tui_fake(10, 2);
+  tui_feed(t, esc("[B") + "q");
+  tui_poll(t, 0, -1, &ev);
+  t_ok("poll down", ev.key == TUI_KEY_DOWN, "");
+  tui_poll(t, 0, -1, &ev);
+  t_ok("poll q", ev.key == TUI_KEY_CHAR && ev.cp == 113, "");
+  t_int("poll empty", (int64)tui_poll(t, 0, -1, &ev), (int64)TUI_EV_NONE);
+  tui_free(t);
+}
+
+fn test_list() {
+  var l: TuiList* = tui_list_new();
+  tui_list_fit(l, 10, 3);
+  var ev: TuiEvent;
+  ev.kind = TUI_EV_KEY;
+  ev.key = TUI_KEY_DOWN;
+  var k: int64 = 0;
+  while (k < 4) {
+    tui_list_key(l, &ev, 3);
+    k = k + 1;
+  }
+  t_ok("list scrolls with the selection", l->sel == 4 && l->top == 2, "sel " + s_int(l->sel) + " top " + s_int(l->top));
+  ev.key = TUI_KEY_END;
+  tui_list_key(l, &ev, 3);
+  t_ok("list end", l->sel == 9 && l->top == 7, "");
+  free(l);
+}
+
+fn main() -> int32 {
+  esc_init();
+  test_utf8();
+  test_render();
+  test_keys();
+  test_list();
+  say("tui_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}

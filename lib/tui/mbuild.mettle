@@ -1,0 +1,10 @@
+import "mbuild/api";
+
+fn project() {
+  mb_package("tui", "0.1.0");
+  mb_on("linux");
+  mb_import_root("src");
+}
+
+fn deps() {
+}

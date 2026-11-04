@@ -1,0 +1,1383 @@
+// tui: a small terminal UI in Mettle (Linux, raw syscalls, no C).
+//
+// A grid of cells drawn into a back buffer; tui_present writes only what
+// changed since the last frame, as one write. Input comes as events (keys,
+// paste, resize, another fd readable). Technique after termbox2: termios
+// raw mode, the alternate screen, TIOCGWINSZ, SIGWINCH through a signalfd.
+//
+//   var t: Tui* = tui_open();      // raw mode, alternate screen
+//   tui_clear(t);
+//   tui_print(t, 0, 0, "hello", 20, TUI_DEFAULT, TUI_DEFAULT, TUI_BOLD);
+//   tui_present(t);
+//   var ev: TuiEvent;
+//   tui_poll(t, 100, -1, &ev);
+//   tui_close(t);                  // the terminal as it was
+//
+// tui_fake(w, h) gives a Tui that keeps its output in t->out instead of
+// writing it (tests).
+
+import "std/mem";
+
+extern fn tui_c_getenv(name: cstring) -> cstring = "getenv";
+extern fn tui_c_strlen(s: cstring) -> int64 = "strlen";
+
+export const TUI_DEFAULT = -1;     // the terminal's own colour
+
+export const TUI_BOLD = 1;
+export const TUI_DIM = 2;
+export const TUI_ITALIC = 4;
+export const TUI_UNDERLINE = 8;
+export const TUI_REVERSE = 16;
+
+export const TUI_EV_NONE = 0;
+export const TUI_EV_KEY = 1;
+export const TUI_EV_RESIZE = 2;
+export const TUI_EV_PASTE = 3;
+export const TUI_EV_FD = 4;        // the extra fd given to tui_poll is readable
+export const TUI_EV_QUIT = 5;      // SIGTERM, SIGHUP or SIGINT
+
+// Keys; a character is TUI_KEY_CHAR with cp set (ctrl+a: cp 'a', TUI_MOD_CTRL).
+export const TUI_KEY_CHAR = 1;
+export const TUI_KEY_ENTER = 2;
+export const TUI_KEY_TAB = 3;
+export const TUI_KEY_BACKTAB = 4;
+export const TUI_KEY_BACKSPACE = 5;
+export const TUI_KEY_ESC = 6;
+export const TUI_KEY_UP = 7;
+export const TUI_KEY_DOWN = 8;
+export const TUI_KEY_LEFT = 9;
+export const TUI_KEY_RIGHT = 10;
+export const TUI_KEY_HOME = 11;
+export const TUI_KEY_END = 12;
+export const TUI_KEY_PGUP = 13;
+export const TUI_KEY_PGDN = 14;
+export const TUI_KEY_INSERT = 15;
+export const TUI_KEY_DELETE = 16;
+export const TUI_KEY_F1 = 21;      // F2..F12 follow: TUI_KEY_F1 + n - 1
+
+export const TUI_MOD_SHIFT = 1;
+export const TUI_MOD_ALT = 2;
+export const TUI_MOD_CTRL = 4;
+
+export struct TuiCell {
+  cp: int32;        // codepoint; -1: the right half of a wide one before it
+  fg: int32;
+  bg: int32;
+  at: int32;
+}
+
+export struct TuiEvent {
+  kind: int32;
+  key: int32;
+  mods: int32;
+  cp: int32;
+  text: string;     // TUI_EV_PASTE
+}
+
+export struct Tui {
+  w: int64;
+  h: int64;
+  cur: TuiCell*;    // the frame being drawn
+  last: TuiCell*;   // what the terminal shows
+  out: uint8*;      // bytes for the terminal
+  olen: int64;
+  ocap: int64;
+  inb: uint8*;      // input not parsed yet
+  ilen: int64;
+  esc_ms: int64;    // when a lone ESC arrived
+  fd_in: int32;
+  fd_out: int32;
+  sigfd: int32;
+  term: uint8*;     // termios before tui_open
+  colors: int32;    // 0, 16, 256 or 16777216
+  fake: bool;
+  cx: int64;        // the cursor to leave shown after present; -1 hidden
+  cy: int64;
+  // pen and position the terminal is at during present
+  pfg: int32;
+  pbg: int32;
+  pat: int32;
+  px: int64;
+  py: int64;
+}
+
+// ---------------------------------------------------------------------------
+// Strings and UTF-8
+// ---------------------------------------------------------------------------
+
+fn tui_view(p: uint8*, n: int64) -> string {
+  var s: string;
+  s.chars = p;
+  s.length = (uint64)n;
+  return s;
+}
+
+fn tui_cstr(s: string) -> cstring {
+  var n: int64 = (int64)s.length;
+  var p: uint8* = (uint8*)malloc(n + 1);
+  memcpy((rawptr)p, (rawptr)s.chars, n);
+  p[n] = (uint8)0;
+  return (cstring)p;
+}
+
+fn tui_env(name: string) -> string {
+  var c: cstring = tui_cstr(name);
+  var v: cstring = tui_c_getenv(c);
+  free((rawptr)c);
+  if (v == 0) {
+    return tui_view((uint8*)"".chars, 0);
+  }
+  return tui_view((uint8*)v, tui_c_strlen(v));
+}
+
+fn tui_has(s: string, needle: string) -> bool {
+  var n: int64 = (int64)s.length;
+  var m: int64 = (int64)needle.length;
+  var i: int64 = 0;
+  while (i + m <= n) {
+    var k: int64 = 0;
+    while (k < m && s.chars[i + k] == needle.chars[k]) {
+      k = k + 1;
+    }
+    if (k == m) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// The codepoint at s[*at], *at moved past it; a bad byte reads as U+FFFD.
+export fn tui_utf8_next(s: string, at: int64*) -> int32 {
+  var n: int64 = (int64)s.length;
+  var i: int64 = *at;
+  var b0: int32 = (int32)s.chars[i];
+  var need: int64 = 0;
+  var cp: int32 = 0;
+  if (b0 < 0x80) {
+    *at = i + 1;
+    return b0;
+  } else if ((b0 & 0xE0) == 0xC0) {
+    need = 1;
+    cp = b0 & 0x1F;
+  } else if ((b0 & 0xF0) == 0xE0) {
+    need = 2;
+    cp = b0 & 0x0F;
+  } else if ((b0 & 0xF8) == 0xF0) {
+    need = 3;
+    cp = b0 & 0x07;
+  } else {
+    *at = i + 1;
+    return 0xFFFD;
+  }
+  if (i + need >= n) {
+    *at = n;
+    return 0xFFFD;
+  }
+  var k: int64 = 1;
+  while (k <= need) {
+    var b: int32 = (int32)s.chars[i + k];
+    if ((b & 0xC0) != 0x80) {
+      *at = i + k;
+      return 0xFFFD;
+    }
+    cp = (cp << 6) | (b & 0x3F);
+    k = k + 1;
+  }
+  *at = i + need + 1;
+  return cp;
+}
+
+// cp as UTF-8 into p (4 bytes room); the byte count.
+export fn tui_utf8_put(p: uint8*, cp: int32) -> int64 {
+  if (cp < 0x80) {
+    p[0] = (uint8)cp;
+    return 1;
+  }
+  if (cp < 0x800) {
+    p[0] = (uint8)(0xC0 | (cp >> 6));
+    p[1] = (uint8)(0x80 | (cp & 0x3F));
+    return 2;
+  }
+  if (cp < 0x10000) {
+    p[0] = (uint8)(0xE0 | (cp >> 12));
+    p[1] = (uint8)(0x80 | ((cp >> 6) & 0x3F));
+    p[2] = (uint8)(0x80 | (cp & 0x3F));
+    return 3;
+  }
+  p[0] = (uint8)(0xF0 | (cp >> 18));
+  p[1] = (uint8)(0x80 | ((cp >> 12) & 0x3F));
+  p[2] = (uint8)(0x80 | ((cp >> 6) & 0x3F));
+  p[3] = (uint8)(0x80 | (cp & 0x3F));
+  return 4;
+}
+
+fn tui_in(cp: int32, lo: int32, hi: int32) -> bool {
+  return cp >= lo && cp <= hi;
+}
+
+// Columns cp takes: 0 combining and zero-width, 2 wide (CJK, most emoji),
+// -1 a control character, else 1. A compact table after wcwidth.
+export fn tui_cp_width(cp: int32) -> int32 {
+  if (cp == 0) {
+    return 0;
+  }
+  if (cp < 32 || tui_in(cp, 0x7F, 0x9F)) {
+    return -1;
+  }
+  if (cp < 0x300) {
+    return 1;
+  }
+  if (tui_in(cp, 0x300, 0x36F) || tui_in(cp, 0x483, 0x489) || tui_in(cp, 0x591, 0x5BD)
+      || tui_in(cp, 0x610, 0x61A) || tui_in(cp, 0x64B, 0x65F) || tui_in(cp, 0x900, 0x903)
+      || tui_in(cp, 0x93A, 0x94F) || tui_in(cp, 0xE31, 0xE31) || tui_in(cp, 0xE34, 0xE3A)
+      || tui_in(cp, 0x1AB0, 0x1AFF) || tui_in(cp, 0x1DC0, 0x1DFF) || tui_in(cp, 0x200B, 0x200F)
+      || tui_in(cp, 0x2028, 0x202E) || tui_in(cp, 0x2060, 0x2064) || tui_in(cp, 0x20D0, 0x20FF)
+      || tui_in(cp, 0xFE00, 0xFE0F) || tui_in(cp, 0xFE20, 0xFE2F) || cp == 0xFEFF
+      || tui_in(cp, 0xE0100, 0xE01EF)) {
+    return 0;
+  }
+  if (tui_in(cp, 0x1100, 0x115F) || tui_in(cp, 0x231A, 0x231B) || tui_in(cp, 0x2329, 0x232A)
+      || tui_in(cp, 0x23E9, 0x23EC) || cp == 0x23F0 || cp == 0x23F3 || tui_in(cp, 0x25FD, 0x25FE)
+      || tui_in(cp, 0x2614, 0x2615) || tui_in(cp, 0x2648, 0x2653) || cp == 0x267F || cp == 0x2693
+      || cp == 0x26A1 || tui_in(cp, 0x26AA, 0x26AB) || tui_in(cp, 0x26BD, 0x26BE)
+      || tui_in(cp, 0x26C4, 0x26C5) || cp == 0x26CE || cp == 0x26D4 || cp == 0x26EA
+      || tui_in(cp, 0x26F2, 0x26F3) || cp == 0x26F5 || cp == 0x26FA || cp == 0x26FD
+      || cp == 0x2705 || tui_in(cp, 0x270A, 0x270B) || cp == 0x2728 || cp == 0x274C
+      || cp == 0x274E || tui_in(cp, 0x2753, 0x2755) || cp == 0x2757 || tui_in(cp, 0x2795, 0x2797)
+      || cp == 0x27B0 || cp == 0x27BF || tui_in(cp, 0x2B1B, 0x2B1C) || cp == 0x2B50 || cp == 0x2B55
+      || tui_in(cp, 0x2E80, 0x303E) || tui_in(cp, 0x3041, 0x33FF) || tui_in(cp, 0x3400, 0x4DBF)
+      || tui_in(cp, 0x4E00, 0x9FFF) || tui_in(cp, 0xA000, 0xA4CF) || tui_in(cp, 0xA960, 0xA97F)
+      || tui_in(cp, 0xAC00, 0xD7A3) || tui_in(cp, 0xF900, 0xFAFF) || tui_in(cp, 0xFE10, 0xFE19)
+      || tui_in(cp, 0xFE30, 0xFE6F) || tui_in(cp, 0xFF00, 0xFF60) || tui_in(cp, 0xFFE0, 0xFFE6)
+      || tui_in(cp, 0x16FE0, 0x18CFF) || tui_in(cp, 0x1B000, 0x1B2FF) || cp == 0x1F004 || cp == 0x1F0CF
+      || cp == 0x1F18E || tui_in(cp, 0x1F191, 0x1F19A) || tui_in(cp, 0x1F200, 0x1F251)
+      || tui_in(cp, 0x1F300, 0x1F64F) || tui_in(cp, 0x1F680, 0x1F6FF) || tui_in(cp, 0x1F7E0, 0x1F7EB)
+      || tui_in(cp, 0x1F90C, 0x1F9FF) || tui_in(cp, 0x1FA70, 0x1FAFF) || tui_in(cp, 0x20000, 0x3FFFD)) {
+    return 2;
+  }
+  return 1;
+}
+
+// Columns s takes on screen (control characters count as one, as drawn).
+export fn tui_width(s: string) -> int64 {
+  var n: int64 = (int64)s.length;
+  var at: int64 = 0;
+  var w: int64 = 0;
+  while (at < n) {
+    var cw: int32 = tui_cp_width(tui_utf8_next(s, &at));
+    if (cw < 0) {
+      cw = 1;
+    }
+    w = w + (int64)cw;
+  }
+  return w;
+}
+
+// The longest start of s that fits in cols columns, never cutting a character.
+export fn tui_clip(s: string, cols: int64) -> string {
+  var n: int64 = (int64)s.length;
+  var at: int64 = 0;
+  var w: int64 = 0;
+  while (at < n) {
+    var next: int64 = at;
+    var cw: int32 = tui_cp_width(tui_utf8_next(s, &next));
+    if (cw < 0) {
+      cw = 1;
+    }
+    if (w + (int64)cw > cols) {
+      break;
+    }
+    w = w + (int64)cw;
+    at = next;
+  }
+  return tui_view(s.chars, at);
+}
+
+// ---------------------------------------------------------------------------
+// Colours
+// ---------------------------------------------------------------------------
+
+// A 24-bit colour; drawn as the nearest 256- or 16-colour one when the
+// terminal has fewer.
+export fn tui_rgb(r: int32, g: int32, b: int32) -> int32 {
+  return 0x1000000 | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+}
+
+// One of the 256 palette colours (0-15 the basic ones).
+export fn tui_index(i: int32) -> int32 {
+  return i & 255;
+}
+
+fn tui_cube(v: int32) -> int32 {
+  if (v < 48) {
+    return 0;
+  }
+  if (v < 115) {
+    return 1;
+  }
+  return (v - 35) / 40;
+}
+
+fn tui_to256(c: int32) -> int32 {
+  if (c < 0x1000000) {
+    return c;
+  }
+  var r: int32 = (c >> 16) & 255;
+  var g: int32 = (c >> 8) & 255;
+  var b: int32 = c & 255;
+  if (r == g && g == b) {
+    if (r < 8) {
+      return 16;
+    }
+    if (r > 238) {
+      return 231;
+    }
+    return 232 + (r - 8) / 10;
+  }
+  return 16 + 36 * tui_cube(r) + 6 * tui_cube(g) + tui_cube(b);
+}
+
+fn tui_to16(c: int32) -> int32 {
+  var i: int32 = tui_to256(c);
+  if (i < 16) {
+    return i;
+  }
+  var r: int32 = 0;
+  var g: int32 = 0;
+  var b: int32 = 0;
+  if (i >= 232) {
+    var v: int32 = 8 + (i - 232) * 10;
+    if (v < 64) {
+      return 0;
+    }
+    if (v < 160) {
+      return 8;
+    }
+    if (v < 224) {
+      return 7;
+    }
+    return 15;
+  }
+  var k: int32 = i - 16;
+  r = k / 36;
+  g = (k / 6) % 6;
+  b = k % 6;
+  var bright: int32 = 0;
+  if (r > 3 || g > 3 || b > 3) {
+    bright = 8;
+  }
+  var idx: int32 = 0;
+  if (r >= 2) {
+    idx = idx | 1;
+  }
+  if (g >= 2) {
+    idx = idx | 2;
+  }
+  if (b >= 2) {
+    idx = idx | 4;
+  }
+  if (idx == 0 && bright == 8) {
+    return 8;
+  }
+  return idx | bright;
+}
+
+// ---------------------------------------------------------------------------
+// Output bytes
+// ---------------------------------------------------------------------------
+
+fn tui_put(t: Tui*, p: uint8*, n: int64) {
+  if (t->olen + n > t->ocap) {
+    var nc: int64 = t->ocap * 2;
+    while (nc < t->olen + n) {
+      nc = nc * 2;
+    }
+    t->out = (uint8*)realloc((rawptr)t->out, nc);
+    t->ocap = nc;
+  }
+  memcpy((rawptr)&t->out[t->olen], (rawptr)p, n);
+  t->olen = t->olen + n;
+}
+
+// Raw text for the terminal, sent with the next tui_flush or tui_present.
+export fn tui_write(t: Tui*, s: string) {
+  tui_put(t, s.chars, (int64)s.length);
+}
+
+fn tui_byte(t: Tui*, c: int32) {
+  var b: uint8[1];
+  b[0] = (uint8)c;
+  tui_put(t, &b[0], 1);
+}
+
+fn tui_num(t: Tui*, n: int64) {
+  if (n >= 10) {
+    tui_num(t, n / 10);
+  }
+  tui_byte(t, 48 + (int32)(n % 10));
+}
+
+fn tui_csi(t: Tui*) {
+  tui_byte(t, 27);
+  tui_byte(t, 91);
+}
+
+// What is buffered, to the terminal (kept in t->out when fake).
+export fn tui_flush(t: Tui*) {
+  if (t->fake) {
+    return;
+  }
+  var off: int64 = 0;
+  while (off < t->olen) {
+    var n: int64 = syscall(1, t->fd_out, &t->out[off], t->olen - off);
+    if (n == -4 || n == -11) {
+      continue;
+    }
+    if (n <= 0) {
+      break;
+    }
+    off = off + n;
+  }
+  t->olen = 0;
+}
+
+// ---------------------------------------------------------------------------
+// The grid
+// ---------------------------------------------------------------------------
+
+fn tui_alloc(t: Tui*) {
+  var n: int64 = t->w * t->h;
+  if (n < 1) {
+    n = 1;
+  }
+  t->cur = (TuiCell*)malloc(n * sizeof(TuiCell));
+  t->last = (TuiCell*)malloc(n * sizeof(TuiCell));
+  var i: int64 = 0;
+  while (i < n) {
+    t->cur[i].cp = 32;
+    t->cur[i].fg = TUI_DEFAULT;
+    t->cur[i].bg = TUI_DEFAULT;
+    t->cur[i].at = 0;
+    t->last[i].cp = -2;      // unknown: drawn on the next present
+    t->last[i].fg = TUI_DEFAULT;
+    t->last[i].bg = TUI_DEFAULT;
+    t->last[i].at = 0;
+    i = i + 1;
+  }
+}
+
+fn tui_new(w: int64, h: int64) -> Tui* {
+  var t: Tui* = new Tui;
+  t->w = w;
+  t->h = h;
+  t->ocap = 4096;
+  t->olen = 0;
+  t->out = (uint8*)malloc(t->ocap);
+  t->inb = (uint8*)malloc(4096);
+  t->ilen = 0;
+  t->esc_ms = 0;
+  t->fd_in = 0;
+  t->fd_out = 1;
+  t->sigfd = -1;
+  t->term = (uint8*)0;
+  t->colors = 256;
+  t->fake = false;
+  t->cx = -1;
+  t->cy = -1;
+  tui_alloc(t);
+  return t;
+}
+
+// A terminal kept in memory: what present writes stays in t->out.
+export fn tui_fake(w: int64, h: int64) -> Tui* {
+  var t: Tui* = tui_new(w, h);
+  t->fake = true;
+  t->colors = 16777216;
+  return t;
+}
+
+fn tui_query_size(t: Tui*) {
+  var ws: uint16[4];
+  ws[0] = (uint16)0;
+  ws[1] = (uint16)0;
+  if (syscall(16, t->fd_out, 0x5413, &ws[0]) == 0 && ws[0] > (uint16)0 && ws[1] > (uint16)0) {   // TIOCGWINSZ
+    t->h = (int64)ws[0];
+    t->w = (int64)ws[1];
+  } else {
+    t->h = 24;
+    t->w = 80;
+  }
+}
+
+// The terminal's size again; the next present redraws everything.
+export fn tui_resize(t: Tui*) {
+  if (!t->fake) {
+    tui_query_size(t);
+  }
+  free((rawptr)t->cur);
+  free((rawptr)t->last);
+  tui_alloc(t);
+  tui_csi(t);
+  tui_write(t, "2J");
+}
+
+// A new size for a fake terminal.
+export fn tui_fake_resize(t: Tui*, w: int64, h: int64) {
+  t->w = w;
+  t->h = h;
+  tui_resize(t);
+}
+
+// The next present draws every cell.
+export fn tui_invalidate(t: Tui*) {
+  var i: int64 = 0;
+  while (i < t->w * t->h) {
+    t->last[i].cp = -2;
+    i = i + 1;
+  }
+  tui_csi(t);
+  tui_write(t, "2J");
+}
+
+export fn tui_clear(t: Tui*) {
+  var i: int64 = 0;
+  while (i < t->w * t->h) {
+    t->cur[i].cp = 32;
+    t->cur[i].fg = TUI_DEFAULT;
+    t->cur[i].bg = TUI_DEFAULT;
+    t->cur[i].at = 0;
+    i = i + 1;
+  }
+  t->cx = -1;
+  t->cy = -1;
+}
+
+// One cell; a wide cp also takes the cell to its right (dropped at the edge).
+export fn tui_set(t: Tui*, x: int64, y: int64, cp: int32, fg: int32, bg: int32, at: int32) {
+  if (x < 0 || y < 0 || x >= t->w || y >= t->h) {
+    return;
+  }
+  var cw: int32 = tui_cp_width(cp);
+  var c: int32 = cp;
+  if (cw < 0) {
+    c = 63;
+    cw = 1;
+  }
+  if (cw == 2 && x + 1 >= t->w) {
+    c = 32;
+    cw = 1;
+  }
+  var i: int64 = y * t->w + x;
+  // a wide character this overwrites half of goes entirely
+  if (t->cur[i].cp == -1 && x > 0) {
+    t->cur[i - 1].cp = 32;
+  }
+  if (x + 1 < t->w && t->cur[i + 1].cp == -1 && cw != 2) {
+    t->cur[i + 1].cp = 32;
+  }
+  t->cur[i].cp = c;
+  t->cur[i].fg = fg;
+  t->cur[i].bg = bg;
+  t->cur[i].at = at;
+  if (cw == 2) {
+    if (x + 2 < t->w && t->cur[i + 2].cp == -1) {
+      t->cur[i + 2].cp = 32;
+    }
+    t->cur[i + 1].cp = -1;
+    t->cur[i + 1].fg = fg;
+    t->cur[i + 1].bg = bg;
+    t->cur[i + 1].at = at;
+  }
+}
+
+// s at x,y clipped to cols columns; combining marks are dropped. The
+// columns used.
+export fn tui_print(t: Tui*, x: int64, y: int64, s: string, cols: int64, fg: int32, bg: int32, at: int32) -> int64 {
+  var n: int64 = (int64)s.length;
+  var i: int64 = 0;
+  var col: int64 = 0;
+  var lim: int64 = cols;
+  if (x + lim > t->w) {
+    lim = t->w - x;
+  }
+  while (i < n) {
+    var cp: int32 = tui_utf8_next(s, &i);
+    var cw: int32 = tui_cp_width(cp);
+    if (cw == 0) {
+      continue;
+    }
+    if (cw < 0) {
+      cw = 1;
+    }
+    if (col + (int64)cw > lim) {
+      break;
+    }
+    tui_set(t, x + col, y, cp, fg, bg, at);
+    col = col + (int64)cw;
+  }
+  return col;
+}
+
+// Cells x .. x+cols-1 of row y as spaces in bg.
+export fn tui_fill(t: Tui*, x: int64, y: int64, cols: int64, bg: int32) {
+  var k: int64 = 0;
+  while (k < cols) {
+    tui_set(t, x + k, y, 32, TUI_DEFAULT, bg, 0);
+    k = k + 1;
+  }
+}
+
+// A horizontal rule across row y.
+export fn tui_hline(t: Tui*, y: int64, fg: int32, at: int32) {
+  var x: int64 = 0;
+  while (x < t->w) {
+    tui_set(t, x, y, 0x2500, fg, TUI_DEFAULT, at);
+    x = x + 1;
+  }
+}
+
+// Leaves the cursor shown at x,y after present (x < 0: hidden).
+export fn tui_cursor(t: Tui*, x: int64, y: int64) {
+  t->cx = x;
+  t->cy = y;
+}
+
+// The text of row y as it is in the frame being drawn (tests, captures).
+export fn tui_row_text(t: Tui*, y: int64) -> string {
+  var p: uint8* = (uint8*)malloc(t->w * 4 + 1);
+  var n: int64 = 0;
+  var x: int64 = 0;
+  while (x < t->w) {
+    var cp: int32 = t->cur[y * t->w + x].cp;
+    if (cp >= 0) {
+      n = n + tui_utf8_put(&p[n], cp);
+    }
+    x = x + 1;
+  }
+  p[n] = (uint8)0;
+  return tui_view(p, n);
+}
+
+fn tui_color_sgr(t: Tui*, c: int32, bg: bool) {
+  if (c == TUI_DEFAULT || t->colors == 0) {
+    if (bg) {
+      tui_write(t, ";49");
+    } else {
+      tui_write(t, ";39");
+    }
+    return;
+  }
+  if (c >= 0x1000000 && t->colors >= 16777216) {
+    if (bg) {
+      tui_write(t, ";48;2;");
+    } else {
+      tui_write(t, ";38;2;");
+    }
+    tui_num(t, (int64)((c >> 16) & 255));
+    tui_byte(t, 59);
+    tui_num(t, (int64)((c >> 8) & 255));
+    tui_byte(t, 59);
+    tui_num(t, (int64)(c & 255));
+    return;
+  }
+  var i: int32 = tui_to256(c);
+  if (t->colors < 256) {
+    i = tui_to16(c);
+  }
+  if (i < 16 && t->colors < 256) {
+    var base: int32 = 30;
+    if (bg) {
+      base = 40;
+    }
+    if (i >= 8) {
+      base = base + 60;
+    }
+    tui_byte(t, 59);
+    tui_num(t, (int64)(base + (i & 7)));
+    return;
+  }
+  if (bg) {
+    tui_write(t, ";48;5;");
+  } else {
+    tui_write(t, ";38;5;");
+  }
+  tui_num(t, (int64)i);
+}
+
+fn tui_pen(t: Tui*, c: TuiCell*) {
+  if (c->fg == t->pfg && c->bg == t->pbg && c->at == t->pat) {
+    return;
+  }
+  tui_csi(t);
+  tui_byte(t, 48);
+  if ((c->at & TUI_BOLD) != 0) {
+    tui_write(t, ";1");
+  }
+  if ((c->at & TUI_DIM) != 0) {
+    tui_write(t, ";2");
+  }
+  if ((c->at & TUI_ITALIC) != 0) {
+    tui_write(t, ";3");
+  }
+  if ((c->at & TUI_UNDERLINE) != 0) {
+    tui_write(t, ";4");
+  }
+  if ((c->at & TUI_REVERSE) != 0) {
+    tui_write(t, ";7");
+  }
+  if (c->fg != TUI_DEFAULT) {
+    tui_color_sgr(t, c->fg, false);
+  }
+  if (c->bg != TUI_DEFAULT) {
+    tui_color_sgr(t, c->bg, true);
+  }
+  tui_byte(t, 109);
+  t->pfg = c->fg;
+  t->pbg = c->bg;
+  t->pat = c->at;
+}
+
+fn tui_move(t: Tui*, x: int64, y: int64) {
+  if (t->px == x && t->py == y) {
+    return;
+  }
+  tui_csi(t);
+  tui_num(t, y + 1);
+  tui_byte(t, 59);
+  tui_num(t, x + 1);
+  tui_byte(t, 72);
+  t->px = x;
+  t->py = y;
+}
+
+fn tui_same(a: TuiCell*, b: TuiCell*) -> bool {
+  return a->cp == b->cp && a->fg == b->fg && a->bg == b->bg && a->at == b->at;
+}
+
+// The frame to the terminal: the cells that changed since the last one, in
+// runs, as one write. The bytes written (tests look at t->out).
+export fn tui_present(t: Tui*) -> int64 {
+  tui_csi(t);
+  tui_write(t, "?25l");
+  t->pfg = -9;
+  t->pbg = -9;
+  t->pat = -9;
+  t->px = -1;
+  t->py = -1;
+  var y: int64 = 0;
+  while (y < t->h) {
+    var x: int64 = 0;
+    while (x < t->w) {
+      var i: int64 = y * t->w + x;
+      if (tui_same(&t->cur[i], &t->last[i])) {
+        x = x + 1;
+        continue;
+      }
+      var sx: int64 = x;
+      if (t->cur[i].cp == -1 && x > 0) {
+        sx = x - 1;
+      }
+      var k: int64 = sx;
+      tui_move(t, sx, y);
+      while (k < t->w) {
+        var j: int64 = y * t->w + k;
+        if (k > x && tui_same(&t->cur[j], &t->last[j]) && t->cur[j].cp != -1) {
+          break;
+        }
+        var c: TuiCell* = &t->cur[j];
+        if (c->cp == -1) {
+          t->last[j] = *c;
+          k = k + 1;
+          continue;
+        }
+        tui_pen(t, c);
+        var u: uint8[4];
+        var nb: int64 = tui_utf8_put(&u[0], c->cp);
+        tui_put(t, &u[0], nb);
+        t->last[j] = *c;
+        var cw: int64 = 1;
+        if (k + 1 < t->w && t->cur[j + 1].cp == -1) {
+          cw = 2;
+        }
+        t->px = t->px + cw;
+        k = k + 1;
+      }
+      x = k;
+    }
+    y = y + 1;
+  }
+  tui_csi(t);
+  tui_write(t, "0m");
+  if (t->cx >= 0 && t->cy >= 0) {
+    t->px = -1;
+    tui_move(t, t->cx, t->cy);
+    tui_csi(t);
+    tui_write(t, "?25h");
+  }
+  var n: int64 = t->olen;
+  tui_flush(t);
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// The terminal
+// ---------------------------------------------------------------------------
+
+fn tui_colors_of_env() -> int32 {
+  if ((int64)tui_env("NO_COLOR").length > 0) {
+    return 0;
+  }
+  var ct: string = tui_env("COLORTERM");
+  if (tui_has(ct, "truecolor") || tui_has(ct, "24bit")) {
+    return 16777216;
+  }
+  var term: string = tui_env("TERM");
+  if (tui_has(term, "256color") || tui_has(term, "direct")) {
+    return 256;
+  }
+  return 16;
+}
+
+fn tui_sigset() -> int64 {
+  // SIGWINCH 28, SIGTERM 15, SIGHUP 1, SIGINT 2: bit sig-1
+  return ((int64)1 << 27) | ((int64)1 << 14) | ((int64)1 << 0) | ((int64)1 << 1);
+}
+
+// SIGWINCH, SIGTERM, SIGHUP and SIGINT blocked and read from t->sigfd.
+fn tui_signals_on(t: Tui*) {
+  var set: int64[1];
+  set[0] = tui_sigset();
+  syscall(14, 0, &set[0], 0, 8);                             // rt_sigprocmask SIG_BLOCK
+  if (t->sigfd < 0) {
+    t->sigfd = (int32)syscall(289, -1, &set[0], 8, 0x80800);  // signalfd4 NONBLOCK|CLOEXEC
+  }
+}
+
+// The signals back to normal (children inherit the mask: call this before
+// starting one, tui_resume after).
+fn tui_signals_off(t: Tui*) {
+  var set: int64[1];
+  set[0] = tui_sigset();
+  syscall(14, 1, &set[0], 0, 8);                             // SIG_UNBLOCK
+}
+
+fn tui_enter(t: Tui*) {
+  var r: uint8* = (uint8*)malloc(64);
+  defer free((rawptr)r);
+  memcpy((rawptr)r, (rawptr)t->term, 64);
+  r[0] = r[0] & (uint8)0xDD;      // c_iflag: BRKINT, ISTRIP off
+  r[1] = r[1] & (uint8)0xFA;      // ICRNL, IXON off
+  r[4] = r[4] & (uint8)0xFE;      // c_oflag: OPOST off
+  r[12] = r[12] & (uint8)0xF4;    // c_lflag: ISIG, ICANON, ECHO off
+  r[13] = r[13] & (uint8)0x7F;    // IEXTEN off
+  r[17 + 6] = (uint8)1;           // VMIN
+  r[17 + 5] = (uint8)0;           // VTIME
+  syscall(16, t->fd_in, 0x5402, r);                          // TCSETS
+  tui_signals_on(t);
+  tui_csi(t);
+  tui_write(t, "?1049h");
+  tui_csi(t);
+  tui_write(t, "?2004h");
+  tui_csi(t);
+  tui_write(t, "?25l");
+  tui_csi(t);
+  tui_write(t, "2J");
+  tui_flush(t);
+}
+
+// Raw mode on the terminal (stdin, stdout), the alternate screen, the
+// cursor hidden; 0 when stdin or stdout is no terminal.
+export fn tui_open() -> Tui* {
+  var t: Tui* = tui_new(80, 24);
+  t->term = (uint8*)malloc(64);
+  if (syscall(16, 0, 0x5401, t->term) != 0 || syscall(16, 1, 0x5401, t->out) != 0) {   // TCGETS
+    free((rawptr)t->term);
+    free((rawptr)t->out);
+    free((rawptr)t->inb);
+    free((rawptr)t->cur);
+    free((rawptr)t->last);
+    free((rawptr)t);
+    return (Tui*)0;
+  }
+  t->colors = tui_colors_of_env();
+  tui_query_size(t);
+  free((rawptr)t->cur);
+  free((rawptr)t->last);
+  tui_alloc(t);
+  tui_enter(t);
+  return t;
+}
+
+// The terminal as before tui_open: cooked mode, the main screen, the
+// cursor shown, signals unblocked. For running a child (an editor) in
+// between; tui_resume takes it back.
+export fn tui_suspend(t: Tui*) {
+  if (t->fake) {
+    return;
+  }
+  tui_csi(t);
+  tui_write(t, "0m");
+  tui_csi(t);
+  tui_write(t, "?2004l");
+  tui_csi(t);
+  tui_write(t, "?25h");
+  tui_csi(t);
+  tui_write(t, "?1049l");
+  tui_flush(t);
+  syscall(16, t->fd_in, 0x5402, t->term);
+  tui_signals_off(t);
+}
+
+export fn tui_resume(t: Tui*) {
+  if (t->fake) {
+    return;
+  }
+  tui_enter(t);
+  tui_resize(t);
+}
+
+// The Tui's memory (after tui_close for a real terminal).
+export fn tui_free(t: Tui*) {
+  free((rawptr)t->cur);
+  free((rawptr)t->last);
+  free((rawptr)t->out);
+  free((rawptr)t->inb);
+  if (t->term != (uint8*)0) {
+    free((rawptr)t->term);
+  }
+  free((rawptr)t);
+}
+
+export fn tui_close(t: Tui*) {
+  tui_suspend(t);
+  if (t->sigfd >= 0) {
+    syscall(3, t->sigfd);
+    t->sigfd = -1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+fn tui_key(ev: TuiEvent*, key: int32, mods: int32, cp: int32) {
+  ev->kind = TUI_EV_KEY;
+  ev->key = key;
+  ev->mods = mods;
+  ev->cp = cp;
+}
+
+fn tui_csi_mods(m: int64) -> int32 {
+  if (m <= 1) {
+    return 0;
+  }
+  var bits: int32 = (int32)(m - 1);
+  var r: int32 = 0;
+  if ((bits & 1) != 0) {
+    r = r | TUI_MOD_SHIFT;
+  }
+  if ((bits & 2) != 0) {
+    r = r | TUI_MOD_ALT;
+  }
+  if ((bits & 4) != 0) {
+    r = r | TUI_MOD_CTRL;
+  }
+  return r;
+}
+
+fn tui_tilde(n: int64) -> int32 {
+  if (n == 1 || n == 7) { return TUI_KEY_HOME; }
+  if (n == 2) { return TUI_KEY_INSERT; }
+  if (n == 3) { return TUI_KEY_DELETE; }
+  if (n == 4 || n == 8) { return TUI_KEY_END; }
+  if (n == 5) { return TUI_KEY_PGUP; }
+  if (n == 6) { return TUI_KEY_PGDN; }
+  if (n >= 11 && n <= 15) { return TUI_KEY_F1 + (int32)(n - 11); }
+  if (n >= 17 && n <= 21) { return TUI_KEY_F1 + 5 + (int32)(n - 17); }
+  if (n == 23 || n == 24) { return TUI_KEY_F1 + 10 + (int32)(n - 23); }
+  return 0;
+}
+
+fn tui_letter_key(c: int32) -> int32 {
+  if (c == 65) { return TUI_KEY_UP; }
+  if (c == 66) { return TUI_KEY_DOWN; }
+  if (c == 67) { return TUI_KEY_RIGHT; }
+  if (c == 68) { return TUI_KEY_LEFT; }
+  if (c == 72) { return TUI_KEY_HOME; }
+  if (c == 70) { return TUI_KEY_END; }
+  if (c == 80) { return TUI_KEY_F1; }
+  if (c == 81) { return TUI_KEY_F1 + 1; }
+  if (c == 82) { return TUI_KEY_F1 + 2; }
+  if (c == 83) { return TUI_KEY_F1 + 3; }
+  if (c == 90) { return TUI_KEY_BACKTAB; }
+  return 0;
+}
+
+fn tui_find_bytes(p: uint8*, n: int64, from: int64, s: string) -> int64 {
+  var m: int64 = (int64)s.length;
+  var i: int64 = from;
+  while (i + m <= n) {
+    var k: int64 = 0;
+    while (k < m && p[i + k] == s.chars[k]) {
+      k = k + 1;
+    }
+    if (k == m) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// A control byte or plain character c as a key.
+fn tui_plain(ev: TuiEvent*, c: int32, mods: int32) {
+  if (c == 13 || c == 10) {
+    tui_key(ev, TUI_KEY_ENTER, mods, 0);
+  } else if (c == 9) {
+    tui_key(ev, TUI_KEY_TAB, mods, 0);
+  } else if (c == 127 || c == 8) {
+    tui_key(ev, TUI_KEY_BACKSPACE, mods, 0);
+  } else if (c == 27) {
+    tui_key(ev, TUI_KEY_ESC, mods, 0);
+  } else if (c == 0) {
+    tui_key(ev, TUI_KEY_CHAR, mods | TUI_MOD_CTRL, 32);
+  } else if (c < 27) {
+    tui_key(ev, TUI_KEY_CHAR, mods | TUI_MOD_CTRL, c + 96);
+  } else if (c < 32) {
+    tui_key(ev, TUI_KEY_CHAR, mods | TUI_MOD_CTRL, c + 64);
+  } else {
+    tui_key(ev, TUI_KEY_CHAR, mods, c);
+  }
+}
+
+// One event from the bytes p[0..n): the bytes it took, 0 when they are a
+// start that needs more (a lone ESC is one too: tui_poll times it out).
+export fn tui_parse(p: uint8*, n: int64, ev: TuiEvent*) -> int64 {
+  ev->kind = TUI_EV_NONE;
+  ev->key = 0;
+  ev->mods = 0;
+  ev->cp = 0;
+  ev->text = tui_view((uint8*)"".chars, 0);
+  if (n <= 0) {
+    return 0;
+  }
+  var c: int32 = (int32)p[0];
+  if (c == 27) {
+    if (n == 1) {
+      return 0;
+    }
+    var c1: int32 = (int32)p[1];
+    if (c1 == 91) {
+      // CSI: parameters, then a final byte 0x40-0x7E
+      var i: int64 = 2;
+      while (i < n && ((int32)p[i] < 0x40 || (int32)p[i] > 0x7E)) {
+        i = i + 1;
+      }
+      if (i >= n) {
+        if (n > 32) {
+          tui_key(ev, TUI_KEY_ESC, 0, 0);
+          return 1;
+        }
+        return 0;
+      }
+      var fin: int32 = (int32)p[i];
+      var a: int64 = 0;
+      var b: int64 = 0;
+      var nparam: int64 = 0;
+      var k: int64 = 2;
+      var cur: int64 = 0;
+      var any: bool = false;
+      while (k < i) {
+        var d: int32 = (int32)p[k];
+        if (d >= 48 && d <= 57) {
+          cur = cur * 10 + (int64)(d - 48);
+          any = true;
+        } else if (d == 59) {
+          if (nparam == 0) { a = cur; } else if (nparam == 1) { b = cur; }
+          nparam = nparam + 1;
+          cur = 0;
+          any = false;
+        }
+        k = k + 1;
+      }
+      if (any || nparam > 0) {
+        if (nparam == 0) { a = cur; } else if (nparam == 1) { b = cur; }
+        nparam = nparam + 1;
+      }
+      if (fin == 126 && a == 200) {
+        var end: int64 = tui_find_bytes(p, n, i + 1, "[201~") - 1;
+        while (end >= i + 1 && (int32)p[end] != 27) {
+          end = tui_find_bytes(p, n, end + 2, "[201~") - 1;
+        }
+        if (end < i + 1) {
+          return 0;
+        }
+        var len: int64 = end - (i + 1);
+        var cp: uint8* = (uint8*)malloc(len + 1);
+        memcpy((rawptr)cp, (rawptr)&p[i + 1], len);
+        cp[len] = (uint8)0;
+        ev->kind = TUI_EV_PASTE;
+        ev->text = tui_view(cp, len);
+        return end + 6;
+      }
+      if (fin == 126) {
+        var key: int32 = tui_tilde(a);
+        if (key == 0) {
+          return i + 1;
+        }
+        tui_key(ev, key, tui_csi_mods(b), 0);
+        return i + 1;
+      }
+      var lk: int32 = tui_letter_key(fin);
+      if (lk != 0) {
+        var m: int64 = b;
+        if (nparam == 1) {
+          m = 0;
+        }
+        var mods: int32 = tui_csi_mods(m);
+        if (lk == TUI_KEY_BACKTAB) {
+          mods = mods | TUI_MOD_SHIFT;
+        }
+        tui_key(ev, lk, mods, 0);
+      }
+      return i + 1;
+    }
+    if (c1 == 79) {
+      if (n < 3) {
+        return 0;
+      }
+      var k2: int32 = tui_letter_key((int32)p[2]);
+      if (k2 != 0) {
+        tui_key(ev, k2, 0, 0);
+      }
+      return 3;
+    }
+    if (c1 == 27) {
+      tui_key(ev, TUI_KEY_ESC, 0, 0);
+      return 1;
+    }
+    // alt+key
+    var sub: TuiEvent;
+    var used: int64 = tui_parse(&p[1], n - 1, &sub);
+    if (used == 0) {
+      return 0;
+    }
+    *ev = sub;
+    ev->mods = ev->mods | TUI_MOD_ALT;
+    return used + 1;
+  }
+  if (c < 0x80) {
+    tui_plain(ev, c, 0);
+    return 1;
+  }
+  var need: int64 = 1;
+  if ((c & 0xE0) == 0xC0) {
+    need = 2;
+  } else if ((c & 0xF0) == 0xE0) {
+    need = 3;
+  } else if ((c & 0xF8) == 0xF0) {
+    need = 4;
+  }
+  if (n < need) {
+    return 0;
+  }
+  var at: int64 = 0;
+  var cpv: int32 = tui_utf8_next(tui_view(p, need), &at);
+  tui_key(ev, TUI_KEY_CHAR, 0, cpv);
+  return at;
+}
+
+fn tui_now_ms() -> int64 {
+  var ts: int64[2];
+  ts[0] = 0;
+  ts[1] = 0;
+  syscall(228, 1, &ts[0]);       // clock_gettime CLOCK_MONOTONIC
+  return ts[0] * 1000 + ts[1] / 1000000;
+}
+
+// Bytes for the parser as if typed (tests).
+export fn tui_feed(t: Tui*, s: string) {
+  var n: int64 = (int64)s.length;
+  if (t->ilen + n > 4096) {
+    n = 4096 - t->ilen;
+  }
+  memcpy((rawptr)&t->inb[t->ilen], (rawptr)s.chars, n);
+  t->ilen = t->ilen + n;
+}
+
+fn tui_take(t: Tui*, ev: TuiEvent*) -> bool {
+  if (t->ilen == 0) {
+    return false;
+  }
+  var used: int64 = tui_parse(t->inb, t->ilen, ev);
+  if (used == 0) {
+    if (t->ilen > 0 && (int32)t->inb[0] == 27) {
+      if (t->esc_ms == 0) {
+        t->esc_ms = tui_now_ms();
+      }
+      if (t->ilen >= 4096 || tui_now_ms() - t->esc_ms >= 30) {
+        // a lone ESC (or a sequence that never ended)
+        tui_key(ev, TUI_KEY_ESC, 0, 0);
+        used = 1;
+      }
+    } else if (t->ilen >= 4096) {
+      used = t->ilen;
+    }
+    if (used == 0) {
+      return false;
+    }
+  }
+  t->esc_ms = 0;
+  memmove((rawptr)t->inb, (rawptr)&t->inb[used], t->ilen - used);
+  t->ilen = t->ilen - used;
+  return ev->kind != TUI_EV_NONE || true;
+}
+
+// The next event, waiting up to ms (0: none waiting, -1: forever). extra:
+// an fd to watch too (TUI_EV_FD when it is readable; -1 none). TUI_EV_NONE
+// when the time ran out.
+export fn tui_poll(t: Tui*, ms: int64, extra: int32, ev: TuiEvent*) -> int32 {
+  ev->kind = TUI_EV_NONE;
+  ev->text = tui_view((uint8*)"".chars, 0);
+  while (true) {
+    if (tui_take(t, ev)) {
+      if (ev->kind != TUI_EV_NONE) {
+        return ev->kind;
+      }
+      continue;
+    }
+    if (t->fake) {
+      return TUI_EV_NONE;
+    }
+    var wait: int64 = ms;
+    if (t->ilen > 0 && (wait < 0 || wait > 30)) {
+      wait = 30;
+    }
+    var fds: int32[6];
+    fds[0] = t->fd_in;
+    fds[1] = 1;
+    fds[2] = t->sigfd;
+    fds[3] = 1;
+    fds[4] = extra;
+    fds[5] = 1;
+    var r: int64 = syscall(7, &fds[0], 3, wait);
+    if (r == -4) {
+      continue;
+    }
+    if (r <= 0) {
+      if (t->ilen > 0) {
+        if (tui_take(t, ev) && ev->kind != TUI_EV_NONE) {
+          return ev->kind;
+        }
+        if (ms >= 0 && ms <= 30) {
+          return TUI_EV_NONE;
+        }
+        continue;
+      }
+      return TUI_EV_NONE;
+    }
+    if (t->sigfd >= 0 && ((fds[3] >> 16) & 0x19) != 0) {
+      var si: uint8[128];
+      var quit: bool = false;
+      var winch: bool = false;
+      while (syscall(0, t->sigfd, &si[0], 128) == 128) {
+        var signo: int32 = (int32)si[0];
+        if (signo == 28) {
+          winch = true;
+        } else {
+          quit = true;
+        }
+      }
+      if (quit) {
+        ev->kind = TUI_EV_QUIT;
+        return TUI_EV_QUIT;
+      }
+      if (winch) {
+        tui_resize(t);
+        ev->kind = TUI_EV_RESIZE;
+        return TUI_EV_RESIZE;
+      }
+    }
+    if (((fds[1] >> 16) & 0x19) != 0) {
+      var got: int64 = syscall(0, t->fd_in, &t->inb[t->ilen], 4096 - t->ilen);
+      if (got == 0) {
+        ev->kind = TUI_EV_QUIT;
+        return TUI_EV_QUIT;
+      }
+      if (got > 0) {
+        t->ilen = t->ilen + got;
+        continue;
+      }
+    }
+    if (extra >= 0 && ((fds[5] >> 16) & 0x19) != 0) {
+      ev->kind = TUI_EV_FD;
+      return TUI_EV_FD;
+    }
+  }
+  return TUI_EV_NONE;
+}
+
+// ---------------------------------------------------------------------------
+// A list with a selection
+// ---------------------------------------------------------------------------
+
+export struct TuiList {
+  n: int64;         // items
+  sel: int64;
+  top: int64;       // the first item shown
+}
+
+export fn tui_list_new() -> TuiList* {
+  var l: TuiList* = new TuiList;
+  l->n = 0;
+  l->sel = 0;
+  l->top = 0;
+  return l;
+}
+
+// The selection kept in 0..n-1 and shown in rows rows.
+export fn tui_list_fit(l: TuiList*, n: int64, rows: int64) {
+  l->n = n;
+  if (l->sel >= n) {
+    l->sel = n - 1;
+  }
+  if (l->sel < 0) {
+    l->sel = 0;
+  }
+  if (l->sel < l->top) {
+    l->top = l->sel;
+  }
+  if (rows > 0 && l->sel >= l->top + rows) {
+    l->top = l->sel - rows + 1;
+  }
+  if (l->top < 0) {
+    l->top = 0;
+  }
+}
+
+// Up, down, page up and down, home and end move the selection; true when
+// the key was one of them.
+export fn tui_list_key(l: TuiList*, ev: TuiEvent*, rows: int64) -> bool {
+  if (ev->kind != TUI_EV_KEY) {
+    return false;
+  }
+  var k: int32 = ev->key;
+  if (k == TUI_KEY_UP) {
+    l->sel = l->sel - 1;
+  } else if (k == TUI_KEY_DOWN) {
+    l->sel = l->sel + 1;
+  } else if (k == TUI_KEY_PGUP) {
+    l->sel = l->sel - rows;
+  } else if (k == TUI_KEY_PGDN) {
+    l->sel = l->sel + rows;
+  } else if (k == TUI_KEY_HOME) {
+    l->sel = 0;
+  } else if (k == TUI_KEY_END) {
+    l->sel = l->n - 1;
+  } else {
+    return false;
+  }
+  tui_list_fit(l, l->n, rows);
+  return true;
+}
