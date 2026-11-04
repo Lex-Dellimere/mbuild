@@ -204,7 +204,11 @@ fn mii_cstr(s: string) -> cstring {
   return (cstring)p;
 }
 
+// Stored so that a temporary `a + b` argument outlives the view (base.mettle's s_sub).
+var mii_view_src: string = "";
+
 fn mii_sub(s: string, a: int64, b: int64) -> string {
+  mii_view_src = s;
   var r: string;
   r.chars = &s.chars[a];
   r.length = (uint64)(b - a);

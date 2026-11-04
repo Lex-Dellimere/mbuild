@@ -3542,8 +3542,9 @@ fn dx_copy_tree(from: string, to: string) -> bool {
   while (i < files->len && ok) {
     var rel: string = sl_get(files, i);
     i = i + 1;
-    fs_mkdirs(p_dir(to + "/" + rel));
-    ok = fs_copy(from + "/" + rel, to + "/" + rel);
+    var dst: string = to + "/" + rel;
+    fs_mkdirs(p_dir(dst));
+    ok = fs_copy(from + "/" + rel, dst);
   }
   free(files);
   return ok;

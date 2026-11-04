@@ -59,7 +59,14 @@ export fn s_byte(s: string, i: int64) -> int32 {
   return (int32)s.chars[i];
 }
 
+// The compiler frees a temporary `a + b` argument after the call unless the
+// callee stores it (DESIGN.md 2, issue 6), and a view into it would dangle:
+// s_sub and s_from store their source here, so a temporary passed to any
+// function that returns a view of it stays alive.
+var g_view_src: string;
+
 export fn s_sub(s: string, start: int64, end: int64) -> string {
+  g_view_src = s;
   var n: int64 = (int64)s.length;
   if (start < 0) { start = 0; }
   if (end > n) { end = n; }
@@ -70,6 +77,7 @@ export fn s_sub(s: string, start: int64, end: int64) -> string {
 }
 
 export fn s_from(s: string, start: int64) -> string {
+  g_view_src = s;
   var n: int64 = (int64)s.length;
   if (start < 0) { start = 0; }
   if (start >= n) {

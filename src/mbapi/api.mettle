@@ -97,7 +97,11 @@ fn mbi_len(s: string) -> int64 {
   return (int64)s.length;
 }
 
+// Stored so that a temporary `a + b` argument outlives the view (base.mettle's s_sub).
+var g_mbi_view_src: string;
+
 fn mbi_sub(s: string, start: int64, end: int64) -> string {
+  g_mbi_view_src = s;
   if (end <= start) {
     return "";
   }
