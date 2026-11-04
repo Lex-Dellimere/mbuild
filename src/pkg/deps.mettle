@@ -1173,15 +1173,16 @@ fn dx_is_partial(spec: string) -> bool {
   return sv_is(spec) && dx_version_parts(spec) < 3 && s_find_byte(spec, 45) < 0;
 }
 
-// Versions matching a partial version ("v1" -> v1.x.y, "v1.2" -> v1.2.y).
-fn dx_matching(vs: StrList*, spec: string) -> StrList* {
+// Versions matching a partial version ("v1" -> v1.x.y, "v1.2" -> v1.2.y):
+// stable ones, or with pre the pre-releases, which only a full version selects.
+fn dx_matching(vs: StrList*, spec: string, pre: bool) -> StrList* {
   var want: SemVer = sv_parse(spec);
   var parts: int64 = dx_version_parts(spec);
   var found: StrList* = sl_new();
   var i: int64 = 0;
   while (i < vs->len) {
     var v: SemVer = sv_parse(sl_get(vs, i));
-    if (v.ok && v.major == want.major && (parts < 2 || v.minor == want.minor)) {
+    if (v.ok && v.major == want.major && (parts < 2 || v.minor == want.minor) && (slen(v.pre) > 0) == pre) {
       sl_push(found, sl_get(vs, i));
     }
     i = i + 1;
@@ -1193,7 +1194,7 @@ fn dx_matching(vs: StrList*, spec: string) -> StrList* {
 fn dx_spec_matches(spec: string, locked: string) -> bool {
   if (dx_is_partial(spec)) {
     var one: StrList* = sl_of(locked);
-    var hits: StrList* = dx_matching(one, spec);
+    var hits: StrList* = dx_matching(one, spec, false);
     var ok: bool = hits->len > 0;
     free(one);
     free(hits);
@@ -1349,7 +1350,7 @@ fn dx_pick_version(cx: DxCx*, m: DxMod*, spec: string, from: string) -> string {
     ix = dx_index(cx, m, round == 1);
     if (dx_is_partial(spec)) {
       var vs: StrList* = dx_versions(ix, false);
-      var hits: StrList* = dx_matching(vs, spec);
+      var hits: StrList* = dx_matching(vs, spec, false);
       label = sv_max(hits);
       free(vs);
       free(hits);
@@ -1367,6 +1368,17 @@ fn dx_pick_version(cx: DxCx*, m: DxMod*, spec: string, from: string) -> string {
   if (slen(label) == 0) {
     if (yanked) {
       dx_fail_hint(m->module + " " + spec + " is yanked in registry " + ix->registry + " and no later version of line " + sv_line(spec) + " exists (required by " + from + ")", dx_available(ix));
+    }
+    if (dx_is_partial(spec)) {
+      var vs: StrList* = dx_versions(ix, false);
+      var pres: StrList* = dx_matching(vs, spec, true);
+      var shown: string = sl_join(pres, ", ");
+      var newest: string = sv_max(pres);
+      free(vs);
+      free(pres);
+      if (slen(newest) > 0) {
+        dx_fail_hint(m->module + " has no stable version " + spec + " (required by " + from + "); its pre-releases: " + shown, "a pre-release is selected only by its full version, e.g. " + m->module + "@" + newest);
+      }
     }
     dx_fail_hint(m->module + " has no version " + spec + " (required by " + from + ")", dx_available(ix));
   }
