@@ -1024,7 +1024,7 @@ fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
     cur->os = a0;
     return s_empty();
   }
-  if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include") || s_eq(f, "mb_import_root")) { return "package"; }
+  if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include") || s_eq(f, "mb_import_root") || s_eq(f, "mb_toolchain")) { return "package"; }
   if (s_eq(f, "mb_dep_bin")) { return "dep-bins"; }
   if (s_eq(f, "mb_targets") || s_eq(f, "mb_flags") || s_eq(f, "mb_prelude") || s_eq(f, "mb_agents")) { return "build"; }
   if (s_eq(f, "mb_bin") || s_eq(f, "mb_bin_kind")) { return "bin." + a0; }
@@ -1298,6 +1298,11 @@ fn mfx_call_text(call: string, args: StrList*) -> string {
 
 // The one call named `call` in the declaring function whose key argument is
 // first_arg; at = -1 when there is none.
+// Calls a file holds at most once, matched whatever their argument.
+fn mfx_singleton(call: string) -> bool {
+  return s_eq(call, "mb_toolchain");
+}
+
 fn mfx_match_call(sc: MfxScan*, call: string, first_arg: string) -> MfxMatch {
   var m: MfxMatch;
   m.at = -1;
@@ -1320,7 +1325,7 @@ fn mfx_match_call(sc: MfxScan*, call: string, first_arg: string) -> MfxMatch {
       }
       continue;
     }
-    if (!s_eq(mfx_arg(c, ki), first_arg)) {
+    if (!mfx_singleton(call) && !s_eq(mfx_arg(c, ki), first_arg)) {
       continue;
     }
     m.count = m.count + 1;
@@ -1393,4 +1398,25 @@ export fn mbf_remove_call(text: string, call: string, first_arg: string) -> MbfE
   }
   var c: MfxCall* = &sc->calls[m.at];
   return mfx_edit(true, s_sub(text, 0, c->line_start) + s_from(text, c->line_end), c->line, s_empty());
+}
+
+// Literal argument idx of the first `call(...)` in fn project() (or fn
+// local()) whose key argument is first_arg (any for a singleton); "" when
+// there is none. Read before the file is compiled (the compiler pin).
+export fn mbf_call_arg(text: string, call: string, first_arg: string, idx: int64) -> string {
+  var sc: MfxScan* = mfx_scan(text);
+  var owner: int64 = mfx_decl_fn(sc);
+  var ki: int64 = mfx_key_index(call);
+  var i: int64 = 0;
+  while (i < sc->ncalls) {
+    var c: MfxCall* = &sc->calls[i];
+    i = i + 1;
+    if (!s_eq(c->fn_name, call) || c->in_fn != owner || !mfx_arg_literal(c, idx)) {
+      continue;
+    }
+    if (mfx_singleton(call) || (mfx_arg_literal(c, ki) && s_eq(mfx_arg(c, ki), first_arg))) {
+      return mfx_arg(c, idx);
+    }
+  }
+  return s_empty();
 }

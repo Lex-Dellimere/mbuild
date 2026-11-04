@@ -85,6 +85,19 @@ fn changed_lines(a: string, b: string) -> string {
 }
 
 fn test_scan() {
+  var pin: string = src("fn project() $\n  mb_package(`a`, `0.1.0`);\n}\n");
+  var pa: StrList* = sl_of("v0.18.0");
+  defer free(pa);
+  var pe: MbfEdit = mbf_set_call(pin, "mb_toolchain", "", pa);
+  t_eq("set_call: a pin goes into fn project()", pe.text, src("fn project() $\n  mb_toolchain(`v0.18.0`);\n  mb_package(`a`, `0.1.0`);\n}\n"));
+  sl_set(pa, 0, "dev-v0.17.0-466-g5907c5e5");
+  var pe2: MbfEdit = mbf_set_call(pe.text, "mb_toolchain", "", pa);
+  t_eq("set_call: a pin is replaced whatever its version", changed_lines(pe.text, pe2.text), "-  mb_toolchain(\"v0.18.0\");|+  mb_toolchain(\"dev-v0.17.0-466-g5907c5e5\");");
+  t_eq("call_arg: the pin", mbf_call_arg(pe2.text, "mb_toolchain", "", 0), "dev-v0.17.0-466-g5907c5e5");
+  t_eq("call_arg: none", mbf_call_arg(pin, "mb_toolchain", "", 0), "");
+  t_eq("call_arg: by key", mbf_call_arg(src("fn local() $\n  mb_tool(`cc`, `clang`);\n  mb_tool(`mettle-linux`, `/x/mettle`);\n}\n"), "mb_tool", "mettle-linux", 1), "/x/mettle");
+  t_eq("call_arg: other functions are not read", mbf_call_arg(src("fn project() $\n}\n\nfn other() $\n  mb_toolchain(`v1.0.0`);\n}\n"), "mb_toolchain", "", 0), "");
+  t_eq("call_arg: a comment is not a call", mbf_call_arg(src("fn project() $\n  // mb_toolchain(`v1.0.0`);\n}\n"), "mb_toolchain", "", 0), "");
   var info: MbfInfo* = mbf_scan(viewer());
   defer free(info);
   t_ok("scan: ok", info->ok);

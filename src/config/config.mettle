@@ -176,6 +176,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     if (s_eq(key, "name") || s_eq(key, "version")) { sl_push(c, "mb_package||"); }
     if (s_eq(key, "include")) { sl_push(c, "mb_publish_include||"); }
     if (s_eq(key, "import-root")) { sl_push(c, "mb_import_root||"); }
+    if (s_eq(key, "toolchain")) { sl_push(c, "mb_toolchain||"); }
     sl_push(c, "mb_meta|" + key + "|");
   } else if (s_eq(section, "build")) {
     if (s_eq(key, "targets")) { sl_push(c, "mb_targets||"); }

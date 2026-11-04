@@ -535,7 +535,7 @@ fn mnx_deps(m: Manifest*) {
 // ---------------------------------------------------------------------------
 
 fn mnx_known_keys(section: string) -> StrList* {
-  if (s_eq(section, "package")) { return mnx_list("name version mettle include description license repository authors import-root"); }
+  if (s_eq(section, "package")) { return mnx_list("name version mettle toolchain include description license repository authors import-root"); }
   if (s_eq(section, "build")) { return mnx_list("targets flags prelude agents"); }
   // bound to locals: mnx_list keeps views into its argument (DESIGN.md 2)
   if (s_starts(section, "profile.")) {

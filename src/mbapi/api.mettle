@@ -686,6 +686,11 @@ export fn mb_import_root(dir: string) {
   mbi_put("package", "import-root", mbi_quote(dir));
 }
 
+// The Mettle toolchain this project builds with: an installed id or version (mbuild toolchain use).
+export fn mb_toolchain(version: string) {
+  mbi_put("package", "toolchain", mbi_quote(version));
+}
+
 // A program to build from main ("" = detected).
 export fn mb_bin(name: string, main: string) {
   var sec: string = "bin." + mbi_key(name);
