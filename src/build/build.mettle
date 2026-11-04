@@ -4093,8 +4093,8 @@ fn bx_init_cmds() {
     "lists each profile with its settings, where they're set, and the compiler flags\nit passes, per bin when a bin changes them.");
   bx_def("doctor", "mbuild doctor [-t T]", "check the environment",
     "shows the host, the tools mbuild uses (curl, tar, the C compilers, pkg-config,\nwine), the compiler for each target and the native-code audit.");
-  bx_def("toolchain", "mbuild toolchain [list | install VERSION [-t T] | remove VERSION [-t T]]", "list or install Mettle compilers",
-    "lists the compiler per target, or installs / removes a release under the\nmbuild home. releases up to v0.17.0 can't build current projects: use a\ncompiler built from ../Mettle.");
+  bx_def("toolchain", "mbuild toolchain [list | install VERSION [-t T] | use VERSION | remove VERSION [-t T]]", "list or install Mettle compilers",
+    "lists the compiler per target, or installs / removes a release under the\nmbuild home; use also writes it as this machine's compiler into\nmbuild.local.mettle. releases up to v0.17.0 can't build current projects:\nuse a compiler built from ../Mettle.");
   bx_def("mettle", "mbuild mettle [-t T] -- ARGS...", "run the selected compiler",
     "runs the compiler mbuild would use, in the project root, with ARGS and the\nfirst bin's component dir. example: mbuild mettle -- --version");
   bx_def("trace", "mbuild trace FN [ARGS...]", "trace a function (mettle trace)", "runs `mettle trace` on the first bin's main file.");

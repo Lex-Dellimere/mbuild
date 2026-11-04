@@ -132,6 +132,15 @@ check "use logger=quiet then run" hasnt "stdout: hi"
 mb components
 check "components shows mbuild.local.mettle" has "mbuild.local.mettle"
 
+# --- toolchain use (11): an installed release becomes mb_tool in mbuild.local.mettle
+TC="$MBUILD_HOME/toolchains/v0.99.0/linux"
+mkdir -p "$TC/bin" && cp "$METTLE" "$TC/bin/mettle"
+mb toolchain use v0.99.0
+check "toolchain use writes mb_tool" grep -qF "mb_tool(\"mettle-linux\", \"$TC/bin/mettle\");" mbuild.local.mettle
+check "toolchain use keeps mb_use" grep -qF 'mb_use("logger", "quiet");' mbuild.local.mettle
+mb toolchain
+check "toolchain lists it" has "$TC/bin/mettle  (tools mettle-linux (mbuild.local.mettle))"
+
 # --- rules (15.8)
 mkdir -p "$W/rules/src" "$W/rules/rules" && cd "$W/rules"
 cat > mbuild.mettle <<'EOF'

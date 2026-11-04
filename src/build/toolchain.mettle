@@ -24,6 +24,7 @@ import "../model/semver";
 import "../model/toml";
 import "../model/manifest";
 import "../model/project";
+import "../config/mbfile";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -377,7 +378,7 @@ fn tcx_pick(p: Project*, target: string) -> Mettle* {
   }
 
   if (!s_eq(target, host)) {
-    return tcx_none("no Mettle compiler for " + target, "set " + env_name + ", or mettle-" + target + " in mbuild.local.mettle, to a " + target + " build of ../Mettle");
+    return tcx_none("no Mettle compiler for " + target, "set " + env_name + ", or mb_tool(\"mettle-" + target + "\", PATH) in mbuild.local.mettle, to a " + target + " build of ../Mettle");
   }
   return tcx_none("no Mettle compiler for " + target, "build ../Mettle (make) and put bin/mettle on PATH, or set " + env_name);
 }
@@ -1195,6 +1196,44 @@ fn tcx_cmd_install(p: Project*, given: string) -> int32 {
   return 0;
 }
 
+// Installs v for the host when missing and writes its compiler as
+// mb_tool("mettle-<host>", PATH) into mbuild.local.mettle (DESIGN.md 11).
+fn tcx_cmd_use(p: Project*, given: string) -> int32 {
+  var v: string = tcx_version_arg(p, given);
+  if (slen(v) == 0) {
+    return 1;
+  }
+  var host: string = sys_os();
+  var targets: StrList* = sl_of(host);
+  defer tcx_sl_free(targets);
+  if (!tcx_ensure(p, v, targets)) {
+    return 1;
+  }
+  var file: string = p->root + "/mbuild.local.mettle";
+  var r: FsRead = fs_read(file);
+  var text: string = s_empty();
+  if (r.ok) {
+    text = r.data;
+  }
+  var args: StrList* = sl_of("mettle-" + host);
+  defer tcx_sl_free(args);
+  sl_push(args, tcx_exe_in(tcx_dir(v, host), host));
+  var e: MbfEdit = mbf_set_call(text, "mb_tool", "mettle-" + host, args);
+  if (!e.ok) {
+    error_msg("mbuild.local.mettle:" + s_int(e.line) + " sets mettle-" + host + " in a way mbuild cannot edit (" + e.why + ")");
+    err_line("  " + cyan("help") + ": change it to: mb_tool(\"mettle-" + host + "\", \"" + sl_get(args, 1) + "\");");
+    return 1;
+  }
+  if (!s_eq(e.text, text)) {
+    if (!fs_write(file, e.text)) {
+      error_msg("cannot write " + file);
+      return 1;
+    }
+    status("Updating", "mbuild.local.mettle: " + mbf_call_at(e.text, e.line));
+  }
+  return 0;
+}
+
 // Drops versions.cache lines of compilers under dir.
 fn tcx_forget(dir: string) {
   var cache: string = tcx_root() + "/versions.cache";
@@ -1272,6 +1311,7 @@ fn tcx_cmd_remove(p: Project*, given: string) -> int32 {
 fn tcx_usage() {
   err_line("usage: mbuild toolchain [list]");
   err_line("       mbuild toolchain install VERSION|latest [-t linux|windows|all]");
+  err_line("       mbuild toolchain use VERSION|latest");
   err_line("       mbuild toolchain remove VERSION [-t ...]");
 }
 
@@ -1284,7 +1324,7 @@ export fn tc_cmd_toolchain(p: Project*) -> int32 {
   if (s_eq(sub, "list") || s_eq(sub, "ls")) {
     return tcx_cmd_list(p);
   }
-  if (s_eq(sub, "install") || s_eq(sub, "remove") || s_eq(sub, "rm")) {
+  if (s_eq(sub, "install") || s_eq(sub, "use") || s_eq(sub, "remove") || s_eq(sub, "rm")) {
     if (rest->len != 2) {
       error_msg("mbuild toolchain " + sub + " takes one VERSION");
       tcx_usage();
@@ -1293,6 +1333,9 @@ export fn tc_cmd_toolchain(p: Project*) -> int32 {
     var v: string = sl_get(rest, 1);
     if (s_eq(sub, "install")) {
       return tcx_cmd_install(p, v);
+    }
+    if (s_eq(sub, "use")) {
+      return tcx_cmd_use(p, v);
     }
     return tcx_cmd_remove(p, v);
   }
