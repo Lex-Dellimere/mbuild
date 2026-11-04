@@ -26,6 +26,8 @@ export struct Options {
   passthrough: StrList*;  // arguments after "--"
   sets: StrList*;     // --set KEY=VALUE, in order
   flags: StrList*;    // --flag=RAW, in order
+  uses: StrList*;     // --use NAME=IMPL, in order
+  no_hooks: bool;
 }
 
 export struct Project {
@@ -34,19 +36,23 @@ export struct Project {
   has_manifest: bool;
   opts: Options*;
   state_dir: string;     // root + "/.mbuild"
+  mbfile: string;        // absolute mbuild.mettle, "" when none
+  legacy_toml: bool;     // only an mbuild.toml is present
 }
 
 // One selected dependency.
 export struct DepModule {
-  module: string;     // "github.com/x/y", or the alias key of a local path package
-  version: string;    // "v1.2.0", a branch, a commit, or "" for a path package
-  commit: string;     // full commit, "" for a path package
+  module: string;     // package name
+  version: string;    // "v1.2.0", "" for a path package
+  commit: string;     // unused since round 3
   dir: string;        // absolute directory holding its files
-  alias: string;      // import alias published in mettle.deps, "" when none
+  alias: string;      // always ""
   is_path: bool;      // a local { path = ... } package
-  man: Manifest*;     // its mbuild.toml, 0 when it has none
-  replaced: string;   // "" | "path" | "version" | "url" ([replace], DESIGN.md 12.5)
-  submodules: StrList*;  // submodule paths checked out inside dir
+  man: Manifest*;     // its manifest, 0 when it has none
+  replaced: string;   // "" | "path" | "version" ([replace], DESIGN.md 12.5)
+  submodules: StrList*;  // unused since round 3
+  checksum: string;   // "sha256:<hex>", "" for a path package
+  registry: string;   // registry name, "" for a path package
 }
 
 export struct DepState {
@@ -84,6 +90,7 @@ export fn options_new() -> Options* {
   o->passthrough = sl_new();
   o->sets = sl_new();
   o->flags = sl_new();
+  o->uses = sl_new();
   return o;
 }
 

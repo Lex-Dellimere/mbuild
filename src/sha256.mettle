@@ -1,0 +1,15 @@
+// sha256: stub, owned by group R (DESIGN.md 14.4).
+
+import "base";
+
+export fn sha_hex(p: uint8*, n: int64) -> string {
+  return s_empty();
+}
+
+export fn sha_string(s: string) -> string {
+  return s_empty();
+}
+
+export fn sha_file(path: string) -> string {
+  return s_empty();
+}

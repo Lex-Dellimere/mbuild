@@ -1,11 +1,10 @@
-// manifest_test: typed build settings, [replace], submodules, [package]
-// mettle and mbuild.local.toml (DESIGN.md 12.21 Group M).
+// manifest_test: typed build settings, [replace], [package] mettle,
+// mbuild.local.toml and the round 3 schema (DESIGN.md 12.21, 13.5, 16.4 Group M).
 //
+//   mettle test tests/manifest_test.mettle     (leak warnings are expected)
 //   tools/mcheck.sh tests/manifest_test.mettle --run
 //
-// A program, not an @test suite: `mettle test` (head and v0.17.0) dies with
-// an internal compiler error (segfault in IR lowering) on an @test function
-// that runs these checks.
+// Run both: `mettle test` reports a failing run as skipped (reports issue 10).
 
 import "std/io";
 import "../src/base";
@@ -173,38 +172,63 @@ fn test_settings() {
   t_eq("cflags along the chain", sl_join(man_profile_cflags(cf, "fast"), ","), "-O1,-O2");
 }
 
-fn test_replace_and_subs() {
-  var r: Manifest* = man_of(pkg("[replace]\n\"github.com/demo/strutil\" = {{ path = \"../strutil\" }\n\"github.com/demo/json\" = {{ url = \"https://github.com/me/json\", version = \"v1.4.1\" }\n\"github.com/demo/apilib\" = {{ version = \"v2.0.0\" }\n[replace.\"github.com/demo/edge\"]\nurl = \"git@github.com:me/edge.git\"\n"));
+fn test_replace_and_removed() {
+  var r: Manifest* = man_of(pkg("[replace]\nstrutil = {{ path = \"../strutil\" }\napilib = {{ version = \"v2.0.0\" }\n[replace.edge]\npath = \"../edge\"\n"));
   t_eq("replace: valid", r->error, "");
   t_eq("replace: no warnings", sl_join(r->warnings, "|"), "");
-  t_ok("replace: four", r->nreplaces == 4);
-  var a: ReplaceSpec* = man_replace_find(r, "github.com/demo/strutil");
-  t_eq("replace: path", a->path + "|" + a->url + "|" + a->version + "|" + s_int(a->line), "../strutil|||4");
-  var j: ReplaceSpec* = man_replace_find(r, "github.com/demo/json");
-  t_eq("replace: fork", j->path + "|" + j->url + "|" + j->version, "|https://github.com/me/json|v1.4.1");
-  t_eq("replace: version", man_replace_find(r, "github.com/demo/apilib")->version, "v2.0.0");
-  t_eq("replace: table form", man_replace_find(r, "github.com/demo/edge")->url, "git@github.com:me/edge.git");
-  t_ok("replace: absent", man_replace_find(r, "github.com/x/y") == (ReplaceSpec*)0);
-  var pv: Manifest* = man_of(pkg("[replace]\n\"github.com/a/b\" = {{ path = \"../b\", version = \"v1\" }\n"));
-  t_eq("replace: path and version", pv->error, "/p/mbuild.toml:4: [replace] \"github.com/a/b\": path excludes url and version (a local checkout is used as it is)");
-  var mk: Manifest* = man_of(pkg("[replace]\nmylib = {{ path = \"../b\" }\n"));
-  t_has("replace: key not a module", mk->error, "[replace] keys are module paths");
+  t_ok("replace: three", r->nreplaces == 3);
+  var a: ReplaceSpec* = man_replace_find(r, "strutil");
+  t_eq("replace: path", a->path + "|" + a->version + "|" + s_int(a->line), "../strutil||4");
+  t_eq("replace: version", man_replace_find(r, "apilib")->version, "v2.0.0");
+  t_eq("replace: table form", man_replace_find(r, "edge")->path, "../edge");
+  t_ok("replace: absent", man_replace_find(r, "other") == (ReplaceSpec*)0);
+  var pv: Manifest* = man_of(pkg("[replace]\nb = {{ path = \"../b\", version = \"v1\" }\n"));
+  t_eq("replace: path and version", pv->error, "/p/mbuild.toml:4: [replace] \"b\": path excludes version (a local checkout is used as it is)");
+  var ru: Manifest* = man_of(pkg("[replace]\njson = {{ url = \"https://github.com/me/json\", version = \"v1.4.1\" }\n"));
+  t_has("replace: url removed", ru->error, "url was removed");
+  var rm: Manifest* = man_of(pkg("[replace]\n\"github.com/a/b\" = {{ path = \"../b\" }\n"));
+  t_has("replace: module path key", rm->error, "package names");
 
-  var d: Manifest* = man_of(pkg("[dependencies]\n\"github.com/a/w\" = {{ version = \"v1.0.0\", submodules = false }\n\"github.com/a/b\" = {{ version = \"v2.1.0\", submodules = [\"a\", \"b\"] }\n\"github.com/a/c\" = \"v1.0.0\"\n[dependencies.\"github.com/a/t\"]\nsubmodules = true\n"));
-  t_eq("subs: valid", d->error, "");
-  t_eq("subs: false", man_dep_find(d, "github.com/a/w")->subs_mode, "none");
-  t_eq("subs: list", man_dep_find(d, "github.com/a/b")->subs_mode + " " + sl_join(man_dep_find(d, "github.com/a/b")->subs, ","), "list a,b");
-  t_eq("subs: default", man_dep_find(d, "github.com/a/c")->subs_mode, "");
-  t_eq("subs: table form", man_dep_find(d, "github.com/a/t")->subs_mode, "all");
-  var ds: Manifest* = man_of(pkg("[dependencies]\n\"github.com/a/w\" = {{ version = \"v1.0.0\", submodules = \"x\" }\n"));
-  t_eq("subs: string is an error", ds->error, "/p/mbuild.toml:4: dependency 'github.com/a/w': submodules must be true, false or an array of submodule paths");
-  var ps: Manifest* = man_of("[package]\nname = \"x\"\nsubmodules = [\"vendor/clib\"]\nmettle = \"0.17\"\n");
-  t_eq("package: valid", ps->error, "");
-  t_eq("package: submodules", ps->subs_mode + " " + sl_join(ps->subs, ","), "list vendor/clib");
-  t_eq("package: mettle normalised", ps->mettle_min, "v0.17.0");
-  t_eq("package: defaults", e_defaults(), "all||0");
+  var d: Manifest* = man_of(pkg("[dependencies]\nstrutil = \"v1.1.0\"\nauth = {{ version = \"v2.0.0\", registry = \"corp\" }\nwidgets = {{ path = \"../widgets\" }\nloose = {{ registry = \"corp\" }\n[dependencies.tbl]\nversion = \"v1\"\n"));
+  t_eq("deps: valid", d->error, "");
+  t_ok("deps: five", d->ndeps == 5);
+  var su: DepSpec* = man_dep_find(d, "strutil");
+  t_eq("deps: string", su->key + "|" + su->version + "|" + su->registry + "|" + su->path, "strutil|v1.1.0||");
+  var au: DepSpec* = man_dep_find(d, "auth");
+  t_eq("deps: registry", au->version + "|" + au->registry, "v2.0.0|corp");
+  t_eq("deps: path", man_dep_find(d, "widgets")->path + "|" + man_dep_find(d, "widgets")->version, "../widgets|");
+  t_eq("deps: latest when unstated", man_dep_find(d, "loose")->version, "latest");
+  t_eq("deps: table form", man_dep_find(d, "tbl")->version, "v1");
+  var dm: Manifest* = man_of(pkg("[dependencies]\n\"github.com/x/y\" = \"v1.0.0\"\n"));
+  t_has("deps: module path key", dm->error, "package names");
+  t_eq("deps: module path message", dm->error, "/p/mbuild.toml:4: dependency 'github.com/x/y' is a module path: dependencies are package names now (e.g. y = \"v1.0.0\"; mbuild migrate converts an mbuild.toml)");
+  var du: Manifest* = man_of(pkg("[dependencies]\nlib = {{ url = \"https://x/lib\", version = \"v1\" }\n"));
+  t_has("deps: url removed", du->error, "dependency 'lib': url was removed");
+  var dmo: Manifest* = man_of(pkg("[dependencies]\nlib = {{ module = \"github.com/a/lib\" }\n"));
+  t_has("deps: module removed", dmo->error, "module was removed");
+  var ds: Manifest* = man_of(pkg("[dependencies]\nlib = {{ version = \"v1\", submodules = false }\n"));
+  t_has("deps: submodules removed", ds->error, "submodules was removed");
+  var dup: Manifest* = man_of(pkg("[dependencies]\nStrUtil = \"v1\"\n"));
+  t_has("deps: bad name", dup->error, "is not a package name");
+  var dst: Manifest* = man_of(pkg("[dependencies]\nstd = \"v1\"\n"));
+  t_has("deps: reserved", dst->error, "'std' is reserved");
+  var dpr: Manifest* = man_of(pkg("[dependencies]\nw = {{ path = \"../w\", registry = \"corp\" }\n"));
+  t_has("deps: path and registry", dpr->error, "both a path and a registry");
+
+  var pm: Manifest* = man_of(pkg("module = \"github.com/a/x\"\n"));
+  t_has("package module removed", pm->error, "[package] module was removed");
+  var ps: Manifest* = man_of(pkg("submodules = [\"vendor/clib\"]\n"));
+  t_has("package submodules removed", ps->error, "[package] include");
+  var tc: Manifest* = man_of(pkg("[toolchain]\nmettle = \"v0.17.0\"\n"));
+  t_has("toolchain removed", tc->error, "[toolchain] was removed");
+  var pmv: Manifest* = man_of("[package]\nname = \"x\"\nmettle = \"0.17\"\n");
+  t_eq("package: mettle normalised", pmv->mettle_min, "v0.17.0");
   var pl: Manifest* = man_of("[package]\nname = \"x\"\nmettle = \"latest\"\n");
   t_has("package: mettle latest", pl->error, "/p/mbuild.toml:3: [package] mettle = \"latest\" is not a Mettle version");
+
+  t_ok("package name: ok", man_is_package_name("strutil") && man_is_package_name("a_1"));
+  t_ok("package name: bad", !man_is_package_name("Str") && !man_is_package_name("1a") && !man_is_package_name("a-b") && !man_is_package_name(""));
+  t_ok("package name: 64", man_is_package_name(s_repeat("a", 64)) && !man_is_package_name(s_repeat("a", 65)));
 
   var tw: Manifest* = man_of(pkg("[tools]\ngit = \"/usr/bin/git\"\n[workspace]\nmembers = []\n"));
   t_eq("tools: parsed", sl_join(tw->tools, ","), "git=/usr/bin/git");
@@ -216,24 +240,19 @@ fn test_replace_and_subs() {
   t_ok("toml: field value absent", toml_field_value(toml_get(it, "", "a"), "z") == (TomlValue*)0);
 }
 
-fn e_defaults() -> string {
-  var e: Manifest* = man_of(pkg(""));
-  return e->subs_mode + "|" + e->mettle_min + "|" + s_int(e->nreplaces);
-}
-
 fn local_of(text: string) -> Manifest* {
   return man_parse_local(toml_parse(text, "/p/mbuild.local.toml"), "/p");
 }
 
 fn test_local() {
-  var bad: Manifest* = local_of("[tools]\ngit = \"g\"\n[dependencies]\n\"github.com/a/b\" = \"v1\"\n");
-  t_eq("local: [dependencies]", bad->error, "/p/mbuild.local.toml:3: [dependencies] is not allowed here (mbuild.local.toml holds [replace], [tools], [profile.NAME] and [build] targets)");
+  var bad: Manifest* = local_of("[tools]\ngit = \"g\"\n[dependencies]\nb = \"v1\"\n");
+  t_eq("local: [dependencies]", bad->error, "/p/mbuild.local.toml:3: [dependencies] is not allowed here (mbuild.local.toml holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
   var bb: Manifest* = local_of("[build]\nflags = [\"-x\"]\n");
   t_has("local: [build] flags", bb->error, "[build] flags is not allowed in mbuild.local.toml");
 
-  var m: Manifest* = man_of(pkg("[build]\ntargets = [\"linux\", \"windows\"]\n[tools]\ncc = \"gcc\"\ngit = \"git\"\n[profile.release]\ncflags = [\"-O2\"]\n[replace]\n\"github.com/demo/json\" = {{ version = \"v1.4.1\" }\n\"github.com/demo/strutil\" = {{ version = \"v1.0.0\" }\n"));
+  var m: Manifest* = man_of(pkg("[build]\ntargets = [\"linux\", \"windows\"]\n[tools]\ncc = \"gcc\"\ngit = \"git\"\n[profile.release]\ncflags = [\"-O2\"]\n[replace]\njson = {{ version = \"v1.4.1\" }\nstrutil = {{ version = \"v1.0.0\" }\n[registry.corp]\nurl = \"https://pkgs.example.com/mettle\"\n"));
   t_eq("local main: valid", m->error, "");
-  var l: Manifest* = local_of("[replace]\n\"github.com/demo/strutil\" = {{ path = \"../strutil\" }\n[tools]\ngit = \"/usr/bin/git\"\n[profile.release]\ncflags = [\"-march=native\"]\nsafe = true\n[profile.mine]\ninherits = \"release\"\n[build]\ntargets = [\"linux\"]\n");
+  var l: Manifest* = local_of("[replace]\nstrutil = {{ path = \"../strutil\" }\n[tools]\ngit = \"/usr/bin/git\"\n[profile.release]\ncflags = [\"-march=native\"]\nsafe = true\n[profile.mine]\ninherits = \"release\"\n[build]\ntargets = [\"linux\"]\n[components]\nlogger = \"quiet\"\n[registry.corp]\nurl = \"/mirror/corp\"\n[registry.default]\nurl = \"/mirror/default\"\n");
   t_eq("local: valid", l->error, "");
   t_eq("local: no warnings", sl_join(l->warnings, "|"), "");
   man_merge_local(m, l);
@@ -244,23 +263,144 @@ fn test_local() {
   t_eq("merge: release flags", flags_of(m, "release"), "--release,--safe");
   t_eq("merge: local profile", flags_of(m, "mine"), "--release,--safe");
   t_eq("merge: profile names", sl_join(man_profile_names(m), ","), "debug,release,mine");
-  var su: ReplaceSpec* = man_replace_find(m, "github.com/demo/strutil");
+  var su: ReplaceSpec* = man_replace_find(m, "strutil");
   t_ok("merge: local replace wins", su->local && s_eq(su->path, "../strutil"));
-  t_ok("merge: main replace kept", !man_replace_find(m, "github.com/demo/json")->local);
+  t_ok("merge: main replace kept", !man_replace_find(m, "json")->local);
   t_ok("merge: replace count", m->nreplaces == 2);
   var rs: Settings* = man_settings(m, query("release", "", "linux", (StrList*)0));
   keep(rs);
   t_eq("merge: origin from local", sl_join(rs->origins, ","), "safe=mbuild.local.toml:7");
+  t_eq("merge: local components", sl_join(m->local_components, ","), "logger=quiet");
+  t_eq("merge: registry mirror", man_reg_find(m, "corp")->url, "/mirror/corp");
+  t_ok("merge: undeclared mirror stays local", m->nregs == 1 && s_eq(man_reg_find(m->local, "default")->url, "/mirror/default"));
+  var lc: Manifest* = local_of("[components]\nlogger = 3\n");
+  t_has("local: component not a string", lc->error, "[components] logger must be an impl name");
+}
+
+// The 13.5 example as the driver emits it.
+fn example_text() -> string {
+  return "[package]\nname = \"viewer\"\nversion = \"0.3.0\"\ndescription = \"image viewer\"\n[build]\ntargets = [\"linux\", \"windows\"]\n[dependencies]\nstrutil = \"v1.1.0\"\nauth = {{ version = \"v2.0.0\", registry = \"corp\" }\nwidgets = {{ path = \"../widgets\" }\n[registry.corp]\nurl = \"https://pkgs.example.com/mettle\"\n[component.renderer]\ndir = \"src/renderer\"\nmode = \"static\"\nimpls = [\"soft\", \"gl\"]\nwindows = \"soft\"\n[rules]\nfiles = [\"rules/no_alloc_in_draw.mettle\"]\n[profile.release]\noptimize = \"full\"\ncrash-report = false\ncomponents = [\"renderer=gl\"]\n[profile.release.windows]\nsubsystem = \"windows\"\n[profile.debug]\nsafe = true\n";
+}
+
+fn settings_of(m: Manifest*, profile: string, bin: string, target: string) -> Settings* {
+  var s: Settings* = man_settings(m, query(profile, bin, target, (StrList*)0));
+  keep(s);
+  return s;
+}
+
+fn test_round3() {
+  var m: Manifest* = man_parse(toml_parse(example_text(), "/home/me/app/.mbuild/config/manifest.toml"), "/home/me/app");
+  t_eq("example: valid", m->error, "");
+  t_eq("example: no warnings", sl_join(m->warnings, "|"), "");
+  t_eq("example: meta", sl_join(m->meta, ","), "description=image viewer");
+  t_ok("example: one component", m->ncomps == 1);
+  var c: CompSpec* = man_comp_find(m, "renderer");
+  t_eq("example: component", c->name + "|" + c->dir + "|" + c->mode + "|" + sl_join(c->impls, ",") + "|" + sl_join(c->os_defaults, ",") + "|" + c->owner + "|" + s_int(c->line), "renderer|/home/me/app/src/renderer|static|soft,gl|windows=soft|viewer|13");
+  t_ok("example: component absent", man_comp_find(m, "logger") == (CompSpec*)0);
+  t_ok("example: one registry", m->nregs == 1);
+  var r: RegSpec* = man_reg_find(m, "corp");
+  t_eq("example: registry", r->name + "|" + r->url + "|" + s_int(r->line), "corp|https://pkgs.example.com/mettle|11");
+  t_ok("example: registry absent", man_reg_find(m, "default") == (RegSpec*)0);
+  t_eq("example: auth registry", man_dep_find(m, "auth")->registry, "corp");
+  t_eq("example: strutil", man_dep_find(m, "strutil")->version + "|" + man_dep_find(m, "strutil")->registry, "v1.1.0|");
+  t_eq("example: rules", sl_join(m->rules, ","), "/home/me/app/rules/no_alloc_in_draw.mettle");
+  var rw: Settings* = settings_of(m, "release", "", "windows");
+  t_eq("example: release windows", sl_join(man_settings_flags(rw, "windows"), ","), "--release,--no-crash-report,--subsystem,windows");
+  t_eq("example: release components", sl_join(rw->components, ","), "renderer=gl");
+  var rl: Settings* = settings_of(m, "release", "", "linux");
+  t_eq("example: release linux", sl_join(man_settings_flags(rl, "linux"), ","), "--release,--no-crash-report");
+  t_eq("example: os profile only on its os", rl->subsystem, "console");
+  t_eq("example: debug", sl_join(man_settings_flags(settings_of(m, "debug", "", "linux"), "linux"), ","), "--safe,-s");
+  t_eq("example: profile names", sl_join(man_profile_names(m), ","), "debug,release");
+
+  var inh: Manifest* = man_of(pkg("[profile.release.windows]\nsubsystem = \"windows\"\n[profile.ship]\ninherits = \"release\"\n[profile.ship.windows]\nnative-heap = true\n"));
+  t_eq("os profile: chain", sl_join(man_settings_flags(settings_of(inh, "ship", "", "windows"), "windows"), ","), "--release,--native-heap,--subsystem,windows");
+  var oslocal: Manifest* = man_of(pkg("[profile.release]\n"));
+  man_merge_local(oslocal, local_of("[profile.release.linux]\ncheck-overflow = true\n"));
+  t_eq("os profile: local", sl_join(man_settings_flags(settings_of(oslocal, "release", "", "linux"), "linux"), ","), "--release,--check-overflow");
+  var osw: Manifest* = man_of(pkg("[profile.release.linux]\nsfae = true\n[profile.release.macos]\nsafe = true\n"));
+  t_has("os profile: unknown key", sl_join(osw->warnings, "|"), "unknown key 'sfae' in [profile.release.linux] (did you mean 'safe'?)");
+  t_has("os profile: unknown os", sl_join(osw->warnings, "|"), "unknown section [profile.release.macos]");
+  var ost: Manifest* = man_of(pkg("[profile.release.windows]\nsafe = \"yes\"\n"));
+  t_has("os profile: typed", ost->error, "`safe` must be true or false");
+
+  var pr: Manifest* = man_of(pkg("[profile.debug]\nprofile-runtime = true\n"));
+  t_eq("profile-runtime", flags_of(pr, "debug"), "-s,--profile-runtime");
+  var ib: Manifest* = man_of(pkg("[profile.release]\nimage-base = \"0x500000\"\n"));
+  t_eq("image-base", flags_of(ib, "release"), "--release,--image-base,0x500000");
+  var ibb: Manifest* = man_of(pkg("[profile.release]\nimage-base = \"5M\"\n"));
+  t_has("image-base: not hex", ibb->error, "`image-base` must be a hex address");
+  var ibs: Settings* = man_settings(pr, query("debug", "", "linux", sl_of("image-base=0x100000")));
+  keep(ibs);
+  t_eq("image-base: --set", sl_join(man_settings_flags(ibs, "linux"), ","), "-s,--profile-runtime,--image-base,0x100000");
+  var ibr: Manifest* = man_of(pkg("[build]\nflags = [\"--image-base\", \"0x1000\"]\n[profile.debug]\nimage-base = \"0x2000\"\n"));
+  t_eq("image-base: raw flag dropped", flags_of(ibr, "debug"), "-s,--image-base,0x2000");
+  var cps: Settings* = man_settings(pr, query("debug", "", "linux", sl_of("components=a=b")));
+  keep(cps);
+  t_has("components: not with --set", cps->error, "use --use NAME=IMPL");
+
+  var cb: Manifest* = man_of(pkg("[profile.release]\ncomponents = [\"logger=quiet\", \"renderer=gl\"]\n[profile.fast]\ninherits = \"release\"\ncomponents = [\"logger=file\"]\n[bin.tool]\ncomponents = [\"renderer=soft\"]\n"));
+  t_eq("components: valid", cb->error, "");
+  t_eq("components: layering order", sl_join(settings_of(cb, "fast", "tool", "linux")->components, ","), "logger=quiet,renderer=gl,logger=file,renderer=soft");
+  var cbad: Manifest* = man_of(pkg("[profile.release]\ncomponents = [\"logger\"]\n"));
+  t_has("components: entry form", cbad->error, "entries are \"component=impl\"");
+
+  var md: Manifest* = man_of(pkg("[component.logger]\ndir = \"src/logger\"\nmode = \"dynamic\"\nimpls = [\"stdout\"]\n"));
+  t_has("component: mode did you mean", md->error, "did you mean \"dyn\"");
+  var ms: Manifest* = man_of(pkg("[component.logger]\ndir = \"src/logger\"\nimpls = \"stdout, quiet,file\"\nlinux = \"quiet\"\n"));
+  t_eq("component: csv impls, default mode", ms->error + sl_join(man_comp_find(ms, "logger")->impls, ",") + "|" + man_comp_find(ms, "logger")->mode + "|" + sl_join(man_comp_find(ms, "logger")->os_defaults, ","), "stdout,quiet,file|static|linux=quiet");
+  var me: Manifest* = man_of(pkg("[component.logger]\ndir = \"src/logger\"\nimpls = []\n"));
+  t_has("component: impls empty", me->error, "needs impls");
+  var mo: Manifest* = man_of(pkg("[component.logger]\ndir = \"src/logger\"\nimpls = [\"stdout\", \"quiet\"]\nwindows = \"quite\"\n"));
+  t_has("component: os default not an impl", mo->error, "windows = \"quite\" is not one of its impls (stdout, quiet) (did you mean \"quiet\"?)");
+  var mn: Manifest* = man_of(pkg("[component.Logger]\ndir = \"x\"\nimpls = [\"a\"]\n"));
+  t_has("component: name", mn->error, "component name 'Logger'");
+  var mdir: Manifest* = man_of(pkg("[component.logger]\nimpls = [\"a\"]\n"));
+  t_has("component: dir required", mdir->error, "needs dir");
+  var mk: Manifest* = man_of(pkg("[component.logger]\ndir = \"/abs/logger\"\nimpls = [\"a\"]\nmdoe = \"dyn\"\n"));
+  t_eq("component: absolute dir kept", man_comp_find(mk, "logger")->dir, "/abs/logger");
+  t_has("component: unknown key", sl_join(mk->warnings, "|"), "unknown key 'mdoe' in [component.logger] (did you mean 'mode'?)");
+
+  var bf: Manifest* = man_of(pkg("[bin.boot]\nmain = \"boot.mettle\"\nkind = \"flat\"\n"));
+  t_has("bin: flat without triple", bf->error, "kind = \"flat\" needs a freestanding triple");
+  var bt: Manifest* = man_of(pkg("[bin.boot]\nmain = \"boot.mettle\"\nkind = \"flat\"\ntriple = \"x86_64-windows\"\n"));
+  t_has("bin: flat with a hosted triple", bt->error, "needs a freestanding triple");
+  var bok: Manifest* = man_of(pkg("[bin.boot]\nmain = \"boot.mettle\"\nkind = \"flat\"\ntriple = \"x86_64-none\"\nimage-base = \"0x100000\"\n[bin.app]\n[bin.lib]\nkind = \"shared\"\n"));
+  t_eq("bin: kinds valid", bok->error, "");
+  t_eq("bin: kinds", man_bin(bok, 0)->kind + "/" + man_bin(bok, 0)->triple + "," + man_bin(bok, 1)->kind + "/" + man_bin(bok, 1)->triple + "," + man_bin(bok, 2)->kind, "flat/x86_64-none,exe/,shared");
+  t_eq("bin: image-base flag", sl_join(man_settings_flags(settings_of(bok, "debug", "boot", "linux"), "linux"), ","), "-s,--image-base,0x100000");
+  var bk: Manifest* = man_of(pkg("[bin.x]\nkind = \"shard\"\n"));
+  t_has("bin: kind typo", bk->error, "did you mean \"shared\"");
+
+  var rg: Manifest* = man_of(pkg("[registry.corp]\nurl = \"https://a\"\n[registry.mirror-2]\nurl = \"file:///srv/reg\"\n"));
+  t_eq("registries: order", rg->error + rg->regs[0].name + "," + rg->regs[1].name + "|" + rg->regs[1].url, "corp,mirror-2|file:///srv/reg");
+  var rgn: Manifest* = man_of(pkg("[registry.corp]\n"));
+  t_has("registry: url required", rgn->error, "[registry.corp] needs url");
+  var rgu: Manifest* = man_of(pkg("[registry]\nurl = \"x\"\n"));
+  t_has("registry: bare section", sl_join(rgu->warnings, "|"), "unknown section [registry] (did you mean [registry.NAME]?)");
+
+  var inc: Manifest* = man_of(pkg("include = [\"src/**\", \"README.md\"]\nlicense = \"MIT\"\nrepository = \"https://example.com/x\"\nauthors = [\"A\", \"B\"]\n"));
+  t_eq("package: include", inc->error + sl_join(inc->include, ","), "src/**,README.md");
+  t_eq("package: meta", sl_join(inc->meta, ","), "license=MIT,repository=https://example.com/x,authors=A, B");
+  t_eq("package: no warnings", sl_join(inc->warnings, "|"), "");
 }
 
 fn run_all() -> int64 {
   test_settings();
-  test_replace_and_subs();
+  test_replace_and_removed();
   test_local();
+  test_round3();
   say("");
   say("manifest_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
   flush_out();
   return g_fail;
+}
+
+@test fn manifest_all() -> int32 {
+  if (run_all() > 0) {
+    return 1;
+  }
+  return 0;
 }
 
 fn main() -> int32 {

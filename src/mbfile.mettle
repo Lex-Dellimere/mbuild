@@ -1,0 +1,84 @@
+// mbfile: stub, owned by group C (DESIGN.md 13.8).
+
+import "base";
+import "manifest";
+
+export struct MbfCommand {
+  name: string;
+  fn_name: string;
+  summary: string;
+  help: string;
+  line: int64;
+}
+
+export struct MbfCall {
+  fn_name: string;
+  args: StrList*;
+  line: int64;
+}
+
+export struct MbfInfo {
+  ok: bool;
+  err: string;
+  has_project: bool;
+  has_exports: bool;
+  has_main: bool;
+  body_start: int64;
+  body_end: int64;
+  commands: MbfCommand*;
+  ncommands: int64;
+  hooks: StrList*;
+  dep_calls: MbfCall*;
+  ndep_calls: int64;
+  unexported: StrList*;
+}
+
+export struct MbfEdit {
+  ok: bool;
+  text: string;
+  line: int64;
+  why: string;
+}
+
+fn mfx_failed(text: string) -> MbfEdit {
+  var e: MbfEdit;
+  e.ok = false;
+  e.text = text;
+  e.line = 0;
+  e.why = "not implemented";
+  return e;
+}
+
+export fn mbf_scan(text: string) -> MbfInfo* {
+  var info: MbfInfo* = new MbfInfo;
+  info->err = "not implemented";
+  info->commands = (MbfCommand*)0;
+  info->hooks = sl_new();
+  info->dep_calls = (MbfCall*)0;
+  info->unexported = sl_new();
+  return info;
+}
+
+export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
+  return mfx_failed(text);
+}
+
+export fn mbf_remove_dep(text: string, name: string) -> MbfEdit {
+  return mfx_failed(text);
+}
+
+export fn mbf_locate(text: string, call: string, first_arg: string, section: string) -> int64 {
+  return 0;
+}
+
+export fn mbf_driver(info: MbfInfo*, file: string, config_only: bool) -> string {
+  return s_empty();
+}
+
+export fn mbf_init_text(name: string) -> string {
+  return s_empty();
+}
+
+export fn mbf_from_manifest(m: Manifest*, mettle_deps: string) -> string {
+  return s_empty();
+}

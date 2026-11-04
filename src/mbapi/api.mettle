@@ -1,0 +1,254 @@
+// mbuild/api: stub, owned by group C (DESIGN.md 13.4).
+
+import "std/io";
+import "std/mem";
+
+export struct MbArgs {
+  argc: int32;
+}
+
+export struct MbCmd {
+  status: int32;
+}
+
+export fn mb_package(name: string, version: string) {
+}
+
+export fn mb_meta(key: string, value: string) {
+}
+
+export fn mb_targets(csv: string) {
+}
+
+export fn mb_flags(csv: string) {
+}
+
+export fn mb_prelude(on: bool) {
+}
+
+export fn mb_bin(name: string, main: string) {
+}
+
+export fn mb_bin_kind(name: string, kind: string, triple: string) {
+}
+
+export fn mb_dep(name: string, version: string) {
+}
+
+export fn mb_dep_from(registry: string, name: string, version: string) {
+}
+
+export fn mb_dep_path(name: string, path: string) {
+}
+
+export fn mb_registry(name: string, url: string) {
+}
+
+export fn mb_replace_path(name: string, path: string) {
+}
+
+export fn mb_replace_version(name: string, version: string) {
+}
+
+export fn mb_profile(name: string) {
+}
+
+export fn mb_for_bin(name: string) {
+}
+
+export fn mb_on(os: string) {
+}
+
+export fn mb_inherits(profile: string) {
+}
+
+export fn mb_set(key: string, value: string) {
+}
+
+export fn mb_set_list(key: string, csv: string) {
+}
+
+export fn mb_c_sources(csv: string) {
+}
+
+export fn mb_c_include(csv: string) {
+}
+
+export fn mb_c_flags(csv: string) {
+}
+
+export fn mb_c_libs(csv: string) {
+}
+
+export fn mb_link_libs(csv: string) {
+}
+
+export fn mb_link_paths(csv: string) {
+}
+
+export fn mb_pkgconfig(csv: string) {
+}
+
+export fn mb_component(name: string, dir: string, mode: string, impls: string) {
+}
+
+export fn mb_component_on(name: string, os: string, pick: string) {
+}
+
+export fn mb_use(component: string, pick: string) {
+}
+
+export fn mb_rule(file: string) {
+}
+
+export fn mb_publish_include(csv: string) {
+}
+
+export fn mb_raw(section: string, key: string, toml_literal: string) {
+}
+
+export fn mb_nargs(a: MbArgs*) -> int32 {
+  return 1;
+}
+
+export fn mb_arg(a: MbArgs*, i: int32) -> string {
+  return "";
+}
+
+export fn mb_flag(a: MbArgs*, flag: string) -> bool {
+  return false;
+}
+
+export fn mb_opt(a: MbArgs*, opt: string, dflt: string) -> string {
+  return "";
+}
+
+export fn mb_root() -> string {
+  return "";
+}
+
+export fn mb_name() -> string {
+  return "";
+}
+
+export fn mb_version() -> string {
+  return "";
+}
+
+export fn mb_os() -> string {
+  return "";
+}
+
+export fn mb_exe_ext() -> string {
+  return "";
+}
+
+export fn mb_verbose() -> bool {
+  return false;
+}
+
+export fn mb_out(bin: string, target: string, profile: string) -> string {
+  return "";
+}
+
+export fn mb_target() -> string {
+  return "";
+}
+
+export fn mb_profile_name() -> string {
+  return "";
+}
+
+export fn mb_out_dir() -> string {
+  return "";
+}
+
+export fn mb_bins() -> string {
+  return "";
+}
+
+export fn mb_built() -> string {
+  return "";
+}
+
+export fn mb_mbuild(args: string) -> int32 {
+  return 1;
+}
+
+export fn mb_cmd(program: string) -> MbCmd* {
+  return (MbCmd*)0;
+}
+
+export fn mb_cmd_arg(c: MbCmd*, s: string) {
+}
+
+export fn mb_cmd_cwd(c: MbCmd*, dir: string) {
+}
+
+export fn mb_cmd_env(c: MbCmd*, kv: string) {
+}
+
+export fn mb_cmd_run(c: MbCmd*) -> int32 {
+  return 1;
+}
+
+export fn mb_cmd_output(c: MbCmd*) -> string {
+  return "";
+}
+
+export fn mb_cmd_status(c: MbCmd*) -> int32 {
+  return 1;
+}
+
+export fn mb_sh(line: string) -> int32 {
+  return 1;
+}
+
+export fn mb_env(name: string) -> string {
+  return "";
+}
+
+export fn mb_home() -> string {
+  return "";
+}
+
+export fn mb_exists(p: string) -> bool {
+  return false;
+}
+
+export fn mb_is_dir(p: string) -> bool {
+  return false;
+}
+
+export fn mb_read(p: string) -> string {
+  return "";
+}
+
+export fn mb_write(p: string, data: string) -> bool {
+  return false;
+}
+
+export fn mb_write_if_changed(p: string, data: string) -> bool {
+  return false;
+}
+
+export fn mb_copy(src: string, dst: string) -> bool {
+  return false;
+}
+
+export fn mb_mkdirs(p: string) -> bool {
+  return false;
+}
+
+export fn mb_remove(p: string) -> bool {
+  return false;
+}
+
+export fn mb_say(s: string) {
+}
+
+export fn mb_warn(s: string) {
+}
+
+export fn mb_fail(s: string) {
+}

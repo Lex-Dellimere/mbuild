@@ -1,0 +1,53 @@
+// components: stub, owned by group K (DESIGN.md 15).
+
+import "std/mem";
+import "base";
+import "manifest";
+import "project";
+
+export struct CmpBuild {
+  target: string;
+  profile: string;
+  bin: string;
+  entry: string;
+  settings: Settings*;
+}
+
+export struct CmpOut {
+  ok: bool;
+  err: string;
+  gen_dir: string;
+  entry: string;
+  selected: StrList*;
+  origins: StrList*;
+  has_swap: bool;
+}
+
+export fn cmp_prepare(p: Project*, ds: DepState*, b: CmpBuild*) -> CmpOut* {
+  var o: CmpOut* = new CmpOut;
+  o->err = "not implemented";
+  o->gen_dir = s_empty();
+  o->entry = b->entry;
+  o->selected = sl_new();
+  o->origins = sl_new();
+  return o;
+}
+
+export fn cmp_check(p: Project*, ds: DepState*) -> int32 {
+  return 1;
+}
+
+export fn cmp_cmd_components(p: Project*, ds: DepState*) -> int32 {
+  return 1;
+}
+
+export fn cmp_cmd_use(p: Project*) -> int32 {
+  return 1;
+}
+
+// 0-terminated.
+export fn cmp_all(p: Project*, ds: DepState*) -> CompSpec** {
+  var all: CompSpec** = (CompSpec**)malloc(8);
+  all[0] = (CompSpec*)0;
+  return all;
+}

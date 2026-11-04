@@ -11,6 +11,11 @@ import "project";
 import "build";
 import "deps";
 import "toolchain";
+import "sha256";
+import "registry";
+import "mbfile";
+import "config";
+import "components";
 import "sys_linux" if linux;
 import "sys_windows" if windows;
 

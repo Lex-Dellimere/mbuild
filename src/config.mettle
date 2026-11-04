@@ -1,0 +1,55 @@
+// config: stub, owned by group C (DESIGN.md 13.2).
+
+import "base";
+import "manifest";
+import "project";
+import "mbfile";
+
+export struct CfgHook {
+  name: string;
+  target: string;
+  profile: string;
+  out_dir: string;
+  bins: StrList*;
+  built: StrList*;
+}
+
+export fn cfg_api_text() -> string {
+  return import_str "mbapi/api.mettle";
+}
+
+export fn cfg_load(p: Project*) -> Manifest* {
+  return (Manifest*)0;
+}
+
+export fn cfg_load_dir(p: Project*, dir: string, key: string) -> Manifest* {
+  return (Manifest*)0;
+}
+
+export fn cfg_info(p: Project*) -> MbfInfo* {
+  return mbf_scan(s_empty());
+}
+
+export fn cfg_run_command(p: Project*, name: string, args: StrList*) -> int32 {
+  return 1;
+}
+
+export fn cfg_run_hook(p: Project*, h: CfgHook*) -> int32 {
+  return 1;
+}
+
+export fn cfg_set_dep(p: Project*, name: string, version: string) -> bool {
+  return false;
+}
+
+export fn cfg_remove_dep(p: Project*, name: string) -> bool {
+  return false;
+}
+
+export fn cfg_manifest_text(p: Project*) -> string {
+  return s_empty();
+}
+
+export fn cfg_cmd_migrate(p: Project*) -> int32 {
+  return 1;
+}
