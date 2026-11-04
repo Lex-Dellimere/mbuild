@@ -5,7 +5,8 @@
 // `.linux` variant first on Linux when the import has no extension);
 // `mettle.deps` files walking up from the importing file's directory, nearest
 // first, matched on the first path component; relative to the importing file;
-// each -I directory; relative to the working directory. A candidate is tried
+// each -I directory; relative to the working directory; last, a one-component
+// import as a package's main module, <root>/<name>. A candidate is tried
 // as written, then with `.mettle` appended unless it already ends so.
 
 import "std/mem";
@@ -162,12 +163,12 @@ fn gx_is_root(d: string) -> bool {
   return slen(d) <= 3 && slen(d) >= 2 && s_byte(d, 1) == 58;
 }
 
-fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string) -> string {
+fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string, main_module: bool) -> string {
   var cut: int64 = 0;
   while (cut < slen(imp) && s_byte(imp, cut) != 47 && s_byte(imp, cut) != 92) {
     cut = cut + 1;
   }
-  if (cut == 0) {
+  if (cut == 0 || (main_module && cut < slen(imp))) {
     return s_empty();
   }
   var first: string = s_sub(imp, 0, cut);
@@ -182,6 +183,8 @@ fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string) -> string {
           var cand: string = sl_get(d->roots, i);
           if (slen(rest) > 0) {
             cand = p_join(cand, rest);
+          } else if (main_module) {
+            cand = p_join(cand, first);
           }
           var r: string = gx_candidate(cand);
           if (slen(r) > 0) {
@@ -220,7 +223,7 @@ export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string 
       return sr;
     }
   }
-  var dr: string = gx_resolve_deps(c, from_file, imp);
+  var dr: string = gx_resolve_deps(c, from_file, imp, false);
   if (slen(dr) > 0) {
     return dr;
   }
@@ -239,7 +242,11 @@ export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string 
     }
     i = i + 1;
   }
-  return gx_candidate(p_join(c->cwd, imp));
+  var cr: string = gx_candidate(p_join(c->cwd, imp));
+  if (slen(cr) > 0) {
+    return cr;
+  }
+  return gx_resolve_deps(c, from_file, imp, true);
 }
 
 fn gx_missing(g: Graph*, what: string, from_file: string, line: string) {

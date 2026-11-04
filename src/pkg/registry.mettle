@@ -1,8 +1,9 @@
 // registry: package registries (DESIGN.md 13): the search order, the index,
 // manifests and archives in the download cache, extraction, publishing.
 //
-// A registry is a static tree: index/<name>, pkg/<name>/<name>-<v>.toml and
-// .tar.gz. Remote ones (http, https) are read with curl, local ones (a path
+// A registry is a static tree of one of two kinds: mbuild's own (index/<name>,
+// pkg/<name>/<name>-<v>.toml and .tar.gz) or the Mettle project's (13.9:
+// v1/index.json, v1/archives/*.tar holding a mettle.package). Remote ones (http, https) are read with curl, local ones (a path
 // or file://) with fs_*; either way every file goes through the cache at
 // $MBUILD_HOME/registry/<name>@<hash12(url)>/, so --offline behaves the same
 // for both. Everything but an index is immutable once published.
@@ -30,12 +31,14 @@ export struct RegVersion {
   sha: string;
   manifest_sha: string;
   yanked: bool;
+  archive: string;  // json kind: the archive path relative to v1/
 }
 
 export struct RegIndex {
   name: string;
   registry: string;
   url: string;
+  kind: string;     // "mbuild" | "json"
   found: bool;
   ok: bool;
   err: string;
@@ -65,6 +68,8 @@ var g_rgx_kind: string;
 var g_rgx_fetched: StrList* = (StrList*)0;
 var g_rgx_warned: StrList* = (StrList*)0;
 var g_rgx_seq: int64 = 0;
+// Per command: "<cache dir> <kind>" of every registry probed.
+var g_rgx_kinds: StrList* = (StrList*)0;
 
 fn rgx_set(kind: string, msg: string) {
   g_rgx_kind = kind;
@@ -381,6 +386,7 @@ fn rgx_index_new(name: string, registry: string, url: string) -> RegIndex* {
   ix->name = name;
   ix->registry = registry;
   ix->url = url;
+  ix->kind = "mbuild";
   ix->found = false;
   ix->ok = false;
   ix->err = s_empty();
@@ -406,6 +412,7 @@ fn rgx_parse_index(ix: RegIndex*, text: string) {
       v.sha = s_empty();
       v.manifest_sha = s_empty();
       v.yanked = false;
+      v.archive = s_empty();
       var k: int64 = 1;
       while (k < f->len) {
         var w: string = sl_get(f, k);
@@ -450,11 +457,19 @@ export fn reg_index_dir(p: Project*, dir: string, name: string, refresh: bool) -
 
 fn rgx_index(p: Project*, registry: string, url: string, name: string, refresh: bool) -> RegIndex* {
   var ix: RegIndex* = rgx_index_new(name, registry, url);
-  var cached: string = rgx_cache_dir(registry, url) + "/index/" + name;
-  var have: bool = fs_is_file(cached);
   if (g_rgx_fetched == (StrList*)0) {
     g_rgx_fetched = sl_new();
   }
+  var kind: string = rgx_kind(p, registry, url);
+  if (slen(kind) == 0) {
+    return rgx_index_fail(ix);
+  }
+  ix->kind = kind;
+  if (s_eq(kind, "json")) {
+    return rgx_index_json(p, ix, refresh);
+  }
+  var cached: string = rgx_cache_dir(registry, url) + "/index/" + name;
+  var have: bool = fs_is_file(cached);
   var key: string = cached;
   var fetch: bool = (refresh || !have) && !sl_has(g_rgx_fetched, key);
   if (fetch && p->opts->offline) {
@@ -551,6 +566,650 @@ export fn reg_version(ix: RegIndex*, version: string) -> RegVersion* {
 }
 
 // ---------------------------------------------------------------------------
+// The Mettle registry (13.9): v1/index.json, plain tar archives
+// ---------------------------------------------------------------------------
+
+// "json" when the registry has v1/index.json, else "mbuild"; "" with the
+// error set when it cannot be reached. Probed once and kept in the cache.
+fn rgx_kind(p: Project*, registry: string, url: string) -> string {
+  var cache: string = rgx_cache_dir(registry, url);
+  if (g_rgx_kinds == (StrList*)0) {
+    g_rgx_kinds = sl_new();
+  }
+  var i: int64 = 0;
+  while (i < g_rgx_kinds->len) {
+    var f: StrList* = s_fields(sl_get(g_rgx_kinds, i));
+    if (f->len == 2 && s_eq(sl_get(f, 0), cache)) {
+      var known: string = sl_get(f, 1);
+      rgx_sl_free(f);
+      return known;
+    }
+    rgx_sl_free(f);
+    i = i + 1;
+  }
+  var kind: string = rgx_kind_probe(p, registry, url, cache);
+  if (slen(kind) > 0) {
+    sl_push(g_rgx_kinds, cache + " " + kind);
+  }
+  return kind;
+}
+
+fn rgx_kind_probe(p: Project*, registry: string, url: string, cache: string) -> string {
+  var kf: string = cache + "/kind";
+  var r: FsRead = fs_read(kf);
+  if (r.ok) {
+    var t: string = s_trim(r.data);
+    if (s_eq(t, "json") || s_eq(t, "mbuild")) {
+      return t;
+    }
+  }
+  var idx: string = cache + "/v1/index.json";
+  if (fs_is_file(idx)) {
+    return "json";
+  }
+  if (p->opts->offline) {
+    return "mbuild";
+  }
+  if (rgx_get(p, registry, url, "v1/index.json", idx)) {
+    sl_push(g_rgx_fetched, idx);
+    fs_write(kf, "json\n");
+    return "json";
+  }
+  if (s_eq(g_rgx_kind, "missing")) {
+    rgx_clear();
+    fs_write(kf, "mbuild\n");
+    return "mbuild";
+  }
+  if (fs_is_dir(cache + "/index")) {
+    // An mbuild registry cached before kinds were probed.
+    rgx_clear();
+    return "mbuild";
+  }
+  return s_empty();
+}
+
+// A minimal JSON reader, enough for v1/index.json.
+struct RgjVal {
+  kind: int32;     // 0 null, 1 bool, 2 number, 3 string, 4 array, 5 object
+  text: string;    // "true"/"false", the number as written, the decoded string
+  keys: StrList*;  // object keys, parallel to vals
+  vals: RgjVal**;
+  n: int64;
+}
+
+struct RgjP {
+  s: string;
+  i: int64;
+  err: string;
+  depth: int64;
+}
+
+fn rgj_new(kind: int32) -> RgjVal* {
+  var v: RgjVal* = new RgjVal;
+  v->kind = kind;
+  v->text = s_empty();
+  v->keys = sl_new();
+  v->vals = (RgjVal**)0;
+  v->n = 0;
+  return v;
+}
+
+fn rgj_push(v: RgjVal*, item: RgjVal*) {
+  v->vals = (RgjVal**)realloc(v->vals, (v->n + 1) * 8);
+  v->vals[v->n] = item;
+  v->n = v->n + 1;
+}
+
+fn rgj_fail(q: RgjP*, msg: string) {
+  if (slen(q->err) == 0) {
+    q->err = msg + " at byte " + s_int(q->i);
+  }
+}
+
+fn rgj_ws(q: RgjP*) {
+  while (q->i < slen(q->s)) {
+    var c: int32 = s_byte(q->s, q->i);
+    if (c != 32 && c != 9 && c != 10 && c != 13) {
+      return;
+    }
+    q->i = q->i + 1;
+  }
+}
+
+fn rgj_at(q: RgjP*) -> int32 {
+  if (q->i >= slen(q->s)) {
+    return -1;
+  }
+  return s_byte(q->s, q->i);
+}
+
+fn rgj_hex4(q: RgjP*) -> int64 {
+  if (q->i + 4 > slen(q->s)) {
+    return -1;
+  }
+  var v: int64 = 0;
+  var k: int64 = 0;
+  while (k < 4) {
+    var c: int32 = s_byte(q->s, q->i + k);
+    var d: int32 = -1;
+    if (c >= 48 && c <= 57) {
+      d = c - 48;
+    } else if (c >= 97 && c <= 102) {
+      d = c - 87;
+    } else if (c >= 65 && c <= 70) {
+      d = c - 55;
+    }
+    if (d < 0) {
+      return -1;
+    }
+    v = v * 16 + (int64)d;
+    k = k + 1;
+  }
+  q->i = q->i + 4;
+  return v;
+}
+
+fn rgj_utf8(b: Buf*, cp: int64) {
+  if (cp < 128) {
+    buf_addb(b, (int32)cp);
+  } else if (cp < 2048) {
+    buf_addb(b, (int32)(192 + cp / 64));
+    buf_addb(b, (int32)(128 + cp % 64));
+  } else if (cp < 65536) {
+    buf_addb(b, (int32)(224 + cp / 4096));
+    buf_addb(b, (int32)(128 + (cp / 64) % 64));
+    buf_addb(b, (int32)(128 + cp % 64));
+  } else {
+    buf_addb(b, (int32)(240 + cp / 262144));
+    buf_addb(b, (int32)(128 + (cp / 4096) % 64));
+    buf_addb(b, (int32)(128 + (cp / 64) % 64));
+    buf_addb(b, (int32)(128 + cp % 64));
+  }
+}
+
+// At the opening quote; the decoded string (the error set on failure).
+fn rgj_string(q: RgjP*) -> string {
+  var b: Buf* = buf_new();
+  q->i = q->i + 1;
+  while (true) {
+    var c: int32 = rgj_at(q);
+    if (c < 0) {
+      rgj_fail(q, "unterminated string");
+      break;
+    }
+    q->i = q->i + 1;
+    if (c == 34) {
+      break;
+    }
+    if (c < 32) {
+      rgj_fail(q, "control character in a string");
+      break;
+    }
+    if (c != 92) {
+      buf_addb(b, c);
+      continue;
+    }
+    var e: int32 = rgj_at(q);
+    q->i = q->i + 1;
+    if (e == 34 || e == 92 || e == 47) {
+      buf_addb(b, e);
+    } else if (e == 98) {
+      buf_addb(b, 8);
+    } else if (e == 102) {
+      buf_addb(b, 12);
+    } else if (e == 110) {
+      buf_addb(b, 10);
+    } else if (e == 114) {
+      buf_addb(b, 13);
+    } else if (e == 116) {
+      buf_addb(b, 9);
+    } else if (e == 117) {
+      var cp: int64 = rgj_hex4(q);
+      if (cp >= 55296 && cp < 56320 && rgj_at(q) == 92) {
+        q->i = q->i + 2;
+        var lo: int64 = rgj_hex4(q);
+        if (lo < 56320 || lo >= 57344) {
+          cp = -1;
+        } else {
+          cp = 65536 + (cp - 55296) * 1024 + (lo - 56320);
+        }
+      }
+      if (cp < 0) {
+        rgj_fail(q, "bad \\u escape");
+        break;
+      }
+      rgj_utf8(b, cp);
+    } else {
+      rgj_fail(q, "bad escape");
+      break;
+    }
+  }
+  return buf_take(b);
+}
+
+fn rgj_word(q: RgjP*, word: string) -> bool {
+  var n: int64 = slen(word);
+  if (q->i + n > slen(q->s) || !s_eq(s_sub(q->s, q->i, q->i + n), word)) {
+    return false;
+  }
+  q->i = q->i + n;
+  return true;
+}
+
+// One value; 0 with the error set on failure.
+fn rgj_value(q: RgjP*) -> RgjVal* {
+  rgj_ws(q);
+  var c: int32 = rgj_at(q);
+  if (c < 0) {
+    rgj_fail(q, "unexpected end");
+    return (RgjVal*)0;
+  }
+  if (c == 123 || c == 91) {
+    if (q->depth >= 64) {
+      rgj_fail(q, "nested too deeply");
+      return (RgjVal*)0;
+    }
+    var close: int32 = 93;
+    var v: RgjVal* = rgj_new(4);
+    if (c == 123) {
+      close = 125;
+      v->kind = 5;
+    }
+    q->i = q->i + 1;
+    q->depth = q->depth + 1;
+    rgj_ws(q);
+    if (rgj_at(q) == close) {
+      q->i = q->i + 1;
+      q->depth = q->depth - 1;
+      return v;
+    }
+    while (true) {
+      if (v->kind == 5) {
+        rgj_ws(q);
+        if (rgj_at(q) != 34) {
+          rgj_fail(q, "expected a key");
+          return (RgjVal*)0;
+        }
+        var key: string = rgj_string(q);
+        rgj_ws(q);
+        if (slen(q->err) > 0 || rgj_at(q) != 58) {
+          rgj_fail(q, "expected ':'");
+          return (RgjVal*)0;
+        }
+        q->i = q->i + 1;
+        sl_push(v->keys, key);
+      }
+      var item: RgjVal* = rgj_value(q);
+      if (item == (RgjVal*)0) {
+        return (RgjVal*)0;
+      }
+      rgj_push(v, item);
+      rgj_ws(q);
+      var d: int32 = rgj_at(q);
+      q->i = q->i + 1;
+      if (d == close) {
+        break;
+      }
+      if (d != 44) {
+        q->i = q->i - 1;
+        rgj_fail(q, "expected ',' or a closing bracket");
+        return (RgjVal*)0;
+      }
+    }
+    q->depth = q->depth - 1;
+    return v;
+  }
+  if (c == 34) {
+    var sv: RgjVal* = rgj_new(3);
+    sv->text = rgj_string(q);
+    if (slen(q->err) > 0) {
+      return (RgjVal*)0;
+    }
+    return sv;
+  }
+  if (rgj_word(q, "true") || rgj_word(q, "false")) {
+    var bv: RgjVal* = rgj_new(1);
+    bv->text = "false";
+    if (c == 116) {
+      bv->text = "true";
+    }
+    return bv;
+  }
+  if (rgj_word(q, "null")) {
+    return rgj_new(0);
+  }
+  if (c == 45 || (c >= 48 && c <= 57)) {
+    var start: int64 = q->i;
+    while (true) {
+      var k: int32 = rgj_at(q);
+      if (!(k == 45 || k == 43 || k == 46 || k == 101 || k == 69 || (k >= 48 && k <= 57))) {
+        break;
+      }
+      q->i = q->i + 1;
+    }
+    var nv: RgjVal* = rgj_new(2);
+    nv->text = s_dup(s_sub(q->s, start, q->i));
+    return nv;
+  }
+  rgj_fail(q, "unexpected character");
+  return (RgjVal*)0;
+}
+
+fn rgj_get(v: RgjVal*, key: string) -> RgjVal* {
+  if (v == (RgjVal*)0 || v->kind != 5) {
+    return (RgjVal*)0;
+  }
+  var i: int64 = 0;
+  while (i < v->n) {
+    if (s_eq(sl_get(v->keys, i), key)) {
+      return v->vals[i];
+    }
+    i = i + 1;
+  }
+  return (RgjVal*)0;
+}
+
+fn rgj_str(v: RgjVal*, key: string) -> string {
+  var g: RgjVal* = rgj_get(v, key);
+  if (g == (RgjVal*)0 || g->kind != 3) {
+    return s_empty();
+  }
+  return g->text;
+}
+
+// Fills ix from index.json text; false with the error set.
+fn rgx_parse_json_index(ix: RegIndex*, text: string) -> bool {
+  var q: RgjP* = new RgjP;
+  defer free(q);
+  q->s = text;
+  q->i = 0;
+  q->err = s_empty();
+  q->depth = 0;
+  var root: RgjVal* = rgj_value(q);
+  rgj_ws(q);
+  if (root != (RgjVal*)0 && q->i < slen(text)) {
+    rgj_fail(q, "trailing data");
+  }
+  var where_at: string = "registry " + ix->registry + ": " + ix->url + "/v1/index.json";
+  if (slen(q->err) > 0) {
+    rgx_set("other", where_at + " is not valid JSON (" + q->err + ")");
+    return false;
+  }
+  var fmt: RgjVal* = rgj_get(root, "format");
+  var pkgs: RgjVal* = rgj_get(root, "packages");
+  if (fmt == (RgjVal*)0 || !s_eq(fmt->text, "1") || pkgs == (RgjVal*)0 || pkgs->kind != 4) {
+    rgx_set("other", where_at + " is not a format 1 index\n  help: a newer mbuild may read it");
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < pkgs->n) {
+    var pk: RgjVal* = pkgs->vals[i];
+    i = i + 1;
+    if (!s_eq(rgj_str(pk, "name"), ix->name)) {
+      continue;
+    }
+    ix->found = true;
+    var vers: RgjVal* = rgj_get(pk, "versions");
+    if (vers == (RgjVal*)0 || vers->kind != 4) {
+      continue;
+    }
+    var k: int64 = 0;
+    while (k < vers->n) {
+      var e: RgjVal* = vers->vals[k];
+      k = k + 1;
+      var vs: string = "v" + rgj_str(e, "version");
+      if (!sv_is(vs)) {
+        continue;
+      }
+      var v: RegVersion;
+      v.version = vs;
+      v.sha = s_lower(rgj_str(e, "sha256"));
+      v.manifest_sha = s_empty();
+      var y: RgjVal* = rgj_get(e, "yanked");
+      v.yanked = y != (RgjVal*)0 && s_eq(y->text, "true");
+      v.archive = rgj_str(e, "archive");
+      ix->versions = (RegVersion*)realloc(ix->versions, (ix->n + 1) * sizeof(RegVersion));
+      ix->versions[ix->n] = v;
+      ix->n = ix->n + 1;
+    }
+  }
+  return true;
+}
+
+// Like rgx_index for a json registry: one v1/index.json for every package.
+fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
+  var cached: string = rgx_cache_dir(ix->registry, ix->url) + "/v1/index.json";
+  var have: bool = fs_is_file(cached);
+  var fetch: bool = (refresh || !have) && !sl_has(g_rgx_fetched, cached);
+  if (fetch && p->opts->offline) {
+    if (!have) {
+      ix->ok = true;
+      rgx_set("missing", rgx_offline_msg("the index of registry " + ix->registry));
+      ix->err = g_rgx_err;
+      return ix;
+    }
+    fetch = false;
+  }
+  if (fetch) {
+    if (g_verbose) {
+      status("Updating", "index of registry " + ix->registry);
+    }
+    if (!rgx_get(p, ix->registry, ix->url, "v1/index.json", cached)) {
+      if (!have) {
+        return rgx_index_fail(ix);
+      }
+      if (rgx_once("unreachable " + ix->registry)) {
+        warn("registry " + ix->registry + " is unreachable (" + g_rgx_err + "); using the cached index");
+      }
+      rgx_clear();
+    }
+    sl_push(g_rgx_fetched, cached);
+  }
+  var r: FsRead = fs_read(cached);
+  if (!r.ok) {
+    rgx_set("other", "cannot read " + cached);
+    return rgx_index_fail(ix);
+  }
+  if (!rgx_parse_json_index(ix, r.data)) {
+    return rgx_index_fail(ix);
+  }
+  ix->ok = true;
+  if (!ix->found) {
+    rgx_set("missing", "registry " + ix->registry + " has no package named " + ix->name);
+    ix->err = g_rgx_err;
+  }
+  return ix;
+}
+
+// The NUL-terminated text of a tar header field.
+fn rgx_tar_field(data: string, at: int64, n: int64) -> string {
+  var k: int64 = 0;
+  while (k < n && at + k < slen(data) && s_byte(data, at + k) != 0) {
+    k = k + 1;
+  }
+  return s_sub(data, at, at + k);
+}
+
+fn rgx_tar_octal(data: string, at: int64, n: int64) -> int64 {
+  var v: int64 = 0;
+  var k: int64 = 0;
+  while (k < n) {
+    var c: int32 = s_byte(data, at + k);
+    if (c >= 48 && c <= 55) {
+      v = v * 8 + (int64)(c - 48);
+    } else if (c != 32 || v > 0) {
+      break;
+    }
+    k = k + 1;
+  }
+  return v;
+}
+
+// The regular member `name` of an uncompressed tar in data; "" when absent.
+fn rgx_tar_member(data: string, name: string) -> string {
+  var off: int64 = 0;
+  while (off + 512 <= slen(data) && s_byte(data, off) != 0) {
+    var nm: string = rgx_tar_field(data, off, 100);
+    if (s_eq(rgx_tar_field(data, off + 257, 5), "ustar")) {
+      var pre: string = rgx_tar_field(data, off + 345, 155);
+      if (slen(pre) > 0) {
+        nm = pre + "/" + nm;
+      }
+    }
+    if (s_starts(nm, "./")) {
+      nm = s_from(nm, 2);
+    }
+    var size: int64 = rgx_tar_octal(data, off + 124, 12);
+    var kind: int32 = s_byte(data, off + 156);
+    var body: int64 = off + 512;
+    if ((kind == 48 || kind == 0) && s_eq(nm, name) && body + size <= slen(data)) {
+      return s_dup(s_sub(data, body, body + size));
+    }
+    off = body + ((size + 511) / 512) * 512;
+  }
+  return s_empty();
+}
+
+// mbuild's manifest (TOML) for a mettle.package; "" with the error set.
+fn rgx_package_toml(ix: RegIndex*, v: RegVersion*, text: string) -> string {
+  var label: string = rgx_label(ix, v->version) + " (registry " + ix->registry + ") mettle.package";
+  var pkg: Buf* = buf_new();
+  var deps: Buf* = buf_new();
+  buf_line(deps, "[dependencies]");
+  var name: string = s_empty();
+  var version: string = s_empty();
+  var lines: StrList* = s_lines(text);
+  defer rgx_sl_free(lines);
+  var i: int64 = 0;
+  var bad: string = s_empty();
+  while (i < lines->len && slen(bad) == 0) {
+    var t: string = s_trim(sl_get(lines, i));
+    i = i + 1;
+    if (slen(t) == 0 || s_starts(t, "#")) {
+      continue;
+    }
+    var eq: int64 = s_find_byte(t, 61);
+    if (eq <= 0) {
+      bad = label + ":" + s_int(i) + ": expected `key = value`";
+      continue;
+    }
+    var k: string = s_trim(s_sub(t, 0, eq));
+    var val: string = s_trim(s_from(t, eq + 1));
+    if (s_eq(k, "name")) {
+      name = val;
+    } else if (s_eq(k, "version")) {
+      version = "v" + val;
+    } else if (s_eq(k, "description") || s_eq(k, "license")) {
+      buf_line(pkg, k + " = " + toml_quote(val));
+    } else if (s_eq(k, "source")) {
+      buf_line(pkg, "repository = " + toml_quote(val));
+    } else if (s_eq(k, "compiler")) {
+      var cv: string = "v" + val;
+      if (!sv_is(cv)) {
+        bad = label + ":" + s_int(i) + ": compiler `" + val + "` is not a version";
+        continue;
+      }
+      buf_line(pkg, "mettle = " + toml_quote(cv));
+    } else if (s_eq(k, "require")) {
+      var f: StrList* = s_fields(val);
+      var dv: string = s_empty();
+      if (f->len == 2) {
+        dv = "v" + sl_get(f, 1);
+      }
+      if (f->len != 2 || !man_is_package_name(sl_get(f, 0)) || !sv_is(dv)) {
+        bad = label + ":" + s_int(i) + ": expected `require = NAME VERSION`";
+      } else {
+        buf_line(deps, sl_get(f, 0) + " = {{ version = " + toml_quote(dv) + ", registry = " + toml_quote(ix->registry) + " }");
+      }
+      rgx_sl_free(f);
+    }
+  }
+  var out: Buf* = buf_new();
+  buf_line(out, "[package]");
+  buf_line(out, "name = " + toml_quote(name));
+  buf_line(out, "version = " + toml_quote(version));
+  buf_add(out, buf_take(pkg));
+  buf_add(out, buf_take(deps));
+  var toml: string = buf_take(out);
+  if (slen(bad) == 0 && !s_eq(name, ix->name)) {
+    bad = "registry " + ix->registry + ": " + rgx_label(ix, v->version) + " is package `" + name + "`, not `" + ix->name + "`\n  help: the registry entry is broken; a package can only be published under the name it declares";
+  }
+  if (slen(bad) == 0 && (!sv_is(version) || sv_cmp(version, v->version) != 0)) {
+    bad = "registry " + ix->registry + ": " + rgx_label(ix, v->version) + " says it is version `" + version + "` in its mettle.package\n  help: the registry entry is broken";
+  }
+  if (slen(bad) > 0) {
+    rgx_set("other", bad);
+    return s_empty();
+  }
+  return toml;
+}
+
+// The cached archive of a json-registry version, fetched when missing.
+fn rgx_archive_json(p: Project*, ix: RegIndex*, v: RegVersion*) -> string {
+  var why: string = rgx_bad_name(v->archive);
+  if (slen(v->archive) == 0) {
+    why = "is empty";
+  }
+  if (slen(why) > 0) {
+    rgx_set("other", "registry " + ix->registry + ": the archive path `" + v->archive + "` of " + rgx_label(ix, v->version) + " " + why);
+    return s_empty();
+  }
+  var rel: string = "v1/" + v->archive;
+  return rgx_cached(p, ix, v, rel, v->sha, true);
+}
+
+// The manifest of a json-registry version: its archive's mettle.package.
+fn rgx_manifest_json(p: Project*, ix: RegIndex*, v: RegVersion*) -> Manifest* {
+  var path: string = rgx_archive_json(p, ix, v);
+  if (slen(path) == 0) {
+    return (Manifest*)0;
+  }
+  var r: FsRead = fs_read(path);
+  if (!r.ok) {
+    rgx_set("other", "cannot read " + path);
+    return (Manifest*)0;
+  }
+  var text: string = rgx_tar_member(r.data, "mettle.package");
+  if (slen(text) == 0) {
+    rgx_set("other", "registry " + ix->registry + ": " + rgx_label(ix, v->version) + " has no mettle.package (" + path + ")");
+    return (Manifest*)0;
+  }
+  var toml: string = rgx_package_toml(ix, v, text);
+  if (slen(toml) == 0) {
+    return (Manifest*)0;
+  }
+  var doc: Toml* = toml_parse(toml, rgx_label(ix, v->version) + " (registry " + ix->registry + ")");
+  var m: Manifest* = man_parse(doc, p->state_dir + "/deps/" + ix->name);
+  if (slen(m->error) > 0) {
+    rgx_set("other", m->error);
+    return (Manifest*)0;
+  }
+  return m;
+}
+
+// Why publish or yank cannot write to registry `name` (dir: its directory,
+// "" when remote); "" when they can.
+export fn reg_write_refusal(p: Project*, name: string, dir: string) -> string {
+  var json: bool = false;
+  if (slen(dir) > 0) {
+    json = fs_is_file(dir + "/v1/index.json");
+  } else {
+    var url: string = rgx_lookup(p, name);
+    if (slen(url) > 0) {
+      if (g_rgx_fetched == (StrList*)0) {
+        g_rgx_fetched = sl_new();
+      }
+      json = s_eq(rgx_kind(p, name, url), "json");
+    }
+    rgx_clear();
+  }
+  if (json) {
+    return "registry " + name + " is a Mettle registry, published by the Mettle repository's website/registry.py; mbuild cannot write to it";
+  }
+  return s_empty();
+}
+
+// ---------------------------------------------------------------------------
 // Manifests and archives
 // ---------------------------------------------------------------------------
 
@@ -619,6 +1278,9 @@ export fn reg_manifest(p: Project*, ix: RegIndex*, version: string) -> Manifest*
   if (v == (RegVersion*)0) {
     return (Manifest*)0;
   }
+  if (s_eq(ix->kind, "json")) {
+    return rgx_manifest_json(p, ix, v);
+  }
   var rel: string = "pkg/" + ix->name + "/" + ix->name + "-" + v->version + ".toml";
   var path: string = rgx_cached(p, ix, v, rel, v->manifest_sha, false);
   if (slen(path) == 0) {
@@ -647,6 +1309,9 @@ export fn reg_fetch(p: Project*, ix: RegIndex*, version: string) -> string {
   var v: RegVersion* = rgx_version_of(ix, version);
   if (v == (RegVersion*)0) {
     return s_empty();
+  }
+  if (s_eq(ix->kind, "json")) {
+    return rgx_archive_json(p, ix, v);
   }
   var rel: string = "pkg/" + ix->name + "/" + ix->name + "-" + v->version + ".tar.gz";
   return rgx_cached(p, ix, v, rel, v->sha, true);
@@ -708,9 +1373,19 @@ fn rgx_bad_name(name: string) -> string {
 }
 
 // "" when every member is a plain file or directory with a safe name.
+fn rgx_gz(archive: string) -> bool {
+  return s_ends(archive, ".gz") || s_ends(archive, ".tgz");
+}
+
 fn rgx_check_members(tar: Tool, archive: string) -> string {
-  var lv: Captured = rgx_tar_list(tar, archive, "-tzvf");
-  var ln: Captured = rgx_tar_list(tar, archive, "-tzf");
+  var z: string = "";
+  if (rgx_gz(archive)) {
+    z = "z";
+  }
+  var fv: string = "-t" + z + "vf";
+  var fl: string = "-t" + z + "f";
+  var lv: Captured = rgx_tar_list(tar, archive, fv);
+  var ln: Captured = rgx_tar_list(tar, archive, fl);
   if (lv.code != 0 || ln.code != 0) {
     return "cannot list " + archive + " (tar exit " + s_int((int64)ln.code) + ")";
   }
@@ -759,7 +1434,11 @@ export fn reg_extract(archive: string, sha: string, dest: string, marker: string
     return "cannot create " + tmp;
   }
   var c: Cmd* = cmd_new(tar);
-  cmd_arg(c, "-xzf");
+  if (rgx_gz(archive)) {
+    cmd_arg(c, "-xzf");
+  } else {
+    cmd_arg(c, "-xf");
+  }
   cmd_path(c, archive);
   cmd_arg(c, "-C");
   cmd_path(c, tmp);

@@ -5013,13 +5013,22 @@ fn bx_abs_dir(arg: string) -> string {
 // "default") when it has a path or file:// URL.
 fn bx_registry_dir(p: Project*, to: string, registry: string) -> string {
   if (slen(to) > 0) {
-    return bx_abs_dir(to);
+    var td: string = bx_abs_dir(to);
+    var tw: string = reg_write_refusal(p, p_base(td), td);
+    if (slen(tw) > 0) {
+      fail(tw);
+    }
+    return td;
   }
   var name: string = registry;
   if (slen(name) == 0) {
     name = "default";
   }
   var dir: string = reg_dir_of(p, name);
+  var why: string = reg_write_refusal(p, name, dir);
+  if (slen(why) > 0) {
+    fail(why);
+  }
   if (slen(dir) == 0) {
     fail("registry " + name + " is served over https; publish into a local copy of it with --to DIR and upload that");
   }
