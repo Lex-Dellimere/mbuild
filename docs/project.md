@@ -2,7 +2,7 @@
 
 `mbuild.mettle` sits at the project root (mbuild walks up from the working
 directory to find it) and is Mettle code. `fn project()` describes the
-package, every `fn cmd_NAME` is a command, `fn hook_pre_build` and
+package, `fn deps()` its dependencies, every `fn cmd_NAME` is a command, `fn hook_pre_build` and
 `fn hook_post_build` run around builds.
 
 ```mettle
@@ -11,13 +11,16 @@ import "mbuild/api";
 fn project() {
   mb_package("viewer", "0.3.0");
   mb_meta("description", "image viewer");
-  mb_dep("strutil", "v1.1.0");
 
   mb_profile("release");
   mb_set("crash-report", "false");
   mb_on("windows");
   mb_set("subsystem", "windows");
   mb_on("");
+}
+
+fn deps() {
+  mb_dep("strutil", "v1.1.0");
 }
 
 // install: build a release and copy it into a bin directory (default ~/.local/bin)
@@ -48,9 +51,9 @@ has one gets an error. `mbuild init` writes an `mbuild.mettle`.
 
 ## Rules
 
-- `fn project()` is required. No `fn main`.
+- `fn project()` is required, `fn deps()` optional. No `fn main`.
 - Import the API plainly: `import "mbuild/api";`, never `as`.
-- If the file exports anything, `project`, every `cmd_*` and every `hook_*`
+- If the file exports anything, `project`, `deps`, every `cmd_*` and every `hook_*`
   must be `export fn` too.
 - Don't define names starting with `mb_`, `Mb` or `mbi_`.
 - It may import other files of the project.
@@ -80,9 +83,13 @@ Per-OS settings go through `mb_on(os)`.
 | `mb_agents(on)` | Keep the dependencies block in `AGENT.rules` ([packages](packages.md#agentrules)). Default `true`. |
 | `mb_publish_include(csv)` | The files `mbuild publish` packs ([dependencies](dependencies.md#publishing)). |
 | `mb_import_root(dir)` | Imports of `name/...` start in `dir` instead of the package root ([dependencies](dependencies.md#import-roots)). |
+| `mb_registry(name, url)` | A registry, searched in call order before `default`. |
 | `mb_raw(section, key, toml)` | Escape hatch: a raw key in the generated manifest. |
 
-### Dependencies
+### fn deps()
+
+Dependencies go in `fn deps()`, which runs right after `fn project()` and
+follows the same rules. `mbuild init` writes an empty one.
 
 | Call | Meaning |
 |---|---|
@@ -90,14 +97,21 @@ Per-OS settings go through `mb_on(os)`.
 | `mb_dep_from(registry, name, version)` | The same, from one named registry. |
 | `mb_dep_path(name, path)` | A package in a local directory. |
 | `mb_dep_bin(dep, bin)` | Also build bin `bin` of dependency `dep` (below). |
-| `mb_registry(name, url)` | A registry, searched in call order before `default`. |
 | `mb_replace_version(name, version)` | One version of `name` for the whole build. |
 | `mb_replace_path(name, path)` | Use a local directory instead of `name` everywhere in the build. |
 
+In `fn project()` these still work, with a warning:
+
+```text
+warning: mbuild.mettle:5: mb_dep belongs in fn deps()
+  help: mbuild tidy moves it
+```
+
 `get`, `remove`, `update`, `tidy` and auto-add edit the `mb_dep*` lines and
-leave the rest of the file alone. They can only edit a call on its own line
-inside `fn project()` with string literal arguments; anything else gets an
-error that shows the line to write. See [dependencies](dependencies.md).
+leave the rest of the file alone. New lines go into `fn deps()`, which they
+add after `fn project()` when it's missing. They can only edit a call on
+its own line with string literal arguments; anything else gets an error
+that shows the line to write. See [dependencies](dependencies.md).
 
 ### Bins
 

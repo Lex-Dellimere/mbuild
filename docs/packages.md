@@ -79,7 +79,7 @@ $ mbuild new site --from greet --opt who=world --opt style=loud --yes
 | `mi_project()` | `plan()` | the new project's name |
 | `mi_template(src, dst)` | `plan()` | a file from a template in the package, variables filled in |
 | `mi_dir(path)` | `plan()` | an empty directory |
-| `mi_dep(name, version)` | `plan()` | another dependency (the package itself is always added) |
+| `mi_dep(name, version)` | `plan()` | another dependency in `fn deps()` (the package itself is always added) |
 | `mi_set(profile, key, value)` | `plan()` | `mb_profile(profile); mb_set(key, value);` in `fn project()` |
 | `mi_line(text)` | `plan()` | a raw line at the end of `fn project()` |
 | `mi_command(name, summary, body)` | `plan()` | a `fn cmd_NAME(a: MbArgs*) -> int32 { body }` with `summary` as its help |

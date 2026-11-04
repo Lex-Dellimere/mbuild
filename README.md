@@ -98,17 +98,20 @@ mbuild deps --tree
 
 ### mbuild.mettle
 
-the project file is mettle. `fn project()` describes the package, every `cmd_NAME` is a command, the comment above it is its help:
+the project file is mettle. `fn project()` describes the package, `fn deps()` its dependencies, every `cmd_NAME` is a command, the comment above it is its help:
 
 ```mettle
 import "mbuild/api";
 
 fn project() {
   mb_package("viewer", "0.3.0");
-  mb_dep("strutil", "v1.1.0");
 
   mb_profile("release");
   mb_set("crash-report", "false");
+}
+
+fn deps() {
+  mb_dep("strutil", "v1.1.0");
 }
 
 // install: build a release and copy it into a bin directory (default ~/.local/bin)

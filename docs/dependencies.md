@@ -53,10 +53,14 @@ to add anything.
 
 ## Declaring dependencies
 
+In `fn deps()` of `mbuild.mettle`:
+
 ```mettle
+fn deps() {
   mb_dep("strutil", "v1.1.0");               // from the registries
   mb_dep_from("corp", "auth", "v2.0.0");     // from one named registry
   mb_dep_path("widgets", "../widgets");      // a local directory with its own mbuild.mettle
+}
 ```
 
 | Version | Means |
@@ -128,7 +132,7 @@ error: apilib is required at incompatible versions:
 ```
 
 `mb_replace_version(name, version)` and `mb_replace_path(name, dir)` in
-`fn project()` override what everyone asks for. Only your project's
+`fn deps()` override what everyone asks for. Only your project's
 replacements count. For a local checkout you're working on, put
 `mb_replace_path` in `mbuild.local.mettle` instead
 ([project](project.md#mbuildlocalmettle)), so it never reaches the lock.
@@ -232,7 +236,15 @@ $ mbuild tidy
 ```
 
 It also moves hand-written `mettle.deps` lines into `mbuild.mettle` as
-`mb_dep_path` calls.
+`mb_dep_path` calls, and dependency calls in `fn project()` into
+`fn deps()`, each line as written:
+
+```text
+$ mbuild tidy
+      Moving mbuild.mettle: 1 line from fn project() into fn deps()
+   Verifying 1 bin for linux
+    Verified
+```
 
 ### mbuild deps [--tree]
 
