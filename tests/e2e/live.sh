@@ -28,6 +28,16 @@ waitfor() {
   done
   ok "$1"
 }
+# waitn NAME FILE ERE N: up to 20 s for N lines of FILE to match ERE
+waitn() {
+  i=0
+  while [ "$(grep -cE -- "$3" "$2" 2>/dev/null)" -lt "$4" ]; do
+    i=$((i + 1))
+    [ $i -gt 400 ] && { bad "$1 (wanted $4 of: $3)" "$(cat "$2" 2>/dev/null)"; return 1; }
+    sleep 0.05
+  done
+  ok "$1"
+}
 # same NAME WANT GOT: the two texts are equal
 same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$(printf 'wanted:\n%s\ngot:\n%s' "$2" "$3")"; fi; }
 
@@ -77,7 +87,13 @@ fn main() -> int32 {
   return 4;
 }
 EOF
-rules() { printf 'export fn val() -> int64 {\n  return %s;\n}\n' "$1" >"$W/src/rules.mettle"; }
+# val on lines 1-3, then enough other functions that a patch takes a while (saves can land in it)
+rules() {
+  { printf 'export fn val() -> int64 {\n  return %s;\n}\n' "$1"
+    awk 'BEGIN { for (i = 0; i < 1200; i++) printf "export fn f%d(a: int64) -> int64 {\n  var x: int64 = a + %d;\n  return x * 2;\n}\n", i, i }'
+  } >"$W/src/rules.mettle"
+}
+RES='^ev (patched|built|patch-error)\|'
 
 for kind in debug release; do
   echo "== mbuild ($kind)"
@@ -106,8 +122,22 @@ for kind in debug release; do
   rules '2 +'
   waitfor "$kind: patch-error with file:line:col" "$O" '^ev patch-error\|\|src/rules.mettle:2:[0-9]+: Expected an expression'
   rules 5
-  i=0
-  while [ "$(grep -c '^ev patched' "$O")" -lt 2 ] && [ $i -lt 400 ]; do i=$((i + 1)); sleep 0.05; done
+  waitn "$kind: fixed" "$O" '^ev patched\|\|val$' 2
+  base=$(grep -cE "$RES" "$O")
+  rules '5 +'
+  waitn "$kind: a typo in the code that is running" "$O" "$RES" $((base + 1))
+  rules 5
+  waitn "$kind: the code restored to what runs" "$O" "$RES" $((base + 2))
+  echo '// c' >>src/rules.mettle
+  waitn "$kind: a save that changes nothing" "$O" "$RES" $((base + 3))
+  rules 6
+  sleep 0.4
+  rules '6 +'
+  waitn "$kind: two saves, the second in the patch of the first" "$O" "$RES" $((base + 5))
+  sleep 4
+  same "$kind: and no more than one result each" $((base + 5)) "$(grep -cE "$RES" "$O")"
+  rules 5
+  waitn "$kind: the last good code restored" "$O" "$RES" $((base + 6))
   rm assets/stop.txt
   wait $pid
   code=$?
@@ -117,7 +147,14 @@ ev removed|shaders/b.glsl|
 ev patched||val
 ev patch-error||src/rules.mettle:2:13: Expected an expression after '+', found ';'
 ev patched||val
-ev removed|assets/stop.txt|" "$(grep '^ev ' "$O")"
+ev patch-error||src/rules.mettle:2:13: Expected an expression after '+', found ';'
+ev built||
+ev built||" "$(grep '^ev ' "$O" | sed -n 1,9p)"
+  # a patch the first save's compile did or did not see decides patched or merged
+  grep '^ev ' "$O" | sed -n 10p | grep -qE '^ev (patched\|\|val|patch-error\|\|src/rules.mettle:2:13: .*)$' && ok "$kind: the first of the two saves has a result" || bad "$kind: the first of the two saves has a result" "$(grep '^ev ' "$O")"
+  same "$kind: the last of the two is a patch-error" "ev patch-error||src/rules.mettle:2:13: Expected an expression after '+', found ';'" "$(grep '^ev ' "$O" | sed -n 11p)"
+  grep '^ev ' "$O" | sed -n 12p | grep -qE '^ev (patched\|\|val|built\|\|)$' && ok "$kind: the restore has a result" || bad "$kind: the restore has a result" "$(grep '^ev ' "$O")"
+  same "$kind: then the stop" "ev removed|assets/stop.txt|" "$(grep '^ev ' "$O" | sed -n 13p)"
   grep -q '^val 5$' "$O" && ok "$kind: the fix is in" || bad "$kind: the fix is in" "$(cat "$O")"
   same "$kind: the exit code is the program's" 3 "$code"
   same "$kind: the events file ends with exited" "exited 3" "$(tail -1 .mbuild/live/fx.events)"

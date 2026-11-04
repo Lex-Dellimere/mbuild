@@ -2415,6 +2415,11 @@ export fn build_cmd_live(p: Project*) -> int32 {
   var c: Cmd* = bx_live_cmd(s, u, nl, outp, false);
   defer free(c);
   lv_env(lv, c->env);
+  var chk_obj: string = p->state_dir + "/tmp/live-check-" + s_replace_byte(u->b->name, 47, 95) + ".o";
+  fs_mkdirs(p->state_dir + "/tmp");
+  var chk: Cmd* = bx_check_cmd(s, u, chk_obj);
+  defer free(chk);
+  lv_track(lv, outp, chk, chk_obj);
   status("Live", bx_label(s, u->b, t));
   return lv_run(lv, c);
 }
@@ -2954,6 +2959,25 @@ export fn build_cmd_check(p: Project*) -> int32 {
   return bx_check_set(p, bx_select_bins(p, bx_positional(p->opts->rest)));
 }
 
+// The compiler's check of u's entry: an object at obj (to be deleted).
+fn bx_check_cmd(s: BxSess*, u: BxUnit*, obj: string) -> Cmd* {
+  var p: Project* = s->p;
+  var c: Cmd* = tc_cmd(u->m);
+  cmd_path(c, bx_rel(p, u->entry));
+  if (u->ti < 0) {
+    cmd_arg(c, "--target");
+    cmd_arg(c, u->b->triple);
+  }
+  cmd_arg(c, "-o");
+  cmd_path(c, bx_rel(p, obj));
+  bx_add_include(c, p, s->ds, bx_unit_gen(u));
+  var st: Settings* = bx_add_flags(c, s, u);
+  free(st);
+  bx_diag_env(c);
+  c->cwd = p->root;
+  return c;
+}
+
 // Compiles each entry in bs to an object (deleted afterwards).
 fn bx_check_set(p: Project*, bs: BinSet*) -> int32 {
   var t0: int64 = sys_now_ms();
@@ -2969,20 +2993,8 @@ fn bx_check_set(p: Project*, bs: BinSet*) -> int32 {
     var b: BinInfo* = u->b;
     var obj: string = p->state_dir + "/tmp/check-" + s_replace_byte(b->name, 47, 95) + ".o";
     fs_mkdirs(p->state_dir + "/tmp");
-    var c: Cmd* = tc_cmd(u->m);
+    var c: Cmd* = bx_check_cmd(s, u, obj);
     defer free(c);
-    cmd_path(c, bx_rel(p, u->entry));
-    if (u->ti < 0) {
-      cmd_arg(c, "--target");
-      cmd_arg(c, b->triple);
-    }
-    cmd_arg(c, "-o");
-    cmd_path(c, bx_rel(p, obj));
-    bx_add_include(c, p, s->ds, bx_unit_gen(u));
-    var st: Settings* = bx_add_flags(c, s, u);
-    free(st);
-    bx_diag_env(c);
-    c->cwd = p->root;
     status("Checking", b->name + " (" + u->target + ")");
     var cap: Captured = proc_capture_all(c);
     bx_print_block(bx_compiler_output(cap.out));

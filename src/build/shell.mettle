@@ -1479,6 +1479,8 @@ fn shx_ev_patch(ss: ShxSess*, ok: bool, out: string, name: string) {
   }
   if (!any && slen(name) > 0) {
     lv_emit(ss->lv, "patched", name);
+  } else if (!any) {
+    lv_emit(ss->lv, "built", s_empty());
   }
 }
 

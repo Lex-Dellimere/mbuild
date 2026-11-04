@@ -329,6 +329,20 @@ export fn sys_stat(p: string) -> FileInfo {
   return fi;
 }
 
+// A number that changes when the file does (mtime and size), -1 when it
+// is not there; takes a NUL-terminated path so a poll leaves nothing behind.
+export fn sys_stamp(p: cstring) -> int64 {
+  var buf: uint8* = (uint8*)malloc(256);
+  memset(buf, 0, 256);
+  if (lx_stat(p, (rawptr)buf) != 0) {
+    free(buf);
+    return -1;
+  }
+  var v: int64 = (lx_rd64(buf, 88) * 1000000000 + lx_rd64(buf, 96)) / 2 + lx_rd64(buf, 48) * 1000003;
+  free(buf);
+  return v;
+}
+
 export fn sys_mkdir(p: string) -> bool {
   lx_mkdir(s_c(p), (uint32)511);
   return lx_is_dir(s_c(p)) != 0;

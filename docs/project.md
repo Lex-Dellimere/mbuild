@@ -495,9 +495,14 @@ end of the line, or the kind alone.
 | `changed PATH`, `removed PATH` | a watched file (from the root) was added or changed, or went |
 | `patched NAME` | a function was patched in, a line each (`mettle live`, or a shell input) |
 | `patch-error MSG` | a patch did not compile: `FILE:LINE:COL: message` of the first error |
-| `built`, `build-error MSG` | the first build worked, or didn't |
+| `built`, `build-error MSG` | the first build worked, or didn't; `built` also ends a save that compiled and patched nothing |
 | `paused`, `resumed` | `mbuild shell`: pause, resume, step |
 | `exited CODE` | the program ended |
+
+Every save of the program's source files ends with `patched` lines, `built`
+or `patch-error`, once. `mettle live` loses a save made while it patches, so
+mbuild counts the saves too, and one left unanswered for 2 s is answered by
+the compiler's check of the entry.
 
 Readers skip kinds they don't know. `--preview SIDE` (either command) sets
 `MBUILD_PREVIEW` for the program, overriding `mb_preview`; mbuild does

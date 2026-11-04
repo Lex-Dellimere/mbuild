@@ -5,6 +5,12 @@
 // The events file is .mbuild/live/<bin>.events, emptied at start; each
 // event is one whole line "KIND PAYLOAD" (KIND alone when there is none),
 // added in one write.
+//
+// Every save of the program's source files ends with one result: patched
+// lines or built, or patch-error. `mettle live` reports one per patch run
+// and loses a save made while a patch is in flight, so the saves are
+// counted here too (settled changes of the files in <exe>.live.files) and
+// one that gets no result in time is answered by the compiler's check.
 
 import "std/mem";
 import "../core/base";
@@ -28,7 +34,29 @@ export struct LiveSess {
   code: int64;        // from "[live] ... exited with N", -1 none
   outb: Buf*;         // partial lines of the child's stdout, stderr
   errb: Buf*;
+  err_seen: bool;     // this compile's first error is out
+  // a result per save
+  listf: string;      // <exe>.live.files, "" none
+  listc: string;      // a NUL-terminated copy
+  sp: StrList*;       // the files of that list (NUL-terminated copies)
+  sv: int64*;         // their stamps
+  slist: int64;       // stamp of the list file
+  moving: bool;       // a change seen, not yet stable
+  adopt: bool;        // a result came before the change was seen
+  pend: int64*;       // settle times of the saves without a result
+  pend_n: int64;
+  last_res: int64;    // when the last result was written
+  lat: int64;         // how long the last result took (ms)
+  t0: int64;
+  chk: Cmd*;          // the compiler's check of the entry, 0 none
+  chk_obj: string;
+  chk_on: bool;       // a check is running
+  chk_void: bool;     // a result came for what it was for
+  chk_t: int64;       // when it started
 }
+
+const LV_PEND_MAX: int64 = 64;
+const LV_WAIT_MS: int64 = 2000;
 
 // --preview SIDE (taken out of rest), else mb_preview; "" none.
 fn lv_preview(p: Project*) -> string {
@@ -72,7 +100,34 @@ export fn lv_open(p: Project*, bin: string) -> LiveSess* {
   lv->code = -1;
   lv->outb = buf_new();
   lv->errb = buf_new();
+  lv->err_seen = false;
+  lv->listf = s_empty();
+  lv->listc = s_empty();
+  lv->sp = sl_new();
+  lv->sv = (int64*)malloc(8);
+  lv->slist = 0;
+  lv->moving = false;
+  lv->adopt = false;
+  lv->pend = (int64*)malloc(LV_PEND_MAX * 8);
+  lv->pend_n = 0;
+  lv->last_res = 0;
+  lv->lat = 0;
+  lv->t0 = sys_now_ms();
+  lv->chk = (Cmd*)0;
+  lv->chk_obj = s_empty();
+  lv->chk_on = false;
+  lv->chk_void = false;
+  lv->chk_t = 0;
   return lv;
+}
+
+// exe's source list and the command that checks the entry (to the object
+// obj): what the results of saves are made from.
+export fn lv_track(lv: LiveSess*, exe: string, chk: Cmd*, obj: string) {
+  lv->listf = exe + ".live.files";
+  lv->listc = s_dup(lv->listf);
+  lv->chk = chk;
+  lv->chk_obj = obj;
 }
 
 // The program's environment: the events file and the preview hint.
@@ -391,15 +446,123 @@ fn lv_error(lv: LiveSess*, l: string) -> string {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// A result per save
+// ---------------------------------------------------------------------------
+
+fn lv_pop(lv: LiveSess*) {
+  var i: int64 = 0;
+  while (i + 1 < lv->pend_n) {
+    lv->pend[i] = lv->pend[i + 1];
+    i = i + 1;
+  }
+  lv->pend_n = lv->pend_n - 1;
+}
+
+// A save settled: its change stopped moving for one tick.
+export fn lv_settled(lv: LiveSess*) {
+  if (lv->pend_n < LV_PEND_MAX) {
+    lv->pend[lv->pend_n] = sys_now_ms();
+    lv->pend_n = lv->pend_n + 1;
+  }
+}
+
+// `mettle live` reported a result: it is the oldest save's. A save made
+// while that patch ran is not reported, it stays and times out.
+fn lv_resolve(lv: LiveSess*) {
+  var now: int64 = sys_now_ms();
+  if (lv->pend_n > 0) {
+    var since: int64 = lv->pend[0];
+    if (lv->last_res > since) {
+      since = lv->last_res;
+    }
+    lv->lat = now - since;
+    lv_pop(lv);
+    if (lv->chk_on) {
+      lv->chk_void = true;
+    }
+  } else if (lv->moving) {
+    lv->moving = false;
+  } else {
+    lv->adopt = true;
+  }
+  lv->last_res = now;
+}
+
+// How long a save waits for `mettle live`: 2 s, more after a slow patch.
+fn lv_wait(lv: LiveSess*) -> int64 {
+  var w: int64 = LV_WAIT_MS;
+  if (lv->lat * 3 / 2 > w) {
+    w = lv->lat * 3 / 2;
+  }
+  return w;
+}
+
+// True (and a check begun) when the oldest save has waited long enough.
+export fn lv_check_due(lv: LiveSess*) -> bool {
+  if (lv->chk == (Cmd*)0 || lv->chk_on || lv->pend_n == 0) {
+    return false;
+  }
+  var now: int64 = sys_now_ms();
+  var since: int64 = lv->pend[0];
+  if (lv->last_res > since) {
+    since = lv->last_res;
+  }
+  if (now - since < lv_wait(lv)) {
+    return false;
+  }
+  lv->chk_on = true;
+  lv->chk_void = false;
+  lv->chk_t = now;
+  return true;
+}
+
+// The check's output: the result of the saves it covers (those before it
+// began), unless `mettle live` answered them meanwhile.
+export fn lv_check_done(lv: LiveSess*, out: string, code: int64) {
+  lv->chk_on = false;
+  if (lv->chk_void) {
+    lv->chk_void = false;
+    return;
+  }
+  var any: bool = false;
+  while (lv->pend_n > 0 && lv->pend[0] <= lv->chk_t) {
+    lv_pop(lv);
+    any = true;
+  }
+  if (!any) {
+    return;
+  }
+  var loc: string = lv->loc;
+  if (!lv_errors(lv, "patch-error", out)) {
+    if (code != 0) {
+      lv_emit(lv, "patch-error", "could not check the program");
+    } else {
+      lv_emit(lv, "built", s_empty());
+    }
+  }
+  lv->loc = loc;
+  lv->last_res = sys_now_ms();
+}
+
 // One line of `mettle live`'s stdout or stderr.
 fn lv_line(lv: LiveSess*, raw: string) {
   var l: string = s_trim(lv_plain(raw));
   if (lv_patch_line(lv, l)) {
+    lv->err_seen = false;
+    lv_resolve(lv);
+    return;
+  }
+  if (s_starts(l, "No function changed")) {
+    lv->err_seen = false;
+    lv_emit(lv, "built", s_empty());
+    lv_resolve(lv);
     return;
   }
   if (s_starts(l, "Built executable")) {
     if (!lv->built) {
       lv->built = true;
+      lv->lat = sys_now_ms() - lv->t0;
       lv_emit(lv, "built", s_empty());
     }
     return;
@@ -411,10 +574,25 @@ fn lv_line(lv: LiveSess*, raw: string) {
     }
     return;
   }
+  if (s_starts(l, "error: ") && s_contains(l, "could not compile")) {
+    lv->err_seen = false;
+    lv->loc = s_empty();
+    return;
+  }
+  if (s_starts(l, "Error: ")) {
+    // a patch the compiler would not build
+    if (lv->built && (lv->pend_n > 0 || lv->moving)) {
+      lv_emit(lv, "patch-error", s_from(l, 7));
+      lv_resolve(lv);
+    }
+    return;
+  }
   var err: string = lv_error(lv, l);
-  if (slen(err) > 0) {
+  if (slen(err) > 0 && !lv->err_seen) {
+    lv->err_seen = true;
     if (lv->built) {
       lv_emit(lv, "patch-error", err);
+      lv_resolve(lv);
     } else {
       lv_emit(lv, "build-error", err);
     }

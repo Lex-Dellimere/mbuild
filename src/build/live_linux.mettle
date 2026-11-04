@@ -5,6 +5,7 @@
 import "std/mem";
 import "../core/base";
 import "live";
+import "../core/fs";
 import "../core/sys_linux" if linux;
 import "../../third_party/alph/core/node" if linux;
 
@@ -19,6 +20,11 @@ struct LvlRun {
   err_h: int64;
   buf: uint8*;
   code: int64;
+  chk_h: int64;       // the check of the entry, 0 none
+  chk_out_h: int64;
+  chk_err_h: int64;
+  chk_out: Buf*;
+  chk_err: Buf*;
 }
 
 // What h has now: to fd and the event parser. False at its end.
@@ -39,6 +45,22 @@ fn lvl_drain(ctx: AlphCtx*, s: LvlRun*, h: int64, fd: int32, b: Buf*) -> bool {
   return true;
 }
 
+// What h has now: into b. False at its end.
+fn lvl_take(ctx: AlphCtx*, s: LvlRun*, h: int64, b: Buf*) -> bool {
+  while (true) {
+    var n: int64 = alph_io_read(ctx, h, (rawptr)s->buf, 8192);
+    if (n == ALPH_IO_AGAIN) {
+      alph_io_arm(ctx, h, ALPH_IO_IN);
+      return true;
+    }
+    if (n <= 0) {
+      return false;
+    }
+    buf_add(b, s_view(s->buf, n));
+  }
+  return true;
+}
+
 fn lvl_io(ctx: AlphCtx*, s: LvlRun*, h: int64) {
   if (h == s->out_h && s->out_h != 0) {
     if (!lvl_drain(ctx, s, h, 1, s->lv->outb)) {
@@ -50,7 +72,120 @@ fn lvl_io(ctx: AlphCtx*, s: LvlRun*, h: int64) {
       alph_io_close(ctx, h);
       s->err_h = 0;
     }
+  } else if (h == s->chk_out_h && s->chk_out_h != 0) {
+    if (!lvl_take(ctx, s, h, s->chk_out)) {
+      alph_io_close(ctx, h);
+      s->chk_out_h = 0;
+    }
+  } else if (h == s->chk_err_h && s->chk_err_h != 0) {
+    if (!lvl_take(ctx, s, h, s->chk_err)) {
+      alph_io_close(ctx, h);
+      s->chk_err_h = 0;
+    }
   }
+}
+
+// What the source files and the saves' deadlines call for, every tick.
+fn lvl_scan(lv: LiveSess*) -> bool {
+  if (slen(lv->listf) == 0) {
+    return false;
+  }
+  var ls: int64 = sys_stamp((cstring)lv->listc.chars);
+  if (ls != lv->slist) {
+    // the list changed (a new import): its files, the old stamps kept
+    lv->slist = ls;
+    var np: StrList* = sl_new();
+    var r: FsRead = fs_read(lv->listf);
+    if (r.ok) {
+      var lines: StrList* = s_lines(r.data);
+      var i: int64 = 0;
+      while (i < lines->len) {
+        var f: string = s_trim(sl_get(lines, i));
+        if (slen(f) > 0) {
+          sl_push(np, s_dup(f));
+        }
+        i = i + 1;
+      }
+      free(lines);
+    }
+    var nv: int64* = (int64*)malloc((np->len + 1) * 8);
+    var k: int64 = 0;
+    while (k < np->len) {
+      var path: string = sl_get(np, k);
+      nv[k] = sys_stamp((cstring)path.chars);
+      var j: int64 = 0;
+      while (j < lv->sp->len) {
+        if (s_eq(sl_get(lv->sp, j), sl_get(np, k))) {
+          nv[k] = lv->sv[j];
+        }
+        j = j + 1;
+      }
+      k = k + 1;
+    }
+    free(lv->sv);
+    lv->sv = nv;
+    lv->sp = np;
+  }
+  var changed: bool = false;
+  var i2: int64 = 0;
+  while (i2 < lv->sp->len) {
+    var path2: string = sl_get(lv->sp, i2);
+    var st: int64 = sys_stamp((cstring)path2.chars);
+    if (st != lv->sv[i2]) {
+      lv->sv[i2] = st;
+      changed = true;
+    }
+    i2 = i2 + 1;
+  }
+  return changed;
+}
+
+// A change stays moving until a tick sees it still; then it is a save.
+fn lvl_track(ctx: AlphCtx*, s: LvlRun*) {
+  var lv: LiveSess* = s->lv;
+  if (lvl_scan(lv)) {
+    if (!lv->adopt) {
+      lv->moving = true;
+    }
+  } else if (lv->moving) {
+    lv->moving = false;
+    lv_settled(lv);
+  }
+  lv->adopt = false;
+  if (s->chk_h == 0 && lv_check_due(lv)) {
+    s->chk_out->len = 0;
+    s->chk_err->len = 0;
+    s->chk_h = sys_proc_start_piped(ctx, lv->chk, &s->chk_out_h, &s->chk_err_h);
+    if (s->chk_h <= 0) {
+      s->chk_h = 0;
+      lv_check_done(lv, s_empty(), 127);
+    } else {
+      alph_io_arm(ctx, s->chk_out_h, ALPH_IO_IN);
+      alph_io_arm(ctx, s->chk_err_h, ALPH_IO_IN);
+    }
+  }
+}
+
+// The check has ended: its result, its object removed.
+fn lvl_check_end(ctx: AlphCtx*, s: LvlRun*, code: int64) {
+  if (s->chk_out_h != 0) {
+    lvl_io(ctx, s, s->chk_out_h);
+  }
+  if (s->chk_err_h != 0) {
+    lvl_io(ctx, s, s->chk_err_h);
+  }
+  s->chk_h = 0;
+  var ob: Buf* = buf_new();
+  buf_add(ob, buf_str(s->chk_out));
+  buf_addb(ob, 10);
+  buf_add(ob, buf_str(s->chk_err));
+  var out: string = buf_take(ob);
+  lv_check_done(s->lv, out, code);
+  free(out.chars);
+  var obj: string = s->lv->chk_obj;
+  sys_remove_file(obj);
+  sys_remove_file(obj + ".o");
+  sys_remove_file(obj + ".obj");
 }
 
 fn lvl_handle(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
@@ -65,13 +200,22 @@ fn lvl_handle(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
     }
     alph_io_arm(ctx, s->out_h, ALPH_IO_IN);
     alph_io_arm(ctx, s->err_h, ALPH_IO_IN);
+    lvl_scan(s->lv);
     alph_start_timer(ctx, 150, LVL_TAG_TICK, 0);
   } else if (m->tag == ALPH_TAG_IO) {
     lvl_io(ctx, s, m->ref);
   } else if (m->tag == LVL_TAG_TICK) {
     lv_poll(s->lv);
+    lvl_track(ctx, s);
     alph_start_timer(ctx, 150, LVL_TAG_TICK, 0);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT && s->chk_h != 0 && m->ref == s->chk_h) {
+    lvl_check_end(ctx, s, m->arg);
   } else if (m->tag == ALPH_TAG_PROC_EXIT && m->ref == s->h) {
+    if (s->chk_h != 0) {
+      alph_proc_kill(ctx, s->chk_h, 15);
+      s->chk_h = 0;
+      sys_remove_file(s->lv->chk_obj);
+    }
     if (s->out_h != 0) {
       lvl_io(ctx, s, s->out_h);
     }
@@ -98,6 +242,11 @@ export fn lv_run(lv: LiveSess*, c: Cmd*) -> int32 {
   s.lv = lv;
   s.c = c;
   s.buf = (uint8*)malloc(8192);
+  s.chk_h = 0;
+  s.chk_out_h = 0;
+  s.chk_err_h = 0;
+  s.chk_out = buf_new();
+  s.chk_err = buf_new();
   var code: int64 = sys_node_run((rawptr)&s, (int64)sizeof(LvlRun), 8, LVL_TAG_SIGINT, &lvl_handle);
   free(s.buf);
   return (int32)code;
