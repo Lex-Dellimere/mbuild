@@ -1034,6 +1034,24 @@ export fn mbf_init_text(name: string) -> string {
   return buf_take(b);
 }
 
+// The call on an edited line, for the status line: mb_dep("x", "v1").
+export fn mbf_call_at(text: string, line: int64) -> string {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  if (line < 1 || line > lines->len) {
+    return s_empty();
+  }
+  var l: string = s_trim(sl_get(lines, line - 1));
+  var cut: int64 = s_find(l, "//");
+  if (cut >= 0) {
+    l = s_trim(s_sub(l, 0, cut));
+  }
+  if (s_ends(l, ";")) {
+    l = s_sub(l, 0, slen(l) - 1);
+  }
+  return l;
+}
+
 // ---------------------------------------------------------------------------
 // mbuild.local.mettle
 // ---------------------------------------------------------------------------

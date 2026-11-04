@@ -533,24 +533,6 @@ export fn cfg_run_hook(p: Project*, h: CfgHook*) -> int32 {
   return code;
 }
 
-// The call on an edited line, for the status line: mb_dep("x", "v1").
-fn cfx_call_shown(text: string, line: int64) -> string {
-  var lines: StrList* = s_lines(text);
-  defer free(lines);
-  if (line < 1 || line > lines->len) {
-    return s_empty();
-  }
-  var l: string = s_trim(sl_get(lines, line - 1));
-  var cut: int64 = s_find(l, "//");
-  if (cut >= 0) {
-    l = s_trim(s_sub(l, 0, cut));
-  }
-  if (s_ends(l, ";")) {
-    l = s_sub(l, 0, slen(l) - 1);
-  }
-  return l;
-}
-
 fn cfx_edit_refused(p: Project*, e: MbfEdit, name: string, fix: string) {
   var shown: string = cfx_show(p, cfx_mbfile(p));
   if (e.line > 0) {
@@ -587,7 +569,7 @@ export fn cfg_set_dep(p: Project*, name: string, version: string) -> bool {
   if (!fs_write(file, e.text)) {
     fail("cannot write " + cfx_show(p, file));
   }
-  status(verb, "mbuild.mettle: " + cfx_call_shown(e.text, e.line));
+  status(verb, "mbuild.mettle: " + mbf_call_at(e.text, e.line));
   p->man = cfg_load(p);
   return true;
 }
@@ -604,7 +586,7 @@ export fn cfg_remove_dep(p: Project*, name: string) -> bool {
   if (!fs_write(file, e.text)) {
     fail("cannot write " + cfx_show(p, file));
   }
-  status("Removing", "mbuild.mettle: " + cfx_call_shown(text, e.line));
+  status("Removing", "mbuild.mettle: " + mbf_call_at(text, e.line));
   p->man = cfg_load(p);
   return true;
 }
