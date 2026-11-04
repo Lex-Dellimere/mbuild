@@ -1,0 +1,198 @@
+// init_driver: a small CLI over init.mettle and agents.mettle for tests/e2e/r3_init.sh.
+//
+//   init_driver DIR new NAME --from PKG [--opt K=V]... [--yes] [--dry-run] [--force] [--registry R] [-v]
+//   init_driver DIR init --from PKG [...]          init --from in the project at DIR
+//   init_driver DIR check PKGDIR                   ini_check_package: prints "ok" or the error
+//   init_driver DIR scaffold NAME                  ini_scaffold_package into DIR
+//   init_driver DIR api                            prints ini_api_text
+//   init_driver DIR strip FILE                     prints agt_strip_block of FILE
+//   init_driver DIR refresh MOD...                 agt_refresh, then "changed=0|1"
+//   init_driver DIR agents [NAME] [--all] MOD...   agt_cmd_agents
+//   init_driver DIR selftest                       pure checks of agt_strip_block
+//
+// DIR's manifest.toml (the manifest schema mbuild.mettle emits) gives the root's direct dependencies and
+// [build] agents; MOD is name:version:dir (version "" for a path package),
+// standing in for a resolved DepState.
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/core/fs";
+import "../../src/model/toml";
+import "../../src/model/manifest";
+import "../../src/model/project";
+import "../../src/config/init";
+import "../../src/config/agents";
+import "../../src/core/sys_linux" if linux;
+import "../../src/core/sys_windows" if windows;
+
+var g_drv_failed: int64 = 0;
+
+fn drv_check(what: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    say("ok   " + what);
+    return;
+  }
+  say("FAIL " + what + "\n--- got\n" + got + "--- want\n" + want + "---");
+  g_drv_failed = g_drv_failed + 1;
+}
+
+fn drv_selftest() -> int32 {
+  var block: string = "# >>> mbuild: AGENT.rules of this project's dependencies (generated)\n# read a dependency's file before using it\n# strutil v1.1.0: .mbuild/deps/strutil/AGENT.rules\n# <<< mbuild\n";
+  var mine: string = "# app\n\nuse strutil for text.\n";
+  drv_check("strip: block at the end", agt_strip_block(mine + "\n" + block), mine);
+  drv_check("strip: block alone", agt_strip_block(block), "");
+  drv_check("strip: block in the middle", agt_strip_block("top\n" + block + "bottom\n"), "top\nbottom\n");
+  drv_check("strip: no block", agt_strip_block(mine), mine);
+  drv_check("strip: no trailing newline", agt_strip_block("top\n" + block + "bottom"), "top\nbottom");
+  if (g_drv_failed > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+fn drv_depstate(p: Project*, mods: StrList*) -> DepState* {
+  var ds: DepState* = depstate_empty(p->root + "/.mbuild/deps");
+  var i: int64 = 0;
+  while (i < mods->len) {
+    var parts: StrList* = s_split(sl_get(mods, i), 58);
+    var m: DepModule;
+    m.module = sl_get(parts, 0);
+    m.version = sl_get(parts, 1);
+    m.commit = s_empty();
+    m.dir = sl_get(parts, 2);
+    if (!s_starts(m.dir, "/")) {
+      m.dir = p->root + "/" + m.dir;
+    }
+    m.alias = s_empty();
+    m.is_path = slen(m.version) == 0;
+    m.man = (Manifest*)0;
+    m.replaced = s_empty();
+    m.submodules = sl_new();
+    m.checksum = s_empty();
+    m.registry = s_empty();
+    depstate_add(ds, m);
+    free(parts);
+    i = i + 1;
+  }
+  return ds;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  if (argc < 3) {
+    err_line("usage: init_driver DIR COMMAND [args]");
+    return 2;
+  }
+  var opts: Options* = options_new();
+  var dir_arg: string = s_from_c(argv[1]);
+  var command: string = s_from_c(argv[2]);
+  var r: IniRequest* = new IniRequest;
+  r->from = s_empty();
+  r->name = s_empty();
+  r->registry = s_empty();
+  r->opts = sl_new();
+  var pos: StrList* = sl_new();
+  var i: int32 = 3;
+  while (i < argc) {
+    var a: string = s_from_c(argv[i]);
+    if (s_eq(a, "--from") && i + 1 < argc) {
+      i = i + 1;
+      r->from = s_from_c(argv[i]);
+    } else if (s_eq(a, "--opt") && i + 1 < argc) {
+      i = i + 1;
+      sl_push(r->opts, s_from_c(argv[i]));
+    } else if (s_eq(a, "--registry") && i + 1 < argc) {
+      i = i + 1;
+      r->registry = s_from_c(argv[i]);
+    } else if (s_eq(a, "--yes")) {
+      r->yes = true;
+    } else if (s_eq(a, "--dry-run")) {
+      r->dry_run = true;
+    } else if (s_eq(a, "--force")) {
+      r->force = true;
+    } else if (s_eq(a, "-v")) {
+      opts->verbose = true;
+      g_verbose = true;
+    } else if (s_eq(a, "--all")) {
+      sl_push(opts->rest, a);
+    } else {
+      sl_push(pos, a);
+    }
+    i = i + 1;
+  }
+  if (s_eq(command, "selftest")) {
+    return drv_selftest();
+  }
+  var root: string = s_replace_byte(sys_realpath(dir_arg), 92, 47);
+  if (slen(root) == 0) {
+    err_line("no such directory: " + dir_arg);
+    return 2;
+  }
+  var p: Project* = new Project;
+  p->root = root;
+  p->opts = opts;
+  p->state_dir = root + "/.mbuild";
+  p->mbfile = s_empty();
+  var mf: FsRead = fs_read(root + "/manifest.toml");
+  if (mf.ok) {
+    p->man = man_parse(toml_parse(mf.data, root + "/manifest.toml"), root);
+    p->has_manifest = true;
+  } else {
+    p->man = man_empty(root, "app");
+  }
+  ini_mbuild_version = "0.2.0";
+  if (s_eq(command, "new") || s_eq(command, "init")) {
+    r->existing = s_eq(command, "init");
+    if (!r->existing && pos->len > 0) {
+      r->name = sl_get(pos, 0);
+    }
+    return ini_run(p, r);
+  }
+  if (s_eq(command, "check")) {
+    var e: string = ini_check_package(p, sl_get(pos, 0));
+    if (slen(e) > 0) {
+      say(e);
+      return 1;
+    }
+    say("ok");
+    return 0;
+  }
+  if (s_eq(command, "scaffold")) {
+    return ini_scaffold_package(root, sl_get(pos, 0));
+  }
+  if (s_eq(command, "api")) {
+    print(ini_api_text());
+    return 0;
+  }
+  if (s_eq(command, "strip")) {
+    var sr: FsRead = fs_read(sl_get(pos, 0));
+    print(agt_strip_block(sr.data));
+    return 0;
+  }
+  if (s_eq(command, "refresh")) {
+    var changed: bool = agt_refresh(p, drv_depstate(p, pos));
+    if (changed) {
+      say("changed=1");
+    } else {
+      say("changed=0");
+    }
+    return 0;
+  }
+  if (s_eq(command, "agents")) {
+    var mods: StrList* = sl_new();
+    var k: int64 = 0;
+    while (k < pos->len) {
+      var x: string = sl_get(pos, k);
+      if (s_find_byte(x, 58) >= 0) {
+        sl_push(mods, x);
+      } else {
+        sl_push(opts->rest, x);
+      }
+      k = k + 1;
+    }
+    return agt_cmd_agents(p, drv_depstate(p, mods));
+  }
+  err_line("unknown command " + command);
+  return 2;
+}

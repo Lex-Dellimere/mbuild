@@ -1,4 +1,226 @@
-// mbuild/init: stub, owned by group N (DESIGN.md 16.2).
+// mbuild/init: what init.rules can call (mbuild help new). The rules only
+// describe options and a plan; mbuild checks and applies the plan.
+//
+// Every value is a string. In paths, file text, command summaries and bodies
+// and the next note, @@name@@ is replaced by an option's value or by project,
+// package, package_version or mbuild_version; @@@@ is a literal @@.
 
+// The only C names the rules may reach: they write the plan file.
+extern fn mii_strlen(s: cstring) -> int64 = "strlen";
+extern fn mii_malloc(n: int64) -> uint8* = "malloc";
+extern fn mii_fopen(path: cstring, mode: cstring) -> cstring = "fopen";
+extern fn mii_fwrite(p: uint8*, size: int64, n: int64, fp: cstring) -> int64 = "fwrite";
+extern fn mii_fclose(fp: cstring) -> int32 = "fclose";
+
+var mii_argc: int32 = 0;
+var mii_argv: cstring* = (cstring*)0;
+var mii_phase: string = "";
+var mii_out: string = "";
+
+// Declares an option (in fn options()): given with --opt NAME=VALUE or at a prompt.
 export fn mi_option(name: string, dflt: string, help: string) {
+  if (!mii_in("options", "mi_option")) {
+    return;
+  }
+  mii_rec3("option", name, dflt, help);
+}
+
+// Restricts an option to a comma-separated list of values (in fn options()).
+export fn mi_choice(name: string, csv: string) {
+  if (!mii_in("options", "mi_choice")) {
+    return;
+  }
+  mii_rec2("choice", name, csv);
+}
+
+// The value of an option (in fn plan()).
+export fn mi_opt(name: string) -> string {
+  if (!mii_in("plan", "mi_opt")) {
+    return "";
+  }
+  var i: int32 = 3;
+  while (i < mii_argc) {
+    var kv: string = mii_str(mii_argv[i]);
+    var n: int64 = (int64)name.length;
+    if ((int64)kv.length > n && kv.chars[n] == 61 && mii_eq(mii_sub(kv, 0, n), name)) {
+      return mii_sub(kv, n + 1, (int64)kv.length);
+    }
+    i = i + 1;
+  }
+  mii_rec1("error", "mi_opt(\"" + name + "\"): no such option (declare it with mi_option in fn options())");
+  return "";
+}
+
+// The name of the project being created or extended (in fn plan()).
+export fn mi_project() -> string {
+  return mi_opt("project");
+}
+
+// Creates an empty directory.
+export fn mi_dir(path: string) {
+  if (!mii_in("plan", "mi_dir")) {
+    return;
+  }
+  mii_rec1("dir", path);
+}
+
+// Writes dst from a template file shipped in the package, variables filled in.
+export fn mi_template(src: string, dst: string) {
+  if (!mii_in("plan", "mi_template")) {
+    return;
+  }
+  mii_rec2("template", src, dst);
+}
+
+// Writes dst with the given text, variables filled in.
+export fn mi_file(dst: string, text: string) {
+  if (!mii_in("plan", "mi_file")) {
+    return;
+  }
+  mii_rec2("file", dst, text);
+}
+
+// Adds a dependency to the project (the package itself is always added).
+export fn mi_dep(name: string, version: string) {
+  if (!mii_in("plan", "mi_dep")) {
+    return;
+  }
+  mii_rec2("dep", name, version);
+}
+
+// Adds mb_profile(profile); mb_set(key, value); to fn project().
+export fn mi_set(profile: string, key: string, value: string) {
+  if (!mii_in("plan", "mi_set")) {
+    return;
+  }
+  mii_rec3("set", profile, key, value);
+}
+
+// Appends a raw line to fn project().
+export fn mi_line(text: string) {
+  if (!mii_in("plan", "mi_line")) {
+    return;
+  }
+  mii_rec1("line", text);
+}
+
+// Adds a command to mbuild.mettle: fn cmd_NAME(a: MbArgs*) -> int32 around body.
+export fn mi_command(name: string, summary: string, body: string) {
+  if (!mii_in("plan", "mi_command")) {
+    return;
+  }
+  mii_rec3("command", name, summary, body);
+}
+
+// Printed as "next:" after the plan is applied.
+export fn mi_next(text: string) {
+  if (!mii_in("plan", "mi_next")) {
+    return;
+  }
+  mii_rec1("next", text);
+}
+
+// Driver plumbing: argv is MODE OUT [NAME=VALUE...].
+export fn mii_start(argc: int32, argv: cstring*) {
+  mii_argc = argc;
+  mii_argv = argv;
+  if (argc > 1) {
+    mii_phase = mii_str(argv[1]);
+  }
+}
+
+export fn mii_mode(m: string) -> bool {
+  return mii_eq(mii_phase, m);
+}
+
+// Writes the records; 0 on success.
+export fn mii_finish() -> int32 {
+  if (mii_argc < 3) {
+    return 2;
+  }
+  var fp: cstring = mii_fopen(mii_argv[2], mii_cstr("wb"));
+  if (fp == 0) {
+    return 2;
+  }
+  var n: int64 = (int64)mii_out.length;
+  var w: int64 = 0;
+  if (n > 0) {
+    w = mii_fwrite(mii_out.chars, 1, n, fp);
+  }
+  mii_fclose(fp);
+  if (w != n) {
+    return 2;
+  }
+  return 0;
+}
+
+fn mii_in(phase: string, what: string) -> bool {
+  if (mii_eq(mii_phase, phase)) {
+    return true;
+  }
+  mii_rec1("error", what + " belongs in fn " + phase + "()");
+  return false;
+}
+
+fn mii_field(s: string) {
+  var n: int64 = (int64)s.length;
+  mii_out = mii_out + "{n}\n" + s + "\n";
+}
+
+fn mii_rec1(kind: string, a: string) {
+  mii_out = mii_out + kind + " 1\n";
+  mii_field(a);
+}
+
+fn mii_rec2(kind: string, a: string, b: string) {
+  mii_out = mii_out + kind + " 2\n";
+  mii_field(a);
+  mii_field(b);
+}
+
+fn mii_rec3(kind: string, a: string, b: string, c: string) {
+  mii_out = mii_out + kind + " 3\n";
+  mii_field(a);
+  mii_field(b);
+  mii_field(c);
+}
+
+fn mii_str(c: cstring) -> string {
+  var s: string;
+  s.chars = (uint8*)c;
+  s.length = (uint64)mii_strlen(c);
+  return s;
+}
+
+fn mii_cstr(s: string) -> cstring {
+  var n: int64 = (int64)s.length;
+  var p: uint8* = mii_malloc(n + 1);
+  var i: int64 = 0;
+  while (i < n) {
+    p[i] = s.chars[i];
+    i = i + 1;
+  }
+  p[n] = 0;
+  return (cstring)p;
+}
+
+fn mii_sub(s: string, a: int64, b: int64) -> string {
+  var r: string;
+  r.chars = &s.chars[a];
+  r.length = (uint64)(b - a);
+  return r;
+}
+
+fn mii_eq(a: string, b: string) -> bool {
+  if (a.length != b.length) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < (int64)a.length) {
+    if (a.chars[i] != b.chars[i]) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
 }

@@ -1,16 +1,276 @@
-// agents: stub, owned by group N (DESIGN.md 16.3).
+// agents: the managed block in a project's AGENT.rules that points at the
+// AGENT.rules of its dependencies (DESIGN.md 16.3).
 
+import "std/mem";
 import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../model/toml";
+import "../model/manifest";
 import "../model/project";
 
+var agx_begin: string = "# >>> mbuild: AGENT.rules of this project's dependencies (generated)";
+var agx_end: string = "# <<< mbuild";
+
+// target relative to base, with ".." where needed; target when they share no root.
+fn agx_rel(base: string, target: string) -> string {
+  var b: StrList* = s_split(p_clean(base), 47);
+  defer free(b);
+  var t: StrList* = s_split(p_clean(target), 47);
+  defer free(t);
+  var i: int64 = 0;
+  while (i < b->len && i < t->len && s_eq(sl_get(b, i), sl_get(t, i))) {
+    i = i + 1;
+  }
+  if (i == 0) {
+    return target;
+  }
+  var parts: StrList* = sl_new();
+  defer free(parts);
+  var k: int64 = i;
+  while (k < b->len) {
+    sl_push(parts, "..");
+    k = k + 1;
+  }
+  k = i;
+  while (k < t->len) {
+    sl_push(parts, sl_get(t, k));
+    k = k + 1;
+  }
+  return sl_join(parts, "/");
+}
+
+fn agx_enabled(p: Project*) -> bool {
+  if (p->man == (Manifest*)0 || p->man->doc == (Toml*)0) {
+    return true;
+  }
+  return toml_bool(p->man->doc, "build", "agents", true);
+}
+
+fn agx_direct(p: Project*, m: DepModule*) -> bool {
+  return p->man != (Manifest*)0 && man_dep_find(p->man, m->module) != (DepSpec*)0;
+}
+
+fn agx_label(m: DepModule*) -> string {
+  if (m->is_path || slen(m->version) == 0) {
+    return m->module + " (path)";
+  }
+  return m->module + " " + m->version;
+}
+
+fn agx_sorted(ds: DepState*) -> StrList* {
+  var names: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < ds->n) {
+    sl_push(names, ds->mods[i].module + "\n" + s_int(i));
+    i = i + 1;
+  }
+  sl_sort(names);
+  return names;
+}
+
+fn agx_index(entry: string) -> int64 {
+  return s_to_int(s_from(entry, s_find_byte(entry, 10) + 1));
+}
+
+// The block for the direct dependencies that ship AGENT.rules, "" when none.
+fn agx_block(p: Project*, ds: DepState*) -> string {
+  var b: Buf* = buf_new();
+  var any: bool = false;
+  var order: StrList* = agx_sorted(ds);
+  defer free(order);
+  var i: int64 = 0;
+  while (i < order->len) {
+    var m: DepModule* = &ds->mods[agx_index(sl_get(order, i))];
+    i = i + 1;
+    var f: string = m->dir + "/AGENT.rules";
+    if (!agx_direct(p, m) || !fs_is_file(f)) {
+      continue;
+    }
+    if (!any) {
+      buf_line(b, agx_begin);
+      buf_line(b, "# read a dependency's file before using it");
+      any = true;
+    }
+    buf_line(b, "# " + agx_label(m) + ": " + agx_rel(p->root, f));
+  }
+  if (!any) {
+    return s_empty();
+  }
+  buf_line(b, agx_end);
+  return buf_take(b);
+}
+
+// [first, end) line range of the block in lines; first = -1 when absent.
+fn agx_find(lines: StrList*, first: int64*, end: int64*) {
+  *first = -1;
+  *end = -1;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = s_trim(sl_get(lines, i));
+    if (*first < 0 && s_starts(l, "# >>> mbuild")) {
+      *first = i;
+    } else if (*first >= 0 && s_eq(l, agx_end)) {
+      *end = i + 1;
+      return;
+    }
+    i = i + 1;
+  }
+  if (*first >= 0) {
+    *end = lines->len;
+  }
+}
+
+// text with block in place of its managed block; appended when it has none.
+fn agx_with_block(text: string, block: string) -> string {
+  var stripped: string = agt_strip_block(text);
+  if (slen(block) == 0) {
+    return stripped;
+  }
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var first: int64 = -1;
+  var end: int64 = -1;
+  agx_find(lines, &first, &end);
+  if (first < 0) {
+    if (slen(stripped) == 0) {
+      return block;
+    }
+    if (s_ends(stripped, "\n")) {
+      return stripped + "\n" + block;
+    }
+    return stripped + "\n\n" + block;
+  }
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < first) {
+    buf_line(b, sl_get(lines, i));
+    i = i + 1;
+  }
+  buf_add(b, block);
+  i = end;
+  while (i < lines->len) {
+    buf_line(b, sl_get(lines, i));
+    i = i + 1;
+  }
+  var out: string = buf_take(b);
+  if (!s_ends(text, "\n") && end < lines->len && s_ends(out, "\n")) {
+    out = s_sub(out, 0, slen(out) - 1);
+  }
+  return out;
+}
+
+// Rewrites the block after a resolution; true when AGENT.rules changed.
 export fn agt_refresh(p: Project*, ds: DepState*) -> bool {
-  return false;
+  if (!agx_enabled(p)) {
+    return false;
+  }
+  var path: string = p->root + "/AGENT.rules";
+  var block: string = agx_block(p, ds);
+  var cur: FsRead = fs_read(path);
+  if (!cur.ok) {
+    if (slen(block) == 0) {
+      return false;
+    }
+    cur.data = s_empty();
+  }
+  var text: string = agx_with_block(cur.data, block);
+  if (cur.ok && s_eq(text, cur.data)) {
+    return false;
+  }
+  if (!fs_write_if_changed(path, text)) {
+    return false;
+  }
+  status("Updated", "AGENT.rules");
+  return true;
 }
 
+// mbuild agents [NAME] [--all]: refresh the block, then print the files.
 export fn agt_cmd_agents(p: Project*, ds: DepState*) -> int32 {
-  return 1;
+  var all: bool = false;
+  var name: string = s_empty();
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_eq(a, "--all")) {
+      all = true;
+    } else if (!s_starts(a, "-")) {
+      name = a;
+    }
+    i = i + 1;
+  }
+  agt_refresh(p, ds);
+  var shown: int64 = 0;
+  var order: StrList* = agx_sorted(ds);
+  defer free(order);
+  i = 0;
+  while (i < order->len) {
+    var m: DepModule* = &ds->mods[agx_index(sl_get(order, i))];
+    i = i + 1;
+    if (slen(name) > 0 && !s_eq(m->module, name)) {
+      continue;
+    }
+    if (slen(name) == 0 && !all && !agx_direct(p, m)) {
+      continue;
+    }
+    var f: string = m->dir + "/AGENT.rules";
+    var r: FsRead = fs_read(f);
+    if (!r.ok) {
+      if (slen(name) > 0) {
+        note(agx_label(m) + " has no AGENT.rules");
+        return 0;
+      }
+      continue;
+    }
+    if (shown > 0) {
+      say("");
+    }
+    say(bold("== " + agx_label(m)) + " (" + agx_rel(p->root, f) + ")");
+    var text: string = agt_strip_block(r.data);
+    print(text);
+    if (slen(text) > 0 && !s_ends(text, "\n")) {
+      say("");
+    }
+    shown = shown + 1;
+  }
+  if (slen(name) > 0 && shown == 0) {
+    error_msg("no dependency " + name);
+    return 1;
+  }
+  if (shown == 0) {
+    note("no dependency ships AGENT.rules");
+  }
+  return 0;
 }
 
+// text without the managed block (and the blank line that set it apart).
 export fn agt_strip_block(text: string) -> string {
-  return text;
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var first: int64 = -1;
+  var end: int64 = -1;
+  agx_find(lines, &first, &end);
+  if (first < 0) {
+    return text;
+  }
+  var keep_from: int64 = first;
+  if (end >= lines->len && first > 0 && slen(s_trim(sl_get(lines, first - 1))) == 0) {
+    keep_from = first - 1;
+  }
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < keep_from) {
+    buf_line(b, sl_get(lines, i));
+    i = i + 1;
+  }
+  i = end;
+  while (i < lines->len) {
+    buf_line(b, sl_get(lines, i));
+    i = i + 1;
+  }
+  var out: string = buf_take(b);
+  if (!s_ends(text, "\n") && end < lines->len && s_ends(out, "\n")) {
+    out = s_sub(out, 0, slen(out) - 1);
+  }
+  return out;
 }
