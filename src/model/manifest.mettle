@@ -30,13 +30,9 @@ export struct BinSpec {
 
 export struct DepSpec {
   key: string;        // package name
-  module: string;     // unused since round 3
   version: string;    // "" for a path dependency; "latest" when unstated
   path: string;
-  url: string;        // unused since round 3
   line: int64;
-  subs_mode: string;  // unused since round 3
-  subs: StrList*;     // unused since round 3
   registry: string;   // "" = search order
 }
 
@@ -61,7 +57,6 @@ export struct RegSpec {
 export struct ReplaceSpec {
   module: string;
   path: string;
-  url: string;
   version: string;
   line: int64;
   local: bool;        // from mbuild.local.mettle
@@ -73,8 +68,6 @@ export struct Manifest {
   doc: Toml*;
   name: string;
   version: string;
-  module: string;
-  toolchain: string;
   targets: StrList*;
   flags: StrList*;
   prelude: bool;
@@ -85,8 +78,6 @@ export struct Manifest {
   warnings: StrList*;
   error: string;
   mettle_min: string;     // [package] mettle, canonical ("v0.17.0"), "" when absent
-  subs_mode: string;      // [package] submodules: "all" (default), "none" or "list"
-  subs: StrList*;
   replaces: ReplaceSpec*; // effective [replace] entries (local ones first after man_merge_local)
   nreplaces: int64;
   tools: StrList*;        // [tools] as "key=value"
@@ -336,43 +327,6 @@ export fn man_is_remote_module(s: string) -> bool {
   return mnx_is_host(first);
 }
 
-// "github.com/a/b/x/y" -> "github.com/a/b"; "" for a non-remote path.
-export fn man_module_of_import(path: string) -> string {
-  if (!man_is_remote_module(path)) {
-    return s_empty();
-  }
-  var parts: StrList* = s_split(path, 47);
-  var result: string = s_empty();
-  if (parts->len >= 3) {
-    result = sl_get(parts, 0) + "/" + sl_get(parts, 1) + "/" + sl_get(parts, 2);
-  }
-  free(parts);
-  return result;
-}
-
-// The module an import belongs to, given the module paths already known
-// (declared in manifests or selected in the lock): the longest one that is
-// the import itself or a prefix of it at a '/' boundary. That covers
-// gitlab subgroups and two-part vanity paths; with no match the first three
-// components are taken, as man_module_of_import does.
-export fn man_module_of_import_in(known: StrList*, path: string) -> string {
-  var best: string = s_empty();
-  var i: int64 = 0;
-  while (i < known->len) {
-    var k: string = sl_get(known, i);
-    if (slen(k) > slen(best) && man_is_remote_module(k)) {
-      if (s_eq(path, k) || s_starts(path, k + "/")) {
-        best = k;
-      }
-    }
-    i = i + 1;
-  }
-  if (slen(best) > 0) {
-    return best;
-  }
-  return man_module_of_import(path);
-}
-
 fn mnx_push_bin(m: Manifest*, b: BinSpec) {
   if (m->nbins % 8 == 0) {
     m->bins = (BinSpec*)realloc(m->bins, (m->nbins + 8) * sizeof(BinSpec));
@@ -460,13 +414,9 @@ fn mnx_dep_from_fields(m: Manifest*, d: DepSpec*, v: TomlValue*) {
 fn mnx_dep_new(key: string, line: int64) -> DepSpec {
   var d: DepSpec;
   d.key = key;
-  d.module = s_empty();
   d.version = s_empty();
   d.path = s_empty();
-  d.url = s_empty();
   d.line = line;
-  d.subs_mode = s_empty();
-  d.subs = sl_new();
   d.registry = s_empty();
   return d;
 }
@@ -474,7 +424,7 @@ fn mnx_dep_new(key: string, line: int64) -> DepSpec {
 // What is wrong with a dependency or [replace] key; "" when it is a package name.
 fn mnx_key_problem(key: string) -> string {
   if (man_is_remote_module(key) || s_find_byte(key, 47) >= 0) {
-    return "'" + key + "' is a module path: dependencies are package names now (e.g. " + p_base(key) + " = \"v1.0.0\"; mbuild migrate converts an mbuild.toml)";
+    return "'" + key + "' is a module path: dependencies are package names now (e.g. " + p_base(key) + " = \"v1.0.0\")";
   }
   if (!man_is_package_name(key)) {
     return "'" + key + "' is not a package name (package names are a lower-case letter, then lower-case letters, digits and '_', at most 64)";
@@ -588,7 +538,7 @@ fn mnx_known_keys(section: string) -> StrList* {
   if (s_starts(section, "component.")) { return mnx_list("dir mode impls linux windows"); }
   if (s_starts(section, "registry.")) { return mnx_list("url"); }
   if (s_eq(section, "rules")) { return mnx_list("files"); }
-  if (s_eq(section, "tools")) { return mnx_list("git cc cc-windows mettle-linux mettle-windows pkg-config"); }
+  if (s_eq(section, "tools")) { return mnx_list("cc cc-windows mettle-linux mettle-windows pkg-config"); }
   if (s_eq(section, "c") || s_eq(section, "c.linux") || s_eq(section, "c.windows")) {
     return mnx_list("sources include cflags libs");
   }
@@ -1236,7 +1186,7 @@ fn mnx_package_extra(m: Manifest*) {
 fn mnx_removed(m: Manifest*) {
   var mv: TomlValue* = toml_get(m->doc, "package", "module");
   if (mv != (TomlValue*)0) {
-    mnx_error(m, mv->line, "[package] module was removed: a package is known by its [package] name and published to a registry (mbuild migrate converts an mbuild.toml)");
+    mnx_error(m, mv->line, "[package] module was removed: a package is known by its [package] name and published to a registry");
     return;
   }
   var sv: TomlValue* = toml_get(m->doc, "package", "submodules");
@@ -1271,7 +1221,6 @@ fn mnx_replace_one(m: Manifest*, key: string, v: TomlValue*, line: int64, is_loc
   var r: ReplaceSpec;
   r.module = key;
   r.path = s_empty();
-  r.url = s_empty();
   r.version = s_empty();
   r.line = line;
   r.local = is_local;
@@ -1640,8 +1589,6 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->doc = toml_parse("", m->file);
   m->name = name;
   m->version = s_empty();
-  m->module = s_empty();
-  m->toolchain = s_empty();
   m->targets = sl_new();
   m->flags = sl_new();
   m->prelude = false;
@@ -1652,8 +1599,6 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->warnings = sl_new();
   m->error = s_empty();
   m->mettle_min = s_empty();
-  m->subs_mode = "all";
-  m->subs = sl_new();
   m->replaces = (ReplaceSpec*)0;
   m->nreplaces = 0;
   m->tools = sl_new();
@@ -2153,18 +2098,11 @@ export fn man_has_c(m: Manifest*) -> bool {
   return false;
 }
 
-// The dependency with this key, else the one with this module; 0 when absent.
-export fn man_dep_find(m: Manifest*, key_or_module: string) -> DepSpec* {
+// The dependency with this key; 0 when absent.
+export fn man_dep_find(m: Manifest*, key: string) -> DepSpec* {
   var i: int64 = 0;
   while (i < m->ndeps) {
-    if (s_eq(m->deps[i].key, key_or_module)) {
-      return &m->deps[i];
-    }
-    i = i + 1;
-  }
-  i = 0;
-  while (i < m->ndeps) {
-    if (slen(m->deps[i].module) > 0 && s_eq(m->deps[i].module, key_or_module)) {
+    if (s_eq(m->deps[i].key, key)) {
       return &m->deps[i];
     }
     i = i + 1;

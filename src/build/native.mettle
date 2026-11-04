@@ -208,7 +208,7 @@ fn natx_find_dep(c: NatCtx*, d: DepSpec*) -> int64 {
     var mi: int64 = c->pkgs[i].mi;
     if (mi >= 0) {
       var dm: DepModule* = &c->ds->mods[mi];
-      if ((slen(d->module) > 0 && s_eq(dm->module, d->module)) || s_eq(dm->module, d->key) || (slen(dm->alias) > 0 && s_eq(dm->alias, d->key))) {
+      if (s_eq(dm->module, d->key)) {
         return i;
       }
     }
@@ -1739,9 +1739,6 @@ fn natx_import_target(c: NatCtx*, from: string, ip: string, files: StrList*) -> 
       var dm: DepModule* = &c->ds->mods[mi];
       if (s_starts(ip, dm->module + "/")) {
         sl_push(cands, c->pkgs[i].dir + "/" + s_from(ip, slen(dm->module) + 1));
-      }
-      if (slen(dm->alias) > 0 && s_starts(ip, dm->alias + "/")) {
-        sl_push(cands, c->pkgs[i].dir + "/" + s_from(ip, slen(dm->alias) + 1));
       }
     }
     i = i + 1;

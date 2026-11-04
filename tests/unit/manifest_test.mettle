@@ -203,7 +203,7 @@ fn test_replace_and_removed() {
   t_eq("deps: table form", man_dep_find(d, "tbl")->version, "v1");
   var dm: Manifest* = man_of(pkg("[dependencies]\n\"github.com/x/y\" = \"v1.0.0\"\n"));
   t_has("deps: module path key", dm->error, "package names");
-  t_eq("deps: module path message", dm->error, "/p/mbuild.toml:4: dependency 'github.com/x/y' is a module path: dependencies are package names now (e.g. y = \"v1.0.0\"; mbuild migrate converts an mbuild.toml)");
+  t_eq("deps: module path message", dm->error, "/p/mbuild.toml:4: dependency 'github.com/x/y' is a module path: dependencies are package names now (e.g. y = \"v1.0.0\")");
   var du: Manifest* = man_of(pkg("[dependencies]\nlib = {{ url = \"https://x/lib\", version = \"v1\" }\n"));
   t_has("deps: url removed", du->error, "dependency 'lib': url was removed");
   var dmo: Manifest* = man_of(pkg("[dependencies]\nlib = {{ module = \"github.com/a/lib\" }\n"));
@@ -232,8 +232,8 @@ fn test_replace_and_removed() {
   t_ok("package name: bad", !man_is_package_name("Str") && !man_is_package_name("1a") && !man_is_package_name("a-b") && !man_is_package_name(""));
   t_ok("package name: 64", man_is_package_name(s_repeat("a", 64)) && !man_is_package_name(s_repeat("a", 65)));
 
-  var tw: Manifest* = man_of(pkg("[tools]\ngit = \"/usr/bin/git\"\n[workspace]\nmembers = []\n"));
-  t_eq("tools: parsed", sl_join(tw->tools, ","), "git=/usr/bin/git");
+  var tw: Manifest* = man_of(pkg("[tools]\npkg-config = \"/usr/bin/pkg-config\"\n[workspace]\nmembers = []\n"));
+  t_eq("tools: parsed", sl_join(tw->tools, ","), "pkg-config=/usr/bin/pkg-config");
   t_eq("tools/workspace warnings", sl_join(tw->warnings, "|"), "/p/mbuild.toml:3: [tools] is machine-specific: move it to mbuild.local.mettle|/p/mbuild.toml:5: workspaces are not supported yet; use path dependencies (docs/dependencies.md)");
 
   var it: Toml* = toml_parse("a = {{ s = [\"x\", \"y\"], b = false }\n", "t.toml");
@@ -247,20 +247,20 @@ fn local_of(text: string) -> Manifest* {
 }
 
 fn test_local() {
-  var bad: Manifest* = local_of("[tools]\ngit = \"g\"\n[dependencies]\nb = \"v1\"\n");
+  var bad: Manifest* = local_of("[tools]\ncc = \"g\"\n[dependencies]\nb = \"v1\"\n");
   t_eq("local: [dependencies]", bad->error, "/p/mbuild.local.mettle:3: [dependencies] is not allowed here (mbuild.local.mettle holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
   var bb: Manifest* = local_of("[build]\nflags = [\"-x\"]\n");
   t_has("local: [build] flags", bb->error, "[build] flags is not allowed in mbuild.local.mettle");
 
-  var m: Manifest* = man_of(pkg("[build]\ntargets = [\"linux\", \"windows\"]\n[tools]\ncc = \"gcc\"\ngit = \"git\"\n[profile.release]\ncflags = [\"-O2\"]\n[replace]\njson = {{ version = \"v1.4.1\" }\nstrutil = {{ version = \"v1.0.0\" }\n[registry.corp]\nurl = \"https://pkgs.example.com/mettle\"\n"));
+  var m: Manifest* = man_of(pkg("[build]\ntargets = [\"linux\", \"windows\"]\n[tools]\ncc = \"gcc\"\npkg-config = \"pkgconf\"\n[profile.release]\ncflags = [\"-O2\"]\n[replace]\njson = {{ version = \"v1.4.1\" }\nstrutil = {{ version = \"v1.0.0\" }\n[registry.corp]\nurl = \"https://pkgs.example.com/mettle\"\n"));
   t_eq("local main: valid", m->error, "");
-  var l: Manifest* = local_of("[replace]\nstrutil = {{ path = \"../strutil\" }\n[tools]\ngit = \"/usr/bin/git\"\n[profile.release]\ncflags = [\"-march=native\"]\nsafe = true\n[profile.mine]\ninherits = \"release\"\n[build]\ntargets = [\"linux\"]\n[components]\nlogger = \"quiet\"\n[registry.corp]\nurl = \"/mirror/corp\"\n[registry.default]\nurl = \"/mirror/default\"\n");
+  var l: Manifest* = local_of("[replace]\nstrutil = {{ path = \"../strutil\" }\n[tools]\npkg-config = \"/usr/bin/pkg-config\"\n[profile.release]\ncflags = [\"-march=native\"]\nsafe = true\n[profile.mine]\ninherits = \"release\"\n[build]\ntargets = [\"linux\"]\n[components]\nlogger = \"quiet\"\n[registry.corp]\nurl = \"/mirror/corp\"\n[registry.default]\nurl = \"/mirror/default\"\n");
   t_eq("local: valid", l->error, "");
   t_eq("local: no warnings", sl_join(l->warnings, "|"), "");
   man_merge_local(m, l);
   t_eq("merge: error", m->error, "");
   t_eq("merge: targets", sl_join(m->targets, ","), "linux");
-  t_eq("merge: tools", sl_join(m->tools, ","), "cc=gcc,git=/usr/bin/git");
+  t_eq("merge: tools", sl_join(m->tools, ","), "cc=gcc,pkg-config=/usr/bin/pkg-config");
   t_eq("merge: cflags", sl_join(man_profile_cflags(m, "release"), ","), "-O2,-march=native");
   t_eq("merge: release flags", flags_of(m, "release"), "--release,--safe");
   t_eq("merge: local profile", flags_of(m, "mine"), "--release,--safe");

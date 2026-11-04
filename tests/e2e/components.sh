@@ -24,7 +24,7 @@ expect_line() {
 # put FILE: stdin into $W/FILE
 put() { mkdir -p "$(dirname "$W/$1")"; cat > "$W/$1"; }
 
-put static/mbuild.toml <<'EOF'
+put static/manifest.toml <<'EOF'
 [package]
 name = "app"
 [component.logger]
@@ -78,7 +78,7 @@ fn main() -> int32 {
 EOF
 
 for d in dyn dynbad; do
-put $d/mbuild.toml <<'EOF'
+put $d/manifest.toml <<'EOF'
 [package]
 name = "app"
 [component.renderer]
@@ -132,7 +132,7 @@ done
 sed -i 's/^export struct Fancy/struct Fancy/' "$W/dynbad/src/renderer/fancy.mettle"
 
 for d in swap swapbad; do
-put $d/mbuild.toml <<'EOF'
+put $d/manifest.toml <<'EOF'
 [package]
 name = "app"
 [component.policy]
@@ -183,7 +183,7 @@ EOF
 done
 cp "$W/swap/src/main.mettle" "$W/swapbad/src/main.mettle"
 
-put rules/mbuild.toml <<'EOF'
+put rules/manifest.toml <<'EOF'
 [package]
 name = "app"
 [rules]
@@ -217,7 +217,7 @@ fn main() -> int32 {
 }
 EOF
 
-put comps/mbuild.toml <<'EOF'
+put comps/manifest.toml <<'EOF'
 [package]
 name = "comps"
 [component.kv]
@@ -231,7 +231,7 @@ export fn kv_get(k: string) -> string {
 }
 EOF
 done
-put clash/mbuild.toml <<'EOF'
+put clash/manifest.toml <<'EOF'
 [package]
 name = "clash"
 [component.logger]
@@ -243,13 +243,13 @@ export fn log_line(s: string) -> int32 {
   return 0;
 }
 EOF
-put kv/mbuild.toml <<'EOF'
+put kv/manifest.toml <<'EOF'
 [package]
 name = "kv"
 EOF
 
 for d in chk chkbad; do
-put $d/mbuild.toml <<'EOF'
+put $d/manifest.toml <<'EOF'
 [package]
 name = "chk"
 [component.kv]

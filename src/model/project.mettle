@@ -14,7 +14,7 @@ export struct Options {
   verbose: bool;
   quiet: bool;
   offline: bool;      // never touch the network
-  locked: bool;       // fail rather than change mbuild.toml or mbuild.lock
+  locked: bool;       // fail rather than change mbuild.mettle or mbuild.lock
   force: bool;        // ignore every stamp
   release: bool;
   jobs: int64;
@@ -44,13 +44,10 @@ export struct Project {
 export struct DepModule {
   module: string;     // package name
   version: string;    // "v1.2.0", "" for a path package
-  commit: string;     // unused since round 3
   dir: string;        // absolute directory holding its files
-  alias: string;      // always ""
   is_path: bool;      // a local { path = ... } package
   man: Manifest*;     // its manifest, 0 when it has none
   replaced: string;   // "" | "path" | "version" ([replace], DESIGN.md 12.5)
-  submodules: StrList*;  // unused since round 3
   checksum: string;   // "sha256:<hex>", "" for a path package
   registry: string;   // registry name, "" for a path package
 }

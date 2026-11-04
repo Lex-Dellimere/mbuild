@@ -208,73 +208,16 @@ fn test_toml_errors() {
   }
 }
 
-fn test_toml_edit() {
-  var l: StrList* = sl_new();
-  defer free(l);
-  sl_push(l, "# my project");
-  sl_push(l, "[package]");
-  sl_push(l, "name = \"app\"   # the name");
-  sl_push(l, "");
-  sl_push(l, "[dependencies]");
-  sl_push(l, "\"github.com/a/b\" = \"v1.0.0\" # pinned");
-  sl_push(l, "  old = {{ path = \"../old\" }");
-  sl_push(l, "");
-  sl_push(l, "# trailing comment");
-  sl_push(l, "[link]");
-  sl_push(l, "linux.libs = [");
-  sl_push(l, "  \"X11\",  # keep?");
-  sl_push(l, "]");
-  sl_push(l, "[empty]");
-  var text: string = lines_of(l) + "\n";
-
-  var r1: string = toml_set_in_text(text, "dependencies", "github.com/a/b", toml_quote("v1.2.0"));
-  t_eq("edit: replace keeps comment", r1, s_replace(text, "\"v1.0.0\" # pinned", "\"v1.2.0\" # pinned"));
-
-  var r2: string = toml_set_in_text(text, "dependencies", "github.com/c/d", toml_quote("latest"));
-  t_eq("edit: insert after last key (indent kept)", r2,
-       s_replace(text, "  old = {{ path = \"../old\" }\n", "  old = {{ path = \"../old\" }\n  \"github.com/c/d\" = \"latest\"\n"));
-  t_eq("edit: remove inserted round-trips", toml_remove_in_text(r2, "dependencies", "github.com/c/d"), text);
-
-  var r3: string = toml_set_in_text(text, "empty", "k", "1");
-  t_eq("edit: insert into empty section", r3, text + "k = 1\n");
-
-  var r4: string = toml_set_in_text(text, "build", "prelude", "true");
-  t_eq("edit: append missing section", r4, text + "\n[build]\nprelude = true\n");
-  t_eq("edit: appended section parses", toml_str(toml_parse(r4, "r4"), "build", "prelude"), "true");
-
-  var r5: string = toml_set_in_text(text, "link.linux", "paths", "[\"lib\"]");
-  t_eq("edit: insert into dotted-key section", r5, s_replace(text, "]\n[empty]", "]\nlinux.paths = [\"lib\"]\n[empty]"));
-  t_eq("edit: dotted insert parses", sl_join(toml_list(toml_parse(r5, "r5"), "link.linux", "paths"), ","), "lib");
-
-  var r6: string = toml_remove_in_text(text, "link.linux", "libs");
-  t_eq("edit: remove multi-line array", r6, s_replace(text, "linux.libs = [\n  \"X11\",  # keep?\n]\n", ""));
-
-  var r7: string = toml_set_in_text(text, "link.linux", "libs", "[\"Xi\"]");
-  t_eq("edit: replace multi-line array", r7, s_replace(text, "[\n  \"X11\",  # keep?\n]", "[\"Xi\"]"));
-
-  var r8: string = toml_remove_in_text(text, "dependencies", "old");
-  t_eq("edit: remove indented inline", r8, s_replace(text, "  old = {{ path = \"../old\" }\n", ""));
-  t_eq("edit: remove absent", toml_remove_in_text(text, "dependencies", "nope"), text);
-  t_eq("edit: unparsable text unchanged", toml_set_in_text("[[x]]\n", "a", "b", "1"), "[[x]]\n");
-
-  var r9: string = toml_set_in_text(text, "", "top", "1");
-  t_eq("edit: top-level key goes before the first table", r9, s_replace(text, "# my project\n[package]", "# my project\ntop = 1\n[package]"));
-
-  t_eq("edit: no trailing newline", toml_set_in_text("[a]\nx = 1", "a", "y", "2"), "[a]\nx = 1\ny = 2\n");
-  t_eq("edit: header at EOF", toml_set_in_text("[a]", "a", "y", "2"), "[a]\ny = 2\n");
-  t_eq("edit: empty text", toml_set_in_text("", "dependencies", "x/y", "\"v1\""), "[dependencies]\n\"x/y\" = \"v1\"\n");
-  t_eq("edit: CRLF kept", toml_set_in_text("[a]\r\nx = 1\r\n", "a", "y", "2"), "[a]\r\nx = 1\r\ny = 2\r\n");
-  t_eq("edit: quoted section literal", toml_set_in_text("", "bin.my app", "main", "\"m\""), "[bin.\"my app\"]\nmain = \"m\"\n");
-
-  t_eq("quote: escapes", toml_quote("a\"b\\c\nd"), "\"a\\\"b\\\\c\\nd\"");
+fn test_toml_literals() {
   t_eq("key literal: bare", toml_key_literal("json-2_x"), "json-2_x");
   t_eq("key literal: quoted", toml_key_literal("github.com/x/y"), "\"github.com/x/y\"");
+  t_eq("section literal", toml_section_literal("bin.my app"), "bin.\"my app\"");
 }
 
 fn main() -> int32 {
   test_toml_parse();
   test_toml_errors();
-  test_toml_edit();
+  test_toml_literals();
   say("");
   say("toml_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
   flush_out();

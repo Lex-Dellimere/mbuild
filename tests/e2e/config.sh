@@ -254,10 +254,6 @@ fn local() {
   out=$("$D" load 2>&1)
   expect_has "$mode: local setting error at its line" "$out" 'error: mbuild.local.mettle:5: optimize = "fast" is not one of'
   rm -f mbuild.local.mettle
-  printf '[tools]\ncc = "x"\n' > mbuild.local.toml
-  out=$("$D" load 2>&1)
-  expect_has "$mode: mbuild.local.toml refused" "$out" "mbuild.local.toml is no longer read"
-  rm -f mbuild.local.toml
 
   echo "== $mode: cfg_build_driver"
   out=$("$D" -v build-driver "$P/bd" 2>&1)

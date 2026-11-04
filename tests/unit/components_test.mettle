@@ -73,7 +73,7 @@ fn drv_project(name: string) -> Project* {
   p->has_manifest = true;
   p->opts = options_new();
   p->opts->mettle = env_get("METTLE");
-  p->man = drv_manifest(root + "/mbuild.toml", root);
+  p->man = drv_manifest(root + "/manifest.toml", root);
   drv_local(p->man, drv_read(root + "/mbuild.local.mettle"));
   return p;
 }
@@ -93,13 +93,10 @@ fn drv_deps(p: Project*, names: StrList*) -> DepState* {
     var dm: DepModule;
     dm.module = sl_get(names, i);
     dm.version = "v1.0.0";
-    dm.commit = s_empty();
     dm.dir = dir;
-    dm.alias = s_empty();
     dm.is_path = true;
-    dm.man = drv_manifest(dir + "/mbuild.toml", dir);
+    dm.man = drv_manifest(dir + "/manifest.toml", dir);
     dm.replaced = s_empty();
-    dm.submodules = sl_new();
     dm.checksum = s_empty();
     dm.registry = s_empty();
     depstate_add(ds, dm);

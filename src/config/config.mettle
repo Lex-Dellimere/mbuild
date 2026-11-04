@@ -387,13 +387,10 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
   return m;
 }
 
-// A directory that still holds only the files mbuild no longer reads.
+// A directory that still holds only an mbuild.toml, which mbuild no longer reads.
 fn cfx_refuse_legacy(p: Project*, dir: string) {
   if (fs_is_file(dir + "/mbuild.toml") && !fs_is_file(dir + "/mbuild.mettle")) {
     fail(cfx_show(p, dir + "/mbuild.toml") + " is no longer read; write mbuild.mettle (mbuild init)");
-  }
-  if (fs_is_file(dir + "/mbuild.local.toml")) {
-    fail(cfx_show(p, dir + "/mbuild.local.toml") + " is no longer read; write mbuild.local.mettle (fn local() with the same mb_ calls)");
   }
 }
 

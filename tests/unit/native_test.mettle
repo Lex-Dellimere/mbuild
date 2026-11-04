@@ -1,14 +1,14 @@
-// native_driver: runs the native module against a project on disk.
+// native_test: the native module against a project on disk, for tests/e2e/native.sh.
 //
-//   native_driver <app-dir> <linux|windows> prepare
-//   native_driver <app-dir> <linux|windows> doctor
-//   native_driver <app-dir> <linux|windows> explain LOGFILE
+//   native_test APP linux|windows prepare        "arg X", "env X", "copy X", "fp X" lines
+//   native_test APP linux|windows doctor
+//   native_test APP linux|windows explain LOGFILE
+//   native_test - linux syms FILE | soname FILE   one library
 //
-// The DepState is built by hand from APP/.mbuild/deps/<host>/<owner>/<repo>
-// (three levels, each with or without an mbuild.toml). The compiler's
-// runtime directory comes from MB_RUNTIME_DIR, the profile from MB_PROFILE
-// (default debug). prepare prints one line per result: "arg X", "env X",
-// "copy X", "fp X". `syms FILE` and `soname FILE` read one library.
+// APP/manifest.toml is the root's manifest (the schema mbuild.mettle emits); the
+// DepState is APP/.mbuild/deps/NAME, each with its frozen manifest.toml or none
+// (a link stands for a replacement). MB_RUNTIME_DIR: the compiler's runtime
+// directory; MB_PROFILE: the profile (default debug).
 
 import "std/io";
 import "std/mem";
@@ -24,7 +24,7 @@ import "../../src/core/sys_linux" if linux;
 import "../../src/core/sys_windows" if windows;
 
 fn drv_manifest(dir: string, fallback: string) -> Manifest* {
-  var file: string = dir + "/mbuild.toml";
+  var file: string = dir + "/manifest.toml";
   var rd: FsRead = fs_read(file);
   if (!rd.ok) {
     return man_empty(dir, fallback);
@@ -62,51 +62,36 @@ fn drv_free(l: StrList*) {
 fn drv_deps(root: string) -> DepState* {
   var base_dir: string = root + "/.mbuild/deps";
   var ds: DepState* = depstate_empty(base_dir);
-  var hosts: StrList* = drv_subdirs(base_dir);
-  var a: int64 = 0;
-  while (a < hosts->len) {
-    var owners: StrList* = drv_subdirs(base_dir + "/" + sl_get(hosts, a));
-    var b: int64 = 0;
-    while (b < owners->len) {
-      var repos: StrList* = drv_subdirs(base_dir + "/" + sl_get(hosts, a) + "/" + sl_get(owners, b));
-      var r: int64 = 0;
-      while (r < repos->len) {
-        var module: string = sl_get(hosts, a) + "/" + sl_get(owners, b) + "/" + sl_get(repos, r);
-        var dm: DepModule;
-        dm.module = module;
-        dm.version = "";
-        dm.commit = "";
-        dm.dir = base_dir + "/" + module;
-        dm.alias = "";
-        dm.is_path = false;
-        dm.man = (Manifest*)0;
-        dm.replaced = "";
-        dm.submodules = (StrList*)0;
-        // A link stands for a [replace] path (or the project itself); dir
-        // stays the link path so native must resolve it.
-        if (sys_is_link(dm.dir)) {
-          dm.replaced = "path";
-        }
-        if (fs_is_file(dm.dir + "/mbuild.toml")) {
-          dm.man = drv_manifest(dm.dir, sl_get(repos, r));
-        }
-        depstate_add(ds, dm);
-        r = r + 1;
-      }
-      drv_free(repos);
-      b = b + 1;
+  var names: StrList* = drv_subdirs(base_dir);
+  var i: int64 = 0;
+  while (i < names->len) {
+    var dm: DepModule;
+    dm.module = sl_get(names, i);
+    dm.version = "v1.0.0";
+    dm.dir = base_dir + "/" + dm.module;
+    dm.is_path = false;
+    dm.man = (Manifest*)0;
+    dm.replaced = "";
+    dm.checksum = "";
+    dm.registry = "fixtures";
+    // dir stays the link path, so native must resolve it.
+    if (sys_is_link(dm.dir)) {
+      dm.replaced = "path";
     }
-    drv_free(owners);
-    a = a + 1;
+    if (fs_is_file(dm.dir + "/manifest.toml")) {
+      dm.man = drv_manifest(dm.dir, dm.module);
+    }
+    depstate_add(ds, dm);
+    i = i + 1;
   }
-  drv_free(hosts);
+  drv_free(names);
   return ds;
 }
 
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
   if (argc < 4) {
-    err_line("usage: native_driver <app-dir> <linux|windows> <prepare|doctor|explain LOGFILE|syms FILE|soname FILE>");
+    err_line("usage: native_test APP linux|windows prepare|doctor|explain LOGFILE|syms FILE|soname FILE");
     return 2;
   }
   var mode: string = s_from_c(argv[3]);

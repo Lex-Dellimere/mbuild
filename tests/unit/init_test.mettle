@@ -59,16 +59,13 @@ fn drv_depstate(p: Project*, mods: StrList*) -> DepState* {
     var m: DepModule;
     m.module = sl_get(parts, 0);
     m.version = sl_get(parts, 1);
-    m.commit = s_empty();
     m.dir = sl_get(parts, 2);
     if (!s_starts(m.dir, "/")) {
       m.dir = p->root + "/" + m.dir;
     }
-    m.alias = s_empty();
     m.is_path = slen(m.version) == 0;
     m.man = (Manifest*)0;
     m.replaced = s_empty();
-    m.submodules = sl_new();
     m.checksum = s_empty();
     m.registry = s_empty();
     depstate_add(ds, m);
