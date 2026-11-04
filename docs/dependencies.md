@@ -346,10 +346,11 @@ published.
 ## Yanked versions
 
 A yanked version is never picked for a new requirement. One that's already
-in your lock still builds, with a warning:
+in your lock still builds, with a warning that says how to move off it
+(`mbuild update yanky moves off it` when a later version exists):
 
 ```text
-warning: yanky v1.0.1 is yanked in registry default; mbuild update yanky moves off it
+warning: yanky v1.0.1 is yanked in registry default; no later version of line v1 exists; `mbuild get yanky@v1.0.0` moves back to v1.0.0
 ```
 
 ## Publishing

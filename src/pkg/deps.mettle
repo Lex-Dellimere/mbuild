@@ -1292,7 +1292,15 @@ fn dx_take_locked(cx: DxCx*, m: DxMod*, r: DxReq*, li: int64) {
   }
   dx_check_sha(m->module, lv, sl_get(cx->lock->shas, li), ix, rv);
   if (rv->yanked && dx_once("yanked " + m->module + " " + lv)) {
-    warn(m->module + " " + lv + " is yanked in registry " + ix->registry + "; mbuild update " + m->module + " moves off it");
+    var off: string = "mbuild update " + m->module + " moves off it";
+    if (slen(dx_after_yanked(ix, lv)) == 0) {
+      off = "no later version of line " + sv_line(lv) + " exists";
+      var back: string = dx_before_yanked(ix, lv);
+      if (slen(back) > 0) {
+        off = off + "; `mbuild get " + m->module + "@" + back + "` moves back to " + back;
+      }
+    }
+    warn(m->module + " " + lv + " is yanked in registry " + ix->registry + "; " + off);
   }
   r->label = lv;
 }
@@ -1331,6 +1339,22 @@ fn dx_after_yanked(ix: RegIndex*, yanked: string) -> string {
   while (i < vs->len && slen(found) == 0) {
     var v: string = sl_get(vs, i);
     if (sv_cmp(v, yanked) > 0 && s_eq(sv_line(v), sv_line(yanked))) {
+      found = v;
+    }
+    i = i + 1;
+  }
+  free(vs);
+  return found;
+}
+
+// The newest version before a yanked one in its line, "" when none.
+fn dx_before_yanked(ix: RegIndex*, yanked: string) -> string {
+  var vs: StrList* = dx_versions(ix, false);
+  var found: string = "";
+  var i: int64 = 0;
+  while (i < vs->len) {
+    var v: string = sl_get(vs, i);
+    if (sv_cmp(v, yanked) < 0 && s_eq(sv_line(v), sv_line(yanked))) {
       found = v;
     }
     i = i + 1;

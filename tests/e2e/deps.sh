@@ -229,7 +229,7 @@ check "latest skips yanked" [ "$(lockv "$P" yanky)" = "v1.0.0" ]
 sed -i "s/^yanky .*/yanky v1.0.1 default sha256:$(idxsha "$R" yanky v1.0.1)/" "$P/mbuild.lock"
 drv "$P" ensure
 check "locked yanked builds" code_is 0
-check "locked yanked warning" has "$S/last.out" "warning: yanky v1.0.1 is yanked in registry default; mbuild update yanky moves off it"
+check "locked yanked warning" has "$S/last.out" "warning: yanky v1.0.1 is yanked in registry default; no later version of line v1 exists; \`mbuild get yanky@v1.0.0\` moves back to v1.0.0"
 
 echo "== integrity"
 P="$S/sum"
