@@ -1,7 +1,26 @@
-// init: stub, owned by group N (DESIGN.md 16.2).
+// init: a package's init.rules starts or extends a project (DESIGN.md 16.2).
+//
+// The rules are compiled into a driver with mbuild/init, after a check that
+// nothing they import can reach the OS. The driver only writes records; this
+// module validates them, fills @@variables@@ and applies the plan.
 
+import "std/io";
+import "std/mem";
 import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/proc";
+import "../model/semver";
+import "../model/manifest";
 import "../model/project";
+import "../pkg/registry";
+import "../build/scan";
+import "../build/graph";
+import "../build/toolchain";
+import "mbfile";
+import "config";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
 
 export struct IniRequest {
   from: string;
@@ -14,16 +33,1435 @@ export struct IniRequest {
   force: bool;
 }
 
+// Set by the CLI: the value of @@mbuild_version@@.
+export var ini_mbuild_version: string = "";
+
+// The package whose rules run.
+struct InxSrc {
+  name: string;
+  version: string;      // "" for a path package without one
+  dir: string;          // absolute
+  label: string;        // "webfw v1.0.0" | "webfw (path)"
+  is_path: bool;
+  driver_dir: string;
+  driver: string;       // the driver's source, set by inx_check_graph
+}
+
+struct InxOpts {
+  names: StrList*;
+  dflts: StrList*;
+  helps: StrList*;
+  choices: StrList*;    // csv per option, "" = any value
+}
+
+// One record of the driver's output: KIND and its fields.
+struct InxRec {
+  kind: string;
+  f: StrList*;
+}
+
+// A checked plan with every variable filled in.
+struct InxWork {
+  dirs: StrList*;
+  files: StrList*;
+  texts: StrList*;      // parallel to files
+  dep_names: StrList*;
+  dep_versions: StrList*;
+  lines: StrList*;      // mi_line text
+  sets: StrList*;       // "profile\nkey\nvalue"
+  cmd_names: StrList*;
+  cmd_summaries: StrList*;
+  cmd_bodies: StrList*;
+  next: StrList*;
+}
+
+// The last error of an inx_ step and its help line ("" for none).
+var g_inx_err: string;
+var g_inx_hint: string;
+
+fn inx_err(msg: string, hint: string) -> bool {
+  g_inx_err = msg;
+  g_inx_hint = hint;
+  return false;
+}
+
+fn inx_report() -> int32 {
+  error_msg(g_inx_err);
+  if (slen(g_inx_hint) > 0) {
+    err_line("  " + cyan("help") + ": " + g_inx_hint);
+  }
+  return 1;
+}
+
+fn inx_lookup(vars: StrList*, name: string) -> int64 {
+  var i: int64 = 0;
+  while (i < vars->len) {
+    var kv: string = sl_get(vars, i);
+    if (slen(kv) > slen(name) && s_byte(kv, slen(name)) == 61 && s_starts(kv, name)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn inx_var_names(vars: StrList*) -> StrList* {
+  var r: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < vars->len) {
+    var kv: string = sl_get(vars, i);
+    sl_push(r, s_sub(kv, 0, s_find_byte(kv, 61)));
+    i = i + 1;
+  }
+  return r;
+}
+
+fn inx_is_var_b(c: int32) -> bool {
+  return is_ident_b(c) && c != 46;
+}
+
+// text with @@name@@ replaced and @@@@ made @@; "" + g_inx_err on an unknown
+// name. label names the text; with lines, ":LINE" is appended.
+fn inx_fill(text: string, vars: StrList*, label: string, lines: bool, ok: bool*) -> string {
+  *ok = true;
+  if (!s_contains(text, "@@")) {
+    return text;
+  }
+  var b: Buf* = buf_new();
+  var n: int64 = slen(text);
+  var i: int64 = 0;
+  var line: int64 = 1;
+  while (i < n) {
+    var c: int32 = s_byte(text, i);
+    if (c == 10) {
+      line = line + 1;
+    }
+    if (c != 64 || i + 1 >= n || s_byte(text, i + 1) != 64) {
+      buf_addb(b, c);
+      i = i + 1;
+      continue;
+    }
+    if (i + 3 < n && s_byte(text, i + 2) == 64 && s_byte(text, i + 3) == 64) {
+      buf_add(b, "@@");
+      i = i + 4;
+      continue;
+    }
+    var j: int64 = i + 2;
+    while (j < n && inx_is_var_b(s_byte(text, j))) {
+      j = j + 1;
+    }
+    var at: string = label;
+    if (lines) {
+      at = label + ":" + s_int(line);
+    }
+    if (j == i + 2 || j + 1 >= n || s_byte(text, j) != 64 || s_byte(text, j + 1) != 64) {
+      *ok = inx_err(at + ": stray @@", "write @@@@ for a literal @@");
+      return s_empty();
+    }
+    var name: string = s_sub(text, i + 2, j);
+    var k: int64 = inx_lookup(vars, name);
+    if (k < 0) {
+      *ok = inx_err(at + ": unknown variable @@" + name + "@@", "known: " + sl_join(inx_var_names(vars), ", "));
+      return s_empty();
+    }
+    var kv: string = sl_get(vars, k);
+    buf_add(b, s_from(kv, slen(name) + 1));
+    i = j + 2;
+  }
+  return buf_take(b);
+}
+
+// "" when p is a plan path mbuild may write, else why not.
+fn inx_bad_path(p: string) -> string {
+  if (slen(p) == 0) {
+    return "an empty path";
+  }
+  if (p_is_abs(p) || s_find_byte(p, 92) >= 0 || s_find_byte(p, 58) >= 0) {
+    return "not a relative path with / separators";
+  }
+  var parts: StrList* = s_split(p, 47);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var part: string = sl_get(parts, i);
+    if (s_eq(part, "..")) {
+      return "it leaves the project";
+    }
+    i = i + 1;
+  }
+  var c: string = p_clean(p);
+  if (s_eq(c, ".mbuild") || s_starts(c, ".mbuild/") || s_eq(c, "build") || s_starts(c, "build/")) {
+    return "mbuild owns .mbuild/ and build/";
+  }
+  if (s_eq(c, "mbuild.mettle")) {
+    return "mbuild writes mbuild.mettle itself (use mi_dep, mi_set, mi_line, mi_command)";
+  }
+  return s_empty();
+}
+
+// A Mettle string literal for s.
+fn inx_lit(s: string) -> string {
+  var b: Buf* = buf_new();
+  buf_addb(b, 34);
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 34 || c == 92) {
+      buf_addb(b, 92);
+      buf_addb(b, c);
+    } else if (c == 10) {
+      buf_add(b, "\\n");
+    } else if (c == 9) {
+      buf_add(b, "\\t");
+    } else if (c == 123) {
+      buf_add(b, "{{");
+    } else {
+      buf_addb(b, c);
+    }
+    i = i + 1;
+  }
+  buf_addb(b, 34);
+  return buf_take(b);
+}
+
+// ---------------------------------------------------------------------------
+// The package
+// ---------------------------------------------------------------------------
+
+fn inx_is_path_ref(from: string) -> bool {
+  return s_starts(from, ".") || s_find_byte(from, 47) >= 0 || s_find_byte(from, 92) >= 0;
+}
+
+// The first two string literals after `call(` in text, as "a\nb"; "" when absent.
+fn inx_call_args(text: string, call: string) -> StrList* {
+  var r: StrList* = sl_new();
+  var at: int64 = s_find(text, call + "(");
+  if (at < 0) {
+    return r;
+  }
+  var i: int64 = at + slen(call) + 1;
+  while (i < slen(text) && r->len < 2) {
+    var c: int32 = s_byte(text, i);
+    if (c == 41 || c == 10) {
+      break;
+    }
+    if (c == 34) {
+      var j: int64 = i + 1;
+      while (j < slen(text) && s_byte(text, j) != 34) {
+        j = j + 1;
+      }
+      sl_push(r, s_sub(text, i + 1, j));
+      i = j;
+    }
+    i = i + 1;
+  }
+  return r;
+}
+
+// Name and version of a package in dir from mb_package(...) in its
+// mbuild.mettle (read, not run).
+fn inx_ident(dir: string, name: string*, version: string*) {
+  *name = s_empty();
+  *version = s_empty();
+  var mf: FsRead = fs_read(dir + "/mbuild.mettle");
+  if (!mf.ok) {
+    return;
+  }
+  var a: StrList* = inx_call_args(mf.data, "mb_package");
+  defer free(a);
+  if (a->len > 0) {
+    *name = sl_get(a, 0);
+  }
+  if (a->len > 1) {
+    *version = sl_get(a, 1);
+  }
+}
+
+fn inx_marker_for(name: string, version: string, rv: RegVersion*, registry: string) -> string {
+  var sha: string = rv->sha;
+  if (!s_starts(sha, "sha256:")) {
+    sha = "sha256:" + sha;
+  }
+  return name + " " + version + " " + sha + " " + registry;
+}
+
+// The newest version that is not yanked, stable before pre-releases.
+fn inx_newest(ix: RegIndex*) -> string {
+  var vs: StrList* = sl_new();
+  defer free(vs);
+  var i: int64 = 0;
+  while (i < ix->n) {
+    if (!ix->versions[i].yanked) {
+      sl_push(vs, ix->versions[i].version);
+    }
+    i = i + 1;
+  }
+  return sv_max(vs);
+}
+
+// Fetches a registry package into $MBUILD_HOME/init/NAME@VERSION, or takes a path.
+fn inx_source(p: Project*, from: string, registry: string, src: InxSrc*) -> bool {
+  src->is_path = inx_is_path_ref(from);
+  if (src->is_path) {
+    var abs: string = from;
+    if (!p_is_abs(abs)) {
+      abs = p_join(sys_cwd(), from);
+    }
+    var real: string = s_replace_byte(sys_realpath(abs), 92, 47);
+    if (slen(real) == 0 || !fs_is_dir(real)) {
+      return inx_err(from + " is not a directory", "");
+    }
+    src->dir = real;
+    inx_ident(real, &src->name, &src->version);
+    if (slen(src->name) == 0) {
+      return inx_err(from + " declares no package (mb_package in its mbuild.mettle)", "");
+    }
+    src->label = src->name + " (path)";
+    var hk: string = hash_string(real);
+    src->driver_dir = fs_mbuild_home() + "/init/path-" + s_sub(hk, 0, 12);
+    return true;
+  }
+  var name: string = from;
+  var want: string = s_empty();
+  var at: int64 = s_find_byte(from, 64);
+  if (at >= 0) {
+    name = s_sub(from, 0, at);
+    want = sv_canonical(s_from(from, at + 1));
+  }
+  if (!man_is_package_name(name)) {
+    return inx_err("`" + from + "` is neither a package name nor a path", "a path starts with ./ or contains /");
+  }
+  var ix: RegIndex* = reg_find(p, name, registry, true);
+  defer free(ix);
+  if (!ix->ok) {
+    return inx_err(reg_error(), "");
+  }
+  if (!ix->found) {
+    return inx_err("no package " + name + " in the registries", "");
+  }
+  if (slen(want) == 0) {
+    want = inx_newest(ix);
+    if (slen(want) == 0) {
+      return inx_err(name + " has no version that is not yanked", "");
+    }
+  }
+  var rv: RegVersion* = reg_version(ix, want);
+  if (rv == (RegVersion*)0) {
+    return inx_err(name + " has no version " + want, "");
+  }
+  src->name = name;
+  src->version = want;
+  src->label = name + " " + want;
+  src->dir = fs_mbuild_home() + "/init/" + name + "@" + want;
+  src->driver_dir = src->dir + "/.driver";
+  var marker: string = inx_marker_for(name, want, rv, ix->registry);
+  if (s_eq(reg_marker(src->dir), marker)) {
+    return true;
+  }
+  var archive: string = reg_fetch(p, ix, want);
+  if (slen(archive) == 0) {
+    return inx_err(reg_error(), "");
+  }
+  if (fs_exists(src->dir)) {
+    sys_remove_tree(src->dir);
+  }
+  var xe: string = reg_extract(archive, rv->sha, src->dir, marker);
+  if (slen(xe) > 0) {
+    return inx_err(xe, "");
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// The driver
+// ---------------------------------------------------------------------------
+
+fn inx_driver_text(rules: string, has_options: bool) -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "// generated by mbuild from init.rules; do not edit");
+  buf_line(b, "import \"mbuild/init\";");
+  buf_line(b, "import " + inx_lit(rules) + ";");
+  buf_line(b, "");
+  buf_line(b, "fn main(argc: int32, argv: cstring*) -> int32 {{");
+  buf_line(b, "  mii_start(argc, argv);");
+  buf_line(b, "  if (mii_mode(\"options\")) {{");
+  if (has_options) {
+    buf_line(b, "    options();");
+  }
+  buf_line(b, "    return mii_finish();");
+  buf_line(b, "  }");
+  buf_line(b, "  if (mii_mode(\"plan\")) {{");
+  buf_line(b, "    plan();");
+  buf_line(b, "    return mii_finish();");
+  buf_line(b, "  }");
+  buf_line(b, "  return 2;");
+  buf_line(b, "}");
+  return buf_take(b);
+}
+
+fn inx_rel_label(src: InxSrc*, file: string) -> string {
+  var dir: string = s_replace_byte(sys_realpath(src->dir), 92, 47);
+  if (p_has_prefix_dir(file, dir)) {
+    return p_rel(dir, file);
+  }
+  return file;
+}
+
+// "word line" for the first use of one of words in text, "" when none.
+fn inx_first_use(text: string, words: StrList*) -> string {
+  var uses: StrList* = scan_uses(text, words);
+  defer free(uses);
+  if (uses->len == 0) {
+    return s_empty();
+  }
+  return sl_get(uses, 0);
+}
+
+// Writes the API and driver files and checks that the driver's import graph
+// declares no extern, syscall or asm outside the API and embeds nothing from
+// outside the package (DESIGN.md 16.2 step 2). Nothing is compiled.
+fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
+  var rules: string = src->dir + "/init.rules";
+  var rf: FsRead = fs_read(rules);
+  if (!rf.ok) {
+    return inx_err(src->label + " has no init.rules", "");
+  }
+  var api: string = src->driver_dir + "/api/mbuild/init.mettle";
+  var driver: string = src->driver_dir + "/driver.mettle";
+  if (!fs_mkdirs(src->driver_dir + "/api/mbuild")) {
+    return inx_err("cannot create " + src->driver_dir, "");
+  }
+  fs_write_if_changed(api, ini_api_text());
+  src->driver = inx_driver_text(rules, s_contains(rf.data, "fn options("));
+  fs_write_if_changed(driver, src->driver);
+  var m: Mettle* = tc_select(p, sys_os());
+  var c: GraphCtx* = graph_ctx_new(sys_os(), m->stdlib_dir);
+  defer free(c);
+  sl_push(c->includes, src->driver_dir + "/api");
+  c->cwd = src->driver_dir;
+  var g: Graph* = graph_build(c, driver);
+  var api_real: string = s_replace_byte(sys_realpath(api), 92, 47);
+  var pkg_real: string = s_replace_byte(sys_realpath(src->dir), 92, 47);
+  var why: string = src->label + ": init.rules may only describe a plan: ";
+  var i: int64 = 0;
+  while (i < g->missing->len) {
+    var mf: string = inx_rel_label(src, sl_get(g->missing_from, i));
+    return inx_err(why + mf + ":" + sl_get(g->missing_lines, i) + " names " + sl_get(g->missing, i) + ", which cannot be found", "");
+  }
+  i = 0;
+  while (i < g->externs->len) {
+    var ef: string = sl_get(g->extern_files, i);
+    if (!s_eq(ef, api_real)) {
+      return inx_err(why + inx_rel_label(src, ef) + ":" + sl_get(g->extern_lines, i) + " declares extern fn " + sl_get(g->externs, i), "");
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < g->embeds->len) {
+    var e: string = sl_get(g->embeds, i);
+    if (!p_has_prefix_dir(e, pkg_real)) {
+      return inx_err(why + "it embeds " + e + ", which is outside the package", "");
+    }
+    i = i + 1;
+  }
+  var bad: StrList* = sl_of("syscall");
+  defer free(bad);
+  sl_push(bad, "asm");
+  i = 0;
+  while (i < g->files->len) {
+    var f: string = sl_get(g->files, i);
+    i = i + 1;
+    if (s_eq(f, api_real)) {
+      continue;
+    }
+    var r: FsRead = fs_read(f);
+    if (!r.ok) {
+      continue;
+    }
+    var use: string = inx_first_use(r.data, bad);
+    if (slen(use) > 0) {
+      var sp: int64 = s_find_byte(use, 32);
+      return inx_err(why + inx_rel_label(src, f) + ":" + s_from(use, sp + 1) + " uses " + s_sub(use, 0, sp), "");
+    }
+  }
+  return true;
+}
+
+// Runs `driver MODE OUT ARGS...` and parses the records it wrote.
+fn inx_run_driver(src: InxSrc*, exe: string, mode: string, args: StrList*, recs: InxRec**, n: int64*) -> bool {
+  var out: string = src->driver_dir + "/" + mode + ".out";
+  sys_remove_file(out);
+  var c: Cmd* = tc_run_program_cmd(sys_os(), exe);
+  cmd_arg(c, mode);
+  cmd_path(c, out);
+  cmd_args(c, args);
+  c->cwd = src->dir;
+  var cap: Captured = proc_capture_all(c);
+  if (cap.code != 0) {
+    if (slen(cap.out) > 0) {
+      print_err(cap.out);
+    }
+    return inx_err(src->label + ": init.rules failed in fn " + mode + "() (exit " + s_int((int64)cap.code) + ")", "");
+  }
+  var r: FsRead = fs_read(out);
+  if (!r.ok) {
+    return inx_err(src->label + ": the init.rules driver wrote no " + mode + " output", "");
+  }
+  return inx_parse_records(src, r.data, recs, n);
+}
+
+fn inx_parse_records(src: InxSrc*, text: string, recs: InxRec**, n: int64*) -> bool {
+  *recs = (InxRec*)0;
+  *n = 0;
+  var pos: int64 = 0;
+  var len: int64 = slen(text);
+  while (pos < len) {
+    var nl: int64 = s_find_from(text, "\n", pos);
+    if (nl < 0) {
+      break;
+    }
+    var head: string = s_sub(text, pos, nl);
+    pos = nl + 1;
+    var sp: int64 = s_find_byte(head, 32);
+    if (sp <= 0 || !s_is_int(s_from(head, sp + 1))) {
+      return inx_err(src->label + ": malformed init.rules output", "");
+    }
+    var rec: InxRec;
+    rec.kind = s_sub(head, 0, sp);
+    rec.f = sl_new();
+    var k: int64 = s_to_int(s_from(head, sp + 1));
+    while (k > 0) {
+      var nl2: int64 = s_find_from(text, "\n", pos);
+      if (nl2 < 0 || !s_is_int(s_sub(text, pos, nl2))) {
+        return inx_err(src->label + ": malformed init.rules output", "");
+      }
+      var flen: int64 = s_to_int(s_sub(text, pos, nl2));
+      pos = nl2 + 1;
+      if (pos + flen + 1 > len) {
+        return inx_err(src->label + ": malformed init.rules output", "");
+      }
+      sl_push(rec.f, s_sub(text, pos, pos + flen));
+      pos = pos + flen + 1;
+      k = k - 1;
+    }
+    if (s_eq(rec.kind, "error")) {
+      return inx_err(src->label + ": init.rules: " + sl_get(rec.f, 0), "");
+    }
+    *recs = (InxRec*)realloc(*recs, (*n + 1) * sizeof(InxRec));
+    (*recs)[*n] = rec;
+    *n = *n + 1;
+  }
+  return true;
+}
+
+fn inx_build(p: Project*, src: InxSrc*) -> string {
+  if (!inx_check_graph(p, src)) {
+    return s_empty();
+  }
+  var d: CfgDriver;
+  d.source = src->driver;
+  d.dir = src->driver_dir;
+  d.includes = sl_of(src->driver_dir + "/api");
+  var exe: string = cfg_build_driver(p, &d);
+  if (slen(exe) == 0) {
+    inx_err(src->label + ": init.rules does not compile", "");
+  }
+  return exe;
+}
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+fn inx_reserved(name: string) -> bool {
+  return s_eq(name, "project") || s_eq(name, "package") || s_eq(name, "package_version") || s_eq(name, "mbuild_version");
+}
+
+fn inx_csv(csv: string) -> StrList* {
+  var r: StrList* = sl_new();
+  var parts: StrList* = s_split(csv, 44);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var t: string = s_trim(sl_get(parts, i));
+    if (slen(t) > 0) {
+      sl_push(r, t);
+    }
+    i = i + 1;
+  }
+  return r;
+}
+
+fn inx_options(src: InxSrc*, recs: InxRec*, n: int64, o: InxOpts*) -> bool {
+  o->names = sl_new();
+  o->dflts = sl_new();
+  o->helps = sl_new();
+  o->choices = sl_new();
+  var i: int64 = 0;
+  while (i < n) {
+    var r: InxRec* = &recs[i];
+    i = i + 1;
+    var name: string = sl_get(r->f, 0);
+    if (s_eq(r->kind, "option")) {
+      var ok: bool = slen(name) > 0;
+      var j: int64 = 0;
+      while (j < slen(name)) {
+        if (!inx_is_var_b(s_byte(name, j))) {
+          ok = false;
+        }
+        j = j + 1;
+      }
+      if (!ok) {
+        return inx_err(src->label + ": init.rules: option `" + name + "` may only hold letters, digits and _", "");
+      }
+      if (inx_reserved(name)) {
+        return inx_err(src->label + ": init.rules: option " + name + " is a built-in variable", "");
+      }
+      if (sl_has(o->names, name)) {
+        return inx_err(src->label + ": init.rules: option " + name + " is declared twice", "");
+      }
+      sl_push(o->names, name);
+      sl_push(o->dflts, sl_get(r->f, 1));
+      sl_push(o->helps, sl_get(r->f, 2));
+      sl_push(o->choices, s_empty());
+    } else if (s_eq(r->kind, "choice")) {
+      var at: int64 = sl_index(o->names, name);
+      if (at < 0) {
+        return inx_err(src->label + ": init.rules: mi_choice(\"" + name + "\") before mi_option(\"" + name + "\")", "");
+      }
+      sl_set(o->choices, at, sl_join(inx_csv(sl_get(r->f, 1)), ", "));
+      if (!inx_allowed(o, at, sl_get(o->dflts, at))) {
+        return inx_err(src->label + ": init.rules: the default of " + name + " is not one of " + sl_get(o->choices, at), "");
+      }
+    }
+  }
+  return true;
+}
+
+fn inx_allowed(o: InxOpts*, at: int64, value: string) -> bool {
+  var cs: string = sl_get(o->choices, at);
+  return slen(cs) == 0 || sl_has(inx_csv(cs), value);
+}
+
+fn inx_read_line(eof: bool*) -> string {
+  var b: Buf* = buf_new();
+  *eof = false;
+  while (true) {
+    var c: int32 = getchar();
+    if (c < 0) {
+      *eof = true;
+      break;
+    }
+    if (c == 10) {
+      break;
+    }
+    if (c != 13) {
+      buf_addb(b, c);
+    }
+  }
+  return s_trim(buf_take(b));
+}
+
+// One value per option: --opt, else a prompt on a terminal, else the default.
+fn inx_values(src: InxSrc*, o: InxOpts*, r: IniRequest*, vals: StrList*) -> bool {
+  var given: StrList* = sl_new();
+  defer free(given);
+  var i: int64 = 0;
+  while (i < o->names->len) {
+    sl_push(vals, sl_get(o->dflts, i));
+    sl_push(given, s_empty());
+    i = i + 1;
+  }
+  i = 0;
+  while (r->opts != (StrList*)0 && i < r->opts->len) {
+    var kv: string = sl_get(r->opts, i);
+    i = i + 1;
+    var eq: int64 = s_find_byte(kv, 61);
+    if (eq <= 0) {
+      return inx_err("--opt " + kv + ": expected NAME=VALUE", "");
+    }
+    var k: string = s_sub(kv, 0, eq);
+    var v: string = s_from(kv, eq + 1);
+    var at: int64 = sl_index(o->names, k);
+    if (at < 0) {
+      var hint: string = "its options: " + sl_join(o->names, ", ");
+      var near: string = man_suggest(k, o->names);
+      if (slen(near) > 0) {
+        hint = "did you mean " + near + "?";
+      }
+      if (o->names->len == 0) {
+        hint = s_empty();
+      }
+      return inx_err(src->label + " has no option " + k, hint);
+    }
+    if (!inx_allowed(o, at, v)) {
+      return inx_err("--opt " + kv + ": " + k + " must be one of " + sl_get(o->choices, at), "");
+    }
+    sl_set(vals, at, v);
+    sl_set(given, at, "1");
+  }
+  if (r->yes || !sys_isatty(0)) {
+    return true;
+  }
+  i = 0;
+  while (i < o->names->len) {
+    if (slen(sl_get(given, i)) > 0) {
+      i = i + 1;
+      continue;
+    }
+    var q: string = sl_get(o->helps, i);
+    if (slen(q) == 0) {
+      q = sl_get(o->names, i);
+    }
+    if (slen(sl_get(o->choices, i)) > 0) {
+      q = q + " (" + sl_get(o->choices, i) + ")";
+    }
+    print(q + " [" + sl_get(o->dflts, i) + "]: ");
+    flush_out();
+    var eof: bool = false;
+    var a: string = inx_read_line(&eof);
+    if (slen(a) == 0) {
+      if (eof) {
+        say("");
+      }
+      i = i + 1;
+      continue;
+    }
+    if (!inx_allowed(o, i, a)) {
+      say("  one of " + sl_get(o->choices, i));
+      continue;
+    }
+    sl_set(vals, i, a);
+    i = i + 1;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// The plan
+// ---------------------------------------------------------------------------
+
+fn inx_work_new() -> InxWork* {
+  var w: InxWork* = new InxWork;
+  w->dirs = sl_new();
+  w->files = sl_new();
+  w->texts = sl_new();
+  w->dep_names = sl_new();
+  w->dep_versions = sl_new();
+  w->lines = sl_new();
+  w->sets = sl_new();
+  w->cmd_names = sl_new();
+  w->cmd_summaries = sl_new();
+  w->cmd_bodies = sl_new();
+  w->next = sl_new();
+  return w;
+}
+
+fn inx_cmd_name_ok(s: string) -> bool {
+  if (slen(s) == 0 || !(s_byte(s, 0) >= 97 && s_byte(s, 0) <= 122)) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (!((c >= 97 && c <= 122) || is_digit_b(c) || c == 95 || c == 45)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn inx_dst(src: InxSrc*, what: string, raw: string, vars: StrList*, ok: bool*) -> string {
+  var d: string = inx_fill(raw, vars, src->label + ": init.rules: " + what + " path " + raw, false, ok);
+  if (!*ok) {
+    return d;
+  }
+  var bad: string = inx_bad_path(d);
+  if (slen(bad) > 0) {
+    *ok = inx_err(src->label + ": init.rules: cannot write " + d + ": " + bad, "");
+  }
+  return p_clean(d);
+}
+
+// Checks every record and fills its variables.
+fn inx_work(src: InxSrc*, recs: InxRec*, n: int64, vars: StrList*, w: InxWork*) -> bool {
+  var pkg_real: string = s_replace_byte(sys_realpath(src->dir), 92, 47);
+  var ok: bool = true;
+  var i: int64 = 0;
+  while (i < n) {
+    var r: InxRec* = &recs[i];
+    i = i + 1;
+    var k: string = r->kind;
+    if (s_eq(k, "dir")) {
+      var dd: string = inx_dst(src, "mi_dir", sl_get(r->f, 0), vars, &ok);
+      if (!ok) {
+        return false;
+      }
+      sl_add_uniq(w->dirs, dd);
+    } else if (s_eq(k, "template") || s_eq(k, "file")) {
+      var dst: string = inx_dst(src, "mi_" + k, sl_get(r->f, 1), vars, &ok);
+      if (!ok) {
+        return false;
+      }
+      var text: string = sl_get(r->f, 1);
+      if (s_eq(k, "template")) {
+        var t: string = sl_get(r->f, 0);
+        var tp: string = s_replace_byte(sys_realpath(p_join(src->dir, t)), 92, 47);
+        if (p_is_abs(t) || slen(tp) == 0 || !p_has_prefix_dir(tp, pkg_real) || !fs_is_file(tp)) {
+          return inx_err(src->label + ": init.rules: template " + t + " is not a file in the package", "");
+        }
+        var tr: FsRead = fs_read(tp);
+        text = inx_fill(tr.data, vars, t, true, &ok);
+      } else {
+        text = inx_fill(sl_get(r->f, 1), vars, src->label + ": init.rules: mi_file(\"" + dst + "\")", false, &ok);
+      }
+      if (!ok) {
+        return false;
+      }
+      var at: int64 = sl_index(w->files, dst);
+      if (at >= 0) {
+        sl_set(w->texts, at, text);
+      } else {
+        sl_push(w->files, dst);
+        sl_push(w->texts, text);
+      }
+    } else if (s_eq(k, "dep")) {
+      var dn: string = sl_get(r->f, 0);
+      if (!man_is_package_name(dn) || slen(sl_get(r->f, 1)) == 0) {
+        return inx_err(src->label + ": init.rules: mi_dep(\"" + dn + "\", \"" + sl_get(r->f, 1) + "\") needs a package name and a version", "");
+      }
+      if (!sl_has(w->dep_names, dn) && !s_eq(dn, src->name)) {
+        sl_push(w->dep_names, dn);
+        sl_push(w->dep_versions, sl_get(r->f, 1));
+      }
+    } else if (s_eq(k, "set")) {
+      if (slen(sl_get(r->f, 0)) == 0 || slen(sl_get(r->f, 1)) == 0) {
+        return inx_err(src->label + ": init.rules: mi_set needs a profile and a key", "");
+      }
+      sl_push(w->sets, sl_get(r->f, 0) + "\n" + sl_get(r->f, 1) + "\n" + sl_get(r->f, 2));
+    } else if (s_eq(k, "line")) {
+      sl_push(w->lines, sl_get(r->f, 0));
+    } else if (s_eq(k, "command")) {
+      var cn: string = sl_get(r->f, 0);
+      if (!inx_cmd_name_ok(cn)) {
+        return inx_err(src->label + ": init.rules: command name `" + cn + "` may only hold a-z, digits, _ and -", "");
+      }
+      var sum: string = inx_fill(sl_get(r->f, 1), vars, src->label + ": init.rules: the summary of command " + cn, false, &ok);
+      if (!ok) {
+        return false;
+      }
+      var body: string = inx_fill(sl_get(r->f, 2), vars, src->label + ": init.rules: the body of command " + cn, false, &ok);
+      if (!ok) {
+        return false;
+      }
+      sl_push(w->cmd_names, cn);
+      sl_push(w->cmd_summaries, sum);
+      sl_push(w->cmd_bodies, body);
+    } else if (s_eq(k, "next")) {
+      var nx: string = inx_fill(sl_get(r->f, 0), vars, src->label + ": init.rules: mi_next", false, &ok);
+      if (!ok) {
+        return false;
+      }
+      sl_push(w->next, nx);
+    }
+  }
+  return true;
+}
+
+// Options, values and the checked plan of src for a project named project.
+fn inx_plan(p: Project*, src: InxSrc*, r: IniRequest*, project: string, w: InxWork*) -> bool {
+  var exe: string = inx_build(p, src);
+  if (slen(exe) == 0) {
+    return false;
+  }
+  var recs: InxRec* = (InxRec*)0;
+  var n: int64 = 0;
+  if (!inx_run_driver(src, exe, "options", sl_new(), &recs, &n)) {
+    return false;
+  }
+  var o: InxOpts;
+  if (!inx_options(src, recs, n, &o)) {
+    return false;
+  }
+  var vals: StrList* = sl_new();
+  defer free(vals);
+  if (!inx_values(src, &o, r, vals)) {
+    return false;
+  }
+  var vars: StrList* = sl_new();
+  defer free(vars);
+  var i: int64 = 0;
+  while (i < o.names->len) {
+    sl_push(vars, sl_get(o.names, i) + "=" + sl_get(vals, i));
+    i = i + 1;
+  }
+  sl_push(vars, "project=" + project);
+  sl_push(vars, "package=" + src->name);
+  sl_push(vars, "package_version=" + src->version);
+  sl_push(vars, "mbuild_version=" + ini_mbuild_version);
+  if (!inx_run_driver(src, exe, "plan", vars, &recs, &n)) {
+    return false;
+  }
+  return inx_work(src, recs, n, vars, w);
+}
+
+// ---------------------------------------------------------------------------
+// Applying
+// ---------------------------------------------------------------------------
+
+// The 13.10 mbuild.mettle, without its example command when bare.
+fn inx_skeleton(name: string, bare: bool) -> string {
+  var t: string = mbf_init_text(name);
+  if (!bare) {
+    return t;
+  }
+  var at: int64 = s_find(t, "\nfn cmd_hello(");
+  if (at < 0) {
+    return t;
+  }
+  var cut: int64 = at;
+  while (cut > 0) {
+    var ls: int64 = cut - 1;
+    while (ls > 0 && s_byte(t, ls - 1) != 10) {
+      ls = ls - 1;
+    }
+    if (!s_starts(s_from(t, ls), "//")) {
+      break;
+    }
+    cut = ls - 1;
+  }
+  var head: string = s_sub(t, 0, cut);
+  while (s_ends(head, "\n")) {
+    head = s_sub(head, 0, slen(head) - 1);
+  }
+  return head + "\n";
+}
+
+fn inx_main_text(name: string) -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "import \"std/io\";");
+  buf_line(b, "");
+  buf_line(b, "fn main() -> int32 {{");
+  buf_line(b, "  print(\"Hello from " + name + "!\\n\");");
+  buf_line(b, "  return 0;");
+  buf_line(b, "}");
+  return buf_take(b);
+}
+
+fn inx_gitignore(text: string) -> string {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var add: Buf* = buf_new();
+  var want: StrList* = sl_of("/build/");
+  defer free(want);
+  sl_push(want, "/.mbuild/");
+  sl_push(want, "/mettle.deps");
+  sl_push(want, "/mbuild.local.mettle");
+  var i: int64 = 0;
+  while (i < want->len) {
+    var w: string = sl_get(want, i);
+    if (!sl_has(lines, w) && !sl_has(lines, s_from(w, 1))) {
+      buf_line(add, w);
+    }
+    i = i + 1;
+  }
+  var extra: string = buf_take(add);
+  if (slen(extra) == 0) {
+    return text;
+  }
+  if (slen(text) > 0 && !s_ends(text, "\n")) {
+    return text + "\n" + extra;
+  }
+  return text + extra;
+}
+
+fn inx_write(path: string, data: string) -> bool {
+  if (!fs_write(path, data)) {
+    return inx_err("cannot write " + path, "");
+  }
+  return true;
+}
+
+fn inx_has_lines(text: string, lines: StrList*) -> bool {
+  var have: StrList* = s_lines(text);
+  defer free(have);
+  var trimmed: StrList* = sl_new();
+  defer free(trimmed);
+  var i: int64 = 0;
+  while (i < have->len) {
+    sl_push(trimmed, s_trim(sl_get(have, i)));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < lines->len) {
+    if (!sl_has(trimmed, s_trim(sl_get(lines, i)))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn inx_declared(info: MbfInfo*, name: string) -> bool {
+  var i: int64 = 0;
+  while (i < info->ndep_calls) {
+    var c: MbfCall* = &info->dep_calls[i];
+    var at: int64 = 0;
+    if (s_eq(c->fn_name, "mb_dep_from")) {
+      at = 1;
+    }
+    if (c->args->len > at && s_eq(sl_get(c->args, at), name)) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn inx_command_line(info: MbfInfo*, name: string) -> int64 {
+  var i: int64 = 0;
+  while (i < info->ncommands) {
+    if (s_eq(info->commands[i].name, name)) {
+      return info->commands[i].line;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// text without the command whose fn starts at line (1-based): its comment
+// block above and everything to the first `}` at column 0.
+fn inx_drop_command(text: string, line: int64) -> string {
+  var ls: StrList* = s_lines(text);
+  defer free(ls);
+  var first: int64 = line - 1;
+  while (first > 0 && s_starts(s_trim(sl_get(ls, first - 1)), "//")) {
+    first = first - 1;
+  }
+  var last: int64 = line - 1;
+  while (last < ls->len && !s_starts(sl_get(ls, last), "}")) {
+    last = last + 1;
+  }
+  if (first > 0 && slen(s_trim(sl_get(ls, first - 1))) == 0) {
+    first = first - 1;
+  }
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < ls->len) {
+    if (i < first || i > last) {
+      buf_line(b, sl_get(ls, i));
+    }
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+fn inx_edit(e: MbfEdit, what: string, text: string*) -> bool {
+  if (!e.ok) {
+    var why: string = e.why;
+    if (slen(why) == 0) {
+      why = "mbuild cannot edit it";
+    }
+    return inx_err("mbuild.mettle: cannot add " + what + ": " + why, "");
+  }
+  *text = e.text;
+  return true;
+}
+
+// The plan's edits of mbuild.mettle. added lists "name version" of new deps.
+fn inx_edit_file(src: InxSrc*, w: InxWork*, text: string*, force: bool, added: StrList*, cmds: StrList*) -> bool {
+  var info: MbfInfo* = mbf_scan(*text);
+  defer free(info);
+  if (!info->ok && slen(info->err) > 0) {
+    return inx_err("mbuild.mettle: " + info->err, "");
+  }
+  if (!inx_declared(info, src->name)) {
+    if (src->is_path) {
+      var pl: string = "mb_dep_path(" + inx_lit(src->name) + ", " + inx_lit(src->dir) + ");";
+      if (!inx_edit(mbf_add_lines(*text, sl_of(pl)), src->name, text)) {
+        return false;
+      }
+      sl_push(added, src->name + " (path)");
+    } else {
+      if (!inx_edit(mbf_set_dep(*text, src->name, src->version), src->name, text)) {
+        return false;
+      }
+      sl_push(added, src->name + " " + src->version);
+    }
+  }
+  var i: int64 = 0;
+  while (i < w->dep_names->len) {
+    var dn: string = sl_get(w->dep_names, i);
+    var dv: string = sl_get(w->dep_versions, i);
+    i = i + 1;
+    if (inx_declared(info, dn)) {
+      continue;
+    }
+    if (!inx_edit(mbf_set_dep(*text, dn, dv), dn, text)) {
+      return false;
+    }
+    sl_push(added, dn + " " + dv);
+  }
+  if (w->lines->len > 0 && !inx_has_lines(*text, w->lines)) {
+    if (!inx_edit(mbf_add_lines(*text, w->lines), "the plan's lines", text)) {
+      return false;
+    }
+  }
+  var sets: StrList* = sl_new();
+  defer free(sets);
+  var prof: string = s_empty();
+  i = 0;
+  while (i < w->sets->len) {
+    var parts: StrList* = s_split(sl_get(w->sets, i), 10);
+    i = i + 1;
+    if (!s_eq(sl_get(parts, 0), prof)) {
+      prof = sl_get(parts, 0);
+      sl_push(sets, "mb_profile(" + inx_lit(prof) + ");");
+    }
+    sl_push(sets, "mb_set(" + inx_lit(sl_get(parts, 1)) + ", " + inx_lit(sl_get(parts, 2)) + ");");
+    free(parts);
+  }
+  if (sets->len > 0 && !inx_has_lines(*text, sets)) {
+    if (!inx_edit(mbf_add_lines(*text, sets), "the plan's settings", text)) {
+      return false;
+    }
+  }
+  i = 0;
+  while (i < w->cmd_names->len) {
+    var cn: string = sl_get(w->cmd_names, i);
+    var line: int64 = inx_command_line(mbf_scan(*text), cn);
+    if (line > 0) {
+      if (!force) {
+        warn("mbuild.mettle already has command " + cn + "; kept it (--force replaces it)");
+        i = i + 1;
+        continue;
+      }
+      *text = inx_drop_command(*text, line);
+    }
+    if (!inx_edit(mbf_add_command(*text, cn, sl_get(w->cmd_summaries, i), sl_get(w->cmd_bodies, i)), "command " + cn, text)) {
+      return false;
+    }
+    sl_push(cmds, cn + ": " + sl_get(w->cmd_summaries, i));
+    i = i + 1;
+  }
+  return true;
+}
+
+fn inx_dir_empty(d: string) -> bool {
+  var files: StrList* = sl_new();
+  defer free(files);
+  var dirs: StrList* = sl_new();
+  defer free(dirs);
+  sys_list_dir(d, files, dirs);
+  return files->len == 0 && dirs->len == 0;
+}
+
+// Writes the plan into root (prefix: how paths are shown, "site/" or "").
+fn inx_apply(src: InxSrc*, w: InxWork*, r: IniRequest*, root: string, prefix: string, project: string, fresh: bool) -> bool {
+  var mbpath: string = root + "/mbuild.mettle";
+  var text: string = s_empty();
+  var created: StrList* = sl_new();
+  defer free(created);
+  var verb: string = "Created";
+  if (r->dry_run) {
+    verb = "Would create";
+  }
+  if (fresh) {
+    text = inx_skeleton(project, true);
+    if (!sl_has(w->files, "src/main.mettle")) {
+      sl_push(w->files, "src/main.mettle");
+      sl_push(w->texts, inx_main_text(project));
+    }
+    var gi: FsRead = fs_read(root + "/.gitignore");
+    var gtext: string = s_empty();
+    if (gi.ok) {
+      gtext = gi.data;
+    }
+    var gnew: string = inx_gitignore(gtext);
+    if (!r->dry_run && !s_eq(gnew, gtext) && !inx_write(root + "/.gitignore", gnew)) {
+      return false;
+    }
+  } else {
+    var mf: FsRead = fs_read(mbpath);
+    if (!mf.ok) {
+      return inx_err("cannot read " + mbpath, "");
+    }
+    text = mf.data;
+  }
+  var before: string = text;
+  var added: StrList* = sl_new();
+  defer free(added);
+  var cmds: StrList* = sl_new();
+  defer free(cmds);
+  if (!inx_edit_file(src, w, &text, r->force, added, cmds)) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < w->files->len) {
+    var f: string = sl_get(w->files, i);
+    var full: string = root + "/" + f;
+    if (fs_exists(full) && !fresh && !r->force) {
+      status_warn("skip", prefix + f + " (exists; --force overwrites)");
+    } else {
+      if (!r->dry_run && !inx_write(full, sl_get(w->texts, i))) {
+        return false;
+      }
+      sl_push(created, prefix + f);
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < w->dirs->len) {
+    var d: string = sl_get(w->dirs, i);
+    var dfull: string = root + "/" + d;
+    if (!fs_is_dir(dfull)) {
+      if (!r->dry_run && !fs_mkdirs(dfull)) {
+        return inx_err("cannot create " + dfull, "");
+      }
+      sl_push(created, prefix + d + "/");
+    }
+    i = i + 1;
+  }
+  var deps: string = s_empty();
+  if (added->len > 0) {
+    deps = "depends on " + sl_join(added, ", ");
+  }
+  if (fresh || !s_eq(text, before)) {
+    if (!r->dry_run && !inx_write(mbpath, text)) {
+      return false;
+    }
+    var what: string = prefix + "mbuild.mettle";
+    if (fresh) {
+      what = what + " (package `" + project + "`";
+      if (slen(deps) > 0) {
+        what = what + ", " + deps;
+      }
+      what = what + ")";
+      status(verb, what);
+    } else {
+      if (slen(deps) > 0) {
+        what = what + " (" + deps + ")";
+      }
+      if (r->dry_run) {
+        status("Would update", what);
+      } else {
+        status("Updated", what);
+      }
+    }
+  }
+  sl_sort(created);
+  if (created->len > 0) {
+    status(verb, sl_join(created, ", "));
+  }
+  i = 0;
+  while (i < cmds->len) {
+    status("Command", sl_get(cmds, i));
+    i = i + 1;
+  }
+  if (w->next->len > 0 && !r->dry_run) {
+    say("");
+    i = 0;
+    while (i < w->next->len) {
+      say("  next: " + bold(sl_get(w->next, i)));
+      i = i + 1;
+    }
+  }
+  return true;
+}
+
+// Plain `mbuild init` for init --from in a directory without mbuild.mettle.
+fn inx_plain_init(root: string, name: string, dry_run: bool, w: InxWork*) -> bool {
+  var verb: string = "Created";
+  if (dry_run) {
+    verb = "Would create";
+  }
+  if (!dry_run && !inx_write(root + "/mbuild.mettle", inx_skeleton(name, false))) {
+    return false;
+  }
+  status(verb, "mbuild.mettle (package `" + name + "`)");
+  var own_main: bool = sl_has(w->files, "src/main.mettle");
+  if (!own_main && !fs_exists(root + "/src/main.mettle") && !fs_exists(root + "/main.mettle")) {
+    if (!dry_run && !inx_write(root + "/src/main.mettle", inx_main_text(name))) {
+      return false;
+    }
+    status(verb, "src/main.mettle");
+  }
+  var gi: FsRead = fs_read(root + "/.gitignore");
+  var gtext: string = s_empty();
+  if (gi.ok) {
+    gtext = gi.data;
+  }
+  var gnew: string = inx_gitignore(gtext);
+  if (!s_eq(gnew, gtext)) {
+    if (!dry_run && !inx_write(root + "/.gitignore", gnew)) {
+      return false;
+    }
+    status("Updated", ".gitignore");
+  }
+  return true;
+}
+
+// mbuild new NAME --from PKG / mbuild init --from PKG.
 export fn ini_run(p: Project*, r: IniRequest*) -> int32 {
-  return 1;
+  g_inx_hint = s_empty();
+  var src: InxSrc* = new InxSrc;
+  defer free(src);
+  if (!inx_source(p, r->from, r->registry, src)) {
+    return inx_report();
+  }
+  var root: string = p->root;
+  var prefix: string = s_empty();
+  var project: string = s_empty();
+  var fresh: bool = false;
+  if (!r->existing) {
+    project = r->name;
+    if (!man_is_package_name(project)) {
+      error_msg("`" + project + "` is not a package name ([a-z][a-z0-9_]*)");
+      return 1;
+    }
+    root = p_join(sys_cwd(), project);
+    prefix = project + "/";
+    if (fs_exists(root) && (!fs_is_dir(root) || !inx_dir_empty(root)) && !r->force) {
+      error_msg(project + " already exists and is not empty");
+      err_line("  " + cyan("help") + ": --force writes into it");
+      return 1;
+    }
+    fresh = true;
+  } else {
+    if (!fs_is_file(root + "/mbuild.mettle") && fs_exists(root + "/mbuild.toml")) {
+      error_msg("mbuild.toml is no longer read; write mbuild.mettle (mbuild init)");
+      return 1;
+    }
+    if (p->has_manifest && p->man != (Manifest*)0) {
+      project = p->man->name;
+    }
+    if (slen(project) == 0) {
+      project = p_base(root);
+    }
+  }
+  var w: InxWork* = inx_work_new();
+  defer free(w);
+  if (!inx_plan(p, src, r, project, w)) {
+    return inx_report();
+  }
+  if (r->existing && !fs_is_file(root + "/mbuild.mettle")) {
+    if (!inx_plain_init(root, project, r->dry_run, w)) {
+      return inx_report();
+    }
+    if (r->dry_run) {
+      fresh = true;
+    }
+  }
+  if (!r->dry_run && fresh && !fs_mkdirs(root)) {
+    error_msg("cannot create " + root);
+    return 1;
+  }
+  if (!inx_apply(src, w, r, root, prefix, project, fresh)) {
+    return inx_report();
+  }
+  return 0;
 }
 
+// publish: the package in dir has both rules files and its init.rules,
+// run with defaults, gives a valid plan (DESIGN.md 16.4).
 export fn ini_check_package(p: Project*, dir: string) -> string {
-  return "init.rules is not implemented yet";
+  g_inx_hint = s_empty();
+  var src: InxSrc* = new InxSrc;
+  src->is_path = true;
+  src->dir = s_replace_byte(sys_realpath(dir), 92, 47);
+  inx_ident(src->dir, &src->name, &src->version);
+  if (p->man != (Manifest*)0 && s_eq(p_clean(p->root), src->dir) && slen(p->man->name) > 0) {
+    src->name = p->man->name;
+    src->version = p->man->version;
+  }
+  if (slen(src->name) == 0) {
+    src->name = p_base(src->dir);
+  }
+  src->label = src->name;
+  if (slen(src->version) > 0) {
+    src->label = src->name + " " + sv_canonical(src->version);
+  }
+  var hk: string = hash_string(src->dir);
+  src->driver_dir = fs_mbuild_home() + "/init/path-" + s_sub(hk, 0, 12);
+  var need: StrList* = sl_of("init.rules");
+  defer free(need);
+  sl_push(need, "AGENT.rules");
+  var i: int64 = 0;
+  while (i < need->len) {
+    if (!fs_is_file(src->dir + "/" + sl_get(need, i))) {
+      return src->name + " cannot be published without " + sl_get(need, i) + " (mbuild init --package writes one)";
+    }
+    i = i + 1;
+  }
+  var r: IniRequest* = new IniRequest;
+  defer free(r);
+  r->opts = sl_new();
+  r->yes = true;
+  var w: InxWork* = inx_work_new();
+  defer free(w);
+  if (!inx_plan(p, src, r, "example", w)) {
+    return g_inx_err;
+  }
+  return s_empty();
 }
 
+fn inx_scaffold_file(dir: string, rel: string, text: string) -> bool {
+  var full: string = dir + "/" + rel;
+  if (fs_exists(full)) {
+    status_warn("skip", rel + " (exists)");
+    return true;
+  }
+  if (!fs_write(full, text)) {
+    error_msg("cannot write " + full);
+    return false;
+  }
+  status("Created", rel);
+  return true;
+}
+
+// init --package: AGENT.rules, init.rules and the template it copies.
 export fn ini_scaffold_package(dir: string, name: string) -> int32 {
-  return 1;
+  var a: Buf* = buf_new();
+  buf_line(a, "# " + name + ": notes for AI coding agents (plain text, shipped with the package)");
+  buf_line(a, "");
+  buf_line(a, "## What it is for");
+  buf_line(a, "");
+  buf_line(a, "## Main API");
+  buf_line(a, "");
+  buf_line(a, "## Conventions");
+  buf_line(a, "");
+  buf_line(a, "## Traps");
+  var t: Buf* = buf_new();
+  buf_line(t, "import \"std/io\";");
+  buf_line(t, "");
+  buf_line(t, "fn main() -> int32 {{");
+  buf_line(t, "  print(\"Hello from @@project@@, built on @@package@@ @@package_version@@!\\n\");");
+  buf_line(t, "  return 0;");
+  buf_line(t, "}");
+  var i: Buf* = buf_new();
+  buf_line(i, "// init.rules: how `mbuild new APP --from " + name + "` starts a project.");
+  buf_line(i, "// @@name@@ in paths, templates and commands is an option, or project,");
+  buf_line(i, "// package, package_version, mbuild_version.");
+  buf_line(i, "import \"mbuild/init\";");
+  buf_line(i, "");
+  buf_line(i, "fn options() {{");
+  buf_line(i, "}");
+  buf_line(i, "");
+  buf_line(i, "fn plan() {{");
+  buf_line(i, "  mi_template(\"templates/main.mettle.tmpl\", \"src/main.mettle\");");
+  buf_line(i, "  mi_next(\"mbuild run\");");
+  buf_line(i, "}");
+  if (!inx_scaffold_file(dir, "AGENT.rules", buf_take(a))) {
+    return 1;
+  }
+  if (!inx_scaffold_file(dir, "init.rules", buf_take(i))) {
+    return 1;
+  }
+  if (!inx_scaffold_file(dir, "templates/main.mettle.tmpl", buf_take(t))) {
+    return 1;
+  }
+  return 0;
 }
 
 export fn ini_api_text() -> string {
