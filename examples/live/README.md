@@ -40,43 +40,68 @@ tick 7  pop 18  food 36  (steady)
 
 ## poke it from the prompt
 
-`mbuild shell` starts the same program with a `mettle> ` prompt inside it. what you type runs at its next `shell_point();` (in `main`, next to the `quiesce;`): read the world, change it, redefine a rule, take it back. the world is a global so the prompt can reach it.
+`mbuild shell` starts the same program with a shell inside it. what you type runs at its next `shell_point();` (in `main`, next to the `quiesce;`): read the world, change it, redefine a rule, take it back, freeze it between ticks (the tick counts `shell_point()` calls). the world is a global so the shell can reach it.
 
 ```bash
 cd examples/live
 mbuild shell
 ```
 
+on a terminal it is full screen (`mbuild-shell`, beside `mbuild`); this is a real capture at 80x24 after `ctrl+p`, `world.pop`, `ctrl+n` and setting `food` in `/inspect world`:
+
 ```text
-$ mbuild shell
+ live_demo  ⏸ paused at tick 27 · 0 patches
+   Compiling live_demo (linux, debug)
+   Running build/linux/debug/shell/live_demo
+ ❯ pause
+   paused at tick 26
+ ❯ world.pop
+   19
+ ❯ step
+   paused at tick 27
+ ❯ world.food = 4242;
+   ok
+
+   33 lines held · ctrl+o streams · /log shows
+────────────────────────────────────────────────────────────────────────────────
+ ❯
+────────────────────────────────────────────────────────────────────────────────
+ ⏸ paused at tick 27 · 0 patches      ctrl+p resume · ctrl+n step · ctrl+d exit
+```
+
+- the input stays at the bottom between two rules; answers scroll above it (PgUp/PgDn). the program's prints are held (a dim count says how many): `ctrl+o` streams them into the scrollback, `/log` shows them all.
+- `ctrl+p` pauses: `shell_point()` waits, so the program stops between ticks with its state consistent. inputs, watches and patches still work while it waits. `ctrl+n` steps one tick and pauses again. `pause when world.food < 50` pauses at the tick where the condition turns true. only the thread calling `shell_point()` stops; others keep running.
+- `/` opens the command palette (`/inspect EXPR`, `/code`, `/watch`, `/log`, `/pause-when`, ...), tab completes names. Esc leaves a view.
+- `/inspect world` is a tree: arrows move, Enter expands a struct or pointer, `e` sets the selected field (`world.food = ...;`).
+- `/watch` lists the globals and any `watch EXPR`, refreshed every tick.
+- `/code` lists the functions and structs, patched ones marked; the right side shows the current source and what a patch replaced. `e` (or `edit harvest`) opens it in `$EDITOR` (vi) and patches it in when you save, `u` undoes that function's patch, `h` its history.
+- `fn NAME(...) { ... }` replaces `NAME` in the running program; `undo` takes back the last change, `r` patches in the files on disk. `src/` is never touched.
+- `ls`, `apropos TEXT`, `explain NAME`, `i EXPR`, `help` work as in line mode. `ctrl+d` quits and stops the program.
+
+piped, or with `--plain`, it is a line shell with the same commands (`pause`, `resume`, `step`, `status`, `watch`, `unwatch`, `edit`, ...):
+
+```text
+$ mbuild shell --plain
    Compiling live_demo (linux, debug)
      Running build/linux/debug/shell/live_demo; its output is held (:log to see it, :unmute to stream it). help for help, :q to leave
-  (6 new lines held, :log)
+  (1 new line held, :log)
+mettle> pause
+paused at tick 2
 mettle> world
-World { tick: 6, pop: 16, food: 55 }
-  (3 new lines held, :log)
-mettle> world.food = 1000;
-ok
+World { tick: 1, pop: 11, food: 94 }
+  (1 new line held, :log)
+mettle> step
+paused at tick 3
   (2 new lines held, :log)
-mettle> explain harvest
-fn harvest(pop: int32) -> int32  src/rules.mettle:10
-  food gathered this tick
-  (3 new lines held, :log)
-mettle> :log 3
-tick 11  pop 22  food 966  (steady)
-tick 12  pop 23  food 954  (steady)
-tick 13  pop 24  food 941  (steady)
-  (2 new lines held, :log)
+mettle> watch world.pop * 2
+watching world.pop * 2
+mettle> watch
+world = World { tick: 2, pop: 12, food: 87 }
+world.pop * 2 = 24
 mettle> :q
 ```
 
-the program's prints don't flood the prompt: they are held, and a dim line says how many are waiting. `:log [N]` shows the last N, `:unmute` streams them above the prompt (`mbuild shell --stream` starts that way), `:mute` holds them again. when the program exits, its last 5 lines and its exit code print and the shell ends.
-
-- an expression prints its value, a struct field by field. a statement runs and prints `ok`.
-- `fn NAME(...) { ... }` replaces `NAME` in the running program; `undo` puts the old one back, `r` patches in the files on disk. `src/` is never touched.
-- `ls [FILE]` lists functions, globals and structs by file with the first line of their comment, `apropos TEXT` searches names and comments, `explain NAME` (or `h`) shows a function's signature and comment, a global's value or a struct's fields. `i EXPR` gives a type.
-- tab completes names and commands, up and down walk the history, Ctrl-C clears the line.
-- `help` lists it all. `:q` or Ctrl-D quits and stops the program. without `mbuild shell`, `shell_point()` is an empty function.
+without `mbuild shell`, `shell_point()` is an empty function.
 
 ## how it works
 

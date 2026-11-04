@@ -404,9 +404,9 @@ starts with `mb_spawn` and doesn't stop is stopped when it returns.
 
 ## mbuild shell
 
-`mbuild shell [BIN] [-- ARGS]` builds the program with `--live`, starts it
-and gives you a `mettle> ` prompt inside it. The program opts in with one
-call next to its `quiesce;`:
+`mbuild shell [BIN] [--plain] [-- ARGS]` builds the program with `--live`,
+starts it and gives you a shell inside it. The program opts in with one call
+next to its `quiesce;`:
 
 ```mettle
 import "mbuild/shell";
@@ -425,8 +425,14 @@ builds everywhere. Each input runs once at the next `shell_point()`:
 |---|---|
 | `world.pop + 1` | prints the value; a struct prints field by field |
 | `world.food = 1000;` | runs the statement, prints `ok` |
-| `fn harvest(pop: int32) -> int32 { ... }` | redefines `harvest` in the running program; `undo` takes it back |
+| `fn harvest(pop: int32) -> int32 { ... }` | redefines `harvest` in the running program |
+| `edit NAME` | `NAME`'s current source in `$EDITOR` (vi), patched in when it changed |
+| `undo [NAME]` | takes back the last change, or `NAME`'s last redefinition |
 | `r` | patches in the files on disk (redefinitions dropped) |
+| `pause`, `resume`, `step` | stop at the next `shell_point()`, go on, run one tick and stop again |
+| `pause when EXPR` | pause at the `shell_point()` where the bool EXPR turns true; no EXPR clears it |
+| `status` | running or paused, the tick (`shell_point()` calls), patches, the condition |
+| `watch [EXPR]`, `unwatch EXPR` | add EXPR to the values written at every tick (the globals are there from the start); no EXPR lists them |
 | `ls [FILE]` | functions, globals and structs of the bin's import graph by file, each with the first line of its doc comment |
 | `apropos TEXT` | the same lines for names and doc comments containing TEXT, any case |
 | `explain NAME` (`h NAME`) | a function's signature, doc and file:line; a global's type, doc and current value; a struct's fields with their comments |
@@ -435,7 +441,25 @@ builds everywhere. Each input runs once at the next `shell_point()`:
 | `help` | every command, grouped, with an example each |
 | `:q`, Ctrl-D | quit; the program stops too |
 
-The program's stdout and stderr come through the shell and are held: a dim
+While paused, `shell_point()` waits on the thread that called it, taking
+patches and running inputs, so the state is the one between two ticks; the
+program's other threads keep running.
+
+On a terminal the session is full screen: mbuild runs `mbuild-shell` (beside
+the mbuild binary; `mbuild install` puts it there, a source checkout builds
+it on demand), which starts `mbuild shell --serve` on two FIFOs in
+`.mbuild/shell` and draws it with `lib/tui`, a small terminal library in
+Mettle. A header and a footer show running/paused, the tick and the patches;
+the input sits between two rules with history and tab completion; `/` opens
+a command palette; `ctrl+p` pauses or resumes, `ctrl+n` steps, `ctrl+o`
+streams the program's output into the scrollback, `ctrl+d` quits. Views
+(Esc back): `/inspect EXPR` (a tree: Enter expands a struct or pointer, `e`
+sets a field), `/code [NAME]` (functions and structs, patched ones marked,
+the source with what each patch replaced; `e` edits in `$EDITOR`, `u`
+undoes, `h` history), `/watch` (live values; `a` adds, `d` removes), `/log`.
+Without mbuild-shell, piped, or with `--plain`, it is the line shell.
+
+In line mode the program's stdout and stderr are held: a dim
 `(N new lines held, :log)` before a prompt says how many arrived, `:log`
 shows them. `:unmute` (or `mbuild shell --stream`) prints them above the
 prompt instead, and the line being typed is drawn again under them. When the
@@ -447,7 +471,7 @@ functions of every module are in scope; locals of running functions are not. Red
 `shell_point()`. `mbuild shell --local` runs no program: each input is built
 into a small one that imports what the entry imports, and `var` statements
 are replayed before each input. Linux only for now; [the example](../examples/live)
-has a transcript.
+has a capture.
 
 ## Hooks
 

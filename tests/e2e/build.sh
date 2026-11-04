@@ -1046,14 +1046,14 @@ check "clean removes their state" sh -c 'grep -qF "Removed .mbuild/dep-bins" "$0
 echo "== bootstrap"
 B="$S/bootstrap"
 mkdir -p "$B"
-cp -r "$here/src" "$here/third_party" "$here/mbuild.mettle" "$B/"
+cp -r "$here/src" "$here/third_party" "$here/lib" "$here/cmd" "$here/mbuild.mettle" "$B/"
 cd "$B" || exit 1
 ( "$METTLE" --build src/main.mettle -o mbuild0 && ./mbuild0 build -r -t host ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"
 check "mettle builds mbuild0, mbuild0 builds mbuild" code_is 0
 ./build/linux/release/mbuild version >"$S/last.out" 2>&1
 check "the release mbuild runs" has "mbuild 0.2.0"
 ./build/linux/release/mbuild build -r -t host >"$S/last.out" 2>&1
-check "and sees itself Fresh" has "Fresh mbuild (linux, release)"
+check "and sees itself Fresh" sh -c 'grep -qF "Fresh mbuild (linux, release)" "$0/last.out" && grep -qF "Fresh mbuild-shell (linux, release)" "$0/last.out"' "$S"
 ./build/linux/release/mbuild help >"$S/last.out" 2>&1
 check "its project commands" sh -c 'grep -q "^  install " "$0/last.out" && grep -q "^  selfcheck " "$0/last.out" && grep -q "^  dist " "$0/last.out"' "$S"
 

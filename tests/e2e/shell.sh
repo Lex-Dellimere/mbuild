@@ -62,7 +62,7 @@ cd "$W"
 
 echo "== help"
 "$MB" help shell >"$T/help.out" 2>&1
-has "help title" "$T/help.out" '^shell - a prompt inside the running program$'
+has "help title" "$T/help.out" '^shell - a shell inside the running program$'
 has "help usage" "$T/help.out" '^  usage: mbuild shell \[BIN\]'
 has "help doc" "$T/help.out" '^Doc: docs/project.md$'
 
