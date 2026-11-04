@@ -1305,7 +1305,11 @@ fn inx_plain_init(root: string, name: string, dry_run: bool, w: InxWork*) -> boo
     if (!dry_run && !inx_write(root + "/.gitignore", gnew)) {
       return false;
     }
-    status("Updated", ".gitignore");
+    if (dry_run) {
+      status("Would update", ".gitignore");
+    } else {
+      status("Updated", ".gitignore");
+    }
   }
   return true;
 }
@@ -1407,10 +1411,14 @@ export fn ini_check_package(p: Project*, dir: string) -> string {
   return s_empty();
 }
 
-fn inx_scaffold_file(dir: string, rel: string, text: string) -> bool {
+fn inx_scaffold_file(dir: string, rel: string, text: string, dry: bool) -> bool {
   var full: string = dir + "/" + rel;
   if (fs_exists(full)) {
     status_warn("skip", rel + " (exists)");
+    return true;
+  }
+  if (dry) {
+    status("Would create", rel);
     return true;
   }
   if (!fs_write(full, text)) {
@@ -1422,8 +1430,8 @@ fn inx_scaffold_file(dir: string, rel: string, text: string) -> bool {
 }
 
 // init --package: init.rules and the template it copies; AGENT.rules too
-// with agent_rules.
-export fn ini_scaffold_package(dir: string, name: string, agent_rules: bool) -> int32 {
+// with agent_rules. dry: only say what it would create.
+export fn ini_scaffold_package(dir: string, name: string, agent_rules: bool, dry: bool) -> int32 {
   var a: Buf* = buf_new();
   buf_line(a, "# " + name + ": notes for AI coding agents (plain text, shipped with the package)");
   buf_line(a, "");
@@ -1454,13 +1462,13 @@ export fn ini_scaffold_package(dir: string, name: string, agent_rules: bool) -> 
   buf_line(i, "  mi_template(\"templates/main.mettle.tmpl\", \"src/main.mettle\");");
   buf_line(i, "  mi_next(\"mbuild run\");");
   buf_line(i, "}");
-  if (agent_rules && !inx_scaffold_file(dir, "AGENT.rules", buf_take(a))) {
+  if (agent_rules && !inx_scaffold_file(dir, "AGENT.rules", buf_take(a), dry)) {
     return 1;
   }
-  if (!inx_scaffold_file(dir, "init.rules", buf_take(i))) {
+  if (!inx_scaffold_file(dir, "init.rules", buf_take(i), dry)) {
     return 1;
   }
-  if (!inx_scaffold_file(dir, "templates/main.mettle.tmpl", buf_take(t))) {
+  if (!inx_scaffold_file(dir, "templates/main.mettle.tmpl", buf_take(t), dry)) {
     return 1;
   }
   return 0;

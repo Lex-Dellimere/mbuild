@@ -3069,11 +3069,17 @@ fn bx_take_opts(p: Project*, name: string) -> StrList* {
 
 // The skeleton of 13.10 in dir: mbuild.mettle, src/main.mettle (unless a
 // main file exists) and the .gitignore lines.
-fn bx_init_files(dir: string, name: string) {
-  if (!fs_write(dir + "/mbuild.mettle", mbf_init_text(name))) {
+fn bx_init_files(dir: string, name: string, dry: bool) {
+  var verb: string = "Created";
+  var upd: string = "Updated";
+  if (dry) {
+    verb = "Would create";
+    upd = "Would update";
+  }
+  if (!dry && !fs_write(dir + "/mbuild.mettle", mbf_init_text(name))) {
     fail("cannot write " + dir + "/mbuild.mettle");
   }
-  status("Created", "mbuild.mettle (package `" + name + "`)");
+  status(verb, "mbuild.mettle (package `" + name + "`)");
   if (fs_exists(dir + "/main.mettle") || fs_exists(dir + "/src/main.mettle")) {
     note("kept the existing main file");
   } else {
@@ -3084,10 +3090,11 @@ fn bx_init_files(dir: string, name: string) {
     buf_line(src, "  print(\"Hello from " + name + "!\\n\");");
     buf_line(src, "  return 0;");
     buf_line(src, "}");
-    if (!fs_write(dir + "/src/main.mettle", buf_take(src))) {
+    var mtext: string = buf_take(src);
+    if (!dry && !fs_write(dir + "/src/main.mettle", mtext)) {
       fail("cannot write src/main.mettle");
     }
-    status("Created", "src/main.mettle");
+    status(verb, "src/main.mettle");
   }
   var gi: string = dir + "/.gitignore";
   var cur: FsRead = fs_read(gi);
@@ -3119,8 +3126,11 @@ fn bx_init_files(dir: string, name: string) {
     i = i + 1;
   }
   if (changed) {
-    fs_write(gi, text + buf_take(add));
-    status("Updated", ".gitignore");
+    var gnew: string = text + buf_take(add);
+    if (!dry) {
+      fs_write(gi, gnew);
+    }
+    status(upd, ".gitignore");
   }
 }
 
@@ -3157,9 +3167,18 @@ export fn build_cmd_init(opts: Options*) -> int32 {
       fail("mbuild.toml is no longer read; write mbuild.mettle (mbuild init)");
     }
     if (!have && !dry) {
-      bx_init_files(dir, name);
+      bx_init_files(dir, name, false);
     }
-    var p: Project* = build_open(opts);
+    var p: Project* = build_find(opts);
+    bx_refuse_legacy(p);
+    if (dry) {
+      // evaluating mbuild.mettle compiles a driver: keep it out of the project
+      var dk: string = hash_string(p->root);
+      p->state_dir = fs_temp_dir() + "/init-dry-" + s_sub(dk, 0, 12);
+    }
+    if (slen(p->mbfile) > 0) {
+      bx_load_manifest(p);
+    }
     g_bx_proj = p;
     var r: IniRequest* = new IniRequest;
     g_bx_ini = r;
@@ -3176,9 +3195,18 @@ export fn build_cmd_init(opts: Options*) -> int32 {
   if (have) {
     fail_hint("mbuild.mettle already exists in " + dir, "this is already a project; edit mbuild.mettle instead");
   }
-  bx_init_files(dir, name);
+  bx_init_files(dir, name, dry);
   if (legacy) {
     note("mbuild.toml is no longer read and can be deleted");
+  }
+  if (dry) {
+    if (fs_is_file(dir + "/mettle.deps")) {
+      status("Would update", "mbuild.mettle (dependencies from mettle.deps)");
+    }
+    if (package) {
+      return ini_scaffold_package(dir, name, agent_rules, true);
+    }
+    return 0;
   }
   if (fs_is_file(dir + "/mettle.deps")) {
     var pd: Project* = build_open(opts);
@@ -3186,7 +3214,7 @@ export fn build_cmd_init(opts: Options*) -> int32 {
     deps_adopt_mettle_deps(pd, true);
   }
   if (package) {
-    var rc: int32 = ini_scaffold_package(dir, name, agent_rules);
+    var rc: int32 = ini_scaffold_package(dir, name, agent_rules, false);
     if (rc != 0) {
       return rc;
     }

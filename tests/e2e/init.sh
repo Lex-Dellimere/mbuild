@@ -210,6 +210,10 @@ mkdir -p pk2
 out=$("$D" pk2 scaffold pk2 --agent-rules 2>&1)
 expect_line "scaffold --agent-rules: AGENT.rules" "$out" "     Created AGENT.rules"
 file_has "scaffold --agent-rules: the headings" pk2/AGENT.rules "## Traps"
+mkdir -p pk3
+out=$("$D" pk3 scaffold pk3 --agent-rules --dry-run 2>&1)
+expect_line "scaffold --dry-run: says so" "$out" "Would create AGENT.rules"
+[ -z "$(ls -A pk3)" ] && ok "scaffold --dry-run: writes nothing" || bad "scaffold --dry-run: writes nothing" "$(ls -A pk3)"
 out=$("$D" . check pk 2>&1)
 [ "$out" = ok ] && ok "scaffolded package passes the check" || bad "scaffolded package passes the check" "$out"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("pk", "0.1.0");\n}\n' > pk/mbuild.mettle
@@ -351,6 +355,37 @@ EOF
   expect_has "cli publish without init.rules" "$out" "error: webfw cannot be published without init.rules (mbuild init --package writes one)"
   cd "$P" || exit 1
 
+  # --dry-run never writes: the directory and its file hashes are the same afterwards
+  snap() { find . | LC_ALL=C sort; find . -type f | LC_ALL=C sort | xargs -r sha256sum; }
+  dry_same() {
+    snap > "$T/snap.before"
+    out=$("$@" 2>&1); rc=$?
+    snap > "$T/snap.after"
+    if [ $rc -eq 0 ] && cmp -s "$T/snap.before" "$T/snap.after"; then ok "dry run writes nothing: $*"; else bad "dry run writes nothing: $* (rc $rc)" "$(diff "$T/snap.before" "$T/snap.after"; echo "$out")"; fi
+  }
+  for extra in "" "--yes" "--force" "--yes --force"; do
+    mkdir -p "dry-empty" && cd dry-empty || exit 1
+    dry_same "$MB" init $extra --dry-run
+    dry_same "$MB" init --dry-run $extra
+    dry_same "$MB" init --package --dry-run $extra
+    dry_same "$MB" init --package --agent-rules --dry-run $extra
+    dry_same "$MB" init --from "$W" --dry-run --yes $extra
+    dry_same "$MB" init --from webfw --dry-run --yes $extra
+    dry_same "$MB" new dryapp --from "$W" --dry-run --yes $extra
+    cd "$P" || exit 1
+    rm -rf dry-proj && mkdir dry-proj && cd dry-proj || exit 1
+    "$MB" init >/dev/null 2>&1
+    rm -rf .mbuild
+    dry_same "$MB" init --from "$W" --dry-run --yes $extra
+    dry_same "$MB" init --from webfw --dry-run --yes $extra
+    dry_same "$MB" new dryapp --from "$W" --dry-run --yes $extra
+    cd "$P" || exit 1
+    rm -rf dry-empty
+  done
+  out=$(cd dry-proj && "$MB" init --from "$W" --dry-run --yes 2>&1)
+  expect_has "dry-run init --from lists what it would write" "$out" "Would create src/routes.mettle, static/"
+  out=$(mkdir -p dry-out && cd dry-out && "$MB" init --yes --dry-run 2>&1)
+  expect_has "dry-run init: Would create" "$out" "Would create mbuild.mettle (package \`dry_out\`)"
 fi
 
 echo

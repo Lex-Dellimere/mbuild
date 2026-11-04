@@ -3,7 +3,7 @@
 //   init_test DIR new NAME --from PKG [--opt K=V]... [--yes] [--dry-run] [--force] [--registry R] [-v]
 //   init_test DIR init --from PKG [...]            init --from in the project at DIR
 //   init_test DIR check PKGDIR                     ini_check_package: prints "ok" or the error
-//   init_test DIR scaffold NAME [--agent-rules]   ini_scaffold_package into DIR
+//   init_test DIR scaffold NAME [--agent-rules] [--dry-run]   ini_scaffold_package into DIR
 //   init_test DIR api                              prints ini_api_text
 //   init_test DIR strip FILE                       prints agt_strip_block of FILE
 //   init_test DIR refresh MOD...                   agt_refresh, then "changed=0|1"
@@ -159,7 +159,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     return 0;
   }
   if (s_eq(command, "scaffold")) {
-    return ini_scaffold_package(root, sl_get(pos, 0), agent_rules);
+    return ini_scaffold_package(root, sl_get(pos, 0), agent_rules, r->dry_run);
   }
   if (s_eq(command, "api")) {
     print(ini_api_text());
