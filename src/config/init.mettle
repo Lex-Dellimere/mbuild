@@ -1087,8 +1087,7 @@ fn inx_edit_file(src: InxSrc*, w: InxWork*, text: string*, force: bool, added: S
   }
   if (!inx_declared(info, src->name)) {
     if (src->is_path) {
-      var pl: string = "mb_dep_path(" + inx_lit(src->name) + ", " + inx_lit(src->dir) + ");";
-      if (!inx_edit(mbf_add_lines(*text, sl_of(pl)), src->name, text)) {
+      if (!inx_edit(mbf_add_dep_path(*text, src->name, src->dir), src->name, text)) {
         return false;
       }
       sl_push(added, src->name + " (path)");

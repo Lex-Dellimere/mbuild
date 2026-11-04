@@ -317,6 +317,30 @@ fn cfx_api_dir(p: Project*) -> string {
   return dir;
 }
 
+var g_cfx_warned: StrList* = (StrList*)0;
+var g_cfx_quiet_misplaced: bool = false;
+
+// `mbuild tidy` moves the calls instead of warning about them.
+export fn cfg_quiet_misplaced() {
+  g_cfx_quiet_misplaced = true;
+}
+
+// Once per file and command: a deps-section call inside fn project().
+fn cfx_warn_misplaced(info: MbfInfo*, shown: string) {
+  if (info->misplaced_line == 0 || g_cfx_quiet_misplaced) {
+    return;
+  }
+  if (g_cfx_warned == (StrList*)0) {
+    g_cfx_warned = sl_new();
+  }
+  if (sl_has(g_cfx_warned, shown)) {
+    return;
+  }
+  sl_push(g_cfx_warned, shown);
+  warn(shown + ":" + s_int(info->misplaced_line) + ": " + info->misplaced_call + " belongs in fn deps()");
+  err_line("  " + cyan("help") + ": mbuild tidy moves it");
+}
+
 // Compiles and runs the driver for file (and local_file, "" = none) with its
 // state in state_dir; parses what it declares. fail() / exit on any error.
 fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, config_only: bool) -> Manifest* {
@@ -327,6 +351,7 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
   if (!info->ok) {
     fail(cfx_relabel(info->err, "mbuild.mettle", shown));
   }
+  cfx_warn_misplaced(info, shown);
   var ltext: string = s_empty();
   var lshown: string = s_empty();
   if (slen(local_file) > 0) {
@@ -607,12 +632,31 @@ export fn cfg_set_dep(p: Project*, name: string, version: string) -> bool {
   return true;
 }
 
+// `mbuild tidy`: the deps-section calls of fn project() into fn deps().
+export fn cfg_move_deps(p: Project*) {
+  var file: string = cfx_mbfile(p);
+  var text: string = cfx_read(p, file);
+  var e: MbfEdit = mbf_move_deps(text);
+  if (!e.ok || s_eq(e.text, text)) {
+    return;
+  }
+  if (!fs_write(file, e.text)) {
+    fail("cannot write " + cfx_show(p, file));
+  }
+  var what: string = e.why + " lines";
+  if (s_eq(e.why, "1")) {
+    what = "1 line";
+  }
+  status("Moving", "mbuild.mettle: " + what + " from fn project() into fn deps()");
+  p->man = cfg_load(p);
+}
+
 export fn cfg_remove_dep(p: Project*, name: string) -> bool {
   var file: string = cfx_mbfile(p);
   var text: string = cfx_read(p, file);
   var e: MbfEdit = mbf_remove_dep(text, name);
   if (!e.ok) {
-    cfx_edit_refused(p, e, name, "one mb_dep(\"" + name + "\", ...); line in fn project()");
+    cfx_edit_refused(p, e, name, "one mb_dep(\"" + name + "\", ...); line in fn deps()");
     return false;
   }
   cfx_locked(p, "Removing " + name);

@@ -40,10 +40,13 @@ export MBUILD_METTLE_LINUX="$METTLE"
 mkdir -p "$MBUILD_HOME"
 
 drv() { "$D" "$@" >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
-# proj DIR then lines of fn project() on stdin; src/main.mettle from $MAIN
+# proj DIR then lines on stdin: mb_dep*/mb_replace_* lines go to fn deps(), the rest to fn project(); src/main.mettle from $MAIN
 proj() {
   rm -rf "$1"; mkdir -p "$1/src"
-  { printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("%s", "v0.1.0");\n' "$(basename "$1")"; sed 's/^/  /'; printf '}\n'; } >"$1/mbuild.mettle"
+  awk -v name="$(basename "$1")" '
+    /^mb_(dep|replace)/ { d = d "  " $0 "\n"; next }
+    { p = p "  " $0 "\n" }
+    END { printf "import \"mbuild/api\";\n\nfn project() {\n  mb_package(\"%s\", \"v0.1.0\");\n%s}\n\nfn deps() {\n%s}\n", name, p, d }' >"$1/mbuild.mettle"
   printf '%s\n' "${MAIN:-fn main() -> int32 { return 0; \}}" >"$1/src/main.mettle"
 }
 
@@ -482,7 +485,7 @@ check "unmanaged line help" has "$S/last.out" 'help: run mbuild tidy to move it 
 drv "$P" adopt
 check "adopt" has "$S/last.out" "Adopted foo = ../foo from mettle.deps"
 check "adopt writes mb_dep_path" has "$P/mbuild.mettle" 'mb_dep_path("foo", "../foo");'
-check "adopt: after mb_package" [ "$(sed -n 5p "$P/mbuild.mettle")" = '  mb_dep_path("foo", "../foo");' ]
+check "adopt: into fn deps()" [ "$(sed -n 8p "$P/mbuild.mettle")" = '  mb_dep_path("foo", "../foo");' ]
 drv "$P" ensure
 check "adopted: a path package" has "$S/last.out" "MOD foo   registry= path=1 man=0"
 check "adopted: no warning" hasnt "$S/last.out" "not managed"

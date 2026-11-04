@@ -204,6 +204,12 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     drv_dump(dm);
     return 0;
   }
+  if (s_eq(cmd, "movedeps")) {
+    cfg_quiet_misplaced();
+    cfg_move_deps(p);
+    drv_dump(cfg_load(p));
+    return 0;
+  }
   p->man = cfg_load(p);
   if (s_eq(cmd, "load")) {
     drv_dump(p->man);

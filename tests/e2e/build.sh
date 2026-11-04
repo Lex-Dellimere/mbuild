@@ -266,7 +266,7 @@ check "-q publish: no status or next line" sh -c '! grep -q "Published\|next:" "
 mb yank strx@v1.1.0 --to "$S/reg-$mode"
 check "yank" grep -q "v1.1.0 .*yanked" "$S/reg-$mode/index/strx"
 mkdir -p "$W/user/src" && cd "$W/user"
-printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("user", "0.1.0");\n  mb_dep("strx", "v1.0.0");\n}\n' > mbuild.mettle
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("user", "0.1.0");\n}\n\nfn deps() {\n  mb_dep("strx", "v1.0.0");\n}\n' > mbuild.mettle
 printf 'import "std/io";\nimport "strx/strx";\nfn main() -> int32 { print("a={strx_a()}\\n"); return 0; }\n' > src/main.mettle
 MBUILD_REGISTRY="$S/reg-$mode" "$MB" run >"$S/last.out" 2>&1
 check "a user of the published package builds and runs" has "a=1"
@@ -300,7 +300,10 @@ export MBUILD_REGISTRY="$F/registry"
 # proj DIR: a project named after DIR with the fn project() lines on stdin
 proj() {
   rm -rf "$1"; mkdir -p "$1/src"
-  { printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("%s", "0.1.0");\n' "$(basename "$1")"; sed 's/^/  /'; printf '}\n'; } >"$1/mbuild.mettle"
+  awk -v name="$(basename "$1")" '
+    /^mb_(dep|replace)/ { d = d "  " $0 "\n"; next }
+    { p = p "  " $0 "\n" }
+    END { printf "import \"mbuild/api\";\n\nfn project() {\n  mb_package(\"%s\", \"0.1.0\");\n%s}\n\nfn deps() {\n%s}\n", name, p, d }' >"$1/mbuild.mettle"
 }
 
 echo "== build, run, rebuild"
@@ -607,6 +610,24 @@ check "tidy ignores a nested project's imports" sh -c '! grep -q "\"zero\"" mbui
 mb build
 check "build after tidy" code_is 0
 
+echo "== fn deps()"
+mkdir -p "$W/olddeps/src" && cd "$W/olddeps" || exit 1
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("olddeps", "0.1.0");\n  mb_dep("strutil", "v1.0.0");\n}\n' > mbuild.mettle
+printf 'import "strutil/strutil";\nfn main() -> int32 { return 0; }\n' > src/main.mettle
+mb build
+check "a dep in fn project(): builds" code_is 0
+check "... warns" has "warning: mbuild.mettle:5: mb_dep belongs in fn deps()"
+check "... once" [ "$(grep -c 'belongs in fn deps' "$S/last.out")" = 1 ]
+check "... help" has "help: mbuild tidy moves it"
+mb get apilib@v1.0.0
+check "get makes fn deps() after fn project()" sh -c '[ "$(sed -n 7,10p mbuild.mettle)" = "$(printf "\nfn deps() {\n  mb_dep(\"apilib\", \"v1.0.0\");\n}")" ]'
+mb tidy
+check "tidy: no warning" hasnt "belongs in"
+check "tidy moves it" has "Moving mbuild.mettle: 1 line from fn project() into fn deps()"
+check "tidy: the moved file" sh -c '[ "$(cat mbuild.mettle)" = "$(printf "import \"mbuild/api\";\n\nfn project() {\n  mb_package(\"olddeps\", \"0.1.0\");\n}\n\nfn deps() {\n  mb_dep(\"strutil\", \"v1.0.0\");\n}")" ]'
+mb build
+check "after the move: no warning" hasnt "warning"
+
 echo "== update and get verify the code"
 proj "$W/upd" <<'EOF'
 mb_dep("apilib", "v1.0.0");
@@ -727,12 +748,15 @@ import "mbuild/api";
 
 fn project() {
   mb_package("sass", "0.1.0");
-  mb_dep_path("meosql", "../meosql");
-  mb_dep_bin("meosql", "server");
   mb_profile("bench");
   mb_inherits("release");
   mb_profile("prof");
   mb_inherits("release");
+}
+
+fn deps() {
+  mb_dep_path("meosql", "../meosql");
+  mb_dep_bin("meosql", "server");
 }
 
 fn hook_post_build() -> int32 {

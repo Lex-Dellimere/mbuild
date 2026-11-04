@@ -20,6 +20,7 @@ export struct MbfCall {
   fn_name: string;
   args: StrList*;
   line: int64;
+  owner: string;    // "project" or "deps"
 }
 
 export struct MbfInfo {
@@ -36,6 +37,11 @@ export struct MbfInfo {
   dep_calls: MbfCall*;
   ndep_calls: int64;
   unexported: StrList*;
+  has_deps: bool;
+  deps_start: int64;
+  deps_end: int64;
+  misplaced_line: int64;   // first deps-section call inside fn project(), 0 = none
+  misplaced_call: string;
 }
 
 export struct MbfEdit {
@@ -356,7 +362,7 @@ fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64)
   while (after < n && (s_byte(text, after) == 32 || s_byte(text, after) == 9)) {
     after = after + 1;
   }
-  var alone: bool = after < n && s_byte(text, after) == 59 && slen(s_trim(s_sub(text, c.line_start, start))) == 0;
+  var alone: bool = after < c.line_end && s_byte(text, after) == 59 && slen(s_trim(s_sub(text, c.line_start, start))) == 0;
   if (alone) {
     var rest: string = s_trim(s_sub(text, after + 1, c.line_end));
     alone = slen(rest) == 0 || s_starts(rest, "//");
@@ -533,6 +539,20 @@ fn mfx_is_dep_fn(name: string) -> bool {
   return s_eq(name, "mb_dep") || s_eq(name, "mb_dep_from") || s_eq(name, "mb_dep_path");
 }
 
+// The calls that belong in fn deps().
+fn mfx_is_deps_fn(name: string) -> bool {
+  return mfx_is_dep_fn(name) || s_eq(name, "mb_dep_bin") || s_eq(name, "mb_replace_path") || s_eq(name, "mb_replace_version");
+}
+
+// The call is in fn project() or fn deps().
+fn mfx_in_decl(sc: MfxScan*, c: MfxCall*) -> bool {
+  if (c->in_fn < 0) {
+    return false;
+  }
+  var f: string = sc->fns[c->in_fn].name;
+  return s_eq(f, "project") || s_eq(f, "deps");
+}
+
 fn mfx_all_literal(c: MfxCall*) -> bool {
   var i: int64 = 0;
   while (i < c->literal->len) {
@@ -578,8 +598,18 @@ export fn mbf_scan(text: string) -> MbfInfo* {
   info->dep_calls = (MbfCall*)0;
   info->ndep_calls = 0;
   info->unexported = sl_new();
+  info->deps_start = -1;
+  info->deps_end = -1;
+  info->misplaced_line = 0;
+  info->misplaced_call = s_empty();
   var proj: int64 = mfx_find_fn(sc, "project");
+  var dfn: int64 = mfx_find_fn(sc, "deps");
   info->has_project = proj >= 0;
+  info->has_deps = dfn >= 0;
+  if (dfn >= 0 && sc->fns[dfn].body_open >= 0) {
+    info->deps_start = sc->fns[dfn].body_open + 1;
+    info->deps_end = sc->fns[dfn].body_close;
+  }
   info->has_main = mfx_find_fn(sc, "main") >= 0;
   if (proj >= 0 && sc->fns[proj].body_open >= 0) {
     info->body_start = sc->fns[proj].body_open + 1;
@@ -615,7 +645,7 @@ export fn mbf_scan(text: string) -> MbfInfo* {
     if (is_hook) {
       sl_push(info->hooks, s_from(f.name, 5));
     }
-    if (sc->exports && !f.exported && (is_cmd || is_hook || s_eq(f.name, "project"))) {
+    if (sc->exports && !f.exported && (is_cmd || is_hook || s_eq(f.name, "project") || s_eq(f.name, "deps"))) {
       sl_push(info->unexported, f.name);
       if (info->ok) {
         info->ok = false;
@@ -627,11 +657,20 @@ export fn mbf_scan(text: string) -> MbfInfo* {
   i = 0;
   while (i < sc->ncalls) {
     var c: MfxCall* = &sc->calls[i];
-    if (c->in_fn == proj && proj >= 0 && mfx_is_dep_fn(c->fn_name) && mfx_all_literal(c)) {
+    var in_proj: bool = c->in_fn == proj && proj >= 0;
+    if (in_proj && info->misplaced_line == 0 && mfx_is_deps_fn(c->fn_name)) {
+      info->misplaced_line = c->line;
+      info->misplaced_call = c->fn_name;
+    }
+    if ((in_proj || (c->in_fn == dfn && dfn >= 0)) && mfx_is_dep_fn(c->fn_name) && mfx_all_literal(c)) {
       var mc: MbfCall;
       mc.fn_name = c->fn_name;
       mc.args = c->args;
       mc.line = c->line;
+      mc.owner = "deps";
+      if (in_proj) {
+        mc.owner = "project";
+      }
       info->dep_calls = (MbfCall*)realloc(info->dep_calls, (info->ndep_calls + 1) * sizeof(MbfCall));
       info->dep_calls[info->ndep_calls] = mc;
       info->ndep_calls = info->ndep_calls + 1;
@@ -684,22 +723,21 @@ fn mfx_match_dep(sc: MfxScan*, name: string) -> MfxMatch {
   m.count = 0;
   m.bad_line = 0;
   m.why = s_empty();
-  var proj: int64 = mfx_find_fn(sc, "project");
   var i: int64 = 0;
   while (i < sc->ncalls) {
     var c: MfxCall* = &sc->calls[i];
     if (mfx_is_dep_fn(c->fn_name)) {
       var ki: int64 = mfx_key_index(c->fn_name);
       if (!mfx_arg_literal(c, ki)) {
-        if (c->in_fn == proj && slen(m.why) == 0) {
+        if (mfx_in_decl(sc, c) && slen(m.why) == 0) {
           m.bad_line = c->line;
           m.why = "a computed package name";
         }
       } else if (s_eq(mfx_arg(c, ki), name)) {
         m.count = m.count + 1;
-        if (c->in_fn != proj) {
+        if (!mfx_in_decl(sc, c)) {
           m.bad_line = c->line;
-          m.why = "a call outside fn project()";
+          m.why = "a call outside fn deps()";
         } else if (m.count > 1) {
           m.bad_line = c->line;
           m.why = "more than one call";
@@ -740,7 +778,8 @@ export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
     var out: string = s_sub(text, 0, c->arg_start[vi]) + mfx_lit(version) + s_from(text, c->arg_end[vi]);
     return mfx_edit(true, out, c->line, s_empty());
   }
-  return mfx_insert_dep(text, sc, proj, "mb_dep(" + mfx_lit(name) + ", " + mfx_lit(version) + ");");
+  var stmt: string = "mb_dep(" + mfx_lit(name) + ", " + mfx_lit(version) + ");";
+  return mfx_insert_dep(text, sc, stmt);
 }
 
 // Adds `mb_dep_path("NAME", "PATH");` where mbf_set_dep adds a new mb_dep;
@@ -759,29 +798,26 @@ export fn mbf_add_dep_path(text: string, name: string, path: string) -> MbfEdit 
   if (m.at >= 0) {
     return mfx_edit(false, text, sc->calls[m.at].line, "declared already");
   }
-  return mfx_insert_dep(text, sc, proj, "mb_dep_path(" + mfx_lit(name) + ", " + mfx_lit(path) + ");");
+  var stmt: string = "mb_dep_path(" + mfx_lit(name) + ", " + mfx_lit(path) + ");";
+  return mfx_insert_dep(text, sc, stmt);
 }
 
-// A new dependency line: after the last mb_dep* line, else after
-// mb_package(, else right after the brace of fn project() (13.8).
-fn mfx_insert_dep(text: string, sc: MfxScan*, proj: int64, stmt: string) -> MbfEdit {
+// A new dependency line goes into fn deps(): after its last mb_dep* line,
+// else at the end of its body; without fn deps(), into a new one right after
+// fn project() (13.8).
+fn mfx_insert_dep(text: string, sc: MfxScan*, stmt: string) -> MbfEdit {
+  var dfn: int64 = mfx_find_fn(sc, "deps");
+  if (dfn < 0 || sc->fns[dfn].body_close < 0) {
+    return mfx_new_deps(text, sc, "  " + stmt + "\n");
+  }
   var anchor: int64 = -1;
   var i: int64 = 0;
   while (i < sc->ncalls) {
     var ci: MfxCall* = &sc->calls[i];
-    if (ci->in_fn == proj && ci->alone && mfx_is_dep_fn(ci->fn_name) && mfx_all_literal(ci)) {
+    if (ci->in_fn == dfn && ci->alone && mfx_is_dep_fn(ci->fn_name) && mfx_all_literal(ci)) {
       anchor = i;
     }
     i = i + 1;
-  }
-  if (anchor < 0) {
-    i = 0;
-    while (i < sc->ncalls && anchor < 0) {
-      if (sc->calls[i].in_fn == proj && sc->calls[i].alone && s_eq(sc->calls[i].fn_name, "mb_package")) {
-        anchor = i;
-      }
-      i = i + 1;
-    }
   }
   if (anchor >= 0) {
     var a: MfxCall* = &sc->calls[anchor];
@@ -792,16 +828,95 @@ fn mfx_insert_dep(text: string, sc: MfxScan*, proj: int64, stmt: string) -> MbfE
     var out2: string = head + mfx_indent(text, a->line_start) + stmt + "\n" + s_from(text, a->line_end);
     return mfx_edit(true, out2, a->line + 1, s_empty());
   }
-  var open: int64 = sc->fns[proj].body_open;
-  var brace_line: int64 = mfx_line_of(text, open);
-  var nl: int64 = open + 1;
-  while (nl < slen(text) && (s_byte(text, nl) == 32 || s_byte(text, nl) == 9 || s_byte(text, nl) == 13)) {
-    nl = nl + 1;
+  return mfx_append_body(text, sc, dfn, "  " + stmt + "\n");
+}
+
+// add (whole lines) at the end of function fi's body.
+fn mfx_append_body(text: string, sc: MfxScan*, fi: int64, add: string) -> MbfEdit {
+  var open: int64 = sc->fns[fi].body_open;
+  var close: int64 = sc->fns[fi].body_close;
+  var cls: int64 = mfx_line_start(text, close);
+  var at_line: int64 = mfx_line_of(text, close);
+  if (slen(s_trim(s_sub(text, cls, close))) == 0 && cls > open) {
+    return mfx_edit(true, s_sub(text, 0, cls) + add + s_from(text, cls), at_line, s_empty());
   }
-  if (nl < slen(text) && s_byte(text, nl) == 10) {
-    return mfx_edit(true, s_sub(text, 0, nl + 1) + "  " + stmt + "\n" + s_from(text, nl + 1), brace_line + 1, s_empty());
+  return mfx_edit(true, s_sub(text, 0, close) + "\n" + add + s_from(text, close), at_line + 1, s_empty());
+}
+
+// A new `fn deps()` holding add (whole lines), right after fn project().
+fn mfx_new_deps(text: string, sc: MfxScan*, add: string) -> MbfEdit {
+  var proj: int64 = mfx_find_fn(sc, "project");
+  var at: int64 = slen(text);
+  if (proj >= 0 && sc->fns[proj].body_close >= 0) {
+    at = mfx_line_end(text, sc->fns[proj].body_close);
   }
-  return mfx_edit(true, s_sub(text, 0, open + 1) + "\n  " + stmt + "\n" + s_from(text, open + 1), brace_line + 1, s_empty());
+  var b: Buf* = buf_new();
+  buf_add(b, s_sub(text, 0, at));
+  if (b->len > 0 && !s_ends(buf_str(b), "\n")) {
+    buf_addb(b, 10);
+  }
+  buf_addb(b, 10);
+  var line: int64 = mfx_line_of(buf_str(b), b->len) + 1;
+  if (sc->exports) {
+    buf_add(b, "export ");
+  }
+  buf_line(b, "fn deps() {{");
+  buf_add(b, add);
+  buf_line(b, "}");
+  var rest: string = s_from(text, at);
+  if (slen(rest) > 0 && !s_starts(rest, "\n")) {
+    buf_addb(b, 10);
+  }
+  buf_add(b, rest);
+  return mfx_edit(true, buf_take(b), line, s_empty());
+}
+
+// `mbuild tidy`: moves every deps-section call of fn project() that sits on
+// its own line into fn deps() (made when missing), keeping each line's text
+// and order. why holds the number of lines moved.
+export fn mbf_move_deps(text: string) -> MbfEdit {
+  var sc: MfxScan* = mfx_scan(text);
+  var proj: int64 = mfx_find_fn(sc, "project");
+  if (proj < 0 || sc->fns[proj].body_close < 0) {
+    return mfx_edit(false, text, 0, "no fn project()");
+  }
+  var kept: Buf* = buf_new();
+  var moved: Buf* = buf_new();
+  var n: int64 = 0;
+  var pos: int64 = 0;
+  var i: int64 = 0;
+  while (i < sc->ncalls) {
+    var c: MfxCall* = &sc->calls[i];
+    i = i + 1;
+    if (c->in_fn != proj || !c->alone || !mfx_is_deps_fn(c->fn_name)) {
+      continue;
+    }
+    buf_add(kept, s_sub(text, pos, c->line_start));
+    var l: string = s_sub(text, c->line_start, c->line_end);
+    buf_add(moved, l);
+    if (!s_ends(l, "\n")) {
+      buf_addb(moved, 10);
+    }
+    pos = c->line_end;
+    n = n + 1;
+  }
+  if (n == 0) {
+    return mfx_edit(true, text, 0, "0");
+  }
+  buf_add(kept, s_from(text, pos));
+  var t: string = buf_take(kept);
+  var add: string = buf_take(moved);
+  var sc2: MfxScan* = mfx_scan(t);
+  defer free(sc2);
+  var dfn: int64 = mfx_find_fn(sc2, "deps");
+  var e: MbfEdit;
+  if (dfn < 0 || sc2->fns[dfn].body_close < 0) {
+    e = mfx_new_deps(t, sc2, add);
+  } else {
+    e = mfx_append_body(t, sc2, dfn, add);
+  }
+  e.why = s_int(n);
+  return e;
 }
 
 export fn mbf_remove_dep(text: string, name: string) -> MbfEdit {
@@ -884,12 +999,13 @@ fn mfx_decl_fn(sc: MfxScan*) -> int64 {
   return at;
 }
 
-// The line of the first literal `call(...)` in fn project() (or fn local())
+// The line of the first literal `call(...)` in fn project() or fn deps() (or fn local())
 // whose key argument is first_arg ("" = any) and that writes to section ("" =
 // any); 0 when there is none. Calls made from other functions are not followed.
 export fn mbf_locate(text: string, call: string, first_arg: string, section: string) -> int64 {
   var sc: MfxScan* = mfx_scan(text);
   var proj: int64 = mfx_decl_fn(sc);
+  var dfn: int64 = mfx_find_fn(sc, "deps");
   var cur: MfxCursor;
   cur.kind = s_empty();
   cur.name = s_empty();
@@ -898,7 +1014,7 @@ export fn mbf_locate(text: string, call: string, first_arg: string, section: str
   while (i < sc->ncalls) {
     var c: MfxCall* = &sc->calls[i];
     i = i + 1;
-    if (c->in_fn != proj || proj < 0) {
+    if ((c->in_fn != proj || proj < 0) && (c->in_fn != dfn || dfn < 0)) {
       continue;
     }
     var sec: string = mfx_section(&cur, c);
@@ -997,7 +1113,7 @@ export fn mbf_driver(info: MbfInfo*, file: string, config_only: bool) -> string 
 }
 
 // mbf_driver, with local_file (mbuild.local.mettle, "" = none) compiled in:
-// config mode then runs fn local() after fn project().
+// config mode then runs fn local() after fn project() and fn deps().
 export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, config_only: bool) -> string {
   var b: Buf* = buf_new();
   buf_line(b, "// generated by mbuild from mbuild.mettle; do not edit");
@@ -1009,10 +1125,14 @@ export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, con
   buf_line(b, "");
   buf_line(b, "fn main(argc: int32, argv: cstring*) -> int32 {{");
   buf_line(b, "  mbi_start(argc, argv);");
+  var decl: string = "project(); ";
+  if (info->has_deps) {
+    decl = "project(); deps(); ";
+  }
   if (slen(local_file) > 0) {
-    buf_line(b, "  if (mbi_mode(\"config\")) {{ project(); mbi_local(); local(); return mbi_finish_config(); }");
+    buf_line(b, "  if (mbi_mode(\"config\")) {{ " + decl + "mbi_local(); local(); return mbi_finish_config(); }");
   } else {
-    buf_line(b, "  if (mbi_mode(\"config\")) {{ project(); return mbi_finish_config(); }");
+    buf_line(b, "  if (mbi_mode(\"config\")) {{ " + decl + "return mbi_finish_config(); }");
   }
   if (!config_only && info->ncommands > 0) {
     buf_line(b, "  if (mbi_mode(\"cmd\")) {{");
@@ -1047,6 +1167,9 @@ export fn mbf_init_text(name: string) -> string {
   buf_line(b, "");
   buf_line(b, "fn project() {{");
   buf_line(b, "  mb_package(" + mfx_lit(name) + ", \"0.1.0\");");
+  buf_line(b, "}");
+  buf_line(b, "");
+  buf_line(b, "fn deps() {{");
   buf_line(b, "}");
   buf_line(b, "");
   buf_line(b, "// hello: an example project command (`mbuild hello NAME`)");

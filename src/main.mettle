@@ -13,6 +13,7 @@ import "build/build";
 import "pkg/deps";
 import "build/toolchain";
 import "config/init";
+import "config/config";
 import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
@@ -229,6 +230,9 @@ fn mx_positional_count(o: Options*) -> int64 {
 }
 
 fn mx_dispatch(command: string, o: Options*) -> int32 {
+  if (s_eq(command, "tidy")) {
+    cfg_quiet_misplaced();
+  }
   if (s_eq(command, "version")) {
     var host: string = sys_os();
     if (sys_is_wine()) {

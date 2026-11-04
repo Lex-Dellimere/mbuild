@@ -2942,6 +2942,7 @@ export fn deps_cmd_update(p: Project*) -> int32 {
 export fn deps_cmd_tidy(p: Project*, used_modules: StrList*) -> int32 {
   dx_refuse_locked(p, "mbuild tidy");
   dx_need_mbfile(p);
+  cfg_move_deps(p);
   g_dx_no_vendor = true;
   dx_arm(p);
   var adopted: StrList* = dx_adopt(p, true);

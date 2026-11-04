@@ -264,7 +264,7 @@ pkg comps v1.0.0
 
 # --- app: imports strutil and vecmath, declares only vecmath -----------------
 A="$ROOT/app"; rm -rf "$A"; mkdir -p "$A/src"
-printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("app", "0.1.0");\n  mb_dep("vecmath", "v0.1.0");\n}\n' > "$A/mbuild.mettle"
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("app", "0.1.0");\n}\n\nfn deps() {\n  mb_dep("vecmath", "v0.1.0");\n}\n' > "$A/mbuild.mettle"
 cat > "$A/src/main.mettle" <<'EOF'
 import "std/io";
 import "vecmath/vecmath";

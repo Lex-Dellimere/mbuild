@@ -93,10 +93,22 @@ fn test_scan() {
   t_eq("scan: one command", s_int(info->ncommands), "1");
   t_eq("scan: command name", info->commands[0].name, "install");
   t_eq("scan: command summary", info->commands[0].summary, "build a release and copy it into a bin directory (default ~/.local/bin)");
-  t_eq("scan: command line", s_int(info->commands[0].line), "29");
+  t_eq("scan: command line", s_int(info->commands[0].line), "32");
   t_eq("scan: hooks", sl_join(info->hooks, ","), "pre_build");
   t_eq("scan: dep calls", s_int(info->ndep_calls), "3");
-  t_eq("scan: dep call 2", info->dep_calls[1].fn_name + " " + sl_join(info->dep_calls[1].args, ",") + " " + s_int(info->dep_calls[1].line), "mb_dep_from corp,auth,v2.0.0 8");
+  t_eq("scan: dep call 2", info->dep_calls[1].fn_name + " " + sl_join(info->dep_calls[1].args, ",") + " " + s_int(info->dep_calls[1].line), "mb_dep_from corp,auth,v2.0.0 27");
+  t_eq("scan: dep call owner", info->dep_calls[1].owner, "deps");
+  t_ok("scan: has deps", info->has_deps && info->deps_start > 0 && info->deps_end > info->deps_start);
+  t_eq("scan: nothing misplaced", s_int(info->misplaced_line), "0");
+
+  var mp: MbfInfo* = mbf_scan(src("fn project() $\n  mb_package(`p`, `1.0.0`);\n  mb_dep_bin(`a`, `b`);\n  mb_dep(`a`, `v1`);\n}\n"));
+  defer free(mp);
+  t_eq("scan: misplaced call", mp->misplaced_call + " " + s_int(mp->misplaced_line), "mb_dep_bin 3");
+  t_eq("scan: misplaced dep owner", mp->dep_calls[0].owner, "project");
+  t_ok("scan: no deps", !mp->has_deps && mp->deps_start < 0);
+  var ud: MbfInfo* = mbf_scan(src("export fn project() $\n}\n\nfn deps() $\n}\n"));
+  defer free(ud);
+  t_eq("scan: unexported deps", ud->err, "mbuild.mettle:4: fn deps must be exported, because this file exports other names");
 
   var ex: MbfInfo* = mbf_scan(src("import `mbuild/api`;\n\nfn project() $\n  mb_package(`x`, `0.1.0`);\n}\n\nexport fn cmd_x(a: MbArgs*) -> int32 $\n  return 0;\n}\n"));
   defer free(ex);
@@ -127,24 +139,37 @@ fn test_edits() {
   t_ok("set: ok", e.ok);
   t_eq("set: only the literal changed", changed_lines(text, e.text), "-  mb_dep(\"strutil\", \"v1.1.0\");|+  mb_dep(\"strutil\", \"v1.2.0\");");
   t_eq("set: same length otherwise", s_int(slen(e.text)), s_int(slen(text)));
-  t_eq("set: line", s_int(e.line), "7");
+  t_eq("set: line", s_int(e.line), "26");
 
   var j: MbfEdit = mbf_set_dep(text, "json", "v1.0.0");
   t_ok("add: ok", j.ok);
   t_eq("add: after the last mb_dep*", changed_lines(text, j.text), "+  mb_dep(\"json\", \"v1.0.0\");");
   t_has("add: placed after mb_dep_path", j.text, "mb_dep_path(\"widgets\", \"../widgets\");\n  mb_dep(\"json\", \"v1.0.0\");\n");
-  t_eq("add: line", s_int(j.line), "10");
+  t_eq("add: line", s_int(j.line), "29");
 
   var a2: MbfEdit = mbf_set_dep(text, "auth", "v2.1.0");
   t_has("set: mb_dep_from version", a2.text, "mb_dep_from(\"corp\", \"auth\", \"v2.1.0\");");
 
   var only_pkg: string = src("fn project() $\n    mb_package(`p`, `1.0.0`);\n}\n");
-  t_eq("add: after mb_package with its indent", mbf_set_dep(only_pkg, "x", "v1").text, src("fn project() $\n    mb_package(`p`, `1.0.0`);\n    mb_dep(`x`, `v1`);\n}\n"));
-  t_eq("add: after the brace", mbf_set_dep(src("fn project() $\n}\n"), "x", "v1").text, src("fn project() $\n  mb_dep(`x`, `v1`);\n}\n"));
+  var nd: MbfEdit = mbf_set_dep(only_pkg, "x", "v1");
+  t_eq("add: creates fn deps() after fn project()", nd.text, src("fn project() $\n    mb_package(`p`, `1.0.0`);\n}\n\nfn deps() $\n  mb_dep(`x`, `v1`);\n}\n"));
+  t_eq("add: new fn deps() line", s_int(nd.line), "6");
+  var ndc: string = src("fn project() $\n}\nfn cmd_x(a: MbArgs*) -> int32 $ return 0; }\n");
+  t_eq("add: fn deps() before what follows", mbf_set_dep(ndc, "x", "v1").text, src("fn project() $\n}\n\nfn deps() $\n  mb_dep(`x`, `v1`);\n}\n\nfn cmd_x(a: MbArgs*) -> int32 $ return 0; }\n"));
+  t_has("add: exported fn deps()", mbf_set_dep(src("export fn project() $\n}\n"), "x", "v1").text, src("\nexport fn deps() $\n  mb_dep(`x`, `v1`);\n}\n"));
+  var init: MbfEdit = mbf_set_dep(mbf_init_text("hello"), "x", "v1");
+  t_has("add: into the empty fn deps()", init.text, src("}\n\nfn deps() $\n  mb_dep(`x`, `v1`);\n}\n\n// hello:"));
+  t_eq("add: empty fn deps() line", s_int(init.line), "9");
+  t_has("add: fn deps() {{} on one line", mbf_set_dep(src("fn project() $\n}\nfn deps() $}\n"), "x", "v1").text, src("fn deps() $\n  mb_dep(`x`, `v1`);\n}\n"));
+  var mixed: string = src("fn project() $\n  mb_dep(`a`, `v1`);\n}\n");
+  t_eq("add: deps in fn project() stay, the new one goes to fn deps()", mbf_set_dep(mixed, "b", "v1").text, src("fn project() $\n  mb_dep(`a`, `v1`);\n}\n\nfn deps() $\n  mb_dep(`b`, `v1`);\n}\n"));
+  t_has("set: a dep in fn project() is edited in place", mbf_set_dep(mixed, "a", "v2").text, src("fn project() $\n  mb_dep(`a`, `v2`);\n}\n"));
+  t_eq("remove: a dep in fn project()", mbf_remove_dep(mixed, "a").text, src("fn project() $\n}\n"));
+  t_has("add path: into fn deps()", mbf_add_dep_path(viewer(), "foo", "../foo").text, "mb_dep_path(\"widgets\", \"../widgets\");\n  mb_dep_path(\"foo\", \"../foo\");\n}\n");
 
   var commented: string = src("fn project() $\n  mb_package(`p`, `1.0.0`);\n  /* mb_dep(`strutil`, `v1.0.0`); */\n  // mb_dep(`strutil`, `v1.0.0`);\n}\n");
   var c: MbfEdit = mbf_set_dep(commented, "strutil", "v1.1.0");
-  t_eq("comment: not matched, a new line is added", changed_lines(commented, c.text), "+  mb_dep(\"strutil\", \"v1.1.0\");");
+  t_eq("comment: not matched, a new line is added", changed_lines(commented, c.text), "+|+fn deps() {{|+  mb_dep(\"strutil\", \"v1.1.0\");|+}");
 
   var r: MbfEdit = mbf_remove_dep(text, "widgets");
   t_ok("remove: ok", r.ok);
@@ -154,12 +179,22 @@ fn test_edits() {
   var bad: MbfEdit = mbf_set_dep(computed, "strutil", "v1.2.0");
   t_ok("computed name -> not ok", !bad.ok);
   t_eq("computed name: line", s_int(bad.line), "3");
-  var helper: string = src("fn deps() $\n  mb_dep(`strutil`, `v1`);\n}\n\nfn project() $\n  deps();\n}\n");
+  var helper: string = src("fn more_deps() $\n  mb_dep(`strutil`, `v1`);\n}\n\nfn project() $\n  more_deps();\n}\n");
   t_ok("helper call -> not ok", !mbf_set_dep(helper, "strutil", "v2").ok);
   var twice: string = src("fn project() $\n  mb_dep(`strutil`, `v1`);\n  mb_dep(`strutil`, `v2`);\n}\n");
   t_ok("two calls -> not ok", !mbf_set_dep(twice, "strutil", "v3").ok);
   var shared: string = src("fn project() $\n  mb_dep(`a`, `v1`); mb_dep(`b`, `v1`);\n}\n");
   t_ok("remove: shared line -> not ok", !mbf_remove_dep(shared, "b").ok);
+
+  var mv_src: string = src("fn project() $\n  mb_package(`p`, `1.0.0`);\n  mb_dep(`a`, `v1`); // pinned\n  mb_set(`x`, `y`);\n    mb_replace_path(`b`, `../b`);\n  mb_dep_bin(`a`, `srv`);\n  mb_flags(`-O`); mb_dep(`c`, `v1`);\n}\n\n// tail\n");
+  var mv: MbfEdit = mbf_move_deps(mv_src);
+  t_ok("move: ok", mv.ok);
+  t_eq("move: count", mv.why, "3");
+  t_eq("move: lines kept as written, in order", mv.text, src("fn project() $\n  mb_package(`p`, `1.0.0`);\n  mb_set(`x`, `y`);\n  mb_flags(`-O`); mb_dep(`c`, `v1`);\n}\n\nfn deps() $\n  mb_dep(`a`, `v1`); // pinned\n    mb_replace_path(`b`, `../b`);\n  mb_dep_bin(`a`, `srv`);\n}\n\n// tail\n"));
+  var mv2: MbfEdit = mbf_move_deps(src("fn deps() $\n  mb_dep(`z`, `v1`);\n}\n\nfn project() $\n  mb_dep(`a`, `v1`);\n}\n"));
+  t_eq("move: appended to an existing fn deps()", mv2.text, src("fn deps() $\n  mb_dep(`z`, `v1`);\n  mb_dep(`a`, `v1`);\n}\n\nfn project() $\n}\n"));
+  var mv3: MbfEdit = mbf_move_deps(viewer());
+  t_ok("move: nothing to move", mv3.ok && s_eq(mv3.text, viewer()) && s_eq(mv3.why, "0"));
 
   var lines: StrList* = sl_new();
   defer free(lines);
@@ -176,16 +211,16 @@ fn test_edits() {
 
 fn test_locate() {
   var text: string = viewer();
-  t_eq("locate: mb_set optimize in release", s_int(mbf_locate(text, "mb_set", "optimize", "profile.release")), "17");
-  t_eq("locate: mb_set safe in debug", s_int(mbf_locate(text, "mb_set", "safe", "profile.debug")), "25");
-  t_eq("locate: os profile", s_int(mbf_locate(text, "mb_set", "subsystem", "profile.release.windows")), "21");
-  t_eq("locate: mb_dep_from by name", s_int(mbf_locate(text, "mb_dep_from", "auth", "dependencies")), "8");
+  t_eq("locate: mb_set optimize in release", s_int(mbf_locate(text, "mb_set", "optimize", "profile.release")), "14");
+  t_eq("locate: mb_set safe in debug", s_int(mbf_locate(text, "mb_set", "safe", "profile.debug")), "22");
+  t_eq("locate: os profile", s_int(mbf_locate(text, "mb_set", "subsystem", "profile.release.windows")), "18");
+  t_eq("locate: mb_dep_from in fn deps()", s_int(mbf_locate(text, "mb_dep_from", "auth", "dependencies")), "27");
   t_eq("locate: wrong section", s_int(mbf_locate(text, "mb_set", "safe", "profile.release")), "0");
   t_eq("locate: any", s_int(mbf_locate(text, "mb_package", "", "")), "4");
 }
 
 fn test_driver() {
-  var want: string = src("// generated by mbuild from mbuild.mettle; do not edit\nimport `mbuild/api`;\nimport `/home/me/app/mbuild.mettle`;\n\nfn main(argc: int32, argv: cstring*) -> int32 $\n  mbi_start(argc, argv);\n  if (mbi_mode(`config`)) $ project(); return mbi_finish_config(); }\n  if (mbi_mode(`cmd`)) $\n    var a: MbArgs* = mbi_args();\n    if (mbi_name(`install`)) $ return cmd_install(a); }\n  }\n  if (mbi_mode(`hook`)) $\n    if (mbi_name(`pre_build`)) $ return hook_pre_build(); }\n  }\n  return mbi_unknown();\n}\n");
+  var want: string = src("// generated by mbuild from mbuild.mettle; do not edit\nimport `mbuild/api`;\nimport `/home/me/app/mbuild.mettle`;\n\nfn main(argc: int32, argv: cstring*) -> int32 $\n  mbi_start(argc, argv);\n  if (mbi_mode(`config`)) $ project(); deps(); return mbi_finish_config(); }\n  if (mbi_mode(`cmd`)) $\n    var a: MbArgs* = mbi_args();\n    if (mbi_name(`install`)) $ return cmd_install(a); }\n  }\n  if (mbi_mode(`hook`)) $\n    if (mbi_name(`pre_build`)) $ return hook_pre_build(); }\n  }\n  return mbi_unknown();\n}\n");
   var info: MbfInfo* = mbf_scan(viewer());
   defer free(info);
   t_eq("driver: 13.2 shape", mbf_driver(info, "/home/me/app/mbuild.mettle", false), want);
@@ -193,7 +228,11 @@ fn test_driver() {
   t_ok("driver: config only has no cmd branch", !s_contains(cfg, "\"cmd\"") && !s_contains(cfg, "\"hook\"") && s_contains(cfg, "\"config\""));
   var it: MbfInfo* = mbf_scan(mbf_init_text("hello"));
   defer free(it);
-  t_ok("init text: scans", it->ok && it->ncommands == 1);
+  t_ok("init text: scans", it->ok && it->ncommands == 1 && it->has_deps);
+  t_has("init text: empty fn deps() after fn project()", mbf_init_text("hello"), src("  mb_package(`hello`, `0.1.0`);\n}\n\nfn deps() $\n}\n\n// hello:"));
+  var nodeps: MbfInfo* = mbf_scan(src("fn project() $\n}\n"));
+  defer free(nodeps);
+  t_has("driver: no fn deps(), project() only", mbf_driver(nodeps, "/a/mbuild.mettle", true), src("$ project(); return mbi_finish_config(); }"));
   t_eq("init text: command", it->commands[0].name + ": " + it->commands[0].summary, "hello: an example project command (`mbuild hello NAME`)");
 }
 
@@ -221,7 +260,7 @@ fn test_local() {
   var info: MbfInfo* = mbf_scan(viewer());
   defer free(info);
   t_has("driver with local: imports it", mbf_driver_local(info, "/a/mbuild.mettle", "/a/mbuild.local.mettle", true), src("import `/a/mbuild.local.mettle`;\n"));
-  t_has("driver with local: runs it", mbf_driver_local(info, "/a/mbuild.mettle", "/a/mbuild.local.mettle", true), src("$ project(); mbi_local(); local(); return mbi_finish_config(); }"));
+  t_has("driver with local: runs it", mbf_driver_local(info, "/a/mbuild.mettle", "/a/mbuild.local.mettle", true), src("$ project(); deps(); mbi_local(); local(); return mbi_finish_config(); }"));
 }
 
 fn run_all() -> int64 {

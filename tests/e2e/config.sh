@@ -64,10 +64,6 @@ version = "0.3.0"
 description = "image viewer"
 [build]
 targets = ["linux", "windows"]
-[dependencies]
-strutil = "v1.1.0"
-auth = { version = "v2.0.0", registry = "corp" }
-widgets = { path = "../widgets" }
 [registry.corp]
 url = "https://pkgs.example.com/mettle"
 [component.renderer]
@@ -85,6 +81,10 @@ components = ["renderer=gl"]
 subsystem = "windows"
 [profile.debug]
 safe = true
+[dependencies]
+strutil = "v1.1.0"
+auth = { version = "v2.0.0", registry = "corp" }
+widgets = { path = "../widgets" }
 EOF
 printf '#!/bin/sh\necho "stub got: $*"\n' > "$T/stub.sh"
 chmod +x "$T/stub.sh"
@@ -156,7 +156,7 @@ hooks pre_build"
   expect_has "$mode: fn main refused" "$out" "error: mbuild.mettle:7: mbuild.mettle cannot define fn main"
 
   mkdir -p "$P/iroot/src" "$P/meosql" && cd "$P/iroot"
-  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("iroot", "0.1.0");\n  mb_import_root("src");\n  mb_dep_path("meosql", "../meosql");\n  mb_dep_bin("meosql", "server");\n  mb_dep_bin("meosql", "admin");\n}\n' > mbuild.mettle
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("iroot", "0.1.0");\n  mb_import_root("src");\n}\n\nfn deps() {\n  mb_dep_path("meosql", "../meosql");\n  mb_dep_bin("meosql", "server");\n  mb_dep_bin("meosql", "admin");\n}\n' > mbuild.mettle
   "$D" load >/dev/null
   expect_eq "$mode: mb_import_root and mb_dep_bin emit" "$("$D" text | sed -n '/^import-root/p;/^\[dep-bins\]/,$p')" 'import-root = "src"
 [dep-bins]
@@ -169,7 +169,7 @@ meosql = ["server", "admin"]'
   expect_line "$mode: import root inside the package" "$out" 'error: mbuild.mettle:5: mb_import_root("../src"): the import root is a directory inside the package, relative to it (e.g. "src")'
   sed -i -e 's|mb_import_root("../src")|mb_import_root("src")|' -e 's|mb_dep_bin("meosql", "admin")|mb_dep_bin("meosq", "admin")|' mbuild.mettle
   out=$("$D" load 2>&1)
-  expect_line "$mode: mb_dep_bin of a non-dependency" "$out" 'error: mbuild.mettle:8: mb_dep_bin("meosq", ...): meosq is not a dependency of this package (did you mean meosql?)'
+  expect_line "$mode: mb_dep_bin of a non-dependency" "$out" 'error: mbuild.mettle:11: mb_dep_bin("meosq", ...): meosq is not a dependency of this package (did you mean meosql?)'
 
   echo "== $mode: commands"
   mkdir -p "$P/hello" && cd "$P/hello"
@@ -224,10 +224,43 @@ EOF
   out=$("$D" --locked setdep strutil v1.3.0 2>&1); code=$?
   expect_has "$mode: --locked refuses" "$out" "--locked forbids it"
   mkdir -p "$P/computed" && cd "$P/computed"
-  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("c", "0.1.0");\n  var n: string = "strutil";\n  mb_dep(n, "v1");\n}\n' > mbuild.mettle
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("c", "0.1.0");\n}\n\nfn deps() {\n  var n: string = "strutil";\n  mb_dep(n, "v1");\n}\n' > mbuild.mettle
   out=$("$D" setdep strutil v1.2.0 2>&1)
-  expect_has "$mode: uneditable" "$out" "error: mbuild.mettle:6 declares strutil in a way mbuild cannot edit"
+  expect_has "$mode: uneditable" "$out" "error: mbuild.mettle:9 declares strutil in a way mbuild cannot edit"
   expect_has "$mode: uneditable help" "$out" 'help: change it to: mb_dep("strutil", "v1.2.0");'
+
+  echo "== $mode: deps in fn project()"
+  mkdir -p "$P/old" && cd "$P/old"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("old", "0.1.0");\n  mb_dep("strutil", "v1.0.0");\n  mb_meta("license", "MIT");\n  mb_replace_version("strutil", "v1.0.1");\n}\n' > mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: misplaced warning" "$out" 'warning: mbuild.mettle:5: mb_dep belongs in fn deps()'
+  expect_line "$mode: misplaced help" "$out" '  help: mbuild tidy moves it'
+  expect_line "$mode: misplaced still resolves" "$out" "dep strutil version=v1.0.0 path= registry="
+  out=$("$D" setdep json v1.0.0 2>&1)
+  expect_eq "$mode: misplaced warns once per command" "$(printf '%s\n' "$out" | grep -c 'belongs in fn deps')" "1"
+  expect_line "$mode: a new dep creates fn deps()" "$out" '      Adding mbuild.mettle: mb_dep("json", "v1.0.0")'
+  expect_eq "$mode: fn deps() after fn project()" "$(sed -n '9,12p' mbuild.mettle)" '
+fn deps() {
+  mb_dep("json", "v1.0.0");
+}'
+  out=$("$D" movedeps 2>&1)
+  expect_no "$mode: move: no warning" "$out" "belongs in"
+  expect_line "$mode: move status" "$out" '      Moving mbuild.mettle: 2 lines from fn project() into fn deps()'
+  expect_eq "$mode: moved in order, the rest kept" "$(cat mbuild.mettle)" 'import "mbuild/api";
+
+fn project() {
+  mb_package("old", "0.1.0");
+  mb_meta("license", "MIT");
+}
+
+fn deps() {
+  mb_dep("json", "v1.0.0");
+  mb_dep("strutil", "v1.0.0");
+  mb_replace_version("strutil", "v1.0.1");
+}'
+  expect_line "$mode: moved deps resolve" "$out" "dep strutil version=v1.0.0 path= registry="
+  out=$("$D" load 2>&1)
+  expect_no "$mode: no warning after the move" "$out" "warning"
 
   echo "== $mode: path packages"
   mkdir -p "$P/widgets" "$P/app"
@@ -238,6 +271,12 @@ EOF
   drv=$(cat .mbuild/config/path/widgets/driver.mettle)
   expect_no "$mode: path package driver has no cmd branch" "$drv" '"cmd"'
   expect_eq "$mode: no mbuild.mettle -> none" "$("$D" loaddir "$P" none)" "no manifest"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("widgets", "0.2.0");\n}\n\nfn deps() {\n  mb_dep("strutil", "v1.1.0");\n}\n' > "$P/widgets/mbuild.mettle"
+  out=$("$D" loaddir "$P/widgets" widgets 2>&1)
+  expect_line "$mode: a path package's fn deps()" "$out" "dep strutil version=v1.1.0 path= registry="
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("widgets", "0.2.0");\n  mb_dep("strutil", "v1.1.0");\n}\n' > "$P/widgets/mbuild.mettle"
+  out=$("$D" loaddir "$P/widgets" widgets 2>&1)
+  expect_has "$mode: a path package's misplaced dep warns" "$out" "/widgets/mbuild.mettle:5: mb_dep belongs in fn deps()"
 
   echo "== $mode: mbuild.local.mettle"
   cd "$P/viewer"

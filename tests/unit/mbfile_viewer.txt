@@ -4,9 +4,6 @@ fn project() {
   mb_package("viewer", "0.3.0");
   mb_meta("description", "image viewer");
   mb_targets("linux, windows");
-  mb_dep("strutil", "v1.1.0");
-  mb_dep_from("corp", "auth", "v2.0.0");
-  mb_dep_path("widgets", "../widgets");
   mb_registry("corp", "https://pkgs.example.com/mettle");
 
   mb_component("renderer", "src/renderer", "static", "soft, gl");
@@ -23,6 +20,12 @@ fn project() {
 
   mb_profile("debug");
   mb_set("safe", "true");
+}
+
+fn deps() {
+  mb_dep("strutil", "v1.1.0");
+  mb_dep_from("corp", "auth", "v2.0.0");
+  mb_dep_path("widgets", "../widgets");
 }
 
 // install: build a release and copy it into a bin directory (default ~/.local/bin)
