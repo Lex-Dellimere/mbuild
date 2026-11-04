@@ -60,61 +60,30 @@ export fn proc_jobs() -> int64 {
   return 8;
 }
 
+fn procx_job(arg: rawptr, i: int64, code: int32) -> bool {
+  if (code < 0) {
+    var cmds: Cmd** = (Cmd**)arg;
+    verbose(cmd_display(cmds[i]));
+  }
+  return true;
+}
+
 // Runs n commands, at most `parallel` at a time, each with stdout and stderr
 // going to logs[i] (logs may be 0: then to files under fs_temp_dir()).
 // Returns the exit codes, in command order.
 export fn proc_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64) -> int32* {
-  var codes: int32* = (int32*)malloc((n + 1) * 4);
-  var jobs: Job** = (Job**)malloc((n + 1) * 8);
-  defer free(jobs);
-  var tmp: string = "";
+  var paths: StrList* = logs;
   if (logs == 0) {
-    tmp = fs_temp_dir();
+    var tmp: string = fs_temp_dir();
+    paths = sl_new();
+    var i: int64 = 0;
+    while (i < n) {
+      sl_push(paths, tmp + "/job-" + hash_string(sys_cwd() + "{sys_now_ms()}-{i}") + ".log");
+      i = i + 1;
+    }
   }
   if (parallel < 1) {
     parallel = 1;
   }
-  var upto: int64 = 0;
-  var running: int64 = 0;
-  var finished: int64 = 0;
-  var nap: int64 = 1;
-  while (finished < n) {
-    while (running < parallel && upto < n) {
-      var logp: string = "";
-      if (logs != 0) {
-        logp = sl_get(logs, upto);
-      } else {
-        logp = tmp + "/job-" + hash_string(sys_cwd() + "{sys_now_ms()}-{upto}") + ".log";
-      }
-      verbose(cmd_display(cmds[upto]));
-      jobs[upto] = sys_job_start(cmds[upto], logp);
-      running = running + 1;
-      upto = upto + 1;
-    }
-    var progressed: bool = false;
-    var i: int64 = 0;
-    while (i < upto) {
-      var j: Job* = jobs[i];
-      if (j != 0) {
-        if (sys_job_poll(j)) {
-          codes[i] = j->code;
-          free(j);
-          jobs[i] = (Job*)0;
-          running = running - 1;
-          finished = finished + 1;
-          progressed = true;
-        }
-      }
-      i = i + 1;
-    }
-    if (progressed) {
-      nap = 1;
-    } else {
-      sys_sleep_ms(nap);
-      if (nap < 20) {
-        nap = nap * 2;
-      }
-    }
-  }
-  return codes;
+  return sys_run_jobs(cmds, n, paths, parallel, (rawptr)cmds, &procx_job);
 }

@@ -2,7 +2,9 @@
 //
 // Only names the v0.17.0 Linux runtime carries are used (DESIGN.md section 3).
 // What that runtime lacks (rename, rmdir, directory listing, fork) is done by
-// host programs: `ls`, `rm`, `mv`, and `/bin/sh` for background jobs.
+// host programs: `ls`, `rm`, `mv`. Child processes that run in the
+// background (the -j pool, services) go through alph (third_party/alph): a
+// node runs only while they do.
 //
 // The runtime's putenv only changes what this process's getenv answers; the
 // children it starts get the environment the process started with. So every
@@ -12,6 +14,9 @@
 import "std/io";
 import "std/mem";
 import "base";
+import "../../third_party/alph/core/mailbox" if linux;
+import "../../third_party/alph/core/node" if linux;
+import "../../third_party/alph/work/limiter" if linux;
 
 extern fn lx_popen(cmd: cstring, mode: cstring) -> cstring = "popen";
 extern fn lx_pclose(fp: cstring) -> int32 = "pclose";
@@ -482,62 +487,6 @@ export fn sys_capture(c: Cmd*, merge_stderr: bool) -> Captured {
   return lx_shell_capture(line);
 }
 
-export fn sys_job_start(c: Cmd*, log_path: string) -> Job* {
-  var j: Job* = new Job;
-  j->log_path = log_path;
-  j->status_path = log_path + ".status";
-  j->done = false;
-  j->code = 127;
-  var tmp: string = j->status_path + ".tmp";
-  lx_remove(s_c(j->status_path));
-  lx_remove(s_c(tmp));
-  var line: string = "( " + lx_shell_line(c) + " ) >" + sh_quote(log_path) + " 2>&1 </dev/null; echo $? >" + sh_quote(tmp) + "; exec mv -f -- " + sh_quote(tmp) + " " + sh_quote(j->status_path);
-  flush_out();
-  var fp: cstring = lx_popen(s_c(line), "r");
-  if (fp == 0) {
-    j->done = true;
-    return j;
-  }
-  j->handle = (int64)fp;
-  return j;
-}
-
-fn lx_read_small(p: string) -> string {
-  var fp: cstring = fopen(s_c(p), "rb");
-  if (fp == 0) {
-    return "";
-  }
-  var b: Buf* = buf_new();
-  var got: int64 = fread((cstring)b->data, 1, 200, fp);
-  fclose(fp);
-  if (got > 0) {
-    b->len = got;
-  }
-  return buf_take(b);
-}
-
-export fn sys_job_poll(j: Job*) -> bool {
-  if (j->done) {
-    return true;
-  }
-  if (!lx_exists(j->status_path)) {
-    return false;
-  }
-  var text: string = s_trim(lx_read_small(j->status_path));
-  var code: int64 = s_to_int(text);
-  if (code < 0) {
-    code = 127;
-  }
-  j->code = (int32)code;
-  j->done = true;
-  if (j->handle != 0) {
-    lx_pclose((cstring)j->handle);
-    j->handle = 0;
-  }
-  lx_remove(s_c(j->status_path));
-  return true;
-}
-
 export fn sys_host_path(p: string) -> string {
   return p;
 }
@@ -615,6 +564,173 @@ fn lx_cstrs(l: StrList*) -> cstring* {
   }
   a[l->len] = 0;
   return a;
+}
+
+// Runs handler as one actor, with a copy of size bytes at state, on a node of its own
+// until it halts, and answers the halt code. handles bounds the processes
+// and connections it holds at once. sig_tag > 0: Ctrl-C comes to the actor
+// as that tag instead of ending mbuild.
+export fn sys_node_run(state: rawptr, size: int64, handles: int64, sig_tag: int64,
+                       handler: fn(AlphCtx*, AlphMsg*) -> int64 with alloc, syscall, asm) -> int64 {
+  var node: AlphNode* = new AlphNode;
+  var cfg: AlphConfig;
+  alph_config(&cfg);
+  cfg.schedulers = 1;
+  cfg.max_actors = 64;
+  cfg.max_handles = handles + 64;
+  cfg.mailbox_size = 2 * handles + 64;
+  if (sig_tag > 0) {
+    cfg.signals = 1 << ALPH_SIGINT;
+  }
+  flush_out();
+  if (!alph_node_start(node, &cfg)) {
+    fail("cannot start child processes (no threads or memory)");
+  }
+  var pid: int64 = alph_node_spawn_bytes(node, 0, state, size, handler);
+  if (sig_tag > 0) {
+    alph_node_signals(node, pid, sig_tag);
+  }
+  var code: int64 = alph_node_wait(node);
+  flush_out();
+  return code;
+}
+
+// Starts c owned by the calling actor: stdin /dev/null, stdout and stderr to
+// log ("" = all three inherited), in a process group of its own unless
+// keep_group. A process handle, or below 0 when nothing started.
+export fn sys_proc_start(ctx: AlphCtx*, c: Cmd*, log: string, keep_group: bool) -> int64 {
+  var args: StrList* = sl_new();
+  defer free(args);
+  sl_push(args, c->tool.path);
+  sl_extend(args, c->args);
+  var spec: AlphProcSpec;
+  memset((rawptr)&spec, 0, (int64)sizeof(AlphProcSpec));
+  spec.argv = lx_cstrs(args);
+  spec.envp = lx_cstrs(lx_child_env(c->env));
+  if (slen(c->cwd) > 0) {
+    spec.cwd = s_c(c->cwd);
+  }
+  if (slen(log) > 0) {
+    spec.log = s_c(log);
+    spec.flags = ALPH_PROC_QUIET;
+  }
+  if (keep_group) {
+    spec.flags = spec.flags | ALPH_PROC_KEEP_GROUP;
+  }
+  flush_out();
+  var h: int64 = alph_proc_spawn(ctx, &spec);
+  free(spec.argv);
+  free(spec.envp);
+  return h;
+}
+
+// The pool's actor: asks the limiter for one permit at a time and starts the
+// next job when it is granted; a job's end gives its permit back.
+struct LxPool {
+  cmds: Cmd**;
+  n: int64;
+  logs: StrList*;
+  parallel: int64;
+  ev: fn(rawptr, int64, int32) -> bool with alloc, syscall, asm;
+  arg: rawptr;
+  codes: int32*;
+  procs: int64*;    // process handle per running job, else 0
+  permits: int64*;  // its permit's ref
+  limiter: int64;
+  asked: int64;     // ref of the acquire not yet granted, else 0
+  upto: int64;
+  running: int64;
+  more: bool;
+}
+
+// A job has ended: its code, its permit back, and the hook.
+fn lx_pool_ended(ctx: AlphCtx*, s: LxPool*, i: int64, code: int32) {
+  s->codes[i] = code;
+  alph_release(ctx, s->limiter, s->permits[i]);
+  if (!s->ev(s->arg, i, code)) {
+    s->more = false;
+  }
+}
+
+// Asks for the next permit, or halts once nothing runs and nothing is left.
+fn lx_pool_next(ctx: AlphCtx*, s: LxPool*) {
+  if (!s->more && s->asked != 0) {
+    alph_release(ctx, s->limiter, s->asked);
+    s->asked = 0;
+  }
+  if (s->more && s->upto < s->n && s->asked == 0) {
+    s->asked = alph_acquire(ctx, s->limiter);
+  }
+  if (s->running == 0 && s->asked <= 0) {
+    alph_halt(ctx, 0);
+  }
+}
+
+fn lx_pool(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
+  var s: LxPool* = (LxPool*)ctx->state;
+  if (m->tag == ALPH_TAG_INIT) {
+    alph_trap_exits(ctx, true);
+    s->limiter = alph_spawn_limiter(ctx, s->parallel);
+    lx_pool_next(ctx, s);
+  } else if (m->tag == ALPH_TAG_GRANTED && m->ref == s->asked) {
+    var i: int64 = s->upto;
+    s->upto = s->upto + 1;
+    s->permits[i] = s->asked;
+    s->asked = 0;
+    s->ev(s->arg, i, -1);
+    var h: int64 = sys_proc_start(ctx, s->cmds[i], sl_get(s->logs, i), true);
+    if (h > 0) {
+      s->procs[i] = h;
+      s->running = s->running + 1;
+    } else {
+      lx_pool_ended(ctx, s, i, 127);
+    }
+    lx_pool_next(ctx, s);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT) {
+    var k: int64 = 0;
+    while (k < s->upto) {
+      if (s->procs[k] == m->ref) {
+        s->procs[k] = 0;
+        s->running = s->running - 1;
+        lx_pool_ended(ctx, s, k, (int32)m->arg);
+      }
+      k = k + 1;
+    }
+    lx_pool_next(ctx, s);
+  }
+  return ALPH_CONTINUE;
+}
+
+// Runs cmds[0..n), at most parallel at a time, stdout and stderr of each to
+// logs[i]. ev(arg, i, -1) as job i starts, ev(arg, i, code) as it ends (in
+// the order they end), and false from the latter starts no more. Codes in
+// command order, -1 for jobs never started.
+export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, arg: rawptr,
+                       ev: fn(rawptr, int64, int32) -> bool with alloc, syscall, asm) -> int32* {
+  var s: LxPool;
+  memset((rawptr)&s, 0, (int64)sizeof(LxPool));
+  s.cmds = cmds;
+  s.n = n;
+  s.logs = logs;
+  s.parallel = parallel;
+  s.ev = ev;
+  s.arg = arg;
+  s.codes = (int32*)malloc((n + 1) * 4);
+  s.procs = (int64*)malloc((n + 1) * 8);
+  s.permits = (int64*)malloc((n + 1) * 8);
+  s.more = true;
+  var k: int64 = 0;
+  while (k < n) {
+    s.codes[k] = -1;
+    s.procs[k] = 0;
+    k = k + 1;
+  }
+  if (n > 0) {
+    sys_node_run((rawptr)&s, (int64)sizeof(LxPool), parallel, 0, &lx_pool);
+  }
+  free(s.procs);
+  free(s.permits);
+  return s.codes;
 }
 
 // Starts c without waiting: output to log_path ("" = inherit stdio, and stdin

@@ -1866,12 +1866,49 @@ fn bx_parallel(p: Project*) -> int64 {
   return proc_jobs();
 }
 
+// bx_run_jobs' state for the pool's events.
+struct BxRun {
+  s: BxSess*;
+  jobs: BxJob**;
+  n: int64;
+  done: int32*;   // exit code once ended, else -1
+  logs: StrList*;
+  next: int64;    // the first job not yet finished in plan order
+  rc: int32;
+}
+
+// A compile starts (code -1) or ends: ended ones are finished in plan order;
+// after a failure no new compile starts.
+fn bx_job_event(arg: rawptr, i: int64, code: int32) -> bool {
+  var r: BxRun* = (BxRun*)arg;
+  if (code < 0) {
+    var j: BxJob* = r->jobs[i];
+    status("Compiling", bx_label(r->s, j->b, j->t));
+    verbose(cmd_display(j->c));
+    return true;
+  }
+  r->done[i] = code;
+  while (r->next < r->n && r->done[r->next] >= 0) {
+    var logp: string = sl_get(r->logs, r->next);
+    var rd: FsRead = fs_read(logp);
+    var text: string = "";
+    if (rd.ok) {
+      text = rd.data;
+    }
+    sys_remove_file(logp);
+    if (bx_finish(r->s, r->jobs[r->next], r->done[r->next], text) != 0) {
+      r->rc = 1;
+    }
+    r->next = r->next + 1;
+  }
+  return r->rc == 0;
+}
+
 // Runs the compiles, at most -j at a time; each compiler's output is printed
 // once it is done, in plan order. After a failure no new compile starts.
 fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   var p: Project* = s->p;
   var par: int64 = bx_parallel(p);
-  var rc: int32 = 0;
   if (par <= 1 || n <= 1) {
     var i: int64 = 0;
     while (i < n) {
@@ -1885,76 +1922,30 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
     }
     return 0;
   }
-  var running: Job** = (Job**)malloc((n + 1) * 8);
-  var codes: int32* = (int32*)malloc((n + 1) * 4);
-  var done: bool* = (bool*)malloc(n + 1);
-  var logs: StrList* = sl_new();
+  var r: BxRun;
+  r.s = s;
+  r.jobs = jobs;
+  r.n = n;
+  r.done = (int32*)malloc((n + 1) * 4);
+  r.logs = sl_new();
+  r.next = 0;
+  r.rc = 0;
   var tmp: string = p->state_dir + "/tmp";
   fs_mkdirs(tmp);
+  var cmds: Cmd** = (Cmd**)malloc((n + 1) * 8);
   var k: int64 = 0;
   while (k < n) {
-    done[k] = false;
-    running[k] = (Job*)0;
-    sl_push(logs, tmp + "/compile-" + jobs[k]->t->target + "-" + jobs[k]->t->profile + "-" + jobs[k]->b->name + ".log");
+    r.done[k] = -1;
+    cmds[k] = jobs[k]->c;
+    sl_push(r.logs, tmp + "/compile-" + jobs[k]->t->target + "-" + jobs[k]->t->profile + "-" + jobs[k]->b->name + ".log");
     k = k + 1;
   }
-  var upto: int64 = 0;
-  var active: int64 = 0;
-  var next: int64 = 0;
-  var nap: int64 = 1;
-  while (true) {
-    while (active < par && upto < n && rc == 0) {
-      var j: BxJob* = jobs[upto];
-      status("Compiling", bx_label(s, j->b, j->t));
-      verbose(cmd_display(j->c));
-      running[upto] = sys_job_start(j->c, sl_get(logs, upto));
-      active = active + 1;
-      upto = upto + 1;
-    }
-    var progressed: bool = false;
-    var i: int64 = next;
-    while (i < upto) {
-      var job: Job* = running[i];
-      if (job != (Job*)0 && !done[i] && sys_job_poll(job)) {
-        codes[i] = job->code;
-        done[i] = true;
-        free(job);
-        running[i] = (Job*)0;
-        active = active - 1;
-        progressed = true;
-      }
-      i = i + 1;
-    }
-    while (next < upto && done[next]) {
-      var logp: string = sl_get(logs, next);
-      var rd: FsRead = fs_read(logp);
-      var text: string = "";
-      if (rd.ok) {
-        text = rd.data;
-      }
-      sys_remove_file(logp);
-      if (bx_finish(s, jobs[next], codes[next], text) != 0) {
-        rc = 1;
-      }
-      next = next + 1;
-    }
-    if (next >= upto && (upto >= n || rc != 0)) {
-      break;
-    }
-    if (progressed) {
-      nap = 1;
-    } else {
-      sys_sleep_ms(nap);
-      if (nap < 20) {
-        nap = nap * 2;
-      }
-    }
-  }
-  free(running);
+  var codes: int32* = sys_run_jobs(cmds, n, r.logs, par, (rawptr)&r, &bx_job_event);
   free(codes);
-  free(done);
-  free(logs);
-  return rc;
+  free(cmds);
+  free(r.done);
+  free(r.logs);
+  return r.rc;
 }
 
 fn bx_tctx_new(s: BxSess*, target: string, m: Mettle*) -> TargetCtx* {

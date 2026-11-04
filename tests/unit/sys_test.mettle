@@ -250,6 +250,42 @@ fn t_sl_free(l: StrList*) {
   free(l);
 }
 
+// The lock test's pool events: when job 1 (the sleep) ends, job 0 must still wait; then release.
+struct LockRun {
+  lk: string;
+  waited: bool;
+  ended0: bool;
+}
+
+fn lock_event(arg: rawptr, i: int64, code: int32) -> bool {
+  var r: LockRun* = (LockRun*)arg;
+  if (code >= 0 && i == 0) {
+    r->ended0 = true;
+  }
+  if (code >= 0 && i == 1) {
+    r->waited = !r->ended0;
+    fs_lock_release(r->lk);
+  }
+  return true;
+}
+
+fn proc_run_jobs_ev(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, r: LockRun*) -> int32* {
+  return sys_run_jobs(cmds, n, logs, parallel, (rawptr)r, &lock_event);
+}
+
+// Counts starts and stops the pool after the first job ends.
+struct StopRun {
+  starts: int64;
+}
+
+fn stop_event(arg: rawptr, i: int64, code: int32) -> bool {
+  var r: StopRun* = (StopRun*)arg;
+  if (code < 0) {
+    r->starts = r->starts + 1;
+  }
+  return false;
+}
+
 fn sh_cmd(script: string) -> Cmd* {
   var c: Cmd* = cmd_new(sys_find_tool("sh"));
   cmd_arg(c, "-c");
@@ -418,23 +454,30 @@ fn test_lock(dir: string) {
   check("fs_lock_release removes the lock", !fs_exists(lk));
   check("fs_lock_acquire after release", fs_lock_acquire(lk, 0));
 
-  // Another process waits for the lock and gets it once it is released.
+  // Another process waits for the lock and gets it once it is released:
+  // job 1 sleeps 0.3 s, and when it ends job 0 must still be waiting.
   var lc: Cmd* = self_cmd("lock");
   cmd_path(lc, lk);
-  var j: Job* = sys_job_start(lc, dir + "/lock.log");
-  sys_sleep_ms(300);
-  check("fs_lock: the other process waits", !sys_job_poll(j));
-  fs_lock_release(lk);
-  var waited: int64 = 0;
-  while (!sys_job_poll(j) && waited < 15000) {
-    sys_sleep_ms(10);
-    waited = waited + 10;
-  }
-  check_code("fs_lock: the other process got it", j->code, 0);
+  var lcmds: Cmd** = (Cmd**)malloc(2 * 8);
+  defer free(lcmds);
+  lcmds[0] = lc;
+  lcmds[1] = sh_cmd("sleep 0.3");
+  var llogs: StrList* = sl_new();
+  defer t_sl_free(llogs);
+  sl_push(llogs, dir + "/lock.log");
+  sl_push(llogs, dir + "/sleep.log");
+  var lr: LockRun;
+  lr.lk = lk;
+  lr.waited = false;
+  lr.ended0 = false;
+  var lcodes: int32* = proc_run_jobs_ev(lcmds, 2, llogs, 2, &lr);
+  check("fs_lock: the other process waits", lr.waited);
+  check_code("fs_lock: the other process got it", lcodes[0], 0);
+  free(lcodes);
   check_eq("fs_lock: the other process said so", s_trim(fs_read(dir + "/lock.log").data), "got");
   check("fs_lock: the other process released it", !fs_exists(lk));
   t_cmd_free(lc);
-  free(j);
+  t_cmd_free(lcmds[1]);
   fs_lock_release(lk);
 }
 
@@ -510,13 +553,11 @@ fn test_jobs(dir: string) {
   check("job log 5 (self cwd)", s_ends(s_trim(fs_read(dir + "/job5.log").data), "/a"));
   check("job status files gone", !fs_exists(dir + "/job0.log.status"));
 
-  var one: Job* = sys_job_start(sh_cmd("sleep 0.3; exit 4"), dir + "/single.log");
-  check("sys_job_poll running", !sys_job_poll(one));
-  while (!sys_job_poll(one)) {
-    sys_sleep_ms(5);
-  }
-  check_code("sys_job_poll code", one->code, 4);
-  free(one);
+  var st: StopRun;
+  st.starts = 0;
+  var codes1: int32* = sys_run_jobs(cmds, 3, logs, 1, (rawptr)&st, &stop_event);
+  check("sys_run_jobs: false from ev starts no more" + why(st.starts == 1 && codes1[0] == 0 && codes1[1] == -1 && codes1[2] == -1, "{st.starts} starts, {codes1[1]}"), st.starts == 1 && codes1[0] == 0 && codes1[1] == -1 && codes1[2] == -1);
+  free(codes1);
   var codes2: int32* = proc_run_jobs(cmds, 3, (StrList*)0, 1);
   check("proc_run_jobs temp logs, serial", codes2[0] == 0 && codes2[1] == 1 && codes2[2] == 2);
   free(codes2);

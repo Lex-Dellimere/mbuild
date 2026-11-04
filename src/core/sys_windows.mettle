@@ -1106,6 +1106,62 @@ export fn sys_job_poll(j: Job*) -> bool {
   return true;
 }
 
+// Runs cmds[0..n), at most parallel at a time, stdout and stderr of each to
+// logs[i]. ev(arg, i, -1) as job i starts, ev(arg, i, code) as it ends (in
+// the order they end), and false from the latter starts no more. Codes in
+// command order, -1 for jobs never started.
+export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, arg: rawptr,
+                       ev: fn(rawptr, int64, int32) -> bool) -> int32* {
+  var codes: int32* = (int32*)malloc((n + 1) * 4);
+  var jobs: Job** = (Job**)malloc((n + 1) * 8);
+  defer free(jobs);
+  var upto: int64 = 0;
+  var running: int64 = 0;
+  var more: bool = true;
+  var nap: int64 = 1;
+  var k: int64 = 0;
+  while (k < n) {
+    codes[k] = -1;
+    k = k + 1;
+  }
+  while (true) {
+    while (more && running < parallel && upto < n) {
+      ev(arg, upto, -1);
+      jobs[upto] = sys_job_start(cmds[upto], sl_get(logs, upto));
+      running = running + 1;
+      upto = upto + 1;
+    }
+    if (running == 0) {
+      break;
+    }
+    var progressed: bool = false;
+    var i: int64 = 0;
+    while (i < upto) {
+      var j: Job* = jobs[i];
+      if (j != 0 && sys_job_poll(j)) {
+        codes[i] = j->code;
+        free(j);
+        jobs[i] = (Job*)0;
+        running = running - 1;
+        progressed = true;
+        if (!ev(arg, i, codes[i])) {
+          more = false;
+        }
+      }
+      i = i + 1;
+    }
+    if (progressed) {
+      nap = 1;
+    } else {
+      sys_sleep_ms(nap);
+      if (nap < 20) {
+        nap = nap * 2;
+      }
+    }
+  }
+  return codes;
+}
+
 export fn sys_set_executable(p: string) {
   // Windows has no execute bit. Under wine the file lives on a Linux
   // filesystem, where a host program may need one.
