@@ -275,6 +275,413 @@ check "init writes mbuild.mettle beside mbuild.toml" sh -c '[ -f mbuild.mettle ]
 check "init notes mbuild.toml" has "note: mbuild.toml is no longer read and can be deleted"
 done
 
+# --- everyday commands, once with the debug mbuild ------------------------------
+MB="$S/mbuild-debug"
+W="$S/cli"
+F="$S/fx"
+sh "$here/tests/fixtures/make-registry.sh" "$F" >/dev/null || exit 1
+export MBUILD_REGISTRY="$F/registry"
+# proj DIR: a project named after DIR with the fn project() lines on stdin
+proj() {
+  rm -rf "$1"; mkdir -p "$1/src"
+  { printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("%s", "0.1.0");\n' "$(basename "$1")"; sed 's/^/  /'; printf '}\n'; } >"$1/mbuild.mettle"
+}
+
+echo "== build, run, rebuild"
+proj "$W/app" </dev/null
+cd "$W/app" || exit 1
+cat > src/main.mettle <<'EOF'
+import "std/io";
+import "util";
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  print(greeting());
+  print(import_str "banner.txt");
+  return argc - 1;
+}
+EOF
+printf 'export fn greeting() -> string {\n  return "greeting v1\\n";\n}\n' > src/util.mettle
+echo "banner one" > src/banner.txt
+mb build
+check "first build" sh -c 'grep -qF "Compiling app (linux, debug)" "$0/last.out" && grep -qF "Finished" "$0/last.out"' "$S"
+check "binary runs" sh -c './build/linux/debug/app | grep -q "greeting v1"'
+check "embedded file used" sh -c './build/linux/debug/app | grep -q "banner one"'
+check "no intermediate object left" test ! -e build/linux/debug/app.o
+before=$(stat -c %y build/linux/debug/app)
+mb -v build
+check "second build is Fresh" has "Fresh app (linux, debug)"
+check "second build does not run the compiler" hasnt "--build"
+check "second build leaves the binary alone" test "$before" = "$(stat -c %y build/linux/debug/app)"
+sed -i 's/greeting v1/greeting v2/' src/util.mettle
+mb build
+check "changing an imported file rebuilds" has "Compiling app"
+check "the rebuilt binary has the change" sh -c './build/linux/debug/app | grep -q "greeting v2"'
+echo "banner two" > src/banner.txt
+mb build
+check "changing an import_str file rebuilds" has "Compiling app"
+mb build --force
+check "--force rebuilds" has "Compiling app"
+mb build -r
+check "release build" sh -c 'grep -qF "Compiling app (linux, release)" "$0/last.out" && [ -x build/linux/release/app ]' "$S"
+mb -v build --release
+check "release Fresh" has "Fresh app (linux, release)"
+mb run -- a b c
+check "run propagates the exit code" code_is 3
+check "run prints Running" has "Running build/linux/debug/app"
+check "run shows the program's output" has "greeting v2"
+mb biuld
+check "unknown command suggests" sh -c 'grep -qF "did you mean build?" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+mb build --forse
+check "unknown flag suggests" has "--force"
+mb help build
+check "help build" has "usage: mbuild build"
+mb build -p fast
+check "unknown profile fails" code_is 1
+mb build -t linux,windoes
+check "unknown target suggests" has "did you mean \`windows\`"
+
+echo "== settings"
+mb -v build --force
+check "debug passes -s" has " -s"
+mb -v build -r --force
+check "release passes --release" has "--release"
+check "release has no -s" sh -c '! grep -- "-o build/linux/release/app" "$0/last.out" | grep -q " -s "' "$S"
+mb -v build --set safe=true
+check "--set safe=true: --safe in argv" has "--safe"
+check "--set safe=true: rebuilt" has "Compiling app (linux, debug)"
+mb -v build --set safe=true
+check "--set again: Fresh" has "Fresh app (linux, debug)"
+mb -v build --flag=--explain -r --force
+check "--flag after typed flags" grep -q -- "--release --explain" "$S/last.out"
+mb -v build --flag --explain -r --force
+check "--flag ARG form" grep -q -- "--release --explain" "$S/last.out"
+proj "$W/prof" <<'EOF'
+mb_profile("fast");
+mb_inherits("release");
+mb_set("check-overflow", "true");
+EOF
+cd "$W/prof" && printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
+mb profiles
+tr -s ' ' <"$S/last.out" >"$S/prof.txt"; cp "$S/prof.txt" "$S/last.out"
+check "profiles: debug row" has "debug stack-trace -> -s"
+check "profiles: release row" has "release optimize=full -> --release"
+check "profiles: fast row" has "fast inherits release; check-overflow (mbuild.mettle:7) -> --release --check-overflow"
+proj "$W/rawflag" <<'EOF'
+mb_flags("--bogus-flag");
+EOF
+cd "$W/rawflag" && printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
+mb build
+check "a raw flag the compiler lacks is refused" has "error: flags: the linux compiler does not accept --bogus-flag (mbuild.mettle)"
+
+echo "== test"
+cd "$W/app" || exit 1
+cat > src/calc.mettle <<'EOF'
+export fn add(a: int32, b: int32) -> int32 {
+  return a + b;
+}
+
+@test fn adds() -> int32 {
+  if (add(2, 2) != 4) { return 1; }
+  return 0;
+}
+
+@test fn adds_zero() -> int32 {
+  if (add(0, 5) != 5) { return 1; }
+  return 0;
+}
+EOF
+mb test
+check "test passes" sh -c 'grep -qF "ok     src/calc.mettle (2 passed)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb test
+check "test is cached" has "src/calc.mettle (cached)"
+mb test --filter zero
+check "test --filter runs a subset" has "(1 passed)"
+mb test --force
+check "test --force ignores the cache" hasnt "(cached)"
+printf '@test fn fails() -> int32 {\n  return 7;\n}\n' > src/broken_test.mettle
+mb test
+check "a failing test exits 1" code_is 1
+check "the failing test is named" has "FAILED src/broken_test.mettle"
+check "the passing file stays cached" has "src/calc.mettle (cached)"
+check "test summary" has "test result: FAILED"
+mb test src/calc.mettle
+check "test with an explicit file" code_is 0
+rm src/broken_test.mettle
+
+echo "== check, clean"
+mb check
+check "check passes" sh -c 'grep -qF "Checking app (linux)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+cp src/util.mettle "$S/util.keep"
+printf 'export fn greeting() -> string {\n  return undefined_name;\n}\n' > src/util.mettle
+mb check
+check "check fails on an error" sh -c 'grep -qF "undefined_name" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+mb build
+check "a build failure names the bin" has "could not compile app (linux, debug)"
+cp "$S/util.keep" src/util.mettle
+mb build
+check "build recovers" code_is 0
+mb clean
+check "clean removes build/ and stamps" sh -c '[ ! -e build ] && [ ! -e .mbuild/stamps ]'
+mb build
+check "build after clean compiles" has "Compiling app"
+mb clean --all
+check "clean --all removes .mbuild" test ! -e .mbuild
+
+echo "== several bins"
+proj "$W/multi" <<'EOF'
+mb_bin("multi", "src/main.mettle");
+mb_bin("tool", "cmd/tool/main.mettle");
+mb_bin("other", "cmd/other/main.mettle");
+EOF
+cd "$W/multi" || exit 1
+mkdir -p cmd/tool cmd/other
+for b in main tool other; do
+  f=src/main.mettle; [ $b = main ] || f=cmd/$b/main.mettle
+  printf 'import "std/io";\nfn main() -> int32 {\n  print("%s bin\\n");\n  return 0;\n}\n' $b > $f
+done
+mb build
+check "three bins" sh -c '[ -x build/linux/debug/multi ] && [ -x build/linux/debug/tool ] && [ -x build/linux/debug/other ]'
+mb run tool
+check "run picks a bin" has "tool bin"
+mb run
+check "run defaults to the package's bin" has "main bin"
+mb build toool
+check "an unknown bin suggests" sh -c 'grep -qF "did you mean \`tool\`" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+mb build other
+check "build one bin" sh -c 'grep -qF "other (linux, debug)" "$0/last.out" && ! grep -qF "tool (linux" "$0/last.out"' "$S"
+printf 'fn main() -> int32 {\n  return undefined_a;\n}\n' > cmd/tool/main.mettle
+printf 'fn main() -> int32 {\n  return undefined_b;\n}\n' > cmd/other/main.mettle
+mb build -j 4 --force
+check "parallel: two broken bins fail" code_is 1
+check "parallel: both reported" sh -c 'grep -qF "could not compile other (linux, debug)" "$0/last.out" && grep -qF "could not compile tool (linux, debug)" "$0/last.out"' "$S"
+a=$(grep -n "undefined_a" "$S/last.out" | head -1 | cut -d: -f1)
+b=$(grep -n "undefined_b" "$S/last.out" | head -1 | cut -d: -f1)
+check "parallel: output in declaration order" test "${a:-0}" -lt "${b:-0}"
+
+echo "== zero-config, libraries"
+mkdir -p "$W/zero" && cd "$W/zero" || exit 1
+printf 'import "std/io";\nfn main() -> int32 {\n  print("zero config\\n");\n  return 0;\n}\n' > main.mettle
+mb build
+check "zero-config names the bin after the directory" has "Compiling zero"
+check "zero-config wrote no project file" test ! -e mbuild.mettle
+mkdir -p "$W/zero2" && cd "$W/zero2" || exit 1
+printf 'import "std/io";\nfn main() -> int32 {\n  print("hello file\\n");\n  return 0;\n}\n' > hello.mettle
+mb run
+check "zero-config single file" has "hello file"
+mkdir -p "$W/nothing" && cd "$W/nothing" || exit 1
+mb build
+check "outside a project: suggests mbuild init" sh -c 'grep -qF "mbuild init" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+proj "$W/mylib" </dev/null
+cd "$W/mylib" || exit 1
+printf 'export fn add(a: int32, b: int32) -> int32 {\n  return a + b;\n}\n' > src/lib.mettle
+printf 'export fn twice(a: int32) -> int32 {\n  return a * 2;\n}\n' > helpers.mettle
+printf 'import "src/lib";\n@test fn adds() -> int32 {\n  if (add(1, 2) != 3) { return 1; }\n  return 0;\n}\n' > lib_test.mettle
+mb check
+check "library check" sh -c 'grep -qF "Checking src/lib (linux)" "$0/last.out" && grep -qF "Checking helpers (linux)" "$0/last.out" && ! grep -qF "lib_test" "$0/last.out"' "$S"
+mb build
+check "library build: nothing to link" has "library: nothing to link"
+mb run
+check "library run explains" sh -c 'grep -qF "is a library" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+mb test
+check "library test" code_is 0
+printf 'extern fn mbx_answer() -> int32 = "mbx_answer";\n@test fn answer() -> int32 {\n  if (mbx_answer() != 42) { return 1; }\n  return 0;\n}\n' > e_test.mettle
+mb test e_test.mettle
+check "a test that calls C is skipped" sh -c 'grep -qF "(0 passed, 1 skipped)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+
+echo "== prelude, nested projects, colour"
+proj "$W/tflags" <<'EOF'
+mb_prelude(true);
+EOF
+cd "$W/tflags" || exit 1
+mkdir -p nested/src deep/x/build
+printf 'fn main() -> int32 {\n  println("prelude main");\n  return 0;\n}\n' > src/main.mettle
+printf '@test fn uses_prelude() -> int32 {\n  println("no import needed");\n  return 0;\n}\n' > src/p_test.mettle
+mb test
+check "test with mb_prelude(true)" has "ok     src/p_test.mettle"
+mb -v test --force
+check "test passes --prelude" has "--prelude"
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("nested", "0.1.0");\n}\n' > nested/mbuild.mettle
+printf '@test fn nested_fails() -> int32 {\n  return 1;\n}\n' > nested/src/n_test.mettle
+printf '@test fn build_fails() -> int32 {\n  return 1;\n}\n' > deep/x/build/b_test.mettle
+mb test
+check "test skips nested projects and build/" sh -c '[ "$(cat "$0/last.code")" = 0 ] && ! grep -q "n_test\|b_test" "$0/last.out"' "$S"
+mb --color=always -v build --force
+check "--color=always passes CLICOLOR_FORCE" has "CLICOLOR_FORCE=1"
+mb --color never -v build --force
+check "--color never passes NO_COLOR" sh -c 'grep -qF "NO_COLOR=1" "$0/last.out" && ! grep -qF "CLICOLOR_FORCE" "$0/last.out"' "$S"
+LANG=C.UTF-8 LC_ALL= LC_CTYPE= mb --color always -v build --force
+check "a UTF-8 locale passes METTLE_DIAG_UNICODE" has "METTLE_DIAG_UNICODE=1"
+mb -v build
+check "colour settings do not invalidate the build" has "Fresh tflags"
+printf 'fn main() -> int32 {\n  return undefined_name;\n}\n' > src/main.mettle
+mb --color always build
+check "--color always: coloured diagnostics" has "$(printf '\033')[2m[E0003]"
+
+echo "== compiler shortcuts, doctor"
+mb mettle -- --version
+check "mettle -- --version" has "mettle v"
+mb explain E0003
+check "explain E0003" sh -c 'grep -qF "E0003" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb version
+check "version" has "mbuild 0.2.0"
+mb doctor -t linux
+check "doctor" sh -c 'grep -qF "host" "$0/last.out" && grep -qF "cc windows" "$0/last.out" && grep -qF "pkg-config" "$0/last.out" && grep -qF "curl" "$0/last.out"' "$S"
+proj "$W/tools" </dev/null
+cd "$W/tools" && printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
+printf 'import "mbuild/api";\n\nfn local() {\n  mb_tool("mettle-linux", "%s");\n}\n' "$METTLE" > mbuild.local.mettle
+mb doctor
+check "doctor names mbuild.local.mettle" has "(mbuild.local.mettle)"
+ln -s "$METTLE" "$S/mettle-link"
+MBUILD_METTLE_LINUX="$S/mettle-link" mb doctor
+check "the variable wins" has "MBUILD_METTLE_LINUX"
+
+echo "== packages from the registry"
+cp -r "$F/app" "$W/fxapp"
+cd "$W/fxapp" || exit 1
+mb build --locked
+check "--locked: a missing package fails" code_is 1
+check "--locked leaves mbuild.mettle" cmp -s mbuild.mettle "$F/app/mbuild.mettle"
+mb run
+check "the fixture app runs" has "vecmath! strutil v1.0.0 dot=50.0 len=5.0"
+mb tidy
+check "tidy adds a directly imported, already selected package" has "strutil v1.0.0"
+check "tidy writes it" grep -qF 'mb_dep("strutil", "v1.0.0");' mbuild.mettle
+cp src/main.mettle "$S/main.keep"
+sed -i 's|strutil/strutil"|strutil/strutl"|' src/main.mettle
+mb build
+check "a typo'd file in a selected package" has "strutil (v1.0.0) has no file 'strutl.mettle'"
+check "a typo'd file: did you mean" has "did you mean \`strutil/strutil\`"
+check "a typo'd file: not a missing package" hasnt "no registry has a package"
+sed -i 's|strutil/strutl"|strutil/"|' src/main.mettle
+mb build
+check "a directory import" sh -c 'grep -qF "package directory" "$0/last.out" && grep -qF "strutil/strutil" "$0/last.out"' "$S"
+cp "$S/main.keep" src/main.mettle
+mkdir -p tools/sub
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("sub", "0.1.0");\n}\n' > tools/sub/mbuild.mettle
+printf 'import "zero/zero";\nfn main() -> int32 {\n  return 0;\n}\n' > tools/sub/main.mettle
+sed -i 's|^import "strutil/strutil";||; s| {su_version()}||' src/main.mettle
+mb tidy
+check "tidy drops a package only a dependency imports" sh -c '! grep -q "\"strutil\"" mbuild.mettle'
+check "tidy ignores a nested project's imports" sh -c '! grep -q "\"zero\"" mbuild.mettle'
+mb build
+check "build after tidy" code_is 0
+
+echo "== update and get verify the code"
+proj "$W/upd" <<'EOF'
+mb_dep("apilib", "v1.0.0");
+EOF
+cd "$W/upd" || exit 1
+cat > src/main.mettle <<'EOF'
+import "std/io";
+import "apilib/apilib";
+fn main() -> int32 {
+  var m: int32 = al_mul(2, 3);
+  println("{al_add(1, 2)} {m}");
+  return 0;
+}
+EOF
+mb build
+mb update
+check "update: Updated" has "Updated apilib v1.0.0 -> v1.1.0"
+check "update: Held" has "Held apilib v1.2.0: src/main.mettle:4: Undefined function 'al_mul'"
+check "update: Summary" has "Summary 1 updated, 1 held back"
+check "update: mbuild.mettle" grep -qF 'mb_dep("apilib", "v1.1.0");' mbuild.mettle
+proj "$W/dry" <<'EOF'
+mb_dep("apilib", "v1.0.0");
+EOF
+cd "$W/dry" || exit 1
+printf 'import "apilib/apilib";\nfn main() -> int32 { return al_mul(1, 2) - 2; }\n' > src/main.mettle
+mb build
+cp mbuild.mettle "$S/dry.mettle"; cp mbuild.lock "$S/dry.lock"
+mb update --dry-run
+check "dry-run: Would update" has "Would update apilib v1.0.0 -> v1.2.0"
+check "dry-run: API report" has "API changes from v1.0.0 to v1.2.0 (inside line v1, which should not break):"
+check "dry-run: nothing written" sh -c 'cmp -s mbuild.mettle "$0/dry.mettle" && cmp -s mbuild.lock "$0/dry.lock"' "$S"
+mb get apilib@v1.2.0
+check "get: breaks this project" sh -c 'grep -qF "error: apilib v1.2.0 breaks this project:" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "get: the error" has "    src/main.mettle:2: Undefined function 'al_mul' (E0003)"
+check "get: Restored" has "  Restored mbuild.mettle and mbuild.lock"
+check "get: help" has "help: stay on v1.0.0 (\`mbuild get apilib@v1.0.0\`), or take it and fix the code: \`mbuild get apilib@v1.2.0 --no-verify\`"
+check "get: restored" sh -c 'cmp -s mbuild.mettle "$0/dry.mettle" && cmp -s mbuild.lock "$0/dry.lock"' "$S"
+mb get apilib@v1.2.0 --no-verify
+check "get --no-verify takes it" grep -qF 'mb_dep("apilib", "v1.2.0");' mbuild.mettle
+cp mbuild.lock "$S/dry.lock"
+mb update --locked
+check "update --locked refuses" sh -c 'grep -qF -- "--locked forbids it" "$0/last.out" && cmp -s mbuild.lock "$0/dry.lock"' "$S"
+
+echo "== why, outdated, clashes, minimum Mettle"
+proj "$W/why" <<'EOF'
+mb_dep("vecmath", "v0.2.0");
+mb_dep("strutil", "v1.0.0");
+EOF
+cd "$W/why" || exit 1
+printf 'import "vecmath/vecmath";\nimport "strutil/strutil";\nfn main() -> int32 { return vm_one() - 1; }\n' > src/main.mettle
+mb build
+mb why strutil
+check "why NAME" has "strutil v1.1.0 (selected: the highest of the versions required)"
+check "why NAME: imported by" has "vecmath v0.2.0: vecmath.mettle:1"
+mb why main vm_one
+check "why A B reaches the compiler" hasnt "is not a dependency"
+mb outdated
+tr -s ' ' <"$S/last.out" >"$S/outd.txt"; cp "$S/outd.txt" "$S/last.out"
+check "outdated: vecmath row" has "vecmath v0.2.0 - v0.3.0 (new line) mbuild.mettle"
+proj "$W/clash" <<'EOF'
+mb_dep("clash1", "v1.0.0");
+mb_dep("clash2", "v1.0.0");
+EOF
+cd "$W/clash" || exit 1
+printf 'import "clash1/clash1";\nimport "clash2/clash2";\nfn main() -> int32 { return clash_name(); }\n' > src/main.mettle
+mb build
+check "clash: fails" code_is 1
+check "clash: note" has "note: \`clash_name\` is exported by both clash2 (clash2.mettle:1) and clash1 (clash1.mettle:1); plain imports share one namespace"
+check "clash: help" has "help: import one of them under a name: import \"clash1/clash1\" as clash1;"
+proj "$W/needy" <<'EOF'
+mb_dep("needs", "v1.0.0");
+EOF
+cd "$W/needy" || exit 1
+printf 'import "needs/needs";\nfn main() -> int32 { return needs_val() - 9; }\n' > src/main.mettle
+mb build
+check "needs a newer Mettle: fails" code_is 1
+check "needs a newer Mettle: error" has "error: needs v1.0.0 needs Mettle v0.99.0 or newer; the linux compiler is"
+check "needs: the newest supporting version" has "or require needs v0.9.0, the newest version that supports Mettle"
+sed -i 's/v1.0.0/v0.9.0/' mbuild.mettle
+mb build
+check "needs v0.9.0 builds" code_is 0
+
+echo "== bootstrap"
+B="$S/bootstrap"
+mkdir -p "$B"
+cp -r "$here/src" "$here/mbuild.mettle" "$B/"
+cd "$B" || exit 1
+( "$METTLE" --build src/main.mettle -o mbuild0 && ./mbuild0 build -r -t host ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"
+check "mettle builds mbuild0, mbuild0 builds mbuild" code_is 0
+./build/linux/release/mbuild version >"$S/last.out" 2>&1
+check "the release mbuild runs" has "mbuild 0.2.0"
+./build/linux/release/mbuild build -r -t host >"$S/last.out" 2>&1
+check "and sees itself Fresh" has "Fresh mbuild (linux, release)"
+./build/linux/release/mbuild help >"$S/last.out" 2>&1
+check "its project commands" sh -c 'grep -q "^  install " "$0/last.out" && grep -q "^  selfcheck " "$0/last.out" && grep -q "^  dist " "$0/last.out"' "$S"
+
+if [ -n "${METTLE_WIN:-}" ] && [ "${SKIP_WINE:-0}" != 1 ]; then
+  echo "== windows"
+  export MBUILD_METTLE_WINDOWS="$METTLE_WIN"
+  proj "$W/cross" </dev/null
+  cd "$W/cross" || exit 1
+  printf 'import "std/io";\nfn main() -> int32 {\n  print("Hello from cross!\\n");\n  return 0;\n}\n' > src/main.mettle
+  mb build -t all
+  check "build -t all" sh -c '[ -x build/linux/debug/cross ] && [ -f build/windows/debug/cross.exe ]'
+  mb run -t windows
+  check "run -t windows through wine" has "Hello from cross!"
+  mb -v build -t windows -r --force
+  check "windows release passes --release" has "--release"
+  ( cd "$B" && wine "$METTLE_WIN" --build src/main.mettle -o mbuild.exe ) >"$S/last.out" 2>&1
+  check "mbuild.exe builds" test -f "$B/mbuild.exe"
+  wine "$B/mbuild.exe" build -t all >"$S/last.out" 2>&1
+  check "mbuild.exe under wine sees the Linux build Fresh" has "Fresh cross (linux, debug)"
+else
+  echo "note: windows skipped (METTLE_WIN names no Windows dev compiler)"
+fi
+
 echo
 echo "build: $pass passed, $failed failed"
 [ $failed = 0 ]
