@@ -44,3 +44,11 @@ fn cmd_dist(a: MbArgs*) -> int32 {
   if (rc != 0) { return rc; }
   return mb_sh("tar -czf dist/mbuild-" + v + "-windows-x64.tar.gz -C build/windows/release mbuild.exe");
 }
+
+// vendor-alph: copy the alph modules mbuild uses from --from DIR (default ../alph) into third_party/alph, imports made relative
+fn cmd_vendor_alph(a: MbArgs*) -> int32 {
+  var src: string = mb_opt(a, "--from", "../alph");
+  var mods: string = "core/node core/queue core/mailbox core/heap sys/atomic sys/clock sys/recover sys/thread sys/linux sys/fd work/limiter net/port";
+  var line: string = "set -e; s=\"" + src + "\"; d=third_party/alph; c=$(git -C \"$s\" rev-parse --short HEAD); rm -rf $d; mkdir -p $d/core $d/sys $d/work $d/net; for f in " + mods + "; do sed -E 's#^import \"alph/([a-z]+/[a-z_]+)\";#import \"../\\1\";#' \"$s/src/$f.mettle\" >$d/$f.mettle; done; cp \"$s/LICENSE\" $d/LICENSE; echo \"alph (https://github.com/Lex-Dellimere/Alph) at $c, Apache-2.0 (LICENSE): the modules mbuild uses, imports made relative. refresh: mbuild vendor-alph --from DIR\" >$d/README";
+  return mb_sh(line);
+}
