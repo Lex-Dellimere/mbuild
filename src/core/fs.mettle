@@ -242,13 +242,40 @@ export fn fs_hash_file(p: string) -> string {
   return h_hex(&h);
 }
 
+// <dir of the running mbuild>/mbuild.home.
+export fn fs_home_file() -> string {
+  return p_dir(s_replace_byte(sys_self_exe(), 92, 47)) + "/mbuild.home";
+}
+
+// The mbuild.home value, read once (one item).
+var g_fs_home_file: StrList* = 0;
+
+fn fs_home_file_value() -> string {
+  if (g_fs_home_file == (StrList*)0) {
+    var l: StrList* = sl_new();
+    var r: FsRead = fs_read(fs_home_file());
+    if (r.ok) {
+      sl_push(l, s_replace_byte(s_trim(r.data), 92, 47));
+    } else {
+      sl_push(l, s_empty());
+    }
+    g_fs_home_file = l;
+  }
+  return sl_get(g_fs_home_file, 0);
+}
+
 // $MBUILD_HOME, else ~/.mbuild on Linux and %LOCALAPPDATA%/mbuild on Windows.
 // $MBUILD_HOME, else ~/.mbuild on Linux. Under wine the host's ~/.mbuild is
 // shared (WINEHOMEDIR names the host home as \??\Z:\home\user), so a wine
 // mbuild sees the same toolchains and git mirrors; a Linux-form MBUILD_HOME
 // is reached through Z:. Real Windows uses %LOCALAPPDATA%\mbuild.
+// Without MBUILD_HOME, a one-line mbuild.home beside the mbuild binary
+// (written by `mbuild setup --home DIR`) names it.
 export fn fs_mbuild_home() -> string {
   var h: string = s_replace_byte(env_get("MBUILD_HOME"), 92, 47);
+  if (slen(h) == 0) {
+    h = fs_home_file_value();
+  }
   if (slen(h) > 0) {
     if (sys_is_wine() && s_starts(h, "/")) {
       return "Z:" + h;
@@ -268,6 +295,18 @@ export fn fs_mbuild_home() -> string {
     return sys_home() + "/mbuild";
   }
   return sys_home() + "/.mbuild";
+}
+
+// Why fs_mbuild_home answers what it does: "MBUILD_HOME", the mbuild.home
+// file, or "the default".
+export fn fs_home_origin() -> string {
+  if (slen(env_get("MBUILD_HOME")) > 0) {
+    return "MBUILD_HOME";
+  }
+  if (slen(fs_home_file_value()) > 0) {
+    return fs_home_file();
+  }
+  return "the default";
 }
 
 export fn fs_temp_dir() -> string {

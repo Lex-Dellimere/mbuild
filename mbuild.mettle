@@ -11,7 +11,7 @@ fn project() {
 fn deps() {
 }
 
-// install: build a release mbuild for this machine and copy it to --to DIR (default ~/.local/bin)
+// install: build a release mbuild, copy it to --to DIR (default ~/.local/bin), then run its setup (--home, --from, --no-compiler, --yes)
 fn cmd_install(a: MbArgs*) -> int32 {
   var dir: string = mb_opt(a, "--to", mb_home() + "/.local/bin");
   if (mb_mbuild("build -r -t host") != 0) { return 1; }
@@ -19,7 +19,15 @@ fn cmd_install(a: MbArgs*) -> int32 {
   var dst: string = dir + "/mbuild" + mb_exe_ext();
   if (!mb_copy(mb_out("mbuild", mb_os(), "release"), dst)) { mb_fail("cannot copy to " + dst); }
   mb_say("installed " + dst);
-  return 0;
+  var c: MbCmd* = mb_cmd(dst);
+  mb_cmd_arg(c, "setup");
+  var home: string = mb_opt(a, "--home", "");
+  if (home != "") { mb_cmd_arg(c, "--home"); mb_cmd_arg(c, home); }
+  var from: string = mb_opt(a, "--from", "");
+  if (from != "") { mb_cmd_arg(c, "--from"); mb_cmd_arg(c, from); }
+  if (mb_flag(a, "--no-compiler")) { mb_cmd_arg(c, "--no-compiler"); }
+  if (mb_flag(a, "--yes")) { mb_cmd_arg(c, "--yes"); }
+  return mb_cmd_run(c);
 }
 
 // selfcheck: build mbuild and every test driver in debug and --release with zero warnings (tools/mcheck.sh)
