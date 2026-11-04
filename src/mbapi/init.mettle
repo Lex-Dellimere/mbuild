@@ -1,9 +1,9 @@
 // mbuild/init: what init.rules can call (mbuild help new). The rules only
 // describe options and a plan; mbuild checks and applies the plan.
 //
-// Every value is a string. In paths, file text, command summaries and bodies
-// and the next note, @@name@@ is replaced by an option's value or by project,
-// package, package_version or mbuild_version; @@@@ is a literal @@.
+// Every value is a string. In paths, file text, mi_line, command summaries
+// and bodies and the next note, @@name@@ is replaced by an option's value or
+// by project, package, package_version or mbuild_version; @@@@ is a literal @@.
 
 // The only C names the rules may reach: they write the plan file.
 extern fn mii_strlen(s: cstring) -> int64 = "strlen";

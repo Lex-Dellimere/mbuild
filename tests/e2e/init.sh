@@ -104,6 +104,15 @@ out=$("$D" . new site5 --from "$W" < /dev/null 2>&1)
 expect_no "stdin not a terminal: no prompt" "$out" "[8080]"
 file_has "stdin not a terminal: defaults" site5/src/routes.mettle 'return "8080";'
 
+# mi_file writes its dst with its text; mi_line fills variables
+F="$T/filefw-$v"
+rm -rf "$F"; cp -r "$W" "$F"
+sed -i 's|^  mi_dir("static");$|  mi_file("conf/port.txt", "port @@port@@\\n");\n  mi_line("// port @@port@@");|' "$F/init.rules"
+out=$("$D" . new fsite --from "$F" --opt port=9000 --yes 2>&1)
+file_has "mi_file: the file at dst" fsite/conf/port.txt "port 9000"
+[ ! -e "fsite/port 9000" ] && ok "mi_file: no file named after the text" || bad "mi_file: no file named after the text" "$(ls fsite)"
+file_has "mi_line fills variables" fsite/mbuild.mettle "  // port 9000"
+
 cd site || exit 1
 echo "// mine" > src/routes.mettle
 out=$("$D" . init --from "$W" --yes 2>&1); rc=$?

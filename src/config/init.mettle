@@ -800,11 +800,16 @@ fn inx_work(src: InxSrc*, recs: InxRec*, n: int64, vars: StrList*, w: InxWork*) 
       }
       sl_add_uniq(w->dirs, dd);
     } else if (s_eq(k, "template") || s_eq(k, "file")) {
-      var dst: string = inx_dst(src, "mi_" + k, sl_get(r->f, 1), vars, &ok);
+      // mi_template(src, dst), mi_file(dst, text)
+      var di: int64 = 1;
+      if (s_eq(k, "file")) {
+        di = 0;
+      }
+      var dst: string = inx_dst(src, "mi_" + k, sl_get(r->f, di), vars, &ok);
       if (!ok) {
         return false;
       }
-      var text: string = sl_get(r->f, 1);
+      var text: string = s_empty();
       if (s_eq(k, "template")) {
         var t: string = sl_get(r->f, 0);
         var tp: string = s_replace_byte(sys_realpath(p_join(src->dir, t)), 92, 47);
@@ -841,7 +846,11 @@ fn inx_work(src: InxSrc*, recs: InxRec*, n: int64, vars: StrList*, w: InxWork*) 
       }
       sl_push(w->sets, sl_get(r->f, 0) + "\n" + sl_get(r->f, 1) + "\n" + sl_get(r->f, 2));
     } else if (s_eq(k, "line")) {
-      sl_push(w->lines, sl_get(r->f, 0));
+      var ln: string = inx_fill(sl_get(r->f, 0), vars, src->label + ": init.rules: mi_line", false, &ok);
+      if (!ok) {
+        return false;
+      }
+      sl_push(w->lines, ln);
     } else if (s_eq(k, "command")) {
       var cn: string = sl_get(r->f, 0);
       if (!inx_cmd_name_ok(cn)) {
