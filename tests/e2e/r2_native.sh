@@ -50,10 +50,10 @@ G="$W/fx/gitbase/github.com/demo"
 
 # --- drivers ---------------------------------------------------------------------
 DRV="$W/native_driver"
-"$HEAD" --build "$here/tests/unit/native_driver.mettle" -o "$DRV" >"$W/drv.log" 2>&1 || { bad "build driver" "$W/drv.log"; exit 1; }
+"$HEAD" --build "$here/tests/unit/native_test.mettle" -o "$DRV" >"$W/drv.log" 2>&1 || { bad "build driver" "$W/drv.log"; exit 1; }
 if grep -q "warning" "$W/drv.log"; then bad "driver builds without warnings" "$W/drv.log"; else ok "driver builds without warnings"; fi
 "$W017" >/dev/null 2>&1 || true
-wine "$W017" --build "$here/tests/unit/native_driver.mettle" -o "$W/native_driver.exe" >"$W/wdrv.log" 2>&1 \
+wine "$W017" --build "$here/tests/unit/native_test.mettle" -o "$W/native_driver.exe" >"$W/wdrv.log" 2>&1 \
   && ok "driver builds as a Windows exe" || bad "driver builds as a Windows exe" "$W/wdrv.log"
 
 # new_app DIR: a project skeleton requiring the modules given after DIR.

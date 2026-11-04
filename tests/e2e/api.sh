@@ -36,7 +36,7 @@ $3"; fi
 }
 
 echo "== building the driver"
-built=$("$here/tools/mcheck.sh" "$here/tests/unit/api_driver.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
+built=$("$here/tools/mcheck.sh" "$here/tests/unit/api_test.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
 printf '%s\n' "$built"
 if grep -q "warning" "$OUT"/api_driver.head.log "$OUT"/api_driver.headrel.log "$OUT"/api_driver.l017.log "$OUT"/api_driver.w017.log; then
   bad "driver compiles without warnings"

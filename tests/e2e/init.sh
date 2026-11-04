@@ -1,19 +1,11 @@
 #!/bin/sh
-# r3_init.sh: acceptance tests of init.rules and AGENT.rules (DESIGN.md 17.4
-# Group N) through tests/unit/init_driver.mettle and the mbuild CLI.
-#
-#   sh tests/e2e/r3_init.sh
-#   SKIP_CLI=1 sh tests/e2e/r3_init.sh    part 1 only (path packages, the driver)
-#
-# Part 1 needs cfg_build_driver and the mbf_ edits (group C). Part 2 needs a
-# working registry (R), mbuild.mettle loading (C) and the CLI (B): `new`,
-# `init --from`, `agents`, `run`, `publish`.
-# Scratch: $MBTEST_TMP (default /tmp/mbuild-test-$USER/r3_init).
+# init.sh: init.rules and AGENT.rules (tests/unit/init_test.mettle and the CLI).
+#   METTLE=dev-compiler sh tests/e2e/init.sh   (scratch: $MBTEST_TMP)
 
 set -u
 here="${MBTEST_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 export METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
-T="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-me}/r3_init}"
+T="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-me}/init}"
 rm -rf "$T"
 mkdir -p "$T"
 export MBUILD_HOME="$T/home"
@@ -57,7 +49,7 @@ mkdir -p "$DRV"
 for v in debug release; do
   flag=""
   [ "$v" = release ] && flag="--release"
-  if "$METTLE" --build $flag "$here/tests/unit/init_driver.mettle" -o "$DRV/init_driver.$v" > "$DRV/$v.log" 2>&1; then
+  if "$METTLE" --build $flag "$here/tests/unit/init_test.mettle" -o "$DRV/init_driver.$v" > "$DRV/$v.log" 2>&1; then
     if grep -q "warning" "$DRV/$v.log"; then bad "driver ($v) compiles without warnings" "$(cat "$DRV/$v.log")"; else ok "driver ($v) compiles without warnings"; fi
   else
     bad "driver ($v) compiles" "$(cat "$DRV/$v.log")"
@@ -248,87 +240,83 @@ out=$("$D" "$A3" refresh "strutil:v1.1.0:deps/strutil" 2>&1)
 [ ! -e "$A3/AGENT.rules" ] && ok "no rules among dependencies: no file" || bad "no rules among dependencies: no file" "$out"
 done
 
-# --- part 2: registry and CLI (needs groups R, C, B) ---------------------------
+# --- part 2: registry and CLI -------------------------------------------------
 
-if [ "${SKIP_CLI:-0}" = 1 ]; then
-  echo "== part 2 skipped (SKIP_CLI=1)"
+echo "== part 2: registry"
+D="$DRV/init_driver.debug"
+rm -rf "$MBUILD_HOME"
+P="$T/p2"
+mkdir -p "$P"
+cd "$P" || exit 1
+out=$("$D" . new rsite --from webfw@v1.0.0 --opt port=9000 --yes 2>&1); rc=$?
+expect_line "registry: mbuild.mettle line" "$out" "     Created rsite/mbuild.mettle (package \`rsite\`, depends on webfw v1.0.0, sqlite v1.2.0)"
+file_has "registry: mb_dep webfw" rsite/mbuild.mettle 'mb_dep("webfw", "v1.0.0");'
+[ -f "$MBUILD_HOME/init/webfw@v1.0.0/init.rules" ] && ok "registry: extracted into the init cache" || bad "registry: extracted into the init cache" "$out"
+out=$("$D" . new rsite2 --from webfw --yes 2>&1)
+file_has "registry: newest version" rsite2/mbuild.mettle 'mb_dep("webfw", "v1.0.0");'
+
+echo "== part 2: CLI"
+MB="$T/mbuild"
+if ! "$METTLE" --build "$here/src/main.mettle" -o "$MB" > "$T/mbuild.log" 2>&1; then
+  bad "mbuild builds" "$(cat "$T/mbuild.log")"
 else
-  echo "== part 2: registry"
-  D="$DRV/init_driver.debug"
+  # a fresh cache, so the transcript has its Fetching line (14.3)
   rm -rf "$MBUILD_HOME"
-  P="$T/p2"
-  mkdir -p "$P"
+  out=$("$MB" new site --from webfw --opt port=9000 --yes 2>&1); rc=$?
+  expect_line "cli new: mbuild.mettle line" "$out" "     Created site/mbuild.mettle (package \`site\`, depends on webfw v1.0.0, sqlite v1.2.0)"
+  expect_line "cli new: files line" "$out" "     Created site/src/main.mettle, site/src/routes.mettle, site/static/"
+  expect_line "cli new: command line" "$out" "     Command serve: run the dev server on port 9000"
+  expect_line "cli new: next line" "$out" "  next: mbuild serve, then open http://localhost:9000"
+  expect_has "cli new: fetch line" "$out" "Fetching webfw v1.0.0 (default)"
+  file_has "cli new: routes" site/src/routes.mettle 'return "9000";'
+  file_has "cli new: mbuild version" site/src/main.mettle "(mbuild $("$MB" version | cut -d' ' -f2))"
+  cd site || exit 1
+  out=$("$MB" run 2>&1); rc=$?
+  [ $rc -eq 0 ] && ok "cli: mbuild run builds" || bad "cli: mbuild run builds" "$out"
+  expect_has "cli: the program runs" "$out" "site serves on port 9000"
+  out=$("$MB" init --from webfw --yes 2>&1)
+  expect_has "cli init --from: skips" "$out" "skip src/main.mettle (exists; --force overwrites)"
+  file_has "cli: AGENT.rules lists webfw" AGENT.rules "# webfw v1.0.0: .mbuild/deps/webfw/AGENT.rules"
   cd "$P" || exit 1
-  out=$("$D" . new rsite --from webfw@v1.0.0 --opt port=9000 --yes 2>&1); rc=$?
-  expect_line "registry: mbuild.mettle line" "$out" "     Created rsite/mbuild.mettle (package \`rsite\`, depends on webfw v1.0.0, sqlite v1.2.0)"
-  file_has "registry: mb_dep webfw" rsite/mbuild.mettle 'mb_dep("webfw", "v1.0.0");'
-  [ -f "$MBUILD_HOME/init/webfw@v1.0.0/init.rules" ] && ok "registry: extracted into the init cache" || bad "registry: extracted into the init cache" "$out"
-  out=$("$D" . new rsite2 --from webfw --yes 2>&1)
-  file_has "registry: newest version" rsite2/mbuild.mettle 'mb_dep("webfw", "v1.0.0");'
 
-  echo "== part 2: CLI"
-  MB="$T/mbuild"
-  if ! "$METTLE" --build "$here/src/main.mettle" -o "$MB" > "$T/mbuild.log" 2>&1; then
-    bad "mbuild builds" "$(cat "$T/mbuild.log")"
-  else
-    # a fresh cache, so the transcript has its Fetching line (14.3)
-    rm -rf "$MBUILD_HOME"
-    out=$("$MB" new site --from webfw --opt port=9000 --yes 2>&1); rc=$?
-    expect_line "cli new: mbuild.mettle line" "$out" "     Created site/mbuild.mettle (package \`site\`, depends on webfw v1.0.0, sqlite v1.2.0)"
-    expect_line "cli new: files line" "$out" "     Created site/src/main.mettle, site/src/routes.mettle, site/static/"
-    expect_line "cli new: command line" "$out" "     Command serve: run the dev server on port 9000"
-    expect_line "cli new: next line" "$out" "  next: mbuild serve, then open http://localhost:9000"
-    expect_has "cli new: fetch line" "$out" "Fetching webfw v1.0.0 (default)"
-    file_has "cli new: routes" site/src/routes.mettle 'return "9000";'
-    file_has "cli new: mbuild version" site/src/main.mettle "(mbuild $("$MB" version | cut -d' ' -f2))"
-    cd site || exit 1
-    out=$("$MB" run 2>&1); rc=$?
-    [ $rc -eq 0 ] && ok "cli: mbuild run builds" || bad "cli: mbuild run builds" "$out"
-    expect_has "cli: the program runs" "$out" "site serves on port 9000"
-    out=$("$MB" init --from webfw --yes 2>&1)
-    expect_has "cli init --from: skips" "$out" "skip src/main.mettle (exists; --force overwrites)"
-    file_has "cli: AGENT.rules lists webfw" AGENT.rules "# webfw v1.0.0: .mbuild/deps/webfw/AGENT.rules"
-    cd "$P" || exit 1
-
-    mkdir -p tapp/src
-    cat > tapp/mbuild.mettle <<'EOF'
+  mkdir -p tapp/src
+  cat > tapp/mbuild.mettle <<'EOF'
 import "mbuild/api";
 
 fn project() {
-  mb_package("tapp", "0.1.0");
-  mb_dep("textfmt", "v0.1.0");
+mb_package("tapp", "0.1.0");
+mb_dep("textfmt", "v0.1.0");
 }
 EOF
-    printf 'import "std/io";\nimport "textfmt/textfmt";\n\nfn main() -> int32 {\n  print(tf_banner("x"));\n  return 0;\n}\n' > tapp/src/main.mettle
-    printf '# tapp\n' > tapp/AGENT.rules
-    cd tapp || exit 1
-    out=$("$MB" agents 2>&1)
-    file_has "cli agents: block lists textfmt" AGENT.rules "# textfmt v0.1.0: .mbuild/deps/textfmt/AGENT.rules"
-    file_lacks "cli agents: not strutil" AGENT.rules "# strutil"
-    file_has "cli agents: user text kept" AGENT.rules "# tapp"
-    out=$("$MB" agents --all 2>&1)
-    expect_line "cli agents --all: textfmt" "$out" "== textfmt v0.1.0 (.mbuild/deps/textfmt/AGENT.rules)"
-    expect_line "cli agents --all: strutil" "$out" "== strutil v1.1.0 (.mbuild/deps/strutil/AGENT.rules)"
-    cd "$P" || exit 1
-    mkdir -p toff/src
-    sed 's/mb_dep("textfmt", "v0.1.0");/mb_dep("textfmt", "v0.1.0");\n  mb_agents(false);/' tapp/mbuild.mettle > toff/mbuild.mettle
-    cp tapp/src/main.mettle toff/src/
-    cd toff || exit 1
-    out=$("$MB" build 2>&1)
-    [ ! -e AGENT.rules ] && ok "cli mb_agents(false): no file" || bad "cli mb_agents(false): no file" "$out"
-    cd "$P" || exit 1
+  printf 'import "std/io";\nimport "textfmt/textfmt";\n\nfn main() -> int32 {\n  print(tf_banner("x"));\n  return 0;\n}\n' > tapp/src/main.mettle
+  printf '# tapp\n' > tapp/AGENT.rules
+  cd tapp || exit 1
+  out=$("$MB" agents 2>&1)
+  file_has "cli agents: block lists textfmt" AGENT.rules "# textfmt v0.1.0: .mbuild/deps/textfmt/AGENT.rules"
+  file_lacks "cli agents: not strutil" AGENT.rules "# strutil"
+  file_has "cli agents: user text kept" AGENT.rules "# tapp"
+  out=$("$MB" agents --all 2>&1)
+  expect_line "cli agents --all: textfmt" "$out" "== textfmt v0.1.0 (.mbuild/deps/textfmt/AGENT.rules)"
+  expect_line "cli agents --all: strutil" "$out" "== strutil v1.1.0 (.mbuild/deps/strutil/AGENT.rules)"
+  cd "$P" || exit 1
+  mkdir -p toff/src
+  sed 's/mb_dep("textfmt", "v0.1.0");/mb_dep("textfmt", "v0.1.0");\n  mb_agents(false);/' tapp/mbuild.mettle > toff/mbuild.mettle
+  cp tapp/src/main.mettle toff/src/
+  cd toff || exit 1
+  out=$("$MB" build 2>&1)
+  [ ! -e AGENT.rules ] && ok "cli mb_agents(false): no file" || bad "cli mb_agents(false): no file" "$out"
+  cd "$P" || exit 1
 
-    cp -r "$W" pub
-    rm pub/AGENT.rules
-    # a new version: an indexed one stops publish earlier (14.7 step 2)
-    sed -i 's/mb_package("webfw", "v1.0.0");/mb_package("webfw", "v1.0.1");/' pub/mbuild.mettle
-    cd pub || exit 1
-    out=$("$MB" publish --to "$REG" --dry-run 2>&1)
-    expect_has "cli publish without AGENT.rules" "$out" "error: webfw cannot be published without AGENT.rules (mbuild init --package writes one)"
-    cd "$P" || exit 1
-  fi
+  cp -r "$W" pub
+  rm pub/AGENT.rules
+  # a new version: an indexed one stops publish earlier (14.7 step 2)
+  sed -i 's/mb_package("webfw", "v1.0.0");/mb_package("webfw", "v1.0.1");/' pub/mbuild.mettle
+  cd pub || exit 1
+  out=$("$MB" publish --to "$REG" --dry-run 2>&1)
+  expect_has "cli publish without AGENT.rules" "$out" "error: webfw cannot be published without AGENT.rules (mbuild init --package writes one)"
+  cd "$P" || exit 1
 fi
 
 echo
-echo "passed $pass, failed $failn"
+echo "init: $pass passed, $failn failed"
 [ $failn -eq 0 ]

@@ -37,7 +37,7 @@ has() { grep -q -- "$2" "$1"; }
 hasnt() { ! grep -q -- "$2" "$1"; }
 
 echo "== building the driver"
-"${DRIVER_METTLE:-$HEAD}" --build "$here/tests/unit/deps_driver.mettle" -o "$S/drv" >"$S/build.log" 2>&1 || { cat "$S/build.log"; exit 1; }
+"${DRIVER_METTLE:-$HEAD}" --build "$here/tests/unit/deps_test.mettle" -o "$S/drv" >"$S/build.log" 2>&1 || { cat "$S/build.log"; exit 1; }
 D="$S/drv"
 
 F="$S/fx"
@@ -524,7 +524,7 @@ check "stale lock removed" [ ! -d "$lk" ]
 if [ "${1:-}" = "--wine" ]; then
   echo "== wine"
   WD="$S/drv.exe"
-  wine "$W017" --build "$(winepath -w "$here/tests/unit/deps_driver.mettle" 2>/dev/null)" -o "$(winepath -w "$WD" 2>/dev/null)" >"$S/wbuild.log" 2>&1 || { cat "$S/wbuild.log"; }
+  wine "$W017" --build "$(winepath -w "$here/tests/unit/deps_test.mettle" 2>/dev/null)" -o "$(winepath -w "$WD" 2>/dev/null)" >"$S/wbuild.log" 2>&1 || { cat "$S/wbuild.log"; }
   WF="$S/wfx"
   "$here/tests/fixtures/make-fixtures.sh" "$WF" >/dev/null
   WA="Z:$WF/app"

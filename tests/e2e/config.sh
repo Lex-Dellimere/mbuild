@@ -1,16 +1,11 @@
 #!/bin/sh
-# r3_config.sh: mbuild.mettle loading, commands, hooks and edits (DESIGN.md
-# 13, 17.4 Group C) through tests/unit/config_driver.mettle, built in debug
-# and --release; every case runs with both builds and their output must match.
-#
-#   METTLE=/path/to/dev/mettle sh tests/e2e/r3_config.sh
-#
-# Scratch: $MBTEST_TMP (default /tmp/mbuild-test-$USER/r3_config).
+# config.sh: loading mbuild.mettle, project commands, hooks and edits (tests/unit/config_test.mettle).
+#   METTLE=dev-compiler sh tests/e2e/config.sh   (scratch: $MBTEST_TMP)
 
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
-T="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-user}/r3_config}"
+T="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-user}/config}"
 rm -rf "$T"
 mkdir -p "$T"
 export MBUILD_HOME="$T/home"
@@ -40,7 +35,7 @@ $3"; fi
 echo "== building"
 for mode in debug release; do
   flag=""; [ $mode = release ] && flag="--release"
-  log=$("$METTLE" --build $flag "$here/tests/unit/config_driver.mettle" -o "$T/config_driver.$mode" 2>&1) || { printf '%s\n' "$log"; echo "config_driver ($mode) does not build"; exit 1; }
+  log=$("$METTLE" --build $flag "$here/tests/unit/config_test.mettle" -o "$T/config_driver.$mode" 2>&1) || { printf '%s\n' "$log"; echo "config_driver ($mode) does not build"; exit 1; }
   expect_no "config_driver ($mode): no warnings" "$log" "warning"
   log=$("$METTLE" --build $flag "$here/tests/unit/mbfile_test.mettle" -o "$T/mbfile_test.$mode" 2>&1) || { printf '%s\n' "$log"; echo "mbfile_test ($mode) does not build"; exit 1; }
   expect_no "mbfile_test ($mode): no warnings" "$log" "warning"
@@ -289,5 +284,5 @@ else
   diff "$T/debug.norm" "$T/release.norm" | head -20
 fi
 echo
-echo "r3_config: $pass passed, $failn failed"
+echo "config: $pass passed, $failn failed"
 [ "$failn" = 0 ]

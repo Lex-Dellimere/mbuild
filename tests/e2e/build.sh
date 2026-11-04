@@ -1,16 +1,11 @@
 #!/bin/sh
-# r3_build.sh: round-3 acceptance tests of the CLI and orchestration
-# (DESIGN.md 17.4 group B) with a real mbuild built from this tree, debug
-# and --release, both runs compared by exit code.
-#
-#   sh tests/e2e/r3_build.sh
-#
-# Scratch: $MBTEST_TMP (default /tmp/mbuild-test-$USER/r3_build).
+# build.sh: the mbuild CLI end to end on real projects, mbuild built debug and --release.
+#   METTLE=dev-compiler sh tests/e2e/build.sh   (scratch: $MBTEST_TMP)
 
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
-S="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-me}/r3_build}"
+S="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-me}/build}"
 rm -rf "$S"
 mkdir -p "$S"
 export LC_ALL=C NO_COLOR=1 METTLE
@@ -281,5 +276,5 @@ check "init notes mbuild.toml" has "note: mbuild.toml is no longer read and can 
 done
 
 echo
-echo "$pass passed, $failed failed"
+echo "build: $pass passed, $failed failed"
 [ $failed = 0 ]

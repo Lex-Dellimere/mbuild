@@ -37,7 +37,7 @@ expect_rc() {
 }
 
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
-  built=$("$here/tools/mcheck.sh" "$here/tests/unit/toolchain_driver.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
+  built=$("$here/tools/mcheck.sh" "$here/tests/unit/toolchain_test.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
   printf '%s\n' "$built"
   if printf '%s' "$built" | grep -q "(0 warnings)" && ! printf '%s' "$built" | grep -qv "(0 warnings)"; then
     ok "driver builds warning-free with head, head --release, v0.17.0 Linux and Windows"

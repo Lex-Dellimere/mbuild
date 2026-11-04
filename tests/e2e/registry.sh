@@ -1,17 +1,11 @@
 #!/bin/sh
-# r3_registry.sh: tests of src/core/sha256.mettle and src/pkg/registry.mettle
-# (DESIGN.md 17.4 group R) through tests/unit/registry_driver.mettle, built
-# debug and --release, against tests/fixtures/make-registry.sh.
-#
-#   METTLE=path/to/mettle sh tests/e2e/r3_registry.sh
-#   METTLE_WIN=path/to/mettle.exe   also the Windows driver under wine
-#
-# Scratch space: $MBTEST_TMP (default /tmp/mbuild-test-$USER/r3_registry).
+# registry.sh: sha256 and the file registry (tests/unit/registry_test.mettle; METTLE_WIN: also under wine).
+#   METTLE=dev-compiler sh tests/e2e/registry.sh   (scratch: $MBTEST_TMP)
 
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
-S="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-user}/r3_registry}"
+S="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-user}/registry}"
 rm -rf "$S"
 mkdir -p "$S"
 export WINEDEBUG=-all
@@ -37,7 +31,7 @@ sum() { sha256sum | cut -c1-64; }
 echo "== building the driver"
 for mode in debug release; do
   flag=""; [ $mode = release ] && flag="--release"
-  "$METTLE" --build $flag "$here/tests/unit/registry_driver.mettle" -o "$S/drv-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
+  "$METTLE" --build $flag "$here/tests/unit/registry_test.mettle" -o "$S/drv-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
   if grep -q 'warning' "$S/build-$mode.log"; then bad "driver builds without warnings ($mode)" "$(cat "$S/build-$mode.log")"; fi
 done
 
@@ -220,7 +214,7 @@ suite release
 
 if [ -n "${METTLE_WIN:-}" ]; then
   echo "== wine"
-  "$METTLE_WIN" --build "$here/tests/unit/registry_driver.mettle" -o "$S/drv.exe" >"$S/build-win.log" 2>&1 || bad "Windows driver builds" "$(cat "$S/build-win.log")"
+  "$METTLE_WIN" --build "$here/tests/unit/registry_test.mettle" -o "$S/drv.exe" >"$S/build-win.log" 2>&1 || bad "Windows driver builds" "$(cat "$S/build-win.log")"
   DRV="wine"
   W="$S/wine"; mkdir -p "$W/app"
   export MBUILD_HOME="$W/home" MBUILD_REGISTRY="$REG" MBUILD_UNIX_PATH="/usr/local/bin:/usr/bin:/bin"
@@ -235,5 +229,5 @@ else
 fi
 
 echo
-echo "$pass passed, $failed failed"
+echo "registry: $pass passed, $failed failed"
 [ $failed -eq 0 ]

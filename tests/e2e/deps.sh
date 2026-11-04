@@ -1,18 +1,11 @@
 #!/bin/sh
-# r3_deps.sh: dependencies over the registry (DESIGN.md 14.5, 17.4 group D),
-# through tests/unit/deps_driver and, for what needs build.mettle, a real
-# mbuild built from this tree.
-#
-#   sh tests/e2e/r3_deps.sh
-#
-# METTLE: the dev compiler. DRV / MB: prebuilt driver / mbuild (else built).
-# MAKE_REGISTRY: the fixture generator (tests/fixtures/make-registry.sh).
-# MBTEST_TMP: scratch (default /tmp/mbuild-test-$USER/r3_deps).
+# deps.sh: dependencies over the registry fixtures (tests/unit/deps_test.mettle and the CLI).
+#   METTLE=dev-compiler sh tests/e2e/deps.sh   (scratch: $MBTEST_TMP)
 
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
-S="${MBTEST_TMP:-/tmp/mbuild-test-$USER/r3_deps}"
+S="${MBTEST_TMP:-/tmp/mbuild-test-$USER/deps}"
 rm -rf "$S"
 mkdir -p "$S"
 export LC_ALL=C NO_COLOR=1
@@ -32,7 +25,7 @@ idxsha() { awk -v v="$3" '$1 == v { sub("sha256=", "", $2); print $2 }' "$1/inde
 D="${DRV:-}"
 if [ -z "$D" ]; then
   echo "== building the driver"
-  "$METTLE" --build "$here/tests/unit/deps_driver.mettle" -o "$S/drv" >"$S/dbuild.log" 2>&1 || { cat "$S/dbuild.log"; exit 1; }
+  "$METTLE" --build "$here/tests/unit/deps_test.mettle" -o "$S/drv" >"$S/dbuild.log" 2>&1 || { cat "$S/dbuild.log"; exit 1; }
   D="$S/drv"
 fi
 
@@ -348,34 +341,30 @@ drv "$P" breaks apilib v1.1.5
 check "publish check: removed export" has "$S/last.out" "removed  fn al_mul"
 check "publish check: new line" has "$S/last.out" "a breaking change needs a new line: publish v2.0.0"
 
-if [ -n "${MB:-}" ] || [ "${RUN_B:-0}" = 1 ]; then
-  echo "== with mbuild (build.mettle)"
-  if [ -z "${MB:-}" ]; then
-    "$METTLE" --build "$here/src/main.mettle" -o "$S/mbuild" >"$S/mbuild.log" 2>&1 || { cat "$S/mbuild.log"; exit 1; }
-    MB="$S/mbuild"
-  fi
-  mb() { (cd "$1" && shift && "$MB" "$@") >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
-  P="$S/b-app"
-  MAIN='import "strutil/strutil";
+echo "== with mbuild"
+if [ -z "${MB:-}" ]; then
+  "$METTLE" --build "$here/src/main.mettle" -o "$S/mbuild" >"$S/mbuild.log" 2>&1 || { cat "$S/mbuild.log"; exit 1; }
+  MB="$S/mbuild"
+fi
+mb() { (cd "$1" && shift && "$MB" "$@") >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
+P="$S/b-app"
+MAIN='import "strutil/strutil";
 import "vecmath/vecmath";
 fn main() -> int32 { return 0; }' proj "$P" <<'EOF'
 mb_dep("vecmath", "v0.2.0");
 EOF
-  mb "$P" build
-  check "build: auto-add" has "$S/last.out" "Adding strutil v1.1.0 (registry default)"
-  mb "$P" build -v
-  check "build: second is Fresh" has "$S/last.out" "Fresh"
-  check "build: no resolving" hasnt "$S/last.out" "Resolving"
-  P="$S/b-nosuch"
-  MAIN='import "nosuch/x";
+mb "$P" build
+check "build: auto-add" has "$S/last.out" "Adding strutil v1.1.0 (registry default)"
+mb "$P" build -v
+check "build: second is Fresh" has "$S/last.out" "Fresh"
+check "build: no resolving" hasnt "$S/last.out" "Resolving"
+P="$S/b-nosuch"
+MAIN='import "nosuch/x";
 fn main() -> int32 { return 0; }' proj "$P" </dev/null
-  mb "$P" build
-  check "build: E0006" has "$S/last.out" "E0006"
-  check "build: no registry note" has "$S/last.out" "no registry has a package named nosuch"
-else
-  echo "(the mbuild part needs build.mettle of group B: set RUN_B=1 or MB=path)"
-fi
+mb "$P" build
+check "build: E0006" has "$S/last.out" "E0006"
+check "build: no registry note" has "$S/last.out" "no registry has a package named nosuch"
 
 echo
-echo "r3_deps: $pass passed, $failed failed"
+echo "deps: $pass passed, $failed failed"
 [ "$failed" -eq 0 ]

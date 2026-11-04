@@ -36,7 +36,7 @@ expect_rc() {
 }
 
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
-  built=$("$here/tools/mcheck.sh" "$here/tests/unit/toolchain_driver.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
+  built=$("$here/tools/mcheck.sh" "$here/tests/unit/toolchain_test.mettle") || { printf '%s\n' "$built"; echo "driver build failed"; exit 1; }
   printf '%s\n' "$built"
   if printf '%s' "$built" | grep -q "^\[headrel\] FAILED"; then bad "driver builds with head --release"; else ok "driver builds with head --release"; fi
   if grep -q "warning" "$OUT"/toolchain_driver.head.log "$OUT"/toolchain_driver.headrel.log "$OUT"/toolchain_driver.l017.log "$OUT"/toolchain_driver.w017.log; then

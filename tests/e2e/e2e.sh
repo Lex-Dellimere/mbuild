@@ -50,7 +50,7 @@ echo "== bootstrap (head compiler: $METTLE)"
 out=$(cd "$here" && mkdir -p build/stage0 && "$METTLE" --build src/main.mettle -o build/stage0/mbuild >/dev/null && build/stage0/mbuild build -r -t host --mettle "$METTLE" 2>&1); rc=$?
 code_is "stage 0 mettle, then mbuild builds mbuild" "$rc" 0 "$out"
 [ $rc = 0 ] || { echo "e2e: bootstrap failed; stopping"; exit 1; }
-out=$(mkdir -p "$T/e2e-core" && "$METTLE" --build "$here/tests/unit/core_graph.mettle" -o "$T/e2e-core/core_graph" >/dev/null 2>&1 && "$T/e2e-core/core_graph" 2>&1); rc=$?
+out=$(mkdir -p "$T/e2e-core" && "$METTLE" --build "$here/tests/unit/graph_test.mettle" -o "$T/e2e-core/core_graph" >/dev/null 2>&1 && "$T/e2e-core/core_graph" 2>&1); rc=$?
 code_is "core_graph" "$rc" 0 "$out"
 MB="$T/e2e-mbuild"
 cp "$here/build/linux/release/mbuild" "$MB"

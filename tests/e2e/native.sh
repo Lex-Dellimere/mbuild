@@ -80,7 +80,7 @@ sed -i 's|^import "github.com/demo/nomanifest/greet";|import "github.com/demo/no
 
 # --- the driver ---------------------------------------------------------------
 DRV="$W/native_driver"
-"$HEAD" --build "$here/tests/unit/native_driver.mettle" -o "$DRV" >"$W/drv.log" 2>&1 || { bad "build driver" "$W/drv.log"; exit 1; }
+"$HEAD" --build "$here/tests/unit/native_test.mettle" -o "$DRV" >"$W/drv.log" 2>&1 || { bad "build driver" "$W/drv.log"; exit 1; }
 if grep -q "warning" "$W/drv.log"; then bad "driver builds without warnings" "$W/drv.log"; else ok "driver builds without warnings"; fi
 
 # prepare TARGET OUTFILE: runs the driver, splits its output into args/env/copy.
@@ -183,7 +183,7 @@ check "doctor windows: strlen in the runtime" has "$W/wd1" "strlen .*Mettle runt
 
 # --- the driver as a Windows program under wine ----------------------------------
 "$W017" >/dev/null 2>&1 || true
-wine "$W017" --build "$here/tests/unit/native_driver.mettle" -o "$W/native_driver.exe" >"$W/wdrv.log" 2>&1 \
+wine "$W017" --build "$here/tests/unit/native_test.mettle" -o "$W/native_driver.exe" >"$W/wdrv.log" 2>&1 \
   && ok "driver builds as a Windows exe" || bad "driver builds as a Windows exe" "$W/wdrv.log"
 rm -rf "$APP/.mbuild/cache/windows"
 MB_RUNTIME_DIR="Z:$W017_RT" wine "$W/native_driver.exe" "Z:$APP" windows prepare >"$W/ww1" 2>&1 \

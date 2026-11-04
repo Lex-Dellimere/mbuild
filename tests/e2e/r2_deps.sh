@@ -30,7 +30,7 @@ lockv() { awk -v m="$2" '$1 == m { print $2 }' "$1/mbuild.lock"; }
 
 echo "== building mbuild and the driver"
 "$HEAD" --build "$here/src/main.mettle" -o "$S/mbuild" >"$S/build.log" 2>&1 || { cat "$S/build.log"; exit 1; }
-"$HEAD" --build "$here/tests/unit/deps_driver.mettle" -o "$S/drv" >"$S/dbuild.log" 2>&1 || { cat "$S/dbuild.log"; exit 1; }
+"$HEAD" --build "$here/tests/unit/deps_test.mettle" -o "$S/drv" >"$S/dbuild.log" 2>&1 || { cat "$S/dbuild.log"; exit 1; }
 MB="$S/mbuild"
 D="$S/drv"
 

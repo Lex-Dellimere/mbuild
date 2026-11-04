@@ -1,19 +1,12 @@
 #!/bin/sh
-# r3_components.sh: components and runtime (DESIGN.md 15, 17.4 group K)
-# through tests/unit/components_driver.mettle, built debug and --release
-# with zero warnings; both builds run every check and must agree. Then the
-# `mbuild components` table and a `mettle live` switch through cmp_cmd_use.
-#
-#   sh tests/e2e/r3_components.sh
-#
-# Scratch: $MBTEST_TMP (default /tmp/mbuild-test-$USER/r3_components).
-# Compiler: $METTLE (default ../Mettle/bin/mettle next to the repository).
+# components.sh: components and runtime selection (tests/unit/components_test.mettle, `mbuild components`, `use`, live).
+#   METTLE=dev-compiler sh tests/e2e/components.sh   (scratch: $MBTEST_TMP)
 
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
 export METTLE
-T="${MBTEST_TMP:-/tmp/mbuild-test-$USER/r3_components}"
+T="${MBTEST_TMP:-/tmp/mbuild-test-$USER/components}"
 W="$T/work"
 export MBUILD_HOME="$T/home"
 export NO_COLOR=1
@@ -277,9 +270,9 @@ D="$T/components_driver"
 for mode in debug release; do
   flag=""
   [ "$mode" = release ] && flag="--release"
-  out=$("$METTLE" --build $flag "$here/tests/unit/components_driver.mettle" -o "$D-$mode" 2>&1)
+  out=$("$METTLE" --build $flag "$here/tests/unit/components_test.mettle" -o "$D-$mode" 2>&1)
   code=$?
-  if [ $code -ne 0 ]; then bad "driver builds ($mode)" "$out"; echo "$pass passed, $failn failed"; exit 1; fi
+  if [ $code -ne 0 ]; then bad "driver builds ($mode)" "$out"; echo "components: $pass passed, $failn failed"; exit 1; fi
   if printf '%s\n' "$out" | grep -q 'warning'; then bad "driver builds without warnings ($mode)" "$out"; else ok "driver builds without warnings ($mode)"; fi
 done
 
@@ -318,5 +311,5 @@ after=$(printf '%s\n' "$live" | sed -n '/Patch/,$p' | grep -c '^stdout: tick')
 if printf '%s\n' "$live" | grep -q 'Patch' && [ "$after" -eq 0 ]; then ok "live switches to quiet"; else bad "live switches to quiet" "$live"; fi
 "$D-debug" "$W" use logger > /dev/null 2>&1
 
-echo "$pass passed, $failn failed"
+echo "components: $pass passed, $failn failed"
 [ $failn -eq 0 ]
