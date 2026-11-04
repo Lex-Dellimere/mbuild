@@ -3139,6 +3139,7 @@ export fn build_cmd_init(opts: Options*) -> int32 {
   var ini_opts: StrList* = bx_take_opts(p0, "--opt");
   var registry: string = bx_take_opt(p0, "--registry");
   var package: bool = bx_take_flag(p0, "--package");
+  var agent_rules: bool = bx_take_flag(p0, "--agent-rules");
   var yes: bool = bx_take_flag(p0, "--yes");
   var dry: bool = bx_take_flag(p0, "--dry-run");
   free(p0);
@@ -3185,7 +3186,7 @@ export fn build_cmd_init(opts: Options*) -> int32 {
     deps_adopt_mettle_deps(pd, true);
   }
   if (package) {
-    var rc: int32 = ini_scaffold_package(dir, name);
+    var rc: int32 = ini_scaffold_package(dir, name, agent_rules);
     if (rc != 0) {
       return rc;
     }
@@ -4649,11 +4650,12 @@ fn bx_init_cmds() {
     return;
   }
   bx_group("build");
-  bx_def("init", "start a project here", "mbuild init [NAME] [--package] [--from PKG[@V]]", "project.md");
+  bx_def("init", "start a project here", "mbuild init [NAME] [--package [--agent-rules]] [--from PKG[@V]]", "project.md");
   bx_ex("mbuild init", "package named after the folder");
   bx_ex("mbuild init --package", "one others can depend on");
   bx_ex("mbuild init --from webfw", "add a package's starter files");
-  bx_fl("--package", "also write init.rules, AGENT.rules and a template");
+  bx_fl("--package", "also write init.rules and a template");
+  bx_fl("--agent-rules", "with --package, also write an AGENT.rules");
   bx_fl("--from PKG[@V]", "add PKG's starter files to this project");
   bx_fl("--opt K=V", "answer one of its options (repeatable)");
   bx_fl("--yes", "take the defaults, don't ask");
@@ -4801,7 +4803,7 @@ fn bx_init_cmds() {
   bx_fl("--dry-run", "show it, write nothing");
   bx_fl("--allow-breaking", "publish API breaks in the same line");
   bx_fl("--no-verify", "skip the verify build");
-  bx_note("checks the version, init.rules, AGENT.rules and the API against the last version in its line. you upload the directory.");
+  bx_note("checks the version, init.rules and the API against the last version in its line. you upload the directory.");
   bx_def("yank", "mark a published version as yanked", "mbuild yank NAME@VERSION --to DIR [--undo]", "dependencies.md");
   bx_ex("mbuild yank strutil@v1.2.0 --to ../registry", "");
   bx_ex("mbuild yank strutil@v1.2.0 --to ../registry --undo", "");
@@ -5498,7 +5500,9 @@ fn bx_pub_files(p: Project*) -> StrList* {
   }
   sl_add_uniq(out, "mbuild.mettle");
   sl_add_uniq(out, "init.rules");
-  sl_add_uniq(out, "AGENT.rules");
+  if (fs_is_file(p->root + "/AGENT.rules")) {
+    sl_add_uniq(out, "AGENT.rules");
+  }
   sl_sort(out);
   if (out->len > 10000) {
     fail("this package has " + s_int(out->len) + " files; a package holds at most 10000 (narrow it with mb_publish_include)");
@@ -5593,16 +5597,6 @@ export fn build_cmd_publish(p: Project*) -> int32 {
   if (slen(newest) > 0) {
     warn("publishing " + version + " after " + newest);
   }
-  var leaves: StrList* = sl_of("init.rules");
-  sl_push(leaves, "AGENT.rules");
-  i = 0;
-  while (i < leaves->len) {
-    if (!fs_is_file(p->root + "/" + sl_get(leaves, i))) {
-      fail(name + " cannot be published without " + sl_get(leaves, i) + " (mbuild init --package writes one)");
-    }
-    i = i + 1;
-  }
-  free(leaves);
   var ierr: string = ini_check_package(p, p->root);
   if (slen(ierr) > 0) {
     fail(ierr);

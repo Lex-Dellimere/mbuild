@@ -1371,8 +1371,8 @@ export fn ini_run(p: Project*, r: IniRequest*) -> int32 {
   return 0;
 }
 
-// publish: the package in dir has both rules files and its init.rules,
-// run with defaults, gives a valid plan.
+// publish: the package in dir has an init.rules that, run with defaults,
+// gives a valid plan (AGENT.rules is optional).
 export fn ini_check_package(p: Project*, dir: string) -> string {
   g_inx_hint = s_empty();
   var src: InxSrc* = new InxSrc;
@@ -1392,15 +1392,8 @@ export fn ini_check_package(p: Project*, dir: string) -> string {
   }
   var hk: string = hash_string(src->dir);
   src->driver_dir = fs_mbuild_home() + "/init/path-" + s_sub(hk, 0, 12);
-  var need: StrList* = sl_of("init.rules");
-  defer free(need);
-  sl_push(need, "AGENT.rules");
-  var i: int64 = 0;
-  while (i < need->len) {
-    if (!fs_is_file(src->dir + "/" + sl_get(need, i))) {
-      return src->name + " cannot be published without " + sl_get(need, i) + " (mbuild init --package writes one)";
-    }
-    i = i + 1;
+  if (!fs_is_file(src->dir + "/init.rules")) {
+    return src->name + " cannot be published without init.rules (mbuild init --package writes one)";
   }
   var r: IniRequest* = new IniRequest;
   defer free(r);
@@ -1428,8 +1421,9 @@ fn inx_scaffold_file(dir: string, rel: string, text: string) -> bool {
   return true;
 }
 
-// init --package: AGENT.rules, init.rules and the template it copies.
-export fn ini_scaffold_package(dir: string, name: string) -> int32 {
+// init --package: init.rules and the template it copies; AGENT.rules too
+// with agent_rules.
+export fn ini_scaffold_package(dir: string, name: string, agent_rules: bool) -> int32 {
   var a: Buf* = buf_new();
   buf_line(a, "# " + name + ": notes for AI coding agents (plain text, shipped with the package)");
   buf_line(a, "");
@@ -1460,7 +1454,7 @@ export fn ini_scaffold_package(dir: string, name: string) -> int32 {
   buf_line(i, "  mi_template(\"templates/main.mettle.tmpl\", \"src/main.mettle\");");
   buf_line(i, "  mi_next(\"mbuild run\");");
   buf_line(i, "}");
-  if (!inx_scaffold_file(dir, "AGENT.rules", buf_take(a))) {
+  if (agent_rules && !inx_scaffold_file(dir, "AGENT.rules", buf_take(a))) {
     return 1;
   }
   if (!inx_scaffold_file(dir, "init.rules", buf_take(i))) {

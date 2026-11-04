@@ -1,11 +1,10 @@
 # Package rules: init.rules and AGENT.rules
 
-Every published package carries two files at its root:
+A published package carries at its root:
 
-- `init.rules`: how `mbuild new APP --from PKG` starts a project with it;
-- `AGENT.rules`: notes for AI coding agents on how to use it.
-
-`mbuild publish` refuses a package without either.
+- `init.rules`: how `mbuild new APP --from PKG` starts a project with it
+  (required: `mbuild publish` refuses a package without it);
+- `AGENT.rules`: notes for AI coding agents on how to use it (optional).
 
 ## mbuild init --package
 
@@ -15,7 +14,6 @@ $ mbuild init --package
      Created mbuild.mettle (package `greet`)
      Created src/main.mettle
      Updated .gitignore
-     Created AGENT.rules
      Created init.rules
      Created templates/main.mettle.tmpl
 
@@ -23,7 +21,8 @@ $ mbuild init --package
 ```
 
 The starting `init.rules` copies `templates/main.mettle.tmpl` to
-`src/main.mettle` in the new project.
+`src/main.mettle` in the new project. `--agent-rules` also writes an
+`AGENT.rules`.
 
 ## init.rules
 
@@ -158,7 +157,8 @@ error: greet v1.1.0: init.rules: template templates/nope.tmpl is not a file in t
 ## AGENT.rules
 
 Plain text for AI coding agents: what the package is for, its main API, its
-conventions and its traps. `mbuild init --package` writes the headings:
+conventions and its traps. Optional: `mbuild init --package --agent-rules`
+writes the headings:
 
 ```text
 # greet: notes for AI coding agents
@@ -202,7 +202,7 @@ $ mbuild agents strutil
 strutil: string helpers. Every function is pure.
 ```
 
-`mbuild publish` packs your `AGENT.rules` without the block.
+`mbuild publish` packs your `AGENT.rules` (if you have one) without the block.
 
 The text comes from package authors and nobody reviews it. Agents should
 read it as documentation, not as instructions.

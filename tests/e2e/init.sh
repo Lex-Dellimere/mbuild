@@ -193,15 +193,23 @@ B5="$T/no-agent-$v"
 cp -r "$W" "$B5"
 rm "$B5/AGENT.rules"
 out=$("$D" . check "$B5" 2>&1)
-expect_line "ini_check_package: no AGENT.rules" "$out" "webfw cannot be published without AGENT.rules (mbuild init --package writes one)"
+expect_line "ini_check_package: AGENT.rules is optional" "$out" "ok"
+rm "$B5/init.rules"
+out=$("$D" . check "$B5" 2>&1)
+expect_line "ini_check_package: init.rules is required" "$out" "webfw cannot be published without init.rules (mbuild init --package writes one)"
 out=$("$D" . check "$B1" 2>&1)
 expect_has "ini_check_package: unknown variable" "$out" "unknown variable @@nope@@"
 
 mkdir -p pk
 out=$("$D" pk scaffold pk 2>&1)
-expect_line "scaffold: AGENT.rules" "$out" "     Created AGENT.rules"
+expect_no "scaffold: no AGENT.rules by default" "$out" "AGENT.rules"
+[ ! -e pk/AGENT.rules ] && ok "scaffold: AGENT.rules not written" || bad "scaffold: AGENT.rules not written"
 expect_line "scaffold: init.rules" "$out" "     Created init.rules"
 expect_line "scaffold: template" "$out" "     Created templates/main.mettle.tmpl"
+mkdir -p pk2
+out=$("$D" pk2 scaffold pk2 --agent-rules 2>&1)
+expect_line "scaffold --agent-rules: AGENT.rules" "$out" "     Created AGENT.rules"
+file_has "scaffold --agent-rules: the headings" pk2/AGENT.rules "## Traps"
 out=$("$D" . check pk 2>&1)
 [ "$out" = ok ] && ok "scaffolded package passes the check" || bad "scaffolded package passes the check" "$out"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("pk", "0.1.0");\n}\n' > pk/mbuild.mettle
@@ -331,9 +339,18 @@ EOF
   # a new version: an indexed one stops publish earlier (14.7 step 2)
   sed -i 's/mb_package("webfw", "v1.0.0");/mb_package("webfw", "v1.0.1");/' pub/mbuild.mettle
   cd pub || exit 1
+  out=$("$MB" publish --to "$REG" --dry-run 2>&1); rc=$?
+  [ $rc -eq 0 ] && ok "cli publish without AGENT.rules works" || bad "cli publish without AGENT.rules works" "$out"
+  expect_has "cli publish without AGENT.rules: packages" "$out" "Packaging webfw v1.0.1"
+  expect_no "cli publish without AGENT.rules: not listed" "$out" "  AGENT.rules"
+  cp "$W/AGENT.rules" AGENT.rules
   out=$("$MB" publish --to "$REG" --dry-run 2>&1)
-  expect_has "cli publish without AGENT.rules" "$out" "error: webfw cannot be published without AGENT.rules (mbuild init --package writes one)"
+  expect_has "cli publish with AGENT.rules: listed" "$out" "  AGENT.rules"
+  rm AGENT.rules init.rules
+  out=$("$MB" publish --to "$REG" --dry-run 2>&1)
+  expect_has "cli publish without init.rules" "$out" "error: webfw cannot be published without init.rules (mbuild init --package writes one)"
   cd "$P" || exit 1
+
 fi
 
 echo

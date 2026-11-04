@@ -464,8 +464,9 @@ $ mbuild registry init ~/www/registry --name mine
      Created registry mine in /home/you/www/registry
 ```
 
-A package needs a version in `mb_package`, an `init.rules` and an
-`AGENT.rules` ([packages](packages.md); `mbuild init --package` writes both).
+A package needs a version in `mb_package` and an `init.rules`
+([packages](packages.md); `mbuild init --package` writes one); an
+`AGENT.rules` is optional.
 `--dry-run` shows what would go in:
 
 ```text
@@ -492,8 +493,7 @@ Without `--to`, it writes into the registry named by `--registry` (default
 Before writing, publish checks:
 
 - the version isn't published yet;
-- `init.rules` and `AGENT.rules` exist, and `init.rules` runs with its
-  defaults ([packages](packages.md));
+- `init.rules` exists and runs with its defaults ([packages](packages.md));
 - no `mb_dep_path` (users couldn't resolve it); replacements get a warning,
   since users ignore them;
 - the API against the newest earlier version in the same line: a removed or
@@ -514,7 +514,7 @@ What gets packed: `mb_publish_include(csv)` when given, else every file
 except `build/`, `.mbuild/`, `vendor/`, `dist/`, dot-files, `mbuild.lock`,
 `mbuild.local.mettle`, `mettle.deps` and subdirectories with their own
 `mbuild.mettle` (nested packages publish on their own). `mbuild.mettle`, `init.rules` and
-`AGENT.rules` always go in. Links and files over 16 MB are refused.
+`AGENT.rules` (when there is one) always go in. Links and files over 16 MB are refused.
 
 A published version can't be deleted, because locks name it. Yank it
 instead (`--undo` takes it back):

@@ -3,7 +3,7 @@
 //   init_test DIR new NAME --from PKG [--opt K=V]... [--yes] [--dry-run] [--force] [--registry R] [-v]
 //   init_test DIR init --from PKG [...]            init --from in the project at DIR
 //   init_test DIR check PKGDIR                     ini_check_package: prints "ok" or the error
-//   init_test DIR scaffold NAME                    ini_scaffold_package into DIR
+//   init_test DIR scaffold NAME [--agent-rules]   ini_scaffold_package into DIR
 //   init_test DIR api                              prints ini_api_text
 //   init_test DIR strip FILE                       prints agt_strip_block of FILE
 //   init_test DIR refresh MOD...                   agt_refresh, then "changed=0|1"
@@ -90,6 +90,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   r->registry = s_empty();
   r->opts = sl_new();
   var pos: StrList* = sl_new();
+  var agent_rules: bool = false;
   var i: int32 = 3;
   while (i < argc) {
     var a: string = s_from_c(argv[i]);
@@ -108,6 +109,8 @@ fn main(argc: int32, argv: cstring*) -> int32 {
       r->dry_run = true;
     } else if (s_eq(a, "--force")) {
       r->force = true;
+    } else if (s_eq(a, "--agent-rules")) {
+      agent_rules = true;
     } else if (s_eq(a, "-v")) {
       opts->verbose = true;
       g_verbose = true;
@@ -156,7 +159,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     return 0;
   }
   if (s_eq(command, "scaffold")) {
-    return ini_scaffold_package(root, sl_get(pos, 0));
+    return ini_scaffold_package(root, sl_get(pos, 0), agent_rules);
   }
   if (s_eq(command, "api")) {
     print(ini_api_text());

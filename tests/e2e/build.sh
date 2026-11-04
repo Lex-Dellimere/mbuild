@@ -447,7 +447,8 @@ printf 'export fn strx_a() -> int32 { return 1; }\nexport fn strx_b() -> int32 {
 mb publish --to "$S/reg-$mode"
 check "publish without init.rules" has "strx cannot be published without init.rules (mbuild init --package writes one)"
 rm mbuild.mettle
-mb init strx --package
+mb init strx --package --agent-rules
+check "init --package --agent-rules: AGENT.rules" test -f AGENT.rules
 check "init --package: fn deps()" grep -qx "fn deps() {" mbuild.mettle
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("strx", "1.0.0");\n}\n' > mbuild.mettle
 rm -f src/main.mettle

@@ -17,7 +17,7 @@ mbuild run
 - `cmd_*` functions in `mbuild.mettle` become `mbuild NAME` commands, `hook_pre_build` / `hook_post_build` run around builds
 - components: swap one implementation of an interface for another at build time, at run time, or while the program runs
 - `mbuild new app --from somepkg` starts a project from a package's `init.rules`
-- packages ship an `AGENT.rules` for AI coding agents, and mbuild points your agent at your deps' ones
+- packages can ship an `AGENT.rules` for AI coding agents, and mbuild points your agent at your deps' ones
 - C code in packages gets built into a `.so` / `.dll` and linked in, on both platforms
 - incremental: unchanged programs are "Fresh", C files only recompile when they or their headers change, passing tests are cached
 

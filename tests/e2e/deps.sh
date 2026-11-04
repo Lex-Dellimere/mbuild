@@ -569,7 +569,8 @@ mb "$P" build
 check "a wrong file is looked up below the import root" has "$S/last.out" "help: did you mean \`mistplot/plot\`?"
 mkdir -p "$S/mpinit"
 mb "$S/mpinit" init mistplot --package
-cp -r "$S/mpinit/init.rules" "$S/mpinit/AGENT.rules" "$S/mpinit/templates" "$L/"
+check "init --package: no AGENT.rules" [ ! -e "$S/mpinit/AGENT.rules" ]
+cp -r "$S/mpinit/init.rules" "$S/mpinit/templates" "$L/"
 printf 'import "std/io";\nimport "mistplot/plot";\nfn main() -> int32 { println("render {plot(5)}"); return 0; }\n' >"$L/cmd/render/main.mettle"
 mb "$L" registry init "$S/plotreg"
 mb "$L" publish --to "$S/plotreg"
