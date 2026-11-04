@@ -273,6 +273,11 @@ check "warning once" [ "$(grep -c "is machine-specific: move it to mbuild.local.
 mkdir -p "$W/old" && cd "$W/old" && printf '[package]\nname = "old"\n' > mbuild.toml
 mb build
 check "mbuild.toml refused" has "error: mbuild.toml is no longer read; write mbuild.mettle (mbuild init)"
+mb init --from webfw
+check "init --from refuses mbuild.toml" sh -c 'grep -qF "error: mbuild.toml is no longer read; write mbuild.mettle (mbuild init)" "$0/last.out" && [ ! -f mbuild.mettle ]' "$S"
+mb init
+check "init writes mbuild.mettle beside mbuild.toml" sh -c '[ -f mbuild.mettle ] && [ -f mbuild.toml ]'
+check "init notes mbuild.toml" has "note: mbuild.toml is no longer read and can be deleted"
 done
 
 echo

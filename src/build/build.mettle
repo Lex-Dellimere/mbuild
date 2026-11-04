@@ -2605,7 +2605,11 @@ export fn build_cmd_init(opts: Options*) -> int32 {
   }
   bx_check_pkg_name(name);
   var have: bool = fs_exists(dir + "/mbuild.mettle");
+  var legacy: bool = !have && fs_is_file(dir + "/mbuild.toml");
   if (slen(from) > 0) {
+    if (legacy) {
+      fail("mbuild.toml is no longer read; write mbuild.mettle (mbuild init)");
+    }
     if (!have && !dry) {
       bx_init_files(dir, name);
     }
@@ -2627,6 +2631,9 @@ export fn build_cmd_init(opts: Options*) -> int32 {
     fail_hint("mbuild.mettle already exists in " + dir, "this is already a project; edit mbuild.mettle instead");
   }
   bx_init_files(dir, name);
+  if (legacy) {
+    note("mbuild.toml is no longer read and can be deleted");
+  }
   if (fs_is_file(dir + "/mettle.deps")) {
     var pd: Project* = build_open(opts);
     g_bx_proj = pd;
