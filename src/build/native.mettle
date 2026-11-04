@@ -26,7 +26,7 @@ struct NatPkg {
   name: string;       // sanitised: the library is mb_<name>
   label: string;      // for messages: the module path, or the root's name
   dir: string;
-  man: Manifest*;     // 0 when the package has no mbuild.toml
+  man: Manifest*;     // 0 when the package has no manifest
   depth: int64;       // requirement depth from the root (link order)
   lib_path: string;   // the built C library, "" when none
   mi: int64;          // index in DepState mods, -1 for the root
@@ -284,7 +284,7 @@ fn natx_load_pkgs(c: NatCtx*) {
       real = natx_real_dir(dm->dir);
     }
     // The project imported as itself (a link to the root) is the root.
-    var own: string = c->p->man->module;
+    var own: string = c->p->man->name;
     if (s_eq(real, c->p->root) || (slen(own) > 0 && s_eq(dm->module, own))) {
       verbose(dm->module + " is the project itself; its C code is built once, as the root's");
       i = i + 1;
@@ -296,7 +296,7 @@ fn natx_load_pkgs(c: NatCtx*) {
       nm = dm->man->name;
     }
     if (slen(nm) == 0) {
-      nm = p_base(dm->module);
+      nm = dm->module;
     }
     pk.name = natx_unique_name(c, natx_sanitise(nm));
     pk.label = dm->module;
@@ -382,7 +382,7 @@ fn natx_manifest_file(c: NatCtx*, i: int64) -> string {
   if (c->pkgs[i].man != 0) {
     return natx_show(c, c->pkgs[i].man->file);
   }
-  return natx_show(c, c->pkgs[i].dir + "/mbuild.toml");
+  return natx_show(c, c->pkgs[i].dir + "/mbuild.mettle");
 }
 
 // ---------------------------------------------------------------------------
@@ -1746,8 +1746,8 @@ fn natx_import_target(c: NatCtx*, from: string, ip: string, files: StrList*) -> 
     }
     i = i + 1;
   }
-  // Importing yourself: the root's own module path names the root.
-  var own: string = c->p->man->module;
+  // Importing yourself: the root's own name names the root.
+  var own: string = c->p->man->name;
   if (slen(own) > 0 && s_starts(ip, own + "/")) {
     sl_push(cands, c->p->root + "/" + s_from(ip, slen(own) + 1));
   }
@@ -1773,7 +1773,7 @@ fn natx_import_target(c: NatCtx*, from: string, ip: string, files: StrList*) -> 
 
 // The .mettle files of one package (paths relative to its directory). Dot
 // directories, `build` directories and nested projects (a subdirectory
-// with its own mbuild.toml) are not entered.
+// with its own mbuild.mettle) are not entered.
 fn natx_walk(root: string, rel: string, found: StrList*, skip: StrList*) {
   var dir: string = root;
   if (slen(rel) > 0) {
@@ -1796,7 +1796,7 @@ fn natx_walk(root: string, rel: string, found: StrList*, skip: StrList*) {
     i = 0;
     while (i < dirs->len) {
       var d: string = sl_get(dirs, i);
-      if (!s_starts(d, ".") && !s_eq(d, "build") && !fs_is_file(p_join(p_join(dir, d), "mbuild.toml"))) {
+      if (!s_starts(d, ".") && !s_eq(d, "build") && !fs_is_file(p_join(p_join(dir, d), "mbuild.mettle"))) {
         natx_walk(root, p_join(rel, d), found, skip);
       }
       i = i + 1;

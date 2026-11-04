@@ -1,7 +1,8 @@
-// build: project discovery and the build / run / test / check / clean / init
-// commands, plus the small shortcuts to the compiler (mettle, trace, why,
-// explain) and doctor. Dependency resolution, native code and compiler
-// selection live in deps, native and toolchain; this module calls them.
+// build: project discovery, help and the commands: build / run / live /
+// test / check / clean / init / new / publish and the rest, plus the small
+// shortcuts to the compiler (mettle, trace, why, explain) and doctor.
+// Dependency resolution, native code, compiler selection, mbuild.mettle,
+// components and registries live in their own modules; this one calls them.
 
 import "std/io";
 import "std/mem";
@@ -16,12 +17,20 @@ import "../model/manifest";
 import "../model/project";
 import "graph";
 import "../pkg/deps";
+import "../pkg/registry";
+import "../pkg/api";
+import "../core/sha256";
+import "../config/mbfile";
+import "../config/config";
+import "../config/init";
+import "../config/agents";
 import "native";
 import "toolchain";
+import "components";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
-export var build_version_text: string = "0.1.0";
+export var build_version_text: string = "0.2.0";
 
 var g_bx_warned: bool = false;
 
@@ -31,6 +40,8 @@ export struct BinInfo {
   main: string;       // as written in the manifest, relative to the root
   entry: string;      // absolute
   flags: StrList*;
+  kind: string;       // "exe" | "shared" | "object" | "flat"
+  triple: string;     // "" = the target's; "*-none" = freestanding
 }
 
 export struct BinSet {
@@ -45,10 +56,13 @@ struct BxSess {
   ds: DepState*;
   targets: StrList*;
   mettles: Mettle**;   // parallel to targets
+  host_m: Mettle*;     // the host's compiler (freestanding bins), 0 until needed
   profile: string;
   cur_t: TargetCtx*;
   cur_nl: NatLink*;
-  missing: StrList*;   // remote modules imported but not found
+  comps: StrList*;     // component names of the build
+  has_cmp: bool;       // components or rules: units go through cmp_prepare
+  hooks_run: StrList*; // "name target profile" of the hooks already run
 }
 
 // Objects other modules may keep pointers to: held here, never freed.
@@ -62,20 +76,18 @@ var g_bx_probed: StrList* = (StrList*)0;
 // [tools] values applied to the environment: "ENV=file".
 var g_bx_tools: StrList* = (StrList*)0;
 var g_bx_verify_said: bool = false;
+// cfg_info of mbuild.mettle, scanned once per command.
+var g_bx_info: MbfInfo* = (MbfInfo*)0;
+// The units, target contexts and requests of the command.
+var g_bx_units: BxUnits* = (BxUnits*)0;
+var g_bx_tctxs: TargetCtx** = (TargetCtx**)0;
+var g_bx_nls: NatLink** = (NatLink**)0;
+var g_bx_ini: IniRequest* = (IniRequest*)0;
 // Held for the whole command (rollback state, plans).
 var g_bx_snap: DepSnap* = (DepSnap*)0;
 var g_bx_plan: UpdatePlan* = (UpdatePlan*)0;
 var g_bx_req: UpdateReq* = (UpdateReq*)0;
 var g_bx_proj: Project* = (Project*)0;
-
-// The project's own git submodules (DESIGN.md 12.8).
-struct BxSubs {
-  top: string;        // the directory holding .git, "" when none
-  paths: StrList*;    // relative to top
-  uninit: StrList*;   // the ones not checked out
-}
-
-var g_bx_subs: BxSubs* = (BxSubs*)0;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -165,11 +177,12 @@ fn bx_positional(l: StrList*) -> StrList* {
 // Project discovery
 // ---------------------------------------------------------------------------
 
-// The nearest directory at or above start holding mbuild.toml, "" when none.
+// The nearest directory at or above start holding mbuild.mettle or an old
+// mbuild.toml (which build_open refuses), "" when none.
 export fn build_find_root(start: string) -> string {
   var dir: string = p_clean(bx_slash(start));
   while (true) {
-    if (fs_is_file(p_join(dir, "mbuild.toml"))) {
+    if (fs_is_file(p_join(dir, "mbuild.mettle")) || fs_is_file(p_join(dir, "mbuild.toml"))) {
       return dir;
     }
     var up: string = p_dir(dir);
@@ -197,65 +210,37 @@ fn bx_safe_name(s: string) -> string {
   return d;
 }
 
-// Manifest messages start with the file name: show it the way the TOML
-// parser's own messages do (relative to the working directory).
-fn bx_manifest_msg(file: string, shown: string, msg: string) -> string {
-  if (s_starts(msg, file + ":")) {
-    return shown + s_from(msg, slen(file));
+// A directory name as a package name: lower case, '_' for anything else.
+fn bx_pkg_name(s: string) -> string {
+  var d: string = s_lower(s_dup(s));
+  var i: int64 = 0;
+  while (i < slen(d)) {
+    var c: int32 = s_byte(d, i);
+    if (!((c >= 97 && c <= 122) || is_digit_b(c) || c == 95)) {
+      d.chars[i] = (uint8)95;
+    }
+    i = i + 1;
   }
-  return msg;
+  if (slen(d) > 64) {
+    d = s_sub(d, 0, 64);
+  }
+  if (slen(d) == 0 || !(s_byte(d, 0) >= 97 && s_byte(d, 0) <= 122)) {
+    d = "app_" + d;
+  }
+  if (s_eq(d, "std") || s_eq(d, "mbuild")) {
+    d = d + "_app";
+  }
+  return d;
 }
 
-// The manifest's name as seen from the working directory, which is the
-// project root or below it: "mbuild.toml", "../mbuild.toml", ...
-fn bx_show_manifest(p: Project*) -> string {
-  var cwd: string = p_clean(bx_cwd());
-  var file: string = p->root + "/mbuild.toml";
-  if (!p_has_prefix_dir(cwd, p->root)) {
-    return bx_show(file);
-  }
-  var below: string = p_rel(p->root, cwd);
-  if (s_eq(below, ".")) {
-    return "mbuild.toml";
-  }
-  var parts: StrList* = s_split(below, 47);
-  var up: string = s_repeat("../", parts->len);
-  free(parts);
-  return up + "mbuild.toml";
-}
-
+// cfg_load (mbuild.mettle, with mbuild.local.mettle in m->local).
 fn bx_load_manifest(p: Project*) {
-  var file: string = p->root + "/mbuild.toml";
-  var rd: FsRead = fs_read(file);
-  if (!rd.ok) {
-    fail("cannot read " + bx_show(file));
-  }
-  var shown: string = bx_show_manifest(p);
-  var doc: Toml* = toml_parse(rd.data, shown);
-  var m: Manifest* = man_parse(doc, p->root);
-  if (slen(m->error) > 0) {
-    fail_hint(bx_manifest_msg(file, shown, m->error), "see docs/manifest.md for the manifest format");
-  }
-  var lfile: string = p->root + "/mbuild.local.toml";
-  var lrd: FsRead = fs_read(lfile);
-  if (lrd.ok) {
-    var lshown: string = s_sub(shown, 0, slen(shown) - 11) + "mbuild.local.toml";
-    var lm: Manifest* = man_parse_local(toml_parse(lrd.data, lshown), p->root);
-    if (slen(lm->error) > 0) {
-      fail_hint(bx_manifest_msg(lfile, lshown, lm->error), "mbuild.local.toml holds [replace], [tools], [profile.NAME] and [build] targets");
-    }
-    man_merge_local(m, lm);
-    var wi: int64 = 0;
-    while (wi < m->warnings->len) {
-      sl_set(m->warnings, wi, bx_manifest_msg(lfile, lshown, sl_get(m->warnings, wi)));
-      wi = wi + 1;
-    }
-  }
+  var m: Manifest* = cfg_load(p);
   if (!g_bx_warned) {
     bx_apply_tools(m);
     var i: int64 = 0;
     while (i < m->warnings->len) {
-      warn(bx_manifest_msg(file, shown, sl_get(m->warnings, i)));
+      warn(bx_unroot(p, sl_get(m->warnings, i)));
       i = i + 1;
     }
     g_bx_warned = true;
@@ -267,7 +252,6 @@ fn bx_load_manifest(p: Project*) {
 // The environment variable a [tools] key stands for ("" for the compilers,
 // which toolchain.mettle reads itself to name their origin).
 fn bx_tool_env(key: string) -> string {
-  if (s_eq(key, "git")) { return "MBUILD_GIT"; }
   if (s_eq(key, "curl")) { return "MBUILD_CURL"; }
   if (s_eq(key, "cc")) { return "CC"; }
   if (s_eq(key, "cc-windows")) { return "CC_WINDOWS"; }
@@ -295,37 +279,53 @@ fn bx_apply_tools(m: Manifest*) {
       continue;
     }
     sys_setenv(env, s_from(entry, eq + 1));
-    var from: string = "mbuild.toml";
-    if (m->local != (Manifest*)0 && sl_has(m->local->tools, entry)) {
-      from = "mbuild.local.toml";
-    }
-    sl_push(g_bx_tools, env + "=" + from);
+    sl_push(g_bx_tools, env + "=mbuild.local.mettle");
   }
 }
 
-// Finds the project from the working directory; a zero-config project in the
-// working directory when no mbuild.toml is found.
-export fn build_open(opts: Options*) -> Project* {
+// Finds the project from the working directory without loading it: the
+// nearest mbuild.mettle (p->mbfile), an mbuild.toml (p->legacy_toml), or a
+// zero-config project in the working directory.
+export fn build_find(opts: Options*) -> Project* {
   var p: Project* = new Project;
   p->opts = opts;
-  var cwd: string = bx_cwd();
-  var root: string = build_find_root(cwd);
-  if (slen(root) > 0) {
-    p->root = root;
-    p->state_dir = root + "/.mbuild";
-    bx_load_manifest(p);
-  } else {
-    p->root = p_clean(cwd);
-    p->state_dir = p->root + "/.mbuild";
-    p->man = man_empty(p->root, bx_safe_name(p_base(p->root)));
-    p->has_manifest = false;
+  var root: string = build_find_root(bx_cwd());
+  if (slen(root) == 0) {
+    root = p_clean(bx_cwd());
+  }
+  p->root = root;
+  p->state_dir = root + "/.mbuild";
+  p->mbfile = s_empty();
+  p->legacy_toml = false;
+  p->man = man_empty(root, bx_safe_name(p_base(root)));
+  p->has_manifest = false;
+  if (fs_is_file(root + "/mbuild.mettle")) {
+    p->mbfile = root + "/mbuild.mettle";
+  } else if (fs_is_file(root + "/mbuild.toml")) {
+    p->legacy_toml = true;
   }
   return p;
 }
 
-// After deps_add_missing edited mbuild.toml.
+fn bx_refuse_legacy(p: Project*) {
+  if (p->legacy_toml) {
+    fail("mbuild.toml is no longer read; write mbuild.mettle (mbuild init)");
+  }
+}
+
+// build_find, then the configuration from mbuild.mettle.
+export fn build_open(opts: Options*) -> Project* {
+  var p: Project* = build_find(opts);
+  bx_refuse_legacy(p);
+  if (slen(p->mbfile) > 0) {
+    bx_load_manifest(p);
+  }
+  return p;
+}
+
+// After an edit of mbuild.mettle (deps_add_missing, cfg_set_dep).
 fn bx_reload(p: Project*) {
-  if (fs_is_file(p->root + "/mbuild.toml")) {
+  if (slen(p->mbfile) > 0) {
     bx_load_manifest(p);
   }
 }
@@ -348,6 +348,8 @@ fn bx_binset_push(bs: BinSet*, name: string, mainp: string) {
   b.main = mainp;
   b.entry = p_clean(p_join(bs->root, mainp));
   b.flags = sl_new();
+  b.kind = "exe";
+  b.triple = s_empty();
   bs->items[bs->n] = b;
   bs->n = bs->n + 1;
 }
@@ -371,7 +373,7 @@ fn bx_default_main(root: string, name: string) -> string {
     i = i + 1;
   }
   if (slen(found) == 0) {
-    fail_hint("[bin." + name + "] has no main and none of " + sl_join(cands, ", ") + " exists", "add main = \"path/to/file.mettle\" to [bin." + name + "]");
+    fail_hint("bin " + name + " has no main and none of " + sl_join(cands, ", ") + " exists", "name it in mbuild.mettle: mb_bin(\"" + name + "\", \"path/to/file.mettle\");");
   }
   free(cands);
   return found;
@@ -393,6 +395,10 @@ export fn build_bins(p: Project*) -> BinSet* {
       }
       bx_binset_push(bs, spec->name, mainp);
       bs->items[bs->n - 1].flags = spec->flags;
+      if (slen(spec->kind) > 0) {
+        bs->items[bs->n - 1].kind = spec->kind;
+      }
+      bs->items[bs->n - 1].triple = spec->triple;
       i = i + 1;
     }
     return bs;
@@ -452,9 +458,9 @@ fn bx_bin_names(bs: BinSet*) -> StrList* {
 
 fn bx_no_bins(p: Project*) {
   if (!p->has_manifest) {
-    fail_hint("nothing to build in " + bx_show(p->root) + ": no mbuild.toml and no .mettle file with fn main", "run `mbuild init` to start a project here, or cd into one");
+    fail_hint("nothing to build in " + bx_show(p->root) + ": no mbuild.mettle and no .mettle file with fn main", "run `mbuild init` to start a project here, or cd into one");
   }
-  fail_hint("no program to build in " + bx_show(p->root), "add src/main.mettle (with fn main), cmd/NAME/main.mettle, or a [bin.NAME] section with main = \"path.mettle\"");
+  fail_hint("no program to build in " + bx_show(p->root), "add src/main.mettle (with fn main), cmd/NAME/main.mettle, or mb_bin(\"NAME\", \"path.mettle\") in mbuild.mettle");
 }
 
 fn bx_is_lib_file(name: string) -> bool {
@@ -537,6 +543,8 @@ fn bx_select_from(p: Project*, all: BinSet*, names: StrList*) -> BinSet* {
     }
     bx_binset_push(sel, nm, all->items[at].main);
     sel->items[sel->n - 1].flags = all->items[at].flags;
+    sel->items[sel->n - 1].kind = all->items[at].kind;
+    sel->items[sel->n - 1].triple = all->items[at].triple;
     i = i + 1;
   }
   return sel;
@@ -612,7 +620,7 @@ export fn build_profile(p: Project*) -> string {
       i = i + 1;
     }
     free(secs);
-    var hint: string = "the profiles are: " + sl_join(known, ", ") + " (add [profile." + prof + "] to mbuild.toml)";
+    var hint: string = "the profiles are: " + sl_join(known, ", ") + " (add mb_profile(\"" + prof + "\") to mbuild.mettle)";
     var sug: string = man_suggest(prof, known);
     if (slen(sug) > 0) {
       hint = "did you mean `" + sug + "`? " + hint;
@@ -624,7 +632,7 @@ export fn build_profile(p: Project*) -> string {
 }
 
 // ---------------------------------------------------------------------------
-// Sessions: dependencies, compilers, import graphs
+// Sessions: dependencies, compilers, components, hooks, import graphs
 // ---------------------------------------------------------------------------
 
 fn bx_fill_dirs(m: Mettle*) {
@@ -658,6 +666,14 @@ fn bx_mettle(p: Project*, target: string) -> Mettle* {
   return m;
 }
 
+// Dependencies, then the AGENT.rules block that points at them (16.3).
+fn bx_deps(p: Project*) -> DepState* {
+  var ds: DepState* = deps_ensure(p);
+  g_bx_ds = ds;
+  agt_refresh(p, ds);
+  return ds;
+}
+
 fn bx_sess(p: Project*, targets: StrList*) -> BxSess* {
   return bx_sess_x(p, targets, true);
 }
@@ -671,18 +687,35 @@ fn bx_fail_text(e: string) {
   fail_hint(s_sub(e, 0, at), s_from(e, at + 9));
 }
 
+// Names of every component of the build (root and dependencies).
+fn bx_comp_names(p: Project*, ds: DepState*) -> StrList* {
+  var l: StrList* = sl_new();
+  var all: CompSpec** = cmp_all(p, ds);
+  var i: int64 = 0;
+  while (all[i] != (CompSpec*)0) {
+    sl_add_uniq(l, all[i]->name);
+    i = i + 1;
+  }
+  free(all);
+  return l;
+}
+
 // check_min: fail when a compiler is older than a package needs (12.11).
 fn bx_sess_x(p: Project*, targets: StrList*, check_min: bool) -> BxSess* {
   var s: BxSess* = new BxSess;
   s->p = p;
   s->targets = targets;
   s->profile = build_profile(p);
-  bx_check_subs_config(p, targets);
-  s->ds = deps_ensure(p);
+  s->ds = bx_deps(p);
+  s->host_m = (Mettle*)0;
+  s->hooks_run = sl_new();
   s->mettles = (Mettle**)malloc((targets->len + 1) * 8);
   var i: int64 = 0;
   while (i < targets->len) {
     s->mettles[i] = bx_mettle(p, sl_get(targets, i));
+    if (s_eq(sl_get(targets, i), sys_os())) {
+      s->host_m = s->mettles[i];
+    }
     i = i + 1;
   }
   i = 0;
@@ -693,183 +726,314 @@ fn bx_sess_x(p: Project*, targets: StrList*, check_min: bool) -> BxSess* {
     }
     i = i + 1;
   }
+  bx_sess_comps(s);
   return s;
 }
 
-// ---------------------------------------------------------------------------
-// The project's own git submodules (12.8): no git process here
-// ---------------------------------------------------------------------------
-
-fn bx_git_top(root: string) -> string {
-  var dir: string = root;
-  while (slen(dir) > 0) {
-    if (fs_exists(dir + "/.git")) {
-      return dir;
-    }
-    var up: string = p_dir(dir);
-    if (s_eq(up, dir) || s_eq(up, ".")) {
-      break;
-    }
-    dir = up;
-  }
-  return s_empty();
-}
-
-fn bx_subs(p: Project*) -> BxSubs* {
-  if (g_bx_subs != (BxSubs*)0) {
-    return g_bx_subs;
-  }
-  var s: BxSubs* = new BxSubs;
-  s->top = bx_git_top(p->root);
-  s->paths = sl_new();
-  s->uninit = sl_new();
-  g_bx_subs = s;
-  if (slen(s->top) == 0) {
-    return s;
-  }
-  var r: FsRead = fs_read(s->top + "/.gitmodules");
-  if (!r.ok) {
-    return s;
-  }
-  var lines: StrList* = s_lines(r.data);
-  var in_sub: bool = false;
+fn bx_sess_comps(s: BxSess*) {
+  s->comps = bx_comp_names(s->p, s->ds);
+  s->has_cmp = s->comps->len > 0 || s->p->man->rules->len > 0;
   var i: int64 = 0;
-  while (i < lines->len) {
-    var t: string = s_trim(sl_get(lines, i));
-    i = i + 1;
-    if (s_starts(t, "[")) {
-      in_sub = s_starts(t, "[submodule");
-      continue;
+  while (s->comps->len == 0 && i < s->p->opts->uses->len) {
+    var u: string = sl_get(s->p->opts->uses, i);
+    var eq: int64 = s_find_byte(u, 61);
+    if (eq > 0) {
+      u = s_sub(u, 0, eq);
     }
-    var eq: int64 = s_find_byte(t, 61);
-    if (in_sub && eq > 0 && s_eq(s_trim(s_sub(t, 0, eq)), "path")) {
-      var path: string = s_trim(s_from(t, eq + 1));
-      while (s_ends(path, "/")) {
-        path = s_sub(path, 0, slen(path) - 1);
-      }
-      if (slen(path) > 0) {
-        sl_push(s->paths, path);
-        var abs: string = s->top + "/" + path;
-        if (!fs_is_dir(abs) || bx_dir_is_empty(abs)) {
-          sl_push(s->uninit, path);
-        }
-      }
-    }
-  }
-  free(lines);
-  return s;
-}
-
-// The uninitialised submodule holding abs, "" when none.
-fn bx_sub_of(p: Project*, abs: string) -> string {
-  var s: BxSubs* = bx_subs(p);
-  var i: int64 = 0;
-  while (i < s->uninit->len) {
-    var path: string = sl_get(s->uninit, i);
-    if (p_has_prefix_dir(abs, s->top + "/" + path)) {
-      return path;
-    }
-    i = i + 1;
-  }
-  return s_empty();
-}
-
-fn bx_sub_help(sub: string) -> string {
-  return "run `git submodule update --init --recursive " + sub + "` (or `mbuild fetch --submodules`)";
-}
-
-fn bx_check_sub_path(p: Project*, what: string, rel: string) {
-  var abs: string = p_clean(p_join(p->root, bx_slash(rel)));
-  var sub: string = bx_sub_of(p, abs);
-  if (slen(sub) > 0) {
-    fail_hint(what + " is inside the git submodule " + sub + ", which is not checked out", bx_sub_help(sub));
+    fail("--use " + sl_get(s->p->opts->uses, i) + ": this build has no component named " + u);
   }
 }
 
-fn bx_check_sub_list(p: Project*, label: string, l: StrList*) {
-  var i: int64 = 0;
-  while (i < l->len) {
-    bx_check_sub_path(p, label + " entry " + sl_get(l, i), sl_get(l, i));
-    i = i + 1;
+// The compiler that builds freestanding bins: the host's (15.7).
+fn bx_host_mettle(s: BxSess*) -> Mettle* {
+  if (s->host_m == (Mettle*)0) {
+    s->host_m = bx_mettle(s->p, sys_os());
   }
-  free(l);
+  return s->host_m;
 }
 
-// Fails before compiling when the manifest points into a submodule that is
-// not checked out.
-fn bx_check_subs_config(p: Project*, targets: StrList*) {
-  if (bx_subs(p)->uninit->len == 0) {
-    return;
-  }
+fn bx_freestanding(b: BinInfo*) -> bool {
+  return b != (BinInfo*)0 && s_ends(b->triple, "-none");
+}
+
+// One compile: a bin or a file for one target, with its component selection.
+struct BxUnit {
+  b: BinInfo*;       // 0 for a file that is no bin (tests, library checks)
+  file: string;      // absolute source entry
+  ti: int64;         // session target index, -1 for a freestanding bin
+  target: string;    // "linux" | "windows" | the freestanding triple
+  m: Mettle*;
+  cmp: CmpOut*;      // 0 when the build has no components and no rules
+  entry: string;     // what the compiler gets: file, or the rules wrapper
+  g: Graph*;
+}
+
+struct BxUnits {
+  items: BxUnit**;
+  n: int64;
+}
+
+fn bx_units_new() -> BxUnits* {
+  var us: BxUnits* = new BxUnits;
+  us->items = (BxUnit**)0;
+  us->n = 0;
+  return us;
+}
+
+fn bx_unit_add(us: BxUnits*, b: BinInfo*, file: string, ti: int64, target: string, m: Mettle*) {
+  var u: BxUnit* = new BxUnit;
+  u->b = b;
+  u->file = file;
+  u->ti = ti;
+  u->target = target;
+  u->m = m;
+  u->cmp = (CmpOut*)0;
+  u->entry = file;
+  u->g = (Graph*)0;
+  us->items = (BxUnit**)realloc(us->items, (us->n + 1) * 8);
+  us->items[us->n] = u;
+  us->n = us->n + 1;
+}
+
+// Every bin for every session target; a freestanding bin once, by the host
+// compiler, whatever -t says.
+fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
+  var us: BxUnits* = bx_units_new();
   var ti: int64 = 0;
-  while (ti < targets->len) {
-    var os: string = sl_get(targets, ti);
-    bx_check_sub_list(p, "[c] sources", man_os_list(p->man, "c.sources", os));
-    bx_check_sub_list(p, "[c] include", man_os_list(p->man, "c.include", os));
-    bx_check_sub_list(p, "[link] paths", man_os_list(p->man, "link.paths", os));
+  while (ti < s->targets->len) {
+    var bi: int64 = 0;
+    while (bi < bs->n) {
+      var b: BinInfo* = &bs->items[bi];
+      if (!bx_freestanding(b)) {
+        bx_unit_add(us, b, b->entry, ti, sl_get(s->targets, ti), s->mettles[ti]);
+      }
+      bi = bi + 1;
+    }
     ti = ti + 1;
   }
-  var i: int64 = 0;
-  while (i < p->man->ndeps) {
-    var d: DepSpec* = man_dep(p->man, i);
-    if (slen(d->path) > 0) {
-      bx_check_sub_path(p, "path dependency " + d->key + " (" + d->path + ")", d->path);
+  var fi: int64 = 0;
+  while (fi < bs->n) {
+    var fb: BinInfo* = &bs->items[fi];
+    if (bx_freestanding(fb)) {
+      bx_check_freestanding(s->p, fb);
+      bx_unit_add(us, fb, fb->entry, -1, fb->triple, bx_host_mettle(s));
     }
+    fi = fi + 1;
+  }
+  return us;
+}
+
+// A freestanding bin has no runtime: no C, no libraries (15.7).
+fn bx_check_freestanding(p: Project*, b: BinInfo*) {
+  var why: string = "";
+  if (man_has_c(p->man)) {
+    why = "this package has C code (mb_c_sources)";
+  }
+  var os: StrList* = sl_of("linux");
+  sl_push(os, "windows");
+  var i: int64 = 0;
+  while (slen(why) == 0 && i < os->len) {
+    var libs: StrList* = man_os_list(p->man, "link.libs", sl_get(os, i));
+    if (libs->len > 0) {
+      why = "this package links libraries (mb_link_libs)";
+    }
+    free(libs);
     i = i + 1;
   }
-  i = 0;
-  while (i < p->man->nreplaces) {
-    if (slen(p->man->replaces[i].path) > 0) {
-      bx_check_sub_path(p, "[replace] path " + p->man->replaces[i].path, p->man->replaces[i].path);
-    }
+  free(os);
+  if (slen(why) > 0) {
+    fail_hint("bin " + b->name + " is freestanding (" + b->triple + ") but " + why, "a freestanding bin has no runtime to link against; build the C parts into another bin");
+  }
+}
+
+// The component selection of every unit (15.5, 15.6); errors stop the command.
+fn bx_components(s: BxSess*, us: BxUnits*, bin_for_files: string) {
+  if (!s->has_cmp) {
+    return;
+  }
+  var i: int64 = 0;
+  while (i < us->n) {
+    bx_unit_cmp(s, us->items[i], bin_for_files);
     i = i + 1;
   }
 }
 
-fn bx_graph_ctx(s: BxSess*, ti: int64) -> GraphCtx* {
-  var m: Mettle* = s->mettles[ti];
-  var c: GraphCtx* = graph_ctx_new(sl_get(s->targets, ti), m->stdlib_dir);
+fn bx_unit_cmp(s: BxSess*, u: BxUnit*, bin_for_files: string) {
+  if (!s->has_cmp) {
+    return;
+  }
+  var cb: CmpBuild* = new CmpBuild;
+  cb->target = u->target;
+  cb->profile = s->profile;
+  cb->bin = bin_for_files;
+  if (u->b != (BinInfo*)0 && slen(bin_for_files) == 0) {
+    cb->bin = s_replace_byte(u->b->name, 47, 95);
+  }
+  cb->entry = u->file;
+  cb->settings = bx_settings_of(s->p, s->profile, bx_unit_bin(u), bx_unit_os(u));
+  var co: CmpOut* = cmp_prepare(s->p, s->ds, cb);
+  free(cb);
+  if (!co->ok) {
+    error_msg(co->err);
+    exit_with(1);
+  }
+  if (co->has_swap && u->ti < 0) {
+    fail("bin " + u->b->name + " is freestanding (" + u->target + "): a swap component needs the runtime it does not have");
+  }
+  u->cmp = co;
+  if (slen(co->entry) > 0) {
+    u->entry = co->entry;
+  }
+}
+
+fn bx_unit_bin(u: BxUnit*) -> string {
+  if (u->b == (BinInfo*)0) {
+    return s_empty();
+  }
+  return u->b->name;
+}
+
+// The OS a unit's settings and import guards see ("none" when freestanding).
+fn bx_unit_os(u: BxUnit*) -> string {
+  if (u->ti < 0) {
+    return "none";
+  }
+  return u->target;
+}
+
+fn bx_unit_gen(u: BxUnit*) -> string {
+  if (u->cmp == (CmpOut*)0) {
+    return s_empty();
+  }
+  return u->cmp->gen_dir;
+}
+
+// The hooks mbuild.mettle defines ("pre_build", "post_build").
+fn bx_has_hook(p: Project*, name: string) -> bool {
+  if (slen(p->mbfile) == 0 || p->opts->no_hooks) {
+    return false;
+  }
+  if (g_bx_info == (MbfInfo*)0) {
+    g_bx_info = cfg_info(p);
+  }
+  return sl_has(g_bx_info->hooks, name) || sl_has(g_bx_info->hooks, "hook_" + name);
+}
+
+// Runs hook_NAME once per (target, profile) of the command (13.7).
+fn bx_hook(s: BxSess*, name: string, target: string, out_dir: string, bins: StrList*, built: StrList*) {
+  var p: Project* = s->p;
+  if (!bx_has_hook(p, name)) {
+    return;
+  }
+  var key: string = name + " " + target + " " + s->profile;
+  if (sl_has(s->hooks_run, key)) {
+    return;
+  }
+  sl_push(s->hooks_run, key);
+  if (g_verbose) {
+    status("Running", "hook_" + name + " (" + target + ", " + s->profile + ")");
+  }
+  var h: CfgHook* = new CfgHook;
+  h->name = name;
+  h->target = target;
+  h->profile = s->profile;
+  h->out_dir = out_dir;
+  h->bins = bins;
+  h->built = built;
+  var rc: int32 = cfg_run_hook(p, h);
+  free(h);
+  if (rc != 0) {
+    error_msg("hook_" + name + " failed (exit " + s_int(rc) + ") for " + target + " " + s->profile);
+    exit_with(1);
+  }
+}
+
+fn bx_unit_out_dir(s: BxSess*, target: string) -> string {
+  return s->p->root + "/build/" + target + "/" + s->profile;
+}
+
+// The bins of the units for one target.
+fn bx_unit_bins(us: BxUnits*, target: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < us->n) {
+    var u: BxUnit* = us->items[i];
+    if (s_eq(u->target, target) && u->b != (BinInfo*)0) {
+      sl_add_uniq(l, u->b->name);
+    }
+    i = i + 1;
+  }
+  return l;
+}
+
+// The targets of the units, in order.
+fn bx_unit_targets(us: BxUnits*) -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < us->n) {
+    sl_add_uniq(l, us->items[i]->target);
+    i = i + 1;
+  }
+  return l;
+}
+
+fn bx_pre_hooks(s: BxSess*, us: BxUnits*) {
+  if (!bx_has_hook(s->p, "pre_build")) {
+    return;
+  }
+  var ts: StrList* = bx_unit_targets(us);
+  var i: int64 = 0;
+  while (i < ts->len) {
+    var t: string = sl_get(ts, i);
+    bx_hook(s, "pre_build", t, bx_unit_out_dir(s, t), bx_unit_bins(us, t), sl_new());
+    i = i + 1;
+  }
+  free(ts);
+}
+
+// built: "target bin" of every unit that was compiled.
+fn bx_post_hooks(s: BxSess*, us: BxUnits*, built: StrList*) {
+  if (!bx_has_hook(s->p, "post_build")) {
+    return;
+  }
+  var ts: StrList* = bx_unit_targets(us);
+  var i: int64 = 0;
+  while (i < ts->len) {
+    var t: string = sl_get(ts, i);
+    var mine: StrList* = sl_new();
+    var k: int64 = 0;
+    while (k < built->len) {
+      if (s_starts(sl_get(built, k), t + " ")) {
+        sl_push(mine, s_from(sl_get(built, k), slen(t) + 1));
+      }
+      k = k + 1;
+    }
+    bx_hook(s, "post_build", t, bx_unit_out_dir(s, t), bx_unit_bins(us, t), mine);
+    i = i + 1;
+  }
+  free(ts);
+}
+
+fn bx_unit_ctx(s: BxSess*, u: BxUnit*) -> GraphCtx* {
+  var c: GraphCtx* = graph_ctx_new(bx_unit_os(u), u->m->stdlib_dir);
+  var gen: string = bx_unit_gen(u);
+  if (slen(gen) > 0) {
+    sl_push(c->includes, gen);
+  }
   sl_push(c->includes, s->ds->include_dir);
   c->cwd = s->p->root;
   return c;
 }
 
-// Graphs for every (target, entry), index ti * entries->len + ei.
-fn bx_graphs(s: BxSess*, entries: StrList*) -> Graph** {
-  var gs: Graph** = (Graph**)malloc((s->targets->len * entries->len + 1) * 8);
-  var ti: int64 = 0;
-  while (ti < s->targets->len) {
-    var c: GraphCtx* = bx_graph_ctx(s, ti);
-    defer free(c);
-    var ei: int64 = 0;
-    while (ei < entries->len) {
-      gs[ti * entries->len + ei] = graph_build(c, sl_get(entries, ei));
-      ei = ei + 1;
-    }
-    ti = ti + 1;
-  }
-  return gs;
-}
-
-// Module paths mbuild knows: the root's requirements and every selected module.
-fn bx_known_modules(p: Project*, ds: DepState*) -> StrList* {
-  var known: StrList* = sl_new();
+fn bx_graphs(s: BxSess*, us: BxUnits*) {
   var i: int64 = 0;
-  while (i < p->man->ndeps) {
-    var d: DepSpec* = man_dep(p->man, i);
-    if (slen(d->module) > 0) {
-      sl_add_uniq(known, d->module);
-    }
+  while (i < us->n) {
+    var u: BxUnit* = us->items[i];
+    var c: GraphCtx* = bx_unit_ctx(s, u);
+    u->g = graph_build(c, u->entry);
+    free(c);
     i = i + 1;
   }
-  i = 0;
-  while (i < ds->n) {
-    if (!ds->mods[i].is_path) {
-      sl_add_uniq(known, ds->mods[i].module);
-    }
-    i = i + 1;
-  }
-  return known;
 }
 
 fn bx_first_component(imp: string) -> string {
@@ -880,28 +1044,15 @@ fn bx_first_component(imp: string) -> string {
   return s_sub(imp, 0, cut);
 }
 
-// The selected dependency an import names (through its alias, its path
-// package key or its module path), -1 when none.
-fn bx_dep_of_import(ds: DepState*, known: StrList*, imp: string) -> int64 {
+// The selected dependency an import names by its first component, -1.
+fn bx_dep_of_import(ds: DepState*, imp: string) -> int64 {
   var first: string = bx_first_component(imp);
-  var i: int64 = 0;
-  while (i < ds->n) {
-    var dm: DepModule* = &ds->mods[i];
-    if (slen(dm->alias) > 0 && s_eq(dm->alias, first)) {
-      return i;
-    }
-    if (dm->is_path && s_eq(dm->module, first)) {
-      return i;
-    }
-    i = i + 1;
-  }
-  var mod: string = man_module_of_import_in(known, imp);
-  if (slen(mod) == 0) {
+  if (slen(first) >= slen(imp)) {
     return -1;
   }
-  i = 0;
+  var i: int64 = 0;
   while (i < ds->n) {
-    if (!ds->mods[i].is_path && s_eq(ds->mods[i].module, mod)) {
+    if (s_eq(ds->mods[i].module, first)) {
       return i;
     }
     i = i + 1;
@@ -909,45 +1060,53 @@ fn bx_dep_of_import(ds: DepState*, known: StrList*, imp: string) -> int64 {
   return -1;
 }
 
-// What follows the dependency's own name in the import ("" for the package itself).
+// What follows the dependency's name in the import ("" for the package itself).
 fn bx_rest_in_dep(dm: DepModule*, imp: string) -> string {
-  if (!dm->is_path && (s_eq(imp, dm->module) || s_starts(imp, dm->module + "/"))) {
-    if (slen(imp) <= slen(dm->module) + 1) {
-      return s_empty();
-    }
-    return s_from(imp, slen(dm->module) + 1);
-  }
-  var first: string = bx_first_component(imp);
-  if (slen(imp) <= slen(first) + 1) {
+  if (slen(imp) <= slen(dm->module) + 1) {
     return s_empty();
   }
-  return s_from(imp, slen(first) + 1);
+  return s_from(imp, slen(dm->module) + 1);
 }
 
-// Remote modules named by imports that did not resolve and that are not
-// selected already (an import into a selected module is a wrong file name).
-fn bx_missing_modules(s: BxSess*, gs: Graph**, n: int64) -> StrList* {
-  var mods: StrList* = sl_new();
-  var known: StrList* = bx_known_modules(s->p, s->ds);
+// The package an unresolved import may name (14.5): "NAME/FILE" with a
+// valid, unreserved package name that is no component and no directory next
+// to the importing file; "" otherwise.
+fn bx_import_package(s: BxSess*, from: string, imp: string) -> string {
+  var first: string = bx_first_component(imp);
+  if (slen(first) >= slen(imp) || !man_is_package_name(first)) {
+    return s_empty();
+  }
+  if (s_eq(first, "std") || s_eq(first, "mbuild") || sl_has(s->comps, first)) {
+    return s_empty();
+  }
+  if (fs_is_dir(p_join(p_dir(from), first))) {
+    return s_empty();
+  }
+  return first;
+}
+
+// Packages named by imports that did not resolve and that are not selected
+// already (an import into a selected package is a wrong file name).
+fn bx_missing_packages(s: BxSess*, us: BxUnits*) -> StrList* {
+  var names: StrList* = sl_new();
   var i: int64 = 0;
-  while (i < n) {
-    var g: Graph* = gs[i];
+  while (i < us->n) {
+    var g: Graph* = us->items[i]->g;
     var k: int64 = 0;
     while (k < g->missing->len) {
       var imp: string = sl_get(g->missing, k);
-      if (s_eq(sl_get(g->missing_kinds, k), "import") && bx_dep_of_import(s->ds, known, imp) < 0) {
-        var mod: string = man_module_of_import_in(known, imp);
-        if (slen(mod) > 0) {
-          sl_add_uniq(mods, mod);
+      if (s_eq(sl_get(g->missing_kinds, k), "import") && bx_dep_of_import(s->ds, imp) < 0) {
+        var name: string = bx_import_package(s, sl_get(g->missing_from, k), imp);
+        if (slen(name) > 0) {
+          sl_add_uniq(names, name);
         }
       }
       k = k + 1;
     }
     i = i + 1;
   }
-  free(known);
-  sl_sort(mods);
-  return mods;
+  sl_sort(names);
+  return names;
 }
 
 // The .mettle files (stems) directly in dir.
@@ -990,15 +1149,12 @@ fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
     ver = "path " + bx_show(dm->dir);
   }
   var who: string = dm->module + " (" + ver + ")";
-  if (!dm->is_path && slen(dm->alias) > 0 && s_eq(bx_first_component(imp), dm->alias)) {
-    who = dm->alias + " (" + dm->module + " " + ver + ")";
-  }
   var target: string = dm->dir;
   if (slen(rest) > 0) {
     target = dm->dir + "/" + rest;
   }
   if (!fs_is_dir(dm->dir) || bx_dir_is_empty(dm->dir)) {
-    error_msg(loc + ": cannot find `" + imp + "`: the checkout of " + who + " is missing or empty");
+    error_msg(loc + ": cannot find `" + imp + "`: the copy of " + who + " is missing or empty");
     err_line("  " + cyan("help") + ": the copy in " + bx_show(dm->dir) + " looks damaged; run `mbuild fetch --force`");
     return;
   }
@@ -1052,106 +1208,71 @@ fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
   free(stems);
 }
 
-// Unresolved imports that would lie in a submodule that is not checked out.
-fn bx_check_subs_imports(p: Project*, gs: Graph**, n: int64) {
-  if (bx_subs(p)->uninit->len == 0) {
-    return;
-  }
-  var shown: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < n) {
-    var g: Graph* = gs[i];
-    var k: int64 = 0;
-    while (k < g->missing->len) {
-      var imp: string = sl_get(g->missing, k);
-      var from: string = sl_get(g->missing_from, k);
-      var loc: string = bx_show(from) + ":" + sl_get(g->missing_lines, k);
-      k = k + 1;
-      var sub: string = bx_sub_of(p, p_clean(p_join(p_dir(from), imp)));
-      if (slen(sub) == 0) {
-        sub = bx_sub_of(p, p_clean(p_join(p->root, imp)));
-      }
-      if (slen(sub) > 0 && !sl_has(shown, loc + imp)) {
-        sl_push(shown, loc + imp);
-        error_msg(loc + ": cannot find `" + imp + "`: " + sub + " is a git submodule that is not checked out");
-        err_line("  " + cyan("help") + ": " + bx_sub_help(sub));
-      }
-    }
-    i = i + 1;
-  }
-  var bad: int64 = shown->len;
-  free(shown);
-  if (bad > 0) {
-    exit_with(1);
-  }
-}
-
-// Scans the graphs, adds missing remote modules (unless --locked/--offline),
-// and fails naming file:line for an import that still does not resolve.
-fn bx_prepare(s: BxSess*, entries: StrList*) -> Graph** {
+// Components, the pre-build hook, then every unit's graph. Missing packages
+// are added (unless --locked/--offline; one no registry has is left to the
+// compiler's E0006); an import into a selected package that names no file
+// stops the command with file:line. bin_for_files names the gen dir of
+// units without a bin ("test").
+fn bx_prepare(s: BxSess*, us: BxUnits*, bin_for_files: string) {
   var p: Project* = s->p;
-  var n: int64 = s->targets->len * entries->len;
-  var gs: Graph** = bx_graphs(s, entries);
-  bx_check_subs_imports(p, gs, n);
-  s->missing = bx_missing_modules(s, gs, n);
-  if (s->missing->len > 0 && !p->opts->locked && !p->opts->offline) {
-    if (deps_add_missing(p, s->missing)) {
+  bx_components(s, us, bin_for_files);
+  bx_pre_hooks(s, us);
+  bx_graphs(s, us);
+  var missing: StrList* = bx_missing_packages(s, us);
+  if (missing->len > 0 && !p->opts->locked && !p->opts->offline) {
+    if (deps_add_missing(p, missing)) {
       bx_reload(p);
-      s->ds = deps_ensure(p);
-      gs = bx_graphs(s, entries);
-      s->missing = bx_missing_modules(s, gs, n);
+      s->ds = bx_deps(p);
+      bx_sess_comps(s);
+      bx_components(s, us, bin_for_files);
+      bx_graphs(s, us);
+      free(missing);
+      missing = bx_missing_packages(s, us);
     }
   }
-  var known: StrList* = bx_known_modules(p, s->ds);
   var shown: StrList* = sl_new();
   var bad_files: int64 = 0;
   var i: int64 = 0;
-  while (i < n) {
-    var g: Graph* = gs[i];
+  while (i < us->n) {
+    var g: Graph* = us->items[i]->g;
     var k: int64 = 0;
     while (k < g->missing->len) {
       var imp: string = sl_get(g->missing, k);
       var loc: string = bx_show(sl_get(g->missing_from, k)) + ":" + sl_get(g->missing_lines, k);
-      if (s_eq(sl_get(g->missing_kinds, k), "import") && !sl_has(shown, loc + imp)) {
-        var at: int64 = bx_dep_of_import(s->ds, known, imp);
-        var mod: string = man_module_of_import_in(known, imp);
-        if (at >= 0) {
-          sl_push(shown, loc + imp);
-          bx_report_bad_file(loc, imp, &s->ds->mods[at]);
-          bad_files = bad_files + 1;
-        } else if (slen(mod) > 0) {
-          sl_push(shown, loc + imp);
-          error_msg(loc + ": cannot find `" + imp + "` (module " + mod + " is not a dependency)");
-        }
+      var at: int64 = bx_dep_of_import(s->ds, imp);
+      if (s_eq(sl_get(g->missing_kinds, k), "import") && at >= 0 && !sl_has(shown, loc + imp)) {
+        sl_push(shown, loc + imp);
+        bx_report_bad_file(loc, imp, &s->ds->mods[at]);
+        bad_files = bad_files + 1;
       }
       k = k + 1;
     }
     i = i + 1;
   }
   free(shown);
-  free(known);
-  var mods: StrList* = s->missing;
-  if (mods->len == 0) {
-    if (bad_files > 0) {
-      exit_with(1);
+  if (bad_files > 0) {
+    exit_with(1);
+  }
+  if (missing->len > 0 && (p->opts->locked || p->opts->offline)) {
+    var why: string = " (--locked stops mbuild from adding them)";
+    if (!p->opts->locked) {
+      why = " (--offline stops mbuild from adding them)";
     }
-    return gs;
+    fail_hint("missing dependencies" + why, "run `mbuild get " + sl_join(missing, "` / `mbuild get ") + "`");
   }
-  var why: string = "";
-  if (p->opts->locked) {
-    why = " (--locked stops mbuild from adding it)";
-  } else if (p->opts->offline) {
-    why = " (--offline stops mbuild from adding it)";
-  }
-  fail_hint("missing dependencies" + why, "run `mbuild get " + sl_join(mods, "` / `mbuild get ") + "`");
-  return gs;
+  free(missing);
 }
 
 // ---------------------------------------------------------------------------
 // Compiling
 // ---------------------------------------------------------------------------
 
-fn bx_add_include(c: Cmd*, p: Project*, ds: DepState*) {
+// -I for the unit's gen dir (when it has one), then for .mbuild/deps.
+fn bx_add_include(c: Cmd*, p: Project*, ds: DepState*, gen: string) {
+  if (slen(gen) > 0) {
+    cmd_arg(c, "-I");
+    cmd_path(c, bx_rel(p, gen));
+  }
   cmd_arg(c, "-I");
   cmd_path(c, bx_rel(p, ds->include_dir));
 }
@@ -1258,7 +1379,7 @@ fn bx_key_where(p: Project*, prof: string, bin: string, key: string) -> string {
   while (i < chain->len) {
     var sec: string = "profile." + sl_get(chain, i);
     if (m->local != (Manifest*)0 && toml_has(m->local->doc, sec, key)) {
-      found = "mbuild.local.toml [" + sec + "]";
+      found = "mbuild.local.mettle (" + sec + ")";
       break;
     }
     if (toml_has(m->doc, sec, key)) {
@@ -1288,17 +1409,17 @@ fn bx_raw_where(p: Project*, prof: string, bin: string, flag: string) -> string 
     i = i + 1;
   }
   free(chain);
-  var found: string = "mbuild.toml";
+  var found: string = "mbuild.mettle";
   i = 0;
   while (i < secs->len) {
     var sec: string = sl_get(secs, i);
     i = i + 1;
     if (m->local != (Manifest*)0 && sl_has(toml_list(m->local->doc, sec, "flags"), flag)) {
-      found = "mbuild.local.toml:" + s_int(toml_get(m->local->doc, sec, "flags")->line);
+      found = "mbuild.local.mettle";
       break;
     }
     if (sl_has(toml_list(m->doc, sec, "flags"), flag)) {
-      found = "mbuild.toml:" + s_int(toml_get(m->doc, sec, "flags")->line);
+      found = "mbuild.mettle";
       break;
     }
   }
@@ -1308,10 +1429,10 @@ fn bx_raw_where(p: Project*, prof: string, bin: string, flag: string) -> string 
 
 // Probes the flags v0.17.0 lacks and every raw flag (once per compiler and
 // flag set in a command); an unsupported one stops the command.
-fn bx_check_support(s: BxSess*, ti: int64, st: Settings*, flags: StrList*, bin: string) {
+fn bx_check_support(s: BxSess*, u: BxUnit*, st: Settings*, flags: StrList*, bin: string) {
   var p: Project* = s->p;
-  var m: Mettle* = s->mettles[ti];
-  var target: string = sl_get(s->targets, ti);
+  var m: Mettle* = u->m;
+  var target: string = u->target;
   var probe: StrList* = sl_new();
   var i: int64 = 0;
   while (i < flags->len) {
@@ -1368,7 +1489,7 @@ fn bx_check_support(s: BxSess*, ti: int64, st: Settings*, flags: StrList*, bin: 
         fname = "--pgo-use";
       }
       error_msg(what + " needs a Mettle compiler that has " + fname + "; the " + target + " compiler (" + m->path + ", " + ver + ") does not");
-      err_line("  " + cyan("help") + ": use a newer compiler (`mbuild toolchain use latest`), or set " + off);
+      err_line("  " + cyan("help") + ": build a newer compiler from ../Mettle, or set " + off);
     } else {
       error_msg("flags: the " + target + " compiler does not accept " + f + " (" + bx_raw_where(p, s->profile, bin, f) + ")");
     }
@@ -1379,17 +1500,16 @@ fn bx_check_support(s: BxSess*, ti: int64, st: Settings*, flags: StrList*, bin: 
 
 // Adds the compile flags of one bin (0: a file that is no bin) for session
 // target ti: typed settings, raw flags, then --flag. Answers the settings.
-fn bx_add_flags(c: Cmd*, s: BxSess*, ti: int64, b: BinInfo*) -> Settings* {
+fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   var p: Project* = s->p;
-  var target: string = sl_get(s->targets, ti);
-  var bin: string = "";
-  if (b != (BinInfo*)0) {
-    bin = b->name;
-  }
-  var st: Settings* = bx_settings_of(p, s->profile, bin, target);
-  var flags: StrList* = man_settings_flags(st, target);
+  var bin: string = bx_unit_bin(u);
+  var st: Settings* = bx_settings_of(p, s->profile, bin, bx_unit_os(u));
+  var flags: StrList* = man_settings_flags(st, u->target);
   sl_extend(flags, p->opts->flags);
-  bx_check_support(s, ti, st, flags, bin);
+  if (u->ti < 0) {
+    bx_drop_hosted(flags, bin);
+  }
+  bx_check_support(s, u, st, flags, bin);
   if (s_eq(st->pgo, "use") && !fs_is_file(p_join(p->root, st->pgo_file))) {
     fail("pgo-file = \"" + st->pgo_file + "\" does not exist: build with pgo = \"instrument\" and run the program (mbuild run -p " + s->profile + ") to record it");
   }
@@ -1399,6 +1519,22 @@ fn bx_add_flags(c: Cmd*, s: BxSess*, ti: int64, b: BinInfo*) -> Settings* {
   cmd_args(c, flags);
   free(flags);
   return st;
+}
+
+// The compiler refuses --safe and --check-effects on *-none targets (15.7).
+fn bx_drop_hosted(flags: StrList*, bin: string) {
+  var drop: StrList* = sl_of("--safe");
+  sl_push(drop, "--check-effects");
+  var i: int64 = 0;
+  while (i < drop->len) {
+    var at: int64 = sl_index(flags, sl_get(drop, i));
+    if (at >= 0) {
+      sl_remove_at(flags, at);
+      verbose("bin " + bin + " is freestanding: dropped " + sl_get(drop, i));
+    }
+    i = i + 1;
+  }
+  free(drop);
 }
 
 // The recorded profile a pgo = "use" build reads is an input of it.
@@ -1514,15 +1650,37 @@ fn bx_strip_ansi(text: string) -> string {
   return buf_take(b);
 }
 
+// The output of a bin by kind (15.7): <bin><ext>, lib<bin>.so / <bin>.dll,
+// <bin>.o / <bin>.obj, <bin>.bin.
+fn bx_out_name(b: BinInfo*, target: string) -> string {
+  if (s_eq(b->kind, "shared")) {
+    if (s_eq(target, "windows")) {
+      return b->name + ".dll";
+    }
+    return "lib" + b->name + ".so";
+  }
+  if (s_eq(b->kind, "flat")) {
+    return b->name + ".bin";
+  }
+  if (s_eq(b->kind, "object") || s_ends(target, "-none")) {
+    if (s_eq(target, "windows") || s_contains(b->triple, "-windows")) {
+      return b->name + ".obj";
+    }
+    return b->name + ".o";
+  }
+  return b->name + target_exe_ext(target);
+}
+
 fn bx_out_path(t: TargetCtx*, b: BinInfo*) -> string {
-  return t->out_dir + "/" + b->name + target_exe_ext(t->target);
+  return t->out_dir + "/" + bx_out_name(b, t->target);
 }
 
 fn bx_remove_intermediates(out: string) {
   sys_remove_file(out + ".o");
   sys_remove_file(out + ".obj");
-  if (s_ends(out, ".exe")) {
-    var stem: string = s_sub(out, 0, slen(out) - 4);
+  var ext: string = p_ext(out);
+  if (s_eq(ext, ".exe") || s_eq(ext, ".so") || s_eq(ext, ".dll")) {
+    var stem: string = s_sub(out, 0, slen(out) - slen(ext));
     sys_remove_file(stem + ".o");
     sys_remove_file(stem + ".obj");
   }
@@ -1557,6 +1715,7 @@ struct BxJob {
   b: BinInfo*;
   t: TargetCtx*;
   nl: NatLink*;
+  u: BxUnit*;
   c: Cmd*;
   outp: string;
   stamp: string;
@@ -1565,32 +1724,68 @@ struct BxJob {
   g: Graph*;
 }
 
-// Prepares the compile of one bin for one target; a Fresh output is
-// reported and finished here.
-fn bx_plan(s: BxSess*, ti: int64, t: TargetCtx*, nl: NatLink*, b: BinInfo*, g: Graph*) -> BxJob* {
+// The compiler arguments that make the output of the unit's bin kind.
+fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, outp: string, st: Settings*) {
+  var b: BinInfo* = u->b;
+  var file: string = bx_rel(p, u->entry);
+  if (s_eq(b->kind, "flat")) {
+    if (slen(st->image_base) == 0) {
+      fail_hint("bin " + b->name + " is flat but has no image-base", "set it in mbuild.mettle: mb_for_bin(\"" + b->name + "\"); mb_set(\"image-base\", \"0x100000\");");
+    }
+    cmd_path(c, file);
+    cmd_arg(c, "--target");
+    cmd_arg(c, b->triple);
+    cmd_arg(c, "--emit-flat");
+    cmd_path(c, bx_rel(p, outp));
+    return;
+  }
+  if (s_eq(b->kind, "object") || u->ti < 0) {
+    cmd_path(c, file);
+    if (slen(b->triple) > 0) {
+      cmd_arg(c, "--target");
+      cmd_arg(c, b->triple);
+    }
+    cmd_arg(c, "-o");
+    cmd_path(c, bx_rel(p, outp));
+    return;
+  }
+  cmd_arg(c, "--build");
+  if (s_eq(b->kind, "shared")) {
+    cmd_arg(c, "--shared");
+    cmd_arg(c, "--soname");
+    cmd_arg(c, p_base(outp));
+  }
+  cmd_path(c, file);
+  cmd_arg(c, "-o");
+  cmd_path(c, bx_rel(p, outp));
+}
+
+// Prepares the compile of one unit; a Fresh output is reported and
+// finished here.
+fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   var p: Project* = s->p;
-  var m: Mettle* = s->mettles[ti];
+  var b: BinInfo* = u->b;
+  var m: Mettle* = u->m;
+  var g: Graph* = u->g;
   var j: BxJob* = new BxJob;
   j->b = b;
   j->t = t;
   j->nl = nl;
+  j->u = u;
   j->g = g;
   j->outp = bx_out_path(t, b);
   var c: Cmd* = tc_cmd(m);
   j->c = c;
-  cmd_arg(c, "--build");
-  cmd_path(c, bx_rel(p, b->entry));
-  cmd_arg(c, "-o");
-  cmd_path(c, bx_rel(p, j->outp));
-  bx_add_include(c, p, s->ds);
-  var st: Settings* = bx_add_flags(c, s, ti, b);
+  var st: Settings* = bx_add_flags(c, s, u);
+  bx_add_include(c, p, s->ds, bx_unit_gen(u));
   cmd_args(c, nl->mettle_args);
+  bx_kind_args(c, p, u, j->outp, st);
   sl_extend(c->env, nl->env);
   bx_diag_env(c);
   c->cwd = p->root;
 
   var h: Hasher = h_new();
-  h_str(&h, "mbuild-build-v2");
+  h_str(&h, "mbuild-build-v3");
   bx_hash_cmd(&h, p, m, c);
   h_str(&h, t->target);
   h_str(&h, t->profile);
@@ -1609,7 +1804,7 @@ fn bx_plan(s: BxSess*, ti: int64, t: TargetCtx*, nl: NatLink*, b: BinInfo*, g: G
     return j;
   }
   if (!g->ok) {
-    error_msg("cannot read " + bx_show(b->entry) + " (the main file of bin `" + b->name + "`)");
+    error_msg("cannot read " + bx_show(u->entry) + " (the main file of bin `" + b->name + "`)");
     j->state = 2;
     return j;
   }
@@ -1625,11 +1820,15 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
   var b: BinInfo* = j->b;
   var t: TargetCtx* = j->t;
   bx_print_block(bx_compiler_output(output));
-  bx_remove_intermediates(j->outp);
+  if (!s_eq(b->kind, "object") && j->u->ti >= 0) {
+    bx_remove_intermediates(j->outp);
+  }
   if (code != 0) {
-    nat_explain_failure(p, s->ds, t, bx_strip_ansi(output));
+    if (j->u->ti >= 0) {
+      nat_explain_failure(p, s->ds, t, bx_strip_ansi(output));
+    }
     bx_explain_clash(s->ds, j->g, bx_strip_ansi(output));
-    error_msg("could not compile `" + b->name + "` (" + t->target + ", " + t->profile + ")");
+    error_msg("could not compile " + b->name + " (" + t->target + ", " + t->profile + ")");
     return 1;
   }
   if (!fs_is_file(j->outp)) {
@@ -1739,16 +1938,6 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   return rc;
 }
 
-fn bx_entries(bs: BinSet*) -> StrList* {
-  var l: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < bs->n) {
-    sl_push(l, bs->items[i].entry);
-    i = i + 1;
-  }
-  return l;
-}
-
 fn bx_targetctx(s: BxSess*, ti: int64) -> TargetCtx* {
   var m: Mettle* = s->mettles[ti];
   var t: TargetCtx* = targetctx_new(s->p, sl_get(s->targets, ti), s->profile);
@@ -1757,42 +1946,85 @@ fn bx_targetctx(s: BxSess*, ti: int64) -> TargetCtx* {
   return t;
 }
 
-// Builds every bin in bs for every session target. 0 on success.
-fn bx_build_all(s: BxSess*, bs: BinSet*) -> int32 {
+// The TargetCtx of every session target, then one per freestanding triple
+// (index targets->len + k, in unit order).
+fn bx_unit_tctx(s: BxSess*, u: BxUnit*, ctxs: TargetCtx**, nls: NatLink**) -> int64 {
+  if (u->ti >= 0) {
+    return u->ti;
+  }
+  var k: int64 = s->targets->len;
+  while (ctxs[k] != (TargetCtx*)0) {
+    if (s_eq(ctxs[k]->target, u->target)) {
+      return k;
+    }
+    k = k + 1;
+  }
+  var t: TargetCtx* = targetctx_new(s->p, u->target, s->profile);
+  t->compiler_stdlib_dir = u->m->stdlib_dir;
+  t->compiler_runtime_dir = u->m->runtime_dir;
+  ctxs[k] = t;
+  nls[k] = natlink_empty();
+  return k;
+}
+
+// Builds every unit, then runs the post-build hooks. 0 on success.
+fn bx_build_units(s: BxSess*, us: BxUnits*) -> int32 {
   var t0: int64 = sys_now_ms();
-  var entries: StrList* = bx_entries(bs);
-  defer free(entries);
-  var gs: Graph** = bx_prepare(s, entries);
-  var jobs: BxJob** = (BxJob**)malloc((s->targets->len * bs->n + 1) * 8);
-  var n: int64 = 0;
+  bx_prepare(s, us, s_empty());
+  var nt: int64 = s->targets->len + us->n + 1;
+  var ctxs: TargetCtx** = (TargetCtx**)malloc(nt * 8);
+  var nls: NatLink** = (NatLink**)malloc(nt * 8);
+  g_bx_tctxs = ctxs;
+  g_bx_nls = nls;
+  var k: int64 = 0;
+  while (k < nt) {
+    ctxs[k] = (TargetCtx*)0;
+    nls[k] = (NatLink*)0;
+    k = k + 1;
+  }
   var ti: int64 = 0;
   while (ti < s->targets->len) {
-    var t: TargetCtx* = bx_targetctx(s, ti);
-    s->cur_t = t;
-    var nl: NatLink* = nat_prepare(s->p, s->ds, t);
-    s->cur_nl = nl;
-    var bi: int64 = 0;
-    while (bi < bs->n) {
-      var j: BxJob* = bx_plan(s, ti, t, nl, &bs->items[bi], gs[ti * bs->n + bi]);
-      if (j->state == 2) {
-        free(jobs);
-        return 1;
-      }
-      if (j->state == 0) {
-        jobs[n] = j;
-        n = n + 1;
-      }
-      bi = bi + 1;
-    }
+    ctxs[ti] = bx_targetctx(s, ti);
+    s->cur_t = ctxs[ti];
+    nls[ti] = nat_prepare(s->p, s->ds, ctxs[ti]);
+    s->cur_nl = nls[ti];
     ti = ti + 1;
   }
+  var jobs: BxJob** = (BxJob**)malloc((us->n + 1) * 8);
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (i < us->n) {
+    var u: BxUnit* = us->items[i];
+    var at: int64 = bx_unit_tctx(s, u, ctxs, nls);
+    var j: BxJob* = bx_plan(s, u, ctxs[at], nls[at]);
+    if (j->state == 2) {
+      return 1;
+    }
+    if (j->state == 0) {
+      jobs[n] = j;
+      n = n + 1;
+    }
+    i = i + 1;
+  }
   var rc: int32 = bx_run_jobs(s, jobs, n);
-  free(jobs);
   if (rc != 0) {
     return 1;
   }
+  var built: StrList* = sl_new();
+  i = 0;
+  while (i < n) {
+    sl_push(built, jobs[i]->t->target + " " + jobs[i]->b->name);
+    i = i + 1;
+  }
+  free(jobs);
+  bx_post_hooks(s, us, built);
+  free(built);
   status("Finished", "in " + bx_secs(sys_now_ms() - t0));
   return 0;
+}
+
+fn bx_build_all(s: BxSess*, bs: BinSet*) -> int32 {
+  return bx_build_units(s, bx_bin_units(s, bs));
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,13 +2045,19 @@ export fn build_cmd_build(p: Project*) -> int32 {
   return bx_build_all(s, bs);
 }
 
-export fn build_cmd_run(p: Project*) -> int32 {
+fn bx_runnable(b: BinInfo*) -> bool {
+  return s_eq(b->kind, "exe") && !bx_freestanding(b);
+}
+
+// The one bin `run` / `live` starts: named, the only runnable one, or the
+// one named after the package.
+fn bx_run_bin(p: Project*, cmd: string) -> BinSet* {
   var names: StrList* = bx_positional(p->opts->rest);
   defer free(names);
   var all: BinSet* = build_bins(p);
   if (all->n == 0) {
     if (bx_lib_set(p)->n > 0) {
-      fail_hint("package `" + p->man->name + "` is a library: it has no program to run", "add src/main.mettle with fn main (or a [bin.NAME] section) to make one; `mbuild check` and `mbuild test` work on libraries");
+      fail_hint("package `" + p->man->name + "` is a library: it has no program to run", "add src/main.mettle with fn main (or mb_bin in mbuild.mettle) to make one; `mbuild check` and `mbuild test` work on libraries");
     }
     bx_no_bins(p);
   }
@@ -1828,18 +2066,39 @@ export fn build_cmd_run(p: Project*) -> int32 {
   if (names->len > 0) {
     sl_push(pick, sl_get(names, 0));
     if (names->len > 1) {
-      fail_hint("`mbuild run` takes one bin", "pass program arguments after `--`: mbuild run " + sl_get(names, 0) + " -- ARGS");
+      fail_hint("`mbuild " + cmd + "` takes one bin", "pass program arguments after `--`: mbuild " + cmd + " " + sl_get(names, 0) + " -- ARGS");
     }
   } else if (all->n > 1) {
-    var known: StrList* = bx_bin_names(all);
+    var known: StrList* = sl_new();
     defer free(known);
-    if (sl_has(known, p->man->name)) {
+    var i: int64 = 0;
+    while (i < all->n) {
+      if (bx_runnable(&all->items[i])) {
+        sl_push(known, all->items[i].name);
+      }
+      i = i + 1;
+    }
+    if (known->len == 1) {
+      sl_push(pick, sl_get(known, 0));
+    } else if (sl_has(known, p->man->name)) {
       sl_push(pick, p->man->name);
     } else {
-      fail_hint("this project has several bins", "name one: mbuild run " + sl_join(known, " | "));
+      fail_hint("this project has several bins", "name one: mbuild " + cmd + " " + sl_join(known, " | "));
     }
   }
   var bs: BinSet* = bx_select_bins(p, pick);
+  var b: BinInfo* = &bs->items[0];
+  if (bx_freestanding(b)) {
+    fail_hint("bin " + b->name + " is freestanding (" + b->triple + "): mbuild cannot run it", "write a project command that starts your emulator: fn cmd_qemu");
+  }
+  if (!s_eq(b->kind, "exe")) {
+    fail("bin " + b->name + " is a " + b->kind + " bin, not a program: mbuild " + cmd + " needs kind exe");
+  }
+  return bs;
+}
+
+// One target for `run`: -t, else the host when [build] targets has it.
+fn bx_run_targets(p: Project*) -> StrList* {
   var targets: StrList* = build_targets(p);
   if (targets->len > 1) {
     if (p->opts->targets->len > 0) {
@@ -1851,7 +2110,12 @@ export fn build_cmd_run(p: Project*) -> int32 {
     }
     targets = sl_of(host);
   }
-  var s: BxSess* = bx_sess(p, targets);
+  return targets;
+}
+
+export fn build_cmd_run(p: Project*) -> int32 {
+  var bs: BinSet* = bx_run_bin(p, "run");
+  var s: BxSess* = bx_sess(p, bx_run_targets(p));
   g_bx_sess = s;
   if (bx_build_all(s, bs) != 0) {
     return 1;
@@ -1872,6 +2136,48 @@ export fn build_cmd_run(p: Project*) -> int32 {
   }
   free(st);
   status("Running", bx_show(outp));
+  return proc_run(c);
+}
+
+// mbuild live [BIN] [-p PROFILE] [-- args]: `mettle live` with the build's
+// setup, host target only (15.4).
+export fn build_cmd_live(p: Project*) -> int32 {
+  var bs: BinSet* = bx_run_bin(p, "live");
+  if (p->opts->targets->len > 0 && !(p->opts->targets->len == 1 && (s_eq(sl_get(p->opts->targets, 0), sys_os()) || s_eq(sl_get(p->opts->targets, 0), "host")))) {
+    fail("mbuild live runs on the host target only (" + sys_os() + ")");
+  }
+  var s: BxSess* = bx_sess(p, sl_of(sys_os()));
+  g_bx_sess = s;
+  var us: BxUnits* = bx_bin_units(s, bs);
+  g_bx_units = us;
+  bx_prepare(s, us, s_empty());
+  var u: BxUnit* = us->items[0];
+  var t: TargetCtx* = bx_targetctx(s, 0);
+  g_bx_t = t;
+  var nl: NatLink* = nat_prepare(p, s->ds, t);
+  s->cur_nl = nl;
+  t->out_dir = t->out_dir + "/live";
+  fs_mkdirs(t->out_dir);
+  bx_copy_beside(nl, t);
+  var outp: string = t->out_dir + "/" + u->b->name + target_exe_ext(t->target);
+  var c: Cmd* = tc_cmd(u->m);
+  defer free(c);
+  cmd_arg(c, "live");
+  cmd_path(c, bx_rel(p, u->entry));
+  var st: Settings* = bx_add_flags(c, s, u);
+  free(st);
+  bx_add_include(c, p, s->ds, bx_unit_gen(u));
+  cmd_args(c, nl->mettle_args);
+  cmd_arg(c, "-o");
+  cmd_path(c, bx_rel(p, outp));
+  if (p->opts->passthrough->len > 0) {
+    cmd_arg(c, "--");
+    cmd_args(c, p->opts->passthrough);
+  }
+  sl_extend(c->env, nl->env);
+  c->cwd = p->root;
+  verbose(cmd_display(c));
+  status("Live", bx_label(u->b, t));
   return proc_run(c);
 }
 
@@ -1906,7 +2212,7 @@ fn bx_walk_owned(root: string, rel: string, skip: StrList*, found: StrList*) {
         sub = rel + "/" + d;
       }
       var abs: string = root + "/" + sub;
-      if (fs_is_file(abs + "/mbuild.toml") || sl_has(skip, abs)) {
+      if (fs_is_file(abs + "/mbuild.mettle") || fs_is_file(abs + "/mbuild.toml") || sl_has(skip, abs)) {
         continue;
       }
       bx_walk_owned(root, sub, skip, found);
@@ -1932,7 +2238,7 @@ fn bx_path_pkg_dirs(p: Project*) -> StrList* {
 
 // The project's own .mettle files, relative to the root and sorted: not in
 // dot directories, build/ directories, nested projects (a directory with its
-// own mbuild.toml) or local path packages.
+// own mbuild.mettle) or local path packages.
 fn bx_owned_files(p: Project*) -> StrList* {
   var found: StrList* = sl_new();
   var skip: StrList* = bx_path_pkg_dirs(p);
@@ -2043,8 +2349,19 @@ export fn build_cmd_test(p: Project*) -> int32 {
   }
   var s: BxSess* = bx_sess(p, bx_targets_or_host(p));
   g_bx_sess = s;
-  var gs: Graph** = bx_prepare(s, files);
   var bins: BinSet* = build_bins(p);
+  var us: BxUnits* = bx_units_new();
+  g_bx_units = us;
+  var ui: int64 = 0;
+  while (ui < s->targets->len) {
+    var uf: int64 = 0;
+    while (uf < files->len) {
+      bx_unit_add(us, bx_bin_of_entry(bins, sl_get(files, uf)), sl_get(files, uf), ui, sl_get(s->targets, ui), s->mettles[ui]);
+      uf = uf + 1;
+    }
+    ui = ui + 1;
+  }
+  bx_prepare(s, us, "test");
   var passed: int64 = 0;
   var cached: int64 = 0;
   var failed: int64 = 0;
@@ -2059,21 +2376,24 @@ export fn build_cmd_test(p: Project*) -> int32 {
     var fi: int64 = 0;
     while (fi < files->len) {
       var file: string = sl_get(files, fi);
+      var u: BxUnit* = us->items[ti * files->len + fi];
+      // The test gen dir is shared by every file: write this file's wrapper.
+      bx_unit_cmp(s, u, "test");
       var c: Cmd* = tc_cmd(m);
       defer free(c);
       cmd_arg(c, "test");
-      cmd_path(c, bx_rel(p, file));
-      bx_add_include(c, p, s->ds);
-      var st: Settings* = bx_add_flags(c, s, ti, bx_bin_of_entry(bins, file));
+      cmd_path(c, bx_rel(p, u->entry));
+      bx_add_include(c, p, s->ds, bx_unit_gen(u));
+      var st: Settings* = bx_add_flags(c, s, u);
       free(st);
       if (slen(p->opts->filter) > 0) {
         cmd_arg(c, "--filter=" + p->opts->filter);
       }
       bx_diag_env(c);
       c->cwd = p->root;
-      var g: Graph* = gs[ti * files->len + fi];
+      var g: Graph* = u->g;
       var h: Hasher = h_new();
-      h_str(&h, "mbuild-test-v2");
+      h_str(&h, "mbuild-test-v3");
       bx_hash_cmd(&h, p, m, c);
       h_str(&h, target);
       graph_fingerprint(g, &h);
@@ -2130,42 +2450,42 @@ fn bx_check_set(p: Project*, bs: BinSet*) -> int32 {
   var t0: int64 = sys_now_ms();
   var s: BxSess* = bx_sess(p, build_targets(p));
   g_bx_sess = s;
-  var entries: StrList* = bx_entries(bs);
-  defer free(entries);
-  var gs: Graph** = bx_prepare(s, entries);
+  var us: BxUnits* = bx_bin_units(s, bs);
+  g_bx_units = us;
+  bx_prepare(s, us, s_empty());
   var bad: int32 = 0;
-  var ti: int64 = 0;
-  while (ti < s->targets->len) {
-    var target: string = sl_get(s->targets, ti);
-    var bi: int64 = 0;
-    while (bi < bs->n) {
-      var b: BinInfo* = &bs->items[bi];
-      var obj: string = p->state_dir + "/tmp/check-" + s_replace_byte(b->name, 47, 95) + ".o";
-      fs_mkdirs(p->state_dir + "/tmp");
-      var c: Cmd* = tc_cmd(s->mettles[ti]);
-      defer free(c);
-      cmd_path(c, bx_rel(p, b->entry));
-      cmd_arg(c, "-o");
-      cmd_path(c, bx_rel(p, obj));
-      bx_add_include(c, p, s->ds);
-      var st: Settings* = bx_add_flags(c, s, ti, b);
-      free(st);
-      bx_diag_env(c);
-      c->cwd = p->root;
-      status("Checking", b->name + " (" + target + ")");
-      var cap: Captured = proc_capture_all(c);
-      bx_print_block(bx_compiler_output(cap.out));
-      sys_remove_file(obj);
-      sys_remove_file(obj + ".o");
-      sys_remove_file(obj + ".obj");
-      if (cap.code != 0) {
-        bx_explain_clash(s->ds, gs[ti * bs->n + bi], bx_strip_ansi(cap.out));
-        error_msg("`" + b->name + "` (" + target + ") has errors");
-        bad = 1;
-      }
-      bi = bi + 1;
+  var i: int64 = 0;
+  while (i < us->n) {
+    var u: BxUnit* = us->items[i];
+    var b: BinInfo* = u->b;
+    var obj: string = p->state_dir + "/tmp/check-" + s_replace_byte(b->name, 47, 95) + ".o";
+    fs_mkdirs(p->state_dir + "/tmp");
+    var c: Cmd* = tc_cmd(u->m);
+    defer free(c);
+    cmd_path(c, bx_rel(p, u->entry));
+    if (u->ti < 0) {
+      cmd_arg(c, "--target");
+      cmd_arg(c, b->triple);
     }
-    ti = ti + 1;
+    cmd_arg(c, "-o");
+    cmd_path(c, bx_rel(p, obj));
+    bx_add_include(c, p, s->ds, bx_unit_gen(u));
+    var st: Settings* = bx_add_flags(c, s, u);
+    free(st);
+    bx_diag_env(c);
+    c->cwd = p->root;
+    status("Checking", b->name + " (" + u->target + ")");
+    var cap: Captured = proc_capture_all(c);
+    bx_print_block(bx_compiler_output(cap.out));
+    sys_remove_file(obj);
+    sys_remove_file(obj + ".o");
+    sys_remove_file(obj + ".obj");
+    if (cap.code != 0) {
+      bx_explain_clash(s->ds, u->g, bx_strip_ansi(cap.out));
+      error_msg("`" + b->name + "` (" + u->target + ") has errors");
+      bad = 1;
+    }
+    i = i + 1;
   }
   if (bad == 0) {
     status("Finished", "in " + bx_secs(sys_now_ms() - t0));
@@ -2195,57 +2515,42 @@ export fn build_cmd_clean(p: Project*) -> int32 {
   return 0;
 }
 
-fn bx_valid_pkg_name(s: string) -> bool {
-  if (slen(s) == 0) {
-    return false;
+// The value of a `--name=VALUE` command flag in rest (the last one), taken
+// out of rest; "" when absent.
+fn bx_take_opt(p: Project*, name: string) -> string {
+  var v: string = s_empty();
+  var l: StrList* = bx_take_opts(p, name);
+  if (l->len > 0) {
+    v = sl_get(l, l->len - 1);
   }
-  var i: int64 = 0;
-  while (i < slen(s)) {
-    var c: int32 = s_byte(s, i);
-    if (!(is_ident_b(c) || c == 45 || c == 46)) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
+  free(l);
+  return v;
 }
 
-// mbuild init [name | module path]: in the working directory.
-export fn build_cmd_init(opts: Options*) -> int32 {
-  var dir: string = p_clean(bx_cwd());
-  var args: StrList* = bx_positional(opts->rest);
-  defer free(args);
-  var name: string = bx_safe_name(p_base(dir));
-  var modpath: string = "";
-  if (args->len > 0) {
-    var a: string = sl_get(args, 0);
-    if (man_is_remote_module(a)) {
-      modpath = a;
-      name = p_base(a);
+// Every value of a repeatable `--name=VALUE` command flag, in order.
+fn bx_take_opts(p: Project*, name: string) -> StrList* {
+  var vals: StrList* = sl_new();
+  var pre: string = name + "=";
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_starts(a, pre)) {
+      sl_push(vals, s_from(a, slen(pre)));
+      sl_remove_at(p->opts->rest, i);
     } else {
-      name = a;
-    }
-    if (!bx_valid_pkg_name(name)) {
-      fail("package name `" + name + "` may only hold letters, digits, '_', '-' and '.'");
+      i = i + 1;
     }
   }
-  var manifest: string = dir + "/mbuild.toml";
-  if (fs_exists(manifest)) {
-    fail_hint("mbuild.toml already exists in " + dir, "this is already a project; edit mbuild.toml instead");
+  return vals;
+}
+
+// The skeleton of 13.10 in dir: mbuild.mettle, src/main.mettle (unless a
+// main file exists) and the .gitignore lines.
+fn bx_init_files(dir: string, name: string) {
+  if (!fs_write(dir + "/mbuild.mettle", mbf_init_text(name))) {
+    fail("cannot write " + dir + "/mbuild.mettle");
   }
-  var b: Buf* = buf_new();
-  buf_line(b, "[package]");
-  buf_line(b, "name = " + toml_quote(name));
-  buf_line(b, "version = \"0.1.0\"");
-  if (slen(modpath) > 0) {
-    buf_line(b, "module = " + toml_quote(modpath));
-  }
-  buf_line(b, "");
-  buf_line(b, "[dependencies]");
-  if (!fs_write(manifest, buf_take(b))) {
-    fail("cannot write " + manifest);
-  }
-  status("Created", "mbuild.toml (package `" + name + "`)");
+  status("Created", "mbuild.mettle (package `" + name + "`)");
   if (fs_exists(dir + "/main.mettle") || fs_exists(dir + "/src/main.mettle")) {
     note("kept the existing main file");
   } else {
@@ -2273,31 +2578,132 @@ export fn build_cmd_init(opts: Options*) -> int32 {
   if (slen(text) > 0 && !s_ends(text, "\n")) {
     buf_line(add, "");
   }
+  var want: StrList* = s_split("/build/ /.mbuild/ /mettle.deps /mbuild.local.mettle", 32);
+  defer free(want);
   var changed: bool = false;
-  if (!sl_has(lines, "/build/") && !sl_has(lines, "build/") && !sl_has(lines, "/build")) {
-    buf_line(add, "/build/");
-    changed = true;
-  }
-  if (!sl_has(lines, "/.mbuild/") && !sl_has(lines, ".mbuild/") && !sl_has(lines, "/.mbuild")) {
-    buf_line(add, "/.mbuild/");
-    changed = true;
-  }
-  if (!sl_has(lines, "/mbuild.local.toml") && !sl_has(lines, "mbuild.local.toml")) {
-    buf_line(add, "/mbuild.local.toml");
-    changed = true;
+  var i: int64 = 0;
+  while (i < want->len) {
+    var w: string = sl_get(want, i);
+    var bare: string = s_from(w, 1);
+    var nosl: string = w;
+    if (s_ends(w, "/")) {
+      nosl = s_sub(w, 0, slen(w) - 1);
+    }
+    if (!sl_has(lines, w) && !sl_has(lines, bare) && !sl_has(lines, nosl)) {
+      buf_line(add, w);
+      changed = true;
+    }
+    i = i + 1;
   }
   if (changed) {
     fs_write(gi, text + buf_take(add));
     status("Updated", ".gitignore");
   }
-  if (fs_is_file(dir + "/mettle.deps")) {
+}
+
+fn bx_check_pkg_name(name: string) {
+  if (!man_is_package_name(name) || s_eq(name, "std") || s_eq(name, "mbuild")) {
+    fail_hint("`" + name + "` is not a package name", "package names are lower case letters, digits and '_', starting with a letter (not std or mbuild)");
+  }
+}
+
+// mbuild init [NAME] [--package] | init --from PKG[@V]: in the working directory.
+export fn build_cmd_init(opts: Options*) -> int32 {
+  var dir: string = p_clean(bx_cwd());
+  var p0: Project* = new Project;
+  p0->opts = opts;
+  var from: string = bx_take_opt(p0, "--from");
+  var ini_opts: StrList* = bx_take_opts(p0, "--opt");
+  var registry: string = bx_take_opt(p0, "--registry");
+  var package: bool = bx_take_flag(p0, "--package");
+  var yes: bool = bx_take_flag(p0, "--yes");
+  var dry: bool = bx_take_flag(p0, "--dry-run");
+  free(p0);
+  var args: StrList* = bx_positional(opts->rest);
+  defer free(args);
+  var name: string = bx_pkg_name(p_base(dir));
+  if (args->len > 0) {
+    name = sl_get(args, 0);
+  }
+  bx_check_pkg_name(name);
+  var have: bool = fs_exists(dir + "/mbuild.mettle");
+  if (slen(from) > 0) {
+    if (!have && !dry) {
+      bx_init_files(dir, name);
+    }
     var p: Project* = build_open(opts);
     g_bx_proj = p;
-    deps_adopt_mettle_deps(p, true);
+    var r: IniRequest* = new IniRequest;
+    g_bx_ini = r;
+    r->from = from;
+    r->name = s_empty();
+    r->opts = ini_opts;
+    r->registry = registry;
+    r->existing = true;
+    r->yes = yes;
+    r->dry_run = dry;
+    r->force = opts->force;
+    return ini_run(p, r);
+  }
+  if (have) {
+    fail_hint("mbuild.mettle already exists in " + dir, "this is already a project; edit mbuild.mettle instead");
+  }
+  bx_init_files(dir, name);
+  if (fs_is_file(dir + "/mettle.deps")) {
+    var pd: Project* = build_open(opts);
+    g_bx_proj = pd;
+    deps_adopt_mettle_deps(pd, true);
+  }
+  if (package) {
+    var rc: int32 = ini_scaffold_package(dir, name);
+    if (rc != 0) {
+      return rc;
+    }
   }
   say("");
   say("  next: " + bold("mbuild run"));
   return 0;
+}
+
+// mbuild new NAME --from PKG[@V] [--opt K=V]... [--yes] [--dry-run] [--force]
+export fn build_cmd_new(p: Project*) -> int32 {
+  var from: string = bx_take_opt(p, "--from");
+  var r: IniRequest* = new IniRequest;
+  g_bx_ini = r;
+  r->opts = bx_take_opts(p, "--opt");
+  r->registry = bx_take_opt(p, "--registry");
+  r->yes = bx_take_flag(p, "--yes");
+  r->dry_run = bx_take_flag(p, "--dry-run");
+  r->force = p->opts->force;
+  r->existing = false;
+  var args: StrList* = bx_positional(p->opts->rest);
+  defer free(args);
+  if (args->len != 1 || slen(from) == 0) {
+    fail_hint("mbuild new takes a name and --from", "mbuild new NAME --from PKG[@VERSION]");
+  }
+  r->name = sl_get(args, 0);
+  bx_check_pkg_name(r->name);
+  r->from = from;
+  return ini_run(p, r);
+}
+
+// The first bin (or library file) for the host target with its gen dir,
+// for the compiler shortcuts (15.6). 0 when the project has none.
+fn bx_tool_unit(p: Project*) -> BxUnit* {
+  var bs: BinSet* = build_bins(p);
+  if (bs->n == 0) {
+    bs = bx_lib_set(p);
+  }
+  if (bs->n == 0) {
+    return (BxUnit*)0;
+  }
+  var s: BxSess* = bx_sess(p, bx_targets_or_host(p));
+  g_bx_sess = s;
+  var us: BxUnits* = bx_units_new();
+  g_bx_units = us;
+  bx_unit_add(us, &bs->items[0], bs->items[0].entry, 0, sl_get(s->targets, 0), s->mettles[0]);
+  bx_unit_cmp(s, us->items[0], s_empty());
+  return us->items[0];
 }
 
 fn bx_one_mettle(p: Project*) -> Mettle* {
@@ -2306,10 +2712,26 @@ fn bx_one_mettle(p: Project*) -> Mettle* {
   return bx_mettle(p, sl_get(targets, 0));
 }
 
-// mbuild mettle [-t T] -- ARGS
+// mbuild mettle [-t T] -- ARGS, with the gen dir of the first bin.
 export fn build_cmd_mettle(p: Project*) -> int32 {
-  var m: Mettle* = bx_one_mettle(p);
-  var c: Cmd* = tc_cmd(m);
+  var u: BxUnit* = (BxUnit*)0;
+  if (p->has_manifest) {
+    u = bx_tool_unit(p);
+  }
+  var m: Mettle* = (Mettle*)0;
+  var c: Cmd* = (Cmd*)0;
+  if (u != (BxUnit*)0) {
+    m = u->m;
+    c = tc_cmd(m);
+    var gen: string = bx_unit_gen(u);
+    if (slen(gen) > 0) {
+      cmd_arg(c, "-I");
+      cmd_path(c, bx_rel(p, gen));
+    }
+  } else {
+    m = bx_one_mettle(p);
+    c = tc_cmd(m);
+  }
   defer free(c);
   cmd_args(c, p->opts->rest);
   cmd_args(c, p->opts->passthrough);
@@ -2319,24 +2741,23 @@ export fn build_cmd_mettle(p: Project*) -> int32 {
 
 // mbuild trace FN [args] / mbuild why A B: on the first bin's main file.
 export fn build_cmd_trace(p: Project*, sub: string) -> int32 {
-  var bs: BinSet* = build_bins(p);
-  if (bs->n == 0) {
-    bx_no_bins(p);
-  }
   if (p->opts->rest->len == 0) {
     if (s_eq(sub, "why")) {
       fail_hint("`mbuild why` needs two names", "mbuild why A B");
     }
     fail_hint("`mbuild trace` needs a function name", "mbuild trace FN [args...]");
   }
-  deps_ensure(p);
-  var m: Mettle* = bx_one_mettle(p);
-  var c: Cmd* = tc_cmd(m);
+  var u: BxUnit* = bx_tool_unit(p);
+  if (u == (BxUnit*)0) {
+    bx_no_bins(p);
+  }
+  var c: Cmd* = tc_cmd(u->m);
   defer free(c);
   cmd_arg(c, sub);
-  cmd_path(c, bx_rel(p, bs->items[0].entry));
+  cmd_path(c, bx_rel(p, u->file));
   cmd_args(c, p->opts->rest);
   cmd_args(c, p->opts->passthrough);
+  bx_add_include(c, p, g_bx_sess->ds, bx_unit_gen(u));
   c->cwd = p->root;
   return proc_run(c);
 }
@@ -2374,48 +2795,6 @@ fn bx_doctor_tool(label: string, name: string, env_override: string) -> bool {
   return false;
 }
 
-// "mettle v0.17.0 ..." -> "v0.17.0"
-fn bx_version_word(text: string) -> string {
-  var words: StrList* = s_fields(s_trim(bx_strip_ansi(text)));
-  var v: string = "";
-  if (words->len >= 2 && s_eq(sl_get(words, 0), "mettle")) {
-    v = sl_get(words, 1);
-  }
-  free(words);
-  return v;
-}
-
-// A [toolchain] pin wins over $METTLE and PATH: say so when they differ.
-fn bx_doctor_pin(p: Project*) {
-  var pin: string = p->man->toolchain;
-  if (slen(pin) == 0 || s_eq(pin, "latest")) {
-    return;
-  }
-  var t: Tool = proc_tool("mettle", "METTLE");
-  if (!tool_found(t)) {
-    return;
-  }
-  var c: Cmd* = cmd_new(t);
-  cmd_arg(c, "--version");
-  var cap: Captured = proc_capture_all(c);
-  free(c);
-  var v: string = bx_version_word(cap.out);
-  if (cap.code != 0 || slen(v) == 0) {
-    return;
-  }
-  var want: string = pin;
-  if (!s_starts(want, "v")) {
-    want = "v" + want;
-  }
-  if (!s_eq(v, want) && !s_starts(v, want + "-") && !s_starts(v, want + "+")) {
-    var from: string = "PATH";
-    if (env_set("METTLE")) {
-      from = "$METTLE";
-    }
-    warn("[toolchain] mettle = \"" + pin + "\" pins a different compiler than " + from + " gives (" + t.path + " is " + v + "); mbuild uses the pinned " + pin);
-  }
-}
-
 export fn build_cmd_doctor(p: Project*) -> int32 {
   var rc: int32 = 0;
   var host: string = sys_os();
@@ -2431,8 +2810,8 @@ export fn build_cmd_doctor(p: Project*) -> int32 {
   }
   say("  home      " + fs_mbuild_home());
   say(bold("tools"));
-  bx_doctor_tool("git", "git", "MBUILD_GIT");
   bx_doctor_tool("curl", "curl", "MBUILD_CURL");
+  bx_doctor_tool("tar", "tar", "");
   if (s_eq(sys_os(), "linux")) {
     bx_doctor_tool("cc", "cc", "CC");
   }
@@ -2443,7 +2822,6 @@ export fn build_cmd_doctor(p: Project*) -> int32 {
   if (s_eq(sys_os(), "linux")) {
     bx_doctor_tool("wine", "wine", "MBUILD_WINE");
   }
-  bx_doctor_pin(p);
   var targets: StrList* = build_targets(p);
   defer free(targets);
   say(bold("compilers"));
@@ -2468,8 +2846,7 @@ export fn build_cmd_doctor(p: Project*) -> int32 {
     }
     i = i + 1;
   }
-  var ds: DepState* = deps_ensure(p);
-  g_bx_ds = ds;
+  var ds: DepState* = bx_deps(p);
   say(bold("native"));
   var prof: string = build_profile(p);
   i = 0;
@@ -2483,29 +2860,19 @@ export fn build_cmd_doctor(p: Project*) -> int32 {
     }
     i = i + 1;
   }
-  bx_doctor_subs(p);
   return rc;
 }
 
-// The dependency key one import of a root-owned file counts for, "" when
-// it names none: a selected alias -> the alias; a file inside a local path
-// package -> its key; a remote path -> its module (known modules first).
-fn bx_used_key(ds: DepState*, known: StrList*, pdirs: StrList*, ctxs: GraphCtx**, file: string, imp: string) -> string {
-  var first: string = bx_first_component(imp);
+// The package one import of a root-owned file counts for, "" when it names
+// none: "NAME/FILE" of a selected package -> NAME; a file inside a local
+// path package -> its name; an unselected "NAME/FILE" that is no component
+// and no directory next to the file -> NAME (14.5).
+fn bx_used_key(ds: DepState*, comps: StrList*, pdirs: StrList*, ctxs: GraphCtx**, file: string, imp: string) -> string {
+  var at: int64 = bx_dep_of_import(ds, imp);
+  if (at >= 0) {
+    return ds->mods[at].module;
+  }
   var i: int64 = 0;
-  while (i < ds->n) {
-    var dm: DepModule* = &ds->mods[i];
-    if (slen(dm->alias) > 0 && s_eq(dm->alias, first)) {
-      return dm->alias;
-    }
-    if (dm->is_path && s_eq(dm->module, first)) {
-      return dm->module;
-    }
-    i = i + 1;
-  }
-  if (man_is_remote_module(imp)) {
-    return man_module_of_import_in(known, imp);
-  }
   var oi: int64 = 0;
   while (oi < 2) {
     var res: string = graph_resolve(ctxs[oi], file, imp);
@@ -2517,8 +2884,13 @@ fn bx_used_key(ds: DepState*, known: StrList*, pdirs: StrList*, ctxs: GraphCtx**
         }
         i = i + 1;
       }
+      return s_empty();
     }
     oi = oi + 1;
+  }
+  var first: string = bx_first_component(imp);
+  if (slen(first) < slen(imp) && man_is_package_name(first) && !s_eq(first, "std") && !s_eq(first, "mbuild") && !sl_has(comps, first) && !fs_is_dir(p_join(p_dir(file), first))) {
+    return first;
   }
   return s_empty();
 }
@@ -2529,7 +2901,7 @@ fn bx_used_key(ds: DepState*, known: StrList*, pdirs: StrList*, ctxs: GraphCtx**
 // a dependency imports is not "used" by the root.
 export fn build_used_modules(p: Project*, ds: DepState*) -> StrList* {
   var used: StrList* = sl_new();
-  var known: StrList* = bx_known_modules(p, ds);
+  var comps: StrList* = bx_comp_names(p, ds);
   var pdirs: StrList* = sl_new();
   var i: int64 = 0;
   while (i < ds->n) {
@@ -2565,7 +2937,7 @@ export fn build_used_modules(p: Project*, ds: DepState*) -> StrList* {
       var sr: ScanResult* = scan_source(rd.data);
       var k: int64 = 0;
       while (k < sr->nimports) {
-        var key: string = bx_used_key(ds, known, pdirs, ctxs, canon_file, scan_import(sr, k)->path);
+        var key: string = bx_used_key(ds, comps, pdirs, ctxs, canon_file, scan_import(sr, k)->path);
         if (slen(key) > 0) {
           sl_add_uniq(used, key);
         }
@@ -2580,7 +2952,7 @@ export fn build_used_modules(p: Project*, ds: DepState*) -> StrList* {
   free(ctxs[1]);
   free(ctxs);
   free(pdirs);
-  free(known);
+  free(comps);
   sl_sort(used);
   return used;
 }
@@ -2930,37 +3302,38 @@ fn bx_verify(p: Project*, with_test: bool) -> BxVerify* {
   if (!v->ok) {
     return v;
   }
-  var n: int64 = targets->len * bs->n;
+  var us: BxUnits* = bx_bin_units(s, bs);
+  g_bx_units = us;
+  bx_components(s, us, s_empty());
+  bx_pre_hooks(s, us);
+  var n: int64 = us->n;
   var cmds: Cmd** = (Cmd**)malloc((n + 1) * 8);
   var logs: StrList* = sl_new();
   var objs: StrList* = sl_new();
   var tmp: string = p->state_dir + "/tmp";
   fs_mkdirs(tmp);
   var k: int64 = 0;
-  ti = 0;
-  while (ti < targets->len) {
-    var target: string = sl_get(targets, ti);
-    var bi: int64 = 0;
-    while (bi < bs->n) {
-      var b: BinInfo* = &bs->items[bi];
-      var stem: string = tmp + "/verify-" + target + "-" + s_replace_byte(b->name, 47, 95);
-      var c: Cmd* = tc_cmd(s->mettles[ti]);
-      cmd_path(c, bx_rel(p, b->entry));
-      cmd_arg(c, "-o");
-      cmd_path(c, bx_rel(p, stem + ".o"));
-      bx_add_include(c, p, s->ds);
-      var st: Settings* = bx_add_flags(c, s, ti, b);
-      free(st);
-      cmd_arg(c, "--error-format=json");
-      cmd_env(c, "NO_COLOR", "1");
-      c->cwd = p->root;
-      cmds[k] = c;
-      sl_push(logs, stem + ".log");
-      sl_push(objs, stem + ".o");
-      k = k + 1;
-      bi = bi + 1;
+  while (k < n) {
+    var u: BxUnit* = us->items[k];
+    var stem: string = tmp + "/verify-" + u->target + "-" + s_replace_byte(u->b->name, 47, 95);
+    var c: Cmd* = tc_cmd(u->m);
+    cmd_path(c, bx_rel(p, u->entry));
+    if (u->ti < 0) {
+      cmd_arg(c, "--target");
+      cmd_arg(c, u->b->triple);
     }
-    ti = ti + 1;
+    cmd_arg(c, "-o");
+    cmd_path(c, bx_rel(p, stem + ".o"));
+    bx_add_include(c, p, s->ds, bx_unit_gen(u));
+    var st: Settings* = bx_add_flags(c, s, u);
+    free(st);
+    cmd_arg(c, "--error-format=json");
+    cmd_env(c, "NO_COLOR", "1");
+    c->cwd = p->root;
+    cmds[k] = c;
+    sl_push(logs, stem + ".log");
+    sl_push(objs, stem + ".o");
+    k = k + 1;
   }
   var codes: int32* = proc_run_jobs(cmds, n, logs, bx_parallel(p));
   k = 0;
@@ -2979,8 +3352,8 @@ fn bx_verify(p: Project*, with_test: bool) -> BxVerify* {
       v->ok = false;
       var errs: StrList* = bx_diag_lines(p, s->ds, text, 3);
       if (errs->len == 0) {
-        var b2: BinInfo* = &bs->items[k % bs->n];
-        sl_push(errs, "could not compile `" + b2->name + "` (" + sl_get(targets, k / bs->n) + "): " + s_trim(text));
+        var u2: BxUnit* = us->items[k];
+        sl_push(errs, "could not compile " + u2->b->name + " (" + u2->target + "): " + s_trim(text));
       }
       sl_extend_uniq(v->errors, errs);
       free(errs);
@@ -3033,7 +3406,7 @@ fn bx_take_flag(p: Project*, name: string) -> bool {
   return found;
 }
 
-// "module version" for each module in mbuild.lock.
+// "name version" for each package in mbuild.lock.
 fn bx_lock_map(p: Project*) -> StrList* {
   var l: StrList* = sl_new();
   var r: FsRead = fs_read(p->root + "/mbuild.lock");
@@ -3049,7 +3422,7 @@ fn bx_lock_map(p: Project*) -> StrList* {
       continue;
     }
     var f: StrList* = s_fields(line);
-    if (f->len >= 2 && s_find_byte(sl_get(f, 0), 47) > 0) {
+    if (f->len >= 2 && man_is_package_name(sl_get(f, 0))) {
       sl_push(l, sl_get(f, 0) + " " + sl_get(f, 1));
     }
     free(f);
@@ -3070,7 +3443,7 @@ fn bx_lock_ver(l: StrList*, module: string) -> string {
   return s_empty();
 }
 
-// True when mbuild.toml, mbuild.lock or the local lock differ from the snapshot.
+// True when mbuild.mettle, mbuild.lock or the local lock differ from the snapshot.
 fn bx_snap_changed(s: DepSnap*) -> bool {
   var i: int64 = 0;
   while (i < s->files->len) {
@@ -3090,7 +3463,7 @@ fn bx_restore(p: Project*, snap: DepSnap*) {
 }
 
 fn bx_say_restored() {
-  err_line("  Restored mbuild.toml and mbuild.lock");
+  err_line("  Restored mbuild.mettle and mbuild.lock");
 }
 
 fn bx_print_errors(v: BxVerify*) {
@@ -3132,7 +3505,7 @@ fn bx_help(text: string) {
   flush_out();
 }
 
-// The module paths named by get's arguments (MODULE[@VERSION] or a key).
+// The package names of get's arguments (NAME[@VERSION]).
 fn bx_get_modules(p: Project*) -> StrList* {
   var names: StrList* = sl_new();
   var i: int64 = 0;
@@ -3143,10 +3516,6 @@ fn bx_get_modules(p: Project*) -> StrList* {
     var name: string = arg;
     if (at > 0) {
       name = s_sub(arg, 0, at);
-    }
-    var d: DepSpec* = man_dep_find(p->man, name);
-    if (d != (DepSpec*)0 && slen(d->module) > 0) {
-      name = d->module;
     }
     sl_push(names, name);
   }
@@ -3258,8 +3627,7 @@ export fn build_cmd_tidy(p: Project*) -> int32 {
   var with_test: bool = bx_take_flag(p, "--test");
   var snap: DepSnap* = deps_snapshot(p);
   g_bx_snap = snap;
-  var ds: DepState* = deps_ensure(p);
-  g_bx_ds = ds;
+  var ds: DepState* = bx_deps(p);
   var rc: int32 = deps_cmd_tidy(p, build_used_modules(p, ds));
   if (rc != 0 || no_verify) {
     return rc;
@@ -3331,7 +3699,7 @@ export fn build_cmd_update(p: Project*) -> int32 {
     return 2;
   }
   if (p->opts->locked) {
-    fail_hint("mbuild update would change mbuild.toml, and --locked forbids it", "run it without --locked");
+    fail_hint("mbuild update would change mbuild.mettle, and --locked forbids it", "run it without --locked");
   }
   var plan: UpdatePlan* = deps_plan_update(p, req);
   g_bx_plan = plan;
@@ -3522,8 +3890,16 @@ fn bx_val_text(v: TomlValue*, key: string) -> string {
   return key + "=" + v->text;
 }
 
-// The keys of one section with their file:line ("inherits" and "main" left out).
-fn bx_section_keys(doc: Toml*, sec: string, file: string, parts: StrList*) {
+// The keys of one section with where they are set ("inherits" and "main"
+// left out): the mb_set line of mbuild.mettle when mbf_locate finds it.
+fn bx_section_keys(p: Project*, doc: Toml*, sec: string, file: string, parts: StrList*) {
+  var text: string = "";
+  if (s_eq(file, "mbuild.mettle")) {
+    var rd: FsRead = fs_read(p->mbfile);
+    if (rd.ok) {
+      text = rd.data;
+    }
+  }
   var keys: StrList* = toml_keys(doc, sec);
   var i: int64 = 0;
   while (i < keys->len) {
@@ -3533,7 +3909,15 @@ fn bx_section_keys(doc: Toml*, sec: string, file: string, parts: StrList*) {
       continue;
     }
     var v: TomlValue* = toml_get(doc, sec, key);
-    sl_push(parts, bx_val_text(v, key) + " (" + file + ":" + s_int(v->line) + ")");
+    var at_line: string = file;
+    var line: int64 = 0;
+    if (slen(text) > 0) {
+      line = mbf_locate(text, "mb_set", key, sec);
+    }
+    if (line > 0) {
+      at_line = file + ":" + s_int(line);
+    }
+    sl_push(parts, bx_val_text(v, key) + " (" + at_line + ")");
   }
   free(keys);
 }
@@ -3578,9 +3962,9 @@ export fn build_cmd_profiles(p: Project*) -> int32 {
     } else {
       head = "inherits " + bx_inherits(m, name);
     }
-    bx_section_keys(m->doc, sec, "mbuild.toml", parts);
+    bx_section_keys(p, m->doc, sec, "mbuild.mettle", parts);
     if (m->local != (Manifest*)0) {
-      bx_section_keys(m->local->doc, sec, "mbuild.local.toml", parts);
+      bx_section_keys(p, m->local->doc, sec, "mbuild.local.mettle", parts);
     }
     var desc: string = sl_join(parts, ", ");
     if (slen(head) > 0 && slen(desc) > 0) {
@@ -3597,7 +3981,7 @@ export fn build_cmd_profiles(p: Project*) -> int32 {
       var bname: string = bs->items[bi].name;
       bi = bi + 1;
       var bparts: StrList* = sl_new();
-      bx_section_keys(m->doc, "bin." + bname, "mbuild.toml", bparts);
+      bx_section_keys(p, m->doc, "bin." + bname, "mbuild.mettle", bparts);
       var btext: string = bx_flags_text(p, name, bname, target);
       if (bparts->len > 0 && !s_eq(btext, ftext)) {
         sl_push(lefts, "  bin " + bname + ": " + sl_join(bparts, ", "));
@@ -3627,113 +4011,767 @@ export fn build_cmd_profiles(p: Project*) -> int32 {
 }
 
 // ---------------------------------------------------------------------------
-// mbuild fetch [--submodules] (12.8)
+// fetch, components, use, agents
 // ---------------------------------------------------------------------------
 
 export fn build_cmd_fetch(p: Project*) -> int32 {
-  var want: bool = bx_take_flag(p, "--submodules");
-  var s: BxSubs* = bx_subs(p);
-  if (want && s->uninit->len > 0) {
-    var cmdline: string = "git -c protocol.file.allow=user submodule update --init --recursive -- " + sl_join(s->uninit, " ");
-    if (p->opts->offline) {
-      fail_hint("--offline forbids checking out the git submodules " + sl_join(s->uninit, ", "), "run `" + cmdline + "` in " + bx_show(s->top) + " when online");
-    }
-    status("Updating", "git submodules " + sl_join(s->uninit, ", ") + " (git submodule update --init --recursive)");
-    var t: Tool = proc_tool("git", "MBUILD_GIT");
-    if (!tool_found(t)) {
-      fail_hint("git is not installed", "install git, or run `" + cmdline + "` another way");
-    }
-    var c: Cmd* = cmd_new(t);
-    cmd_arg(c, "-c");
-    cmd_arg(c, "protocol.file.allow=user");
-    cmd_arg(c, "submodule");
-    cmd_arg(c, "update");
-    cmd_arg(c, "--init");
-    cmd_arg(c, "--recursive");
-    cmd_arg(c, "--");
-    cmd_args(c, s->uninit);
-    c->cwd = s->top;
-    verbose(cmd_display(c));
-    var cap: Captured = proc_capture_all(c);
-    free(c);
-    if (cap.code != 0) {
-      bx_print_block(cap.out);
-      fail("`" + cmdline + "` failed in " + bx_show(s->top));
-    }
-    if (g_verbose) {
-      bx_print_block(cap.out);
-    }
-    g_bx_subs = (BxSubs*)0;
-  } else if (!want && s->uninit->len > 0) {
-    note("git submodules " + sl_join(s->uninit, ", ") + " are not checked out; `mbuild fetch --submodules` checks them out");
-  }
   return deps_cmd_fetch(p);
 }
 
-// doctor: each submodule of the project's repository.
-fn bx_doctor_subs(p: Project*) {
-  var s: BxSubs* = bx_subs(p);
-  if (s->paths->len == 0) {
+// mbuild components [--check]: --check stays in rest for cmp_cmd_components.
+export fn build_cmd_components(p: Project*) -> int32 {
+  return cmp_cmd_components(p, bx_deps(p));
+}
+
+// mbuild use NAME=IMPL | NAME
+export fn build_cmd_use(p: Project*) -> int32 {
+  if (!p->has_manifest) {
+    fail_hint("no mbuild.mettle here", "run `mbuild init` first");
+  }
+  return cmp_cmd_use(p);
+}
+
+// mbuild agents [NAME] [--all]
+export fn build_cmd_agents(p: Project*) -> int32 {
+  var ds: DepState* = deps_ensure(p);
+  g_bx_ds = ds;
+  return agt_cmd_agents(p, ds);
+}
+
+// ---------------------------------------------------------------------------
+// Help and project commands (13.6)
+// ---------------------------------------------------------------------------
+
+struct BxCmd {
+  name: string;
+  usage: string;
+  summary: string;
+  details: string;
+}
+
+var g_bx_cmds: BxCmd* = (BxCmd*)0;
+var g_bx_ncmds: int64 = 0;
+
+fn bx_def(name: string, usage: string, summary: string, details: string) {
+  g_bx_cmds = (BxCmd*)realloc(g_bx_cmds, (g_bx_ncmds + 1) * sizeof(BxCmd));
+  g_bx_cmds[g_bx_ncmds].name = name;
+  g_bx_cmds[g_bx_ncmds].usage = usage;
+  g_bx_cmds[g_bx_ncmds].summary = summary;
+  g_bx_cmds[g_bx_ncmds].details = details;
+  g_bx_ncmds = g_bx_ncmds + 1;
+}
+
+fn bx_init_cmds() {
+  if (g_bx_ncmds > 0) {
     return;
   }
-  say(bold("submodules"));
-  var status_out: string = "";
-  var t: Tool = proc_tool("git", "MBUILD_GIT");
-  if (tool_found(t)) {
-    var c: Cmd* = cmd_new(t);
-    cmd_arg(c, "submodule");
-    cmd_arg(c, "status");
-    c->cwd = s->top;
-    var cap: Captured = proc_capture_all(c);
-    free(c);
-    if (cap.code == 0) {
-      status_out = cap.out;
-    }
-  }
-  var lines: StrList* = s_lines(status_out);
-  var w: int64 = 10;
+  bx_def("init", "mbuild init [NAME] [--package] | mbuild init --from PKG[@V] [--opt K=V]... [--yes] [--dry-run]", "start a project here",
+    "writes mbuild.mettle (package NAME, default: the directory name), a hello world\nsrc/main.mettle unless there's a main file, and the .gitignore lines. lines of an\nexisting mettle.deps become dependencies. --package also writes init.rules,\nAGENT.rules and a template. --from adds a package's starter files to this project.");
+  bx_def("new", "mbuild new NAME --from PKG[@V] [--opt K=V]... [--yes] [--dry-run]", "start a project from a package's init.rules",
+    "makes NAME/ from the plan in PKG's init.rules (a registry package, or a path).\noptions come from --opt, a prompt, or their defaults (--yes). --dry-run only\nshows what it would write; --force writes into a non-empty NAME/.");
+  bx_def("build", "mbuild build [BINS...] [-t T] [-r | -p PROFILE] [--set KEY=VALUE] [--flag ARG] [--force]", "build the programs",
+    "builds every bin (or the named ones) for each target into\nbuild/<target>/<profile>/. unchanged ones are Fresh. imports of packages that\naren't dependencies yet get added (unless --locked or --offline). a package\nwith no bins (a library) is type-checked instead.");
+  bx_def("run", "mbuild run [BIN] [-t T] [-r] [-- ARGS...]", "build and run a program",
+    "builds one bin for one target (default: the host) and runs it with ARGS.\nthe exit code is the program's.");
+  bx_def("live", "mbuild live [BIN] [-p PROFILE] [-- ARGS...]", "run a program and patch it as you edit",
+    "`mettle live` with the project's dependencies, native libraries, components and\npre-build hook, host target only. saved files patch the running program at its\nnext `quiesce;`; `mbuild use` in another terminal switches a component.");
+  bx_def("test", "mbuild test [FILES...] [--filter S] [--force]", "run @test functions",
+    "runs `mettle test` on the given files, or on every project file with an @test.\npassing files are cached (`ok FILE (cached)`). --filter S runs tests whose names\ncontain S. tests run in the compiler's interpreter, which can't call externs.");
+  bx_def("check", "mbuild check [BINS...] [-t T]", "type-check without linking",
+    "compiles each bin to an object (types, borrow analysis, warnings) and throws it\naway. in a library each top-level and src/ .mettle file is checked.");
+  bx_def("clean", "mbuild clean [--all]", "remove build outputs",
+    "removes build/ and .mbuild/{{cache,stamps,tmp}. --all removes .mbuild entirely.");
+  bx_def("get", "mbuild get NAME[@VERSION]... [--no-verify] [--test]", "add or upgrade a dependency",
+    "adds NAME to mbuild.mettle (default: the newest version) and updates\nmbuild.lock, then checks every bin still compiles for every target (--test: and\nthe tests pass). when it doesn't, both files are put back. --no-verify takes it\nanyway.");
+  bx_def("remove", "mbuild remove NAME... [--no-verify]", "drop a dependency",
+    "removes NAME from mbuild.mettle and mbuild.lock, then checks the project still\ncompiles (putting both back when it doesn't).");
+  bx_def("update", "mbuild update [NAME...] [--all] [--major] [--dry-run] [--no-verify] [--test]", "move dependencies forward, verified",
+    "moves each requirement to the newest version in its line (--major: the newest\noverall; --all: transitive ones too). a version that breaks the code is held\nback and the newest one that works is taken. --dry-run shows the plan and the\nAPI changes.");
+  bx_def("tidy", "mbuild tidy [--no-verify]", "add missing and drop unused dependencies",
+    "adds packages the code imports, drops requirements nothing imports and adopts\nhand-written mettle.deps lines, then verifies the project.");
+  bx_def("deps", "mbuild deps [--tree]", "show the resolved dependencies", "lists the selected packages with their versions, registries and native libraries.");
+  bx_def("why", "mbuild why NAME | mbuild why A B", "why a package is in the build",
+    "with one name: the requirement chains and the files that import it. with two,\nruns `mettle why` on the first bin's main file (`mbuild why main Audit`).");
+  bx_def("outdated", "mbuild outdated [-v] [NAME]", "show newer dependency versions",
+    "lists each dependency with its version, the newest compatible one and the\nnewest overall. NAME shows one package and its API changes.");
+  bx_def("fetch", "mbuild fetch", "download everything the lock names", "fetches every locked package into the cache, so later builds work --offline.");
+  bx_def("vendor", "mbuild vendor [--remove]", "copy dependencies into vendor/",
+    "copies each dependency to vendor/; while it matches mbuild.lock, builds use it\nand touch no registry. --remove deletes it.");
+  bx_def("publish", "mbuild publish [--to DIR] [--registry NAME] [--dry-run] [--allow-breaking] [--no-verify]", "put this package in a registry",
+    "checks the package (version, init.rules, AGENT.rules, API against the last\nversion in its line, a verify build), packs it and writes it into the registry\ndirectory DIR (or the --registry's local path). you upload that directory.\n--dry-run shows the files and the manifest.");
+  bx_def("yank", "mbuild yank NAME@VERSION --to DIR [--undo]", "mark a published version as yanked",
+    "yanked versions stay for existing locks but are never picked for new ones.\n--undo clears the mark.");
+  bx_def("registry", "mbuild registry init DIR [--name NAME]", "create a registry directory", "writes registry.toml, index/ and pkg/ in DIR.");
+  bx_def("components", "mbuild components [-t T] [-p PROFILE] [--check]", "show component selections",
+    "lists each component, its impls and the one selected for the target and\nprofile, with where the choice comes from. --check compiles every impl.");
+  bx_def("use", "mbuild use NAME=IMPL | mbuild use NAME", "pick a component impl on this machine",
+    "writes the choice into mbuild.local.mettle (NAME alone removes it) and\nregenerates the selectors, so a running `mbuild live` switches too.");
+  bx_def("agents", "mbuild agents [NAME] [--all]", "show dependencies' AGENT.rules",
+    "refreshes the block in AGENT.rules and prints each direct dependency's file\n(--all: every dependency's).");
+  bx_def("profiles", "mbuild profiles", "show the resolved build settings",
+    "lists each profile with its settings, where they're set, and the compiler flags\nit passes, per bin when a bin changes them.");
+  bx_def("doctor", "mbuild doctor [-t T]", "check the environment",
+    "shows the host, the tools mbuild uses (curl, tar, the C compilers, pkg-config,\nwine), the compiler for each target and the native-code audit.");
+  bx_def("toolchain", "mbuild toolchain [list | install VERSION [-t T] | remove VERSION [-t T]]", "list or install Mettle compilers",
+    "lists the compiler per target, or installs / removes a release under the\nmbuild home. releases up to v0.17.0 can't build current projects: use a\ncompiler built from ../Mettle.");
+  bx_def("mettle", "mbuild mettle [-t T] -- ARGS...", "run the selected compiler",
+    "runs the compiler mbuild would use, in the project root, with ARGS and the\nfirst bin's component dir. example: mbuild mettle -- --version");
+  bx_def("trace", "mbuild trace FN [ARGS...]", "trace a function (mettle trace)", "runs `mettle trace` on the first bin's main file.");
+  bx_def("explain", "mbuild explain CODE", "explain a diagnostic code", "runs `mettle explain CODE`, e.g. mbuild explain E0003.");
+  bx_def("version", "mbuild version", "print the mbuild version", "prints the mbuild version and the host.");
+  bx_def("help", "mbuild help [COMMAND]", "show help", "shows the commands, or the help of one.");
+}
+
+fn bx_find_cmd(name: string) -> BxCmd* {
+  bx_init_cmds();
   var i: int64 = 0;
-  while (i < s->paths->len) {
-    if (slen(sl_get(s->paths, i)) + 2 > w) {
-      w = slen(sl_get(s->paths, i)) + 2;
+  while (i < g_bx_ncmds) {
+    if (s_eq(g_bx_cmds[i].name, name)) {
+      return &g_bx_cmds[i];
     }
     i = i + 1;
   }
-  i = 0;
-  while (i < s->paths->len) {
-    var path: string = sl_get(s->paths, i);
-    i = i + 1;
-    var state: string = green("ok");
-    if (sl_has(s->uninit, path)) {
-      state = yellow("not checked out");
-    } else {
-      var k: int64 = 0;
-      while (k < lines->len) {
-        var line: string = sl_get(lines, k);
-        k = k + 1;
-        var f: StrList* = s_fields(line);
-        if (f->len >= 2 && s_starts(line, "+") && s_eq(sl_get(f, 1), path)) {
-          var now: string = s_from(sl_get(f, 0), 1);
-          var rec: string = "";
-          var c2: Cmd* = cmd_new(t);
-          cmd_arg(c2, "ls-tree");
-          cmd_arg(c2, "HEAD");
-          cmd_arg(c2, "--");
-          cmd_arg(c2, path);
-          c2->cwd = s->top;
-          var cap2: Captured = proc_capture_all(c2);
-          free(c2);
-          var lf: StrList* = s_fields(cap2.out);
-          if (lf->len >= 3) {
-            rec = sl_get(lf, 2);
-          }
-          free(lf);
-          state = yellow("at " + s_sub(now, 0, 7) + " (the superproject records " + s_sub(rec, 0, 7) + ")");
-        }
-        free(f);
-      }
+  return (BxCmd*)0;
+}
+
+// True when name is a built-in command (they shadow project commands).
+export fn build_is_builtin(name: string) -> bool {
+  return bx_find_cmd(name) != (BxCmd*)0;
+}
+
+fn bx_global_help() -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "global flags:");
+  buf_line(b, "  -v, --verbose          print every command mbuild runs");
+  buf_line(b, "  -q, --quiet            only errors and program output");
+  buf_line(b, "  --color WHEN           auto (default), always or never");
+  buf_line(b, "  -t, --target T         linux, windows, all or host (repeatable)");
+  buf_line(b, "  -r, --release          the release profile");
+  buf_line(b, "  -p, --profile NAME     another profile");
+  buf_line(b, "  -j, --jobs N           parallel compiles");
+  buf_line(b, "  --force                ignore every up-to-date stamp");
+  buf_line(b, "  --offline              never touch the network");
+  buf_line(b, "  --locked               fail rather than change mbuild.mettle or mbuild.lock");
+  buf_line(b, "  --mettle PATH          the compiler for the host target");
+  buf_line(b, "  --set KEY=VALUE        a typed build setting (repeatable)");
+  buf_line(b, "  --flag ARG             a raw compiler flag (repeatable)");
+  buf_line(b, "  --use NAME=IMPL        a component impl (repeatable)");
+  buf_line(b, "  --no-hooks             skip hook_pre_build and hook_post_build");
+  return buf_take(b);
+}
+
+// mbuild.mettle's commands, scanned (nothing is compiled); 0 when none.
+fn bx_project_info(p: Project*) -> MbfInfo* {
+  if (p == (Project*)0 || slen(p->mbfile) == 0) {
+    return (MbfInfo*)0;
+  }
+  if (g_bx_info == (MbfInfo*)0) {
+    g_bx_info = cfg_info(p);
+  }
+  return g_bx_info;
+}
+
+// The project command `name` (cmd_gen_docs answers gen-docs and gen_docs), 0.
+fn bx_project_cmd(info: MbfInfo*, name: string) -> MbfCommand* {
+  if (info == (MbfInfo*)0) {
+    return (MbfCommand*)0;
+  }
+  var dashed: string = s_replace_byte(name, 95, 45);
+  var i: int64 = 0;
+  while (i < info->ncommands) {
+    var c: MbfCommand* = &info->commands[i];
+    if (s_eq(c->name, name) || s_eq(c->name, dashed) || s_eq(c->fn_name, "cmd_" + name)) {
+      return c;
     }
-    say("  " + s_pad_right(path, w) + state);
+    i = i + 1;
+  }
+  return (MbfCommand*)0;
+}
+
+// error: no command 'x' + a suggestion over built-ins and project commands.
+fn bx_unknown_cmd(info: MbfInfo*, name: string) {
+  bx_init_cmds();
+  var cands: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < g_bx_ncmds) {
+    sl_push(cands, g_bx_cmds[i].name);
+    i = i + 1;
+  }
+  var nbuiltin: int64 = cands->len;
+  i = 0;
+  while (info != (MbfInfo*)0 && i < info->ncommands) {
+    sl_add_uniq(cands, info->commands[i].name);
+    i = i + 1;
+  }
+  var sug: string = man_suggest(name, cands);
+  var is_proj: bool = sl_index(cands, sug) >= nbuiltin;
+  free(cands);
+  var msg: string = "no command '" + name + "'";
+  if (slen(sug) == 0) {
+    fail_hint(msg, "run `mbuild help` for the commands");
+  }
+  if (is_proj) {
+    fail_hint(msg, "did you mean " + sug + "? (mbuild.mettle)");
+  }
+  fail_hint(msg, "did you mean " + sug + "?");
+}
+
+fn bx_say_cmd_line(name: string, summary: string) {
+  var pad: int64 = 12;
+  if (slen(name) + 1 > pad) {
+    pad = slen(name) + 1;
+  }
+  say("  " + s_pad_right(name, pad) + summary);
+}
+
+// mbuild help [topic]. p may be unloaded (build_find): help compiles nothing.
+export fn build_help(p: Project*, topic: string) -> int32 {
+  bx_init_cmds();
+  var info: MbfInfo* = bx_project_info(p);
+  if (info != (MbfInfo*)0 && !info->ok) {
+    warn("mbuild.mettle: " + info->err);
+    info = (MbfInfo*)0;
+  }
+  if (slen(topic) > 0) {
+    var c: BxCmd* = bx_find_cmd(topic);
+    if (c != (BxCmd*)0) {
+      say("usage: " + c->usage);
+      say("");
+      say(c->details);
+      say("");
+      print(bx_global_help());
+      return 0;
+    }
+    var pc: MbfCommand* = bx_project_cmd(info, topic);
+    if (pc == (MbfCommand*)0) {
+      bx_unknown_cmd(info, topic);
+    }
+    say("usage: mbuild " + pc->name + " [ARGS...]   (mbuild.mettle:" + s_int(pc->line) + ")");
+    say("");
+    if (slen(pc->help) > 0) {
+      say(pc->help);
+    } else {
+      say("(no description)");
+    }
+    return 0;
+  }
+  say(bold("mbuild") + " " + build_version_text + ": build tool and package manager for Mettle");
+  say("");
+  say("usage: mbuild [-v] [-q] [-t TARGET] [-r] [-p PROFILE] COMMAND [args]");
+  say("");
+  say("commands:");
+  var i: int64 = 0;
+  while (i < g_bx_ncmds) {
+    bx_say_cmd_line(g_bx_cmds[i].name, g_bx_cmds[i].summary);
+    i = i + 1;
+  }
+  if (info != (MbfInfo*)0 && info->ncommands > 0) {
+    say("");
+    say("project commands (mbuild.mettle):");
+    i = 0;
+    while (i < info->ncommands) {
+      var c2: MbfCommand* = &info->commands[i];
+      var summ: string = c2->summary;
+      if (slen(summ) == 0) {
+        summ = "(no description)";
+      }
+      if (build_is_builtin(c2->name)) {
+        summ = "(shadowed by the built-in " + c2->name + "; rename " + c2->fn_name + ")";
+      }
+      bx_say_cmd_line(c2->name, summ);
+      i = i + 1;
+    }
+  }
+  say("");
+  say("run `mbuild help COMMAND` for more");
+  return 0;
+}
+
+// mbuild NAME [args]: cmd_NAME of mbuild.mettle, args untouched (13.6).
+// p comes from build_find: the configuration is loaded only for a command
+// that exists.
+export fn build_cmd_project(p: Project*, name: string) -> int32 {
+  bx_refuse_legacy(p);
+  var info: MbfInfo* = bx_project_info(p);
+  if (info != (MbfInfo*)0 && !info->ok) {
+    fail(info->err);
+  }
+  var c: MbfCommand* = bx_project_cmd(info, name);
+  if (c == (MbfCommand*)0) {
+    bx_unknown_cmd(info, name);
+  }
+  bx_load_manifest(p);
+  return cfg_run_command(p, c->name, p->opts->rest);
+}
+
+// ---------------------------------------------------------------------------
+// Registries: publish, yank, registry init (14.7)
+// ---------------------------------------------------------------------------
+
+// A directory argument as an absolute path ('/' separators).
+fn bx_abs_dir(arg: string) -> string {
+  var d: string = bx_slash(arg);
+  if (!p_is_abs(d)) {
+    d = p_join(bx_cwd(), d);
+  }
+  return p_clean(d);
+}
+
+// The registry directory of --to DIR, else of --registry NAME (default
+// "default") when it has a path or file:// URL.
+fn bx_registry_dir(p: Project*, to: string, registry: string) -> string {
+  if (slen(to) > 0) {
+    return bx_abs_dir(to);
+  }
+  var name: string = registry;
+  if (slen(name) == 0) {
+    name = "default";
+  }
+  var dir: string = reg_dir_of(p, name);
+  if (slen(dir) == 0) {
+    fail("registry " + name + " is served over https; publish into a local copy of it with --to DIR and upload that");
+  }
+  return dir;
+}
+
+// The index of name in a registry directory: versions and their archive
+// sha256, parallel; yanked ones too.
+struct BxIndex {
+  vers: StrList*;
+  shas: StrList*;
+}
+
+fn bx_read_index(dir: string, name: string) -> BxIndex* {
+  var ix: BxIndex* = new BxIndex;
+  ix->vers = sl_new();
+  ix->shas = sl_new();
+  var rd: FsRead = fs_read(dir + "/index/" + name);
+  if (!rd.ok) {
+    return ix;
+  }
+  var lines: StrList* = s_lines(rd.data);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var f: StrList* = s_fields(sl_get(lines, i));
+    i = i + 1;
+    if (f->len == 0 || s_starts(sl_get(f, 0), "#") || !sv_is(sl_get(f, 0))) {
+      free(f);
+      continue;
+    }
+    var sha: string = "";
+    var k: int64 = 1;
+    while (k < f->len) {
+      if (s_starts(sl_get(f, k), "sha256=")) {
+        sha = s_from(sl_get(f, k), 7);
+      }
+      k = k + 1;
+    }
+    sl_push(ix->vers, sv_canonical(sl_get(f, 0)));
+    sl_push(ix->shas, sha);
+    free(f);
   }
   free(lines);
+  return ix;
+}
+
+fn bx_size_text(n: int64) -> string {
+  if (n < 1024) {
+    return "{n} B";
+  }
+  var tenths: int64 = n * 10 / 1024;
+  if (tenths < 10240) {
+    var whole: int64 = tenths / 10;
+    var frac: int64 = tenths % 10;
+    return "{whole}.{frac} KB";
+  }
+  var mt: int64 = n * 10 / (1024 * 1024);
+  var mw: int64 = mt / 10;
+  var mf: int64 = mt % 10;
+  return "{mw}.{mf} MB";
+}
+
+fn bx_pub_walk(root: string, rel: string, out: StrList*) {
+  var dir: string = root;
+  if (slen(rel) > 0) {
+    dir = root + "/" + rel;
+  }
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  if (sys_list_dir(dir, files, dirs)) {
+    var i: int64 = 0;
+    while (i < files->len) {
+      var f: string = sl_get(files, i);
+      i = i + 1;
+      if (s_starts(f, ".")) {
+        continue;
+      }
+      if (slen(rel) == 0 && (s_eq(f, "mbuild.lock") || s_eq(f, "mbuild.local.mettle") || s_eq(f, "mettle.deps"))) {
+        continue;
+      }
+      if (slen(rel) > 0) {
+        f = rel + "/" + f;
+      }
+      sl_push(out, f);
+    }
+    i = 0;
+    while (i < dirs->len) {
+      var d: string = sl_get(dirs, i);
+      i = i + 1;
+      if (s_starts(d, ".")) {
+        continue;
+      }
+      if (slen(rel) == 0 && (s_eq(d, "build") || s_eq(d, "vendor") || s_eq(d, "dist"))) {
+        continue;
+      }
+      var sub: string = d;
+      if (slen(rel) > 0) {
+        sub = rel + "/" + d;
+      }
+      bx_pub_walk(root, sub, out);
+    }
+  }
+  free(files);
+  free(dirs);
+}
+
+// The files a publish packs (14.7 step 6), sorted, relative to the root.
+fn bx_pub_files(p: Project*) -> StrList* {
+  var out: StrList* = sl_new();
+  var inc: StrList* = p->man->include;
+  if (inc != (StrList*)0 && inc->len > 0) {
+    var i: int64 = 0;
+    while (i < inc->len) {
+      var rel: string = p_clean(bx_slash(sl_get(inc, i)));
+      i = i + 1;
+      var abs: string = p->root + "/" + rel;
+      if (fs_is_dir(abs)) {
+        var below: StrList* = sl_new();
+        bx_pub_walk(abs, "", below);
+        var k: int64 = 0;
+        while (k < below->len) {
+          sl_add_uniq(out, rel + "/" + sl_get(below, k));
+          k = k + 1;
+        }
+        free(below);
+      } else if (fs_is_file(abs)) {
+        sl_add_uniq(out, rel);
+      } else {
+        fail("[package] include names " + rel + ", which does not exist");
+      }
+    }
+  } else {
+    bx_pub_walk(p->root, "", out);
+  }
+  sl_add_uniq(out, "mbuild.mettle");
+  sl_add_uniq(out, "init.rules");
+  sl_add_uniq(out, "AGENT.rules");
+  sl_sort(out);
+  if (out->len > 10000) {
+    fail("this package has " + s_int(out->len) + " files; a package holds at most 10000 (narrow it with mb_publish_include)");
+  }
+  var j: int64 = 0;
+  while (j < out->len) {
+    var f: string = p->root + "/" + sl_get(out, j);
+    if (sys_is_link(f)) {
+      fail(sl_get(out, j) + " is a link; packages hold regular files only");
+    }
+    if (sys_stat(f).size > 16 * 1024 * 1024) {
+      fail(sl_get(out, j) + " is over 16 MB; leave it out with mb_publish_include");
+    }
+    j = j + 1;
+  }
+  return out;
+}
+
+fn bx_pub_section_kept(sec: string) -> bool {
+  return s_eq(sec, "package") || s_eq(sec, "dependencies") || s_starts(sec, "dependencies.") || s_eq(sec, "c") || s_starts(sec, "c.") || s_eq(sec, "link") || s_starts(sec, "link.") || s_starts(sec, "component.");
+}
+
+fn bx_pub_package_key(key: string) -> bool {
+  return s_eq(key, "name") || s_eq(key, "version") || s_eq(key, "description") || s_eq(key, "license") || s_eq(key, "repository") || s_eq(key, "authors") || s_eq(key, "mettle");
+}
+
+// The emitted TOML reduced to what users read (14.7 step 7).
+fn bx_pub_manifest(p: Project*) -> string {
+  var lines: StrList* = s_lines(cfg_manifest_text(p));
+  var b: Buf* = buf_new();
+  var sec: string = "";
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var line: string = sl_get(lines, i);
+    i = i + 1;
+    var t: string = s_trim(line);
+    if (s_starts(t, "[") && s_ends(t, "]")) {
+      sec = s_trim(s_sub(t, 1, slen(t) - 1));
+      if (bx_pub_section_kept(sec)) {
+        buf_line(b, line);
+      }
+      continue;
+    }
+    if (!bx_pub_section_kept(sec)) {
+      continue;
+    }
+    if (s_eq(sec, "package") && slen(t) > 0 && !s_starts(t, "#")) {
+      var eq: int64 = s_find_byte(t, 61);
+      if (eq > 0 && !bx_pub_package_key(s_trim(s_sub(t, 0, eq)))) {
+        continue;
+      }
+    }
+    buf_line(b, line);
+  }
+  free(lines);
+  return buf_take(b);
+}
+
+// Step 4: the API against the newest earlier version of the same line in
+// the registry directory. "" or the error report.
+fn bx_pub_api(p: Project*, dir: string, ix: BxIndex*, version: string) -> string {
+  var name: string = p->man->name;
+  var prev: string = "";
+  var prev_sha: string = "";
+  var i: int64 = 0;
+  while (i < ix->vers->len) {
+    var v: string = sl_get(ix->vers, i);
+    if (s_eq(sv_line(v), sv_line(version)) && sv_cmp(v, version) < 0 && (slen(prev) == 0 || sv_cmp(v, prev) > 0)) {
+      prev = v;
+      prev_sha = sl_get(ix->shas, i);
+    }
+    i = i + 1;
+  }
+  if (slen(prev) == 0) {
+    return s_empty();
+  }
+  var dest: string = p->state_dir + "/tmp/api/" + name + "@" + prev;
+  if (!fs_is_dir(dest)) {
+    var archive: string = dir + "/pkg/" + name + "/" + name + "-" + prev + ".tar.gz";
+    var err: string = reg_extract(archive, prev_sha, dest, name + " " + prev + " sha256:" + prev_sha);
+    if (slen(err) > 0) {
+      warn("cannot compare the API with " + name + " " + prev + ": " + err);
+      return s_empty();
+    }
+  }
+  var d: ApiDiff* = api_diff(api_surface_dir(dest), api_surface_dir(p->root));
+  var br: ApiDiff* = api_breaking(d);
+  var report: string = s_empty();
+  if (br->what->len > 0) {
+    report = name + " " + version + " breaks the API of " + prev + ":\n" + api_render(br, (StrList*)0) + "\n  help: a breaking change needs a new line: publish " + bx_next_line(version) + " (or pass --allow-breaking)";
+  } else if (d->what->len > 0 && s_eq(bx_minor_of(prev), bx_minor_of(version))) {
+    warn(name + " " + version + " adds exports with only a patch bump over " + prev + "; consider a minor version");
+  }
+  free(d);
+  free(br);
+  return report;
+}
+
+// "v1.2.3" -> "v1.2"
+fn bx_minor_of(v: string) -> string {
+  var dot: int64 = s_rfind_byte(v, 46);
+  if (dot < 0) {
+    return v;
+  }
+  return s_sub(v, 0, dot);
+}
+
+// The first version of the next compatibility line: v2.0.0, or v0.N+1.0.
+fn bx_next_line(v: string) -> string {
+  var sv: SemVer = sv_parse(v);
+  if (sv.major == 0) {
+    var m: int64 = sv.minor + 1;
+    return "v0.{m}.0";
+  }
+  var mj: int64 = sv.major + 1;
+  return "v{mj}.0.0";
+}
+
+// mbuild publish [--to DIR] [--registry NAME] [--dry-run] [--allow-breaking] [--no-verify]
+export fn build_cmd_publish(p: Project*) -> int32 {
+  var to: string = bx_take_opt(p, "--to");
+  var registry: string = bx_take_opt(p, "--registry");
+  var dry: bool = bx_take_flag(p, "--dry-run");
+  var allow: bool = bx_take_flag(p, "--allow-breaking");
+  var no_verify: bool = bx_take_flag(p, "--no-verify");
+  var m: Manifest* = p->man;
+  if (!p->has_manifest) {
+    fail_hint("no mbuild.mettle here: nothing to publish", "run `mbuild init --package` to make a package");
+  }
+  if (slen(m->name) == 0 || !sv_is(m->version)) {
+    fail_hint("a published package needs a name and a version", "mb_package(\"name\", \"0.1.0\") in mbuild.mettle");
+  }
+  var name: string = m->name;
+  var version: string = sv_canonical(m->version);
+  var dir: string = bx_registry_dir(p, to, registry);
+  if (!fs_is_file(dir + "/registry.toml")) {
+    fail_hint(dir + " is not a registry (no registry.toml)", "make one with `mbuild registry init " + bx_show(dir) + "`");
+  }
+  var ix: BxIndex* = bx_read_index(dir, name);
+  if (sl_has(ix->vers, version)) {
+    fail(name + " " + version + " is already in " + bx_show(dir) + "; publish a new version");
+  }
+  var newest: string = "";
+  var i: int64 = 0;
+  while (i < ix->vers->len) {
+    var v: string = sl_get(ix->vers, i);
+    if (s_eq(sv_line(v), sv_line(version)) && sv_cmp(v, version) > 0 && (slen(newest) == 0 || sv_cmp(v, newest) > 0)) {
+      newest = v;
+    }
+    i = i + 1;
+  }
+  if (slen(newest) > 0) {
+    warn("publishing " + version + " after " + newest);
+  }
+  var leaves: StrList* = sl_of("init.rules");
+  sl_push(leaves, "AGENT.rules");
+  i = 0;
+  while (i < leaves->len) {
+    if (!fs_is_file(p->root + "/" + sl_get(leaves, i))) {
+      fail(name + " cannot be published without " + sl_get(leaves, i) + " (mbuild init --package writes one)");
+    }
+    i = i + 1;
+  }
+  free(leaves);
+  var ierr: string = ini_check_package(p, p->root);
+  if (slen(ierr) > 0) {
+    fail(ierr);
+  }
+  i = 0;
+  while (i < m->ndeps) {
+    var d: DepSpec* = man_dep(m, i);
+    if (slen(d->path) > 0) {
+      fail_hint("dependency " + d->key + " is a path package (" + d->path + "): users of " + name + " cannot resolve it", "publish " + d->key + " too and depend on a version");
+    }
+    i = i + 1;
+  }
+  if (m->nreplaces > 0) {
+    warn("mbuild.mettle replaces dependencies; users of " + name + " ignore that");
+  }
+  if (!allow) {
+    var rep: string = bx_pub_api(p, dir, ix, version);
+    if (slen(rep) > 0) {
+      bx_fail_text(rep);
+    }
+  }
+  if (!no_verify) {
+    var v: BxVerify* = bx_verify(p, false);
+    if (!v->ok) {
+      error_msg(name + " " + version + " does not build:");
+      bx_print_errors(v);
+      bx_help("fix it, or publish anyway with --no-verify");
+      return 1;
+    }
+  }
+  var files: StrList* = bx_pub_files(p);
+  var manifest: string = bx_pub_manifest(p);
+  var stage: string = p->state_dir + "/tmp/publish";
+  sys_remove_tree(stage);
+  var total: int64 = 0;
+  i = 0;
+  while (i < files->len) {
+    var rel: string = sl_get(files, i);
+    var src: string = p->root + "/" + rel;
+    var dst: string = stage + "/" + rel;
+    fs_mkdirs(p_dir(dst));
+    if (s_eq(rel, "AGENT.rules")) {
+      var rd: FsRead = fs_read(src);
+      if (!rd.ok || !fs_write(dst, agt_strip_block(rd.data))) {
+        fail("cannot stage " + rel);
+      }
+    } else if (!fs_copy(src, dst)) {
+      fail("cannot stage " + rel);
+    }
+    total = total + sys_stat(dst).size;
+    i = i + 1;
+  }
+  fs_write(p->state_dir + "/tmp/publish.list", sl_join(files, "\n") + "\n");
+  var nfiles: string = s_int(files->len) + " files";
+  if (files->len == 1) {
+    nfiles = "1 file";
+  }
+  status("Packaging", name + " " + version + " (" + nfiles + ", " + bx_size_text(total) + ")");
+  if (dry) {
+    say("");
+    say("files:");
+    i = 0;
+    while (i < files->len) {
+      say("  " + sl_get(files, i));
+      i = i + 1;
+    }
+    say("");
+    say("manifest:");
+    print(manifest);
+    return 0;
+  }
+  var r: RegPublish* = new RegPublish;
+  r->dir = dir;
+  r->name = name;
+  r->version = version;
+  r->root = stage;
+  r->files = files;
+  r->manifest_text = manifest;
+  r->dry_run = false;
+  var err: string = reg_publish(r);
+  free(r);
+  if (slen(err) > 0) {
+    fail(err);
+  }
+  var sha: string = sha_file(dir + "/pkg/" + name + "/" + name + "-" + version + ".tar.gz");
+  if (slen(sha) > 8) {
+    sha = s_sub(sha, 0, 8);
+  }
+  status("Published", name + " " + version + " to " + dir + " (sha256 " + sha + ")");
+  say("  next: upload " + dir + " to the host that serves it");
+  return 0;
+}
+
+// mbuild yank NAME@VERSION --to DIR [--undo]
+export fn build_cmd_yank(p: Project*) -> int32 {
+  var to: string = bx_take_opt(p, "--to");
+  var registry: string = bx_take_opt(p, "--registry");
+  var undo: bool = bx_take_flag(p, "--undo");
+  var args: StrList* = bx_positional(p->opts->rest);
+  defer free(args);
+  var at: int64 = -1;
+  if (args->len == 1) {
+    at = s_find_byte(sl_get(args, 0), 64);
+  }
+  if (at <= 0) {
+    fail_hint("mbuild yank takes NAME@VERSION", "mbuild yank strutil@v1.1.1 --to DIR");
+  }
+  var arg: string = sl_get(args, 0);
+  var name: string = s_sub(arg, 0, at);
+  var version: string = s_from(arg, at + 1);
+  if (!sv_is(version)) {
+    fail("`" + version + "` is not a version (v1.2.3)");
+  }
+  version = sv_canonical(version);
+  var dir: string = bx_registry_dir(p, to, registry);
+  var err: string = reg_yank(dir, name, version, undo);
+  if (slen(err) > 0) {
+    fail(err);
+  }
+  if (undo) {
+    status("Unyanked", name + " " + version + " in " + dir);
+  } else {
+    status("Yanked", name + " " + version + " in " + dir);
+  }
+  return 0;
+}
+
+// mbuild registry init DIR [--name NAME]
+export fn build_cmd_registry(p: Project*) -> int32 {
+  var name: string = bx_take_opt(p, "--name");
+  var args: StrList* = bx_positional(p->opts->rest);
+  defer free(args);
+  if (args->len != 2 || !s_eq(sl_get(args, 0), "init")) {
+    fail_hint("mbuild registry takes `init DIR`", "mbuild registry init DIR [--name NAME]");
+  }
+  var dir: string = bx_abs_dir(sl_get(args, 1));
+  if (slen(name) == 0) {
+    name = p_base(dir);
+  }
+  var err: string = reg_init_dir(dir, name);
+  if (slen(err) > 0) {
+    fail(err);
+  }
+  status("Created", "registry " + name + " in " + dir);
+  return 0;
 }

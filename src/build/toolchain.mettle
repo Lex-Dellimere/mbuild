@@ -1,5 +1,6 @@
-// toolchain: finds, downloads and runs Mettle compilers per target
-// (DESIGN.md section 11).
+// toolchain: finds and runs Mettle compilers per target, and installs
+// explicit releases (DESIGN.md section 11). Only a dev compiler built from
+// ../Mettle builds current projects; nothing is downloaded on its own.
 //
 // A Windows .exe is built by the Windows compiler and a Linux binary by the
 // Linux one, so each target has its own compiler: on Linux the Windows
@@ -258,28 +259,19 @@ fn tcx_cmd_free(c: Cmd*) {
   free(c);
 }
 
-// The file the last tcx_tools_value answer came from.
-var g_tcx_tools_file: string;
-
-// [tools] KEY of mbuild.local.toml, else of mbuild.toml (DESIGN.md 12.5);
-// "" when neither sets it.
+// The tools KEY of mbuild.local.mettle (m->local->tools, "key=value");
+// "" when it does not set it.
 fn tcx_tools_value(p: Project*, key: string) -> string {
-  g_tcx_tools_file = s_empty();
-  var r: FsRead = fs_read(p->root + "/mbuild.local.toml");
-  if (r.ok) {
-    var doc: Toml* = toml_parse(r.data, p->root + "/mbuild.local.toml");
-    var v: string = toml_str(doc, "tools", key);
-    if (slen(v) > 0) {
-      g_tcx_tools_file = "mbuild.local.toml";
-      return v;
-    }
+  if (p->man == (Manifest*)0 || p->man->local == (Manifest*)0 || p->man->local->tools == (StrList*)0) {
+    return s_empty();
   }
-  if (p->man != (Manifest*)0 && p->man->doc != (Toml*)0) {
-    var v2: string = toml_str(p->man->doc, "tools", key);
-    if (slen(v2) > 0) {
-      g_tcx_tools_file = "mbuild.toml";
-      return v2;
+  var l: StrList* = p->man->local->tools;
+  var i: int64 = 0;
+  while (i < l->len) {
+    if (s_starts(sl_get(l, i), key + "=")) {
+      return s_from(sl_get(l, i), slen(key) + 1);
     }
+    i = i + 1;
   }
   return s_empty();
 }
@@ -345,17 +337,10 @@ fn tcx_make(target: string, exe: string, source: string) -> Mettle* {
   return m;
 }
 
-fn tcx_make_installed(v: string, target: string, source: string) -> Mettle* {
-  var m: Mettle* = tcx_make(target, tcx_exe_in(tcx_dir(v, target), target), source);
-  if (m != (Mettle*)0) {
-    m->installed = v;
-  }
-  return m;
-}
-
-// The compiler for target, or 0 with g_tcx_err/g_tcx_hint set. With
-// allow_dl false nothing is downloaded (used by `toolchain list`).
-fn tcx_pick(p: Project*, target: string, allow_dl: bool) -> Mettle* {
+// The compiler for target, or 0 with g_tcx_err/g_tcx_hint set:
+// MBUILD_METTLE_<T>, mbuild.local.mettle tools mettle-<t>, --mettle (host),
+// then for the host $METTLE and mettle on PATH.
+fn tcx_pick(p: Project*, target: string) -> Mettle* {
   tcx_set_err(s_empty(), s_empty());
   if (!target_valid(target)) {
     return tcx_none("unknown target '" + target + "'", "targets are linux and windows");
@@ -367,14 +352,12 @@ fn tcx_pick(p: Project*, target: string, allow_dl: bool) -> Mettle* {
   if (s_eq(host, "linux") && s_eq(target, "windows") && !tool_found(tcx_wine())) {
     return tcx_wine_missing();
   }
-  var offline: bool = p->opts != (Options*)0 && p->opts->offline;
-
   var env_name: string = "MBUILD_METTLE_" + tcx_upper(target);
   var ev: string = env_get(env_name);
   var tools_key: string = "mettle-" + target;
   var tools_val: string = tcx_tools_value(p, tools_key);
   if (slen(tools_val) > 0 && (slen(ev) == 0 || s_eq(ev, tools_val))) {
-    return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), "[tools] " + tools_key + " (" + g_tcx_tools_file + ")");
+    return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), "tools " + tools_key + " (mbuild.local.mettle)");
   }
   if (slen(ev) > 0) {
     return tcx_make(target, tcx_resolve(ev), env_name);
@@ -382,32 +365,6 @@ fn tcx_pick(p: Project*, target: string, allow_dl: bool) -> Mettle* {
   if (s_eq(target, host) && p->opts != (Options*)0 && slen(p->opts->mettle) > 0) {
     return tcx_make(target, tcx_resolve(p->opts->mettle), "--mettle");
   }
-
-  var pin: string = s_empty();
-  if (p->man != (Manifest*)0) {
-    pin = tcx_norm(p->man->toolchain);
-  }
-  if (slen(pin) > 0) {
-    var pin_src: string = "[toolchain] mettle = \"" + pin + "\" in mbuild.toml";
-    if (!sv_is(pin)) {
-      return tcx_none("mbuild.toml pins Mettle '" + pin + "', which is not a release version", "write a release tag such as \"v0.17.0\" in [toolchain] mettle");
-    }
-    if (!tcx_installed(pin, target)) {
-      var install_hint: string = "run `mbuild toolchain install " + pin + " -t " + target + "`";
-      if (!allow_dl) {
-        return tcx_none("Mettle " + pin + " (pinned in mbuild.toml) is not installed for " + target + "; the next build downloads it", install_hint);
-      }
-      if (offline) {
-        return tcx_none("Mettle " + pin + " (pinned in mbuild.toml) is not installed for " + target + ", and --offline forbids downloading it", install_hint + " while online");
-      }
-      status("Downloading", "Mettle " + pin + " for " + target + " (pinned in mbuild.toml)");
-      if (!tcx_download(pin, target)) {
-        return (Mettle*)0;
-      }
-    }
-    return tcx_make_installed(pin, target, pin_src);
-  }
-
   if (s_eq(target, host)) {
     var me: string = env_get("METTLE");
     if (slen(me) > 0) {
@@ -419,32 +376,10 @@ fn tcx_pick(p: Project*, target: string, allow_dl: bool) -> Mettle* {
     }
   }
 
-  var have: StrList* = tcx_versions(target);
-  var newest: string = s_empty();
-  if (have->len > 0) {
-    newest = sl_get(have, 0);
+  if (!s_eq(target, host)) {
+    return tcx_none("no Mettle compiler for " + target, "set " + env_name + ", or mettle-" + target + " in mbuild.local.mettle, to a " + target + " build of ../Mettle");
   }
-  tcx_sl_free(have);
-  if (slen(newest) > 0) {
-    return tcx_make_installed(newest, target, "newest installed toolchain " + newest);
-  }
-
-  var get_hint: string = "run `mbuild toolchain install latest -t " + target + "`, or set " + env_name;
-  if (!allow_dl) {
-    return tcx_none("no Mettle compiler for " + target + " found; the next build downloads the latest release", get_hint);
-  }
-  if (offline) {
-    return tcx_none("no Mettle compiler for " + target + " found, and --offline forbids downloading one", get_hint + " (online)");
-  }
-  var latest: string = tcx_latest();
-  if (slen(latest) == 0) {
-    return (Mettle*)0;
-  }
-  status("Downloading", "Mettle " + latest + " for " + target + " (no compiler found)");
-  if (!tcx_download(latest, target)) {
-    return (Mettle*)0;
-  }
-  return tcx_make_installed(latest, target, "latest release " + latest + " (downloaded)");
+  return tcx_none("no Mettle compiler for " + target, "build ../Mettle (make) and put bin/mettle on PATH, or set " + env_name);
 }
 
 fn tcx_fail_last() {
@@ -455,7 +390,7 @@ fn tcx_fail_last() {
 }
 
 export fn tc_select(p: Project*, target: string) -> Mettle* {
-  var m: Mettle* = tcx_pick(p, target, true);
+  var m: Mettle* = tcx_pick(p, target);
   if (m == (Mettle*)0) {
     tcx_fail_last();
   }
@@ -549,7 +484,7 @@ export fn tc_require_minimum(m: Mettle*, need: string, who: string) -> string {
   if (sv_cmp(have, want) >= 0) {
     return s_empty();
   }
-  return who + " needs Mettle " + want + " or newer; the " + m->target + " compiler is " + have + " (" + m->path + ")\n  help: run `mbuild toolchain use " + want + "`";
+  return who + " needs Mettle " + want + " or newer; the " + m->target + " compiler is " + have + " (" + m->path + ")\n  help: build a newer compiler from ../Mettle";
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,11 +1145,7 @@ fn tcx_cmd_list(p: Project*) -> int32 {
     if (tcx_installed(v, "windows")) {
       sl_push(oses, "windows");
     }
-    var mark: string = s_empty();
-    if (p->man != (Manifest*)0 && s_eq(tcx_norm(p->man->toolchain), v)) {
-      mark = "  (pinned in mbuild.toml)";
-    }
-    say("  " + s_pad_right(v, 10) + " " + sl_join(oses, ", ") + mark);
+    say("  " + s_pad_right(v, 10) + " " + sl_join(oses, ", "));
     tcx_sl_free(oses);
     i = i + 1;
   }
@@ -1226,7 +1157,7 @@ fn tcx_cmd_list(p: Project*) -> int32 {
   i = 0;
   while (i < targets->len) {
     var t: string = sl_get(targets, i);
-    var m: Mettle* = tcx_pick(p, t, false);
+    var m: Mettle* = tcx_pick(p, t);
     if (m != (Mettle*)0) {
       var how: string = s_empty();
       if (m->via_wine) {
@@ -1255,53 +1186,12 @@ fn tcx_cmd_install(p: Project*, given: string) -> int32 {
   if (slen(v) == 0) {
     return 1;
   }
-  if (!tcx_ensure(p, v, targets)) {
-    return 1;
-  }
-  return 0;
-}
-
-fn tcx_cmd_use(p: Project*, given: string) -> int32 {
-  if (!p->has_manifest) {
-    error_msg("no mbuild.toml in " + p->root);
-    err_line("  " + cyan("help") + ": run `mbuild init` first; `toolchain use` pins the compiler in mbuild.toml");
-    return 1;
-  }
-  if (p->opts != (Options*)0 && p->opts->locked) {
-    error_msg("--locked: not changing mbuild.toml");
-    return 1;
-  }
-  var targets: StrList* = tcx_targets(p, true);
-  if (targets == (StrList*)0) {
-    return 2;
-  }
-  var v: string = tcx_version_arg(p, given);
-  if (slen(v) == 0) {
-    return 1;
+  if (!sv_is(v) || sv_cmp(v, "v0.17.0") <= 0) {
+    warn("releases up to v0.17.0 cannot build current projects; build ../Mettle instead");
   }
   if (!tcx_ensure(p, v, targets)) {
     return 1;
   }
-  var file: string = p->root + "/mbuild.toml";
-  var r: FsRead = fs_read(file);
-  if (!r.ok) {
-    error_msg("cannot read " + file);
-    return 1;
-  }
-  var doc: Toml* = toml_parse(r.data, file);
-  if (slen(doc->error) > 0) {
-    error_msg(doc->error);
-    return 1;
-  }
-  var text: string = toml_set_in_text(r.data, "toolchain", "mettle", toml_quote(v));
-  if (!s_eq(text, r.data) && !fs_write(file, text)) {
-    error_msg("cannot write " + file);
-    return 1;
-  }
-  if (p->man != (Manifest*)0) {
-    p->man->toolchain = v;
-  }
-  status("Pinned", "Mettle " + v + " in " + file);
   return 0;
 }
 
@@ -1376,16 +1266,12 @@ fn tcx_cmd_remove(p: Project*, given: string) -> int32 {
     }
     status("Removed", "Mettle " + v);
   }
-  if (p->man != (Manifest*)0 && s_eq(tcx_norm(p->man->toolchain), v)) {
-    warn("mbuild.toml still pins Mettle " + v + "; the next build downloads it again");
-  }
   return 0;
 }
 
 fn tcx_usage() {
   err_line("usage: mbuild toolchain [list]");
   err_line("       mbuild toolchain install VERSION|latest [-t linux|windows|all]");
-  err_line("       mbuild toolchain use VERSION|latest [-t ...]");
   err_line("       mbuild toolchain remove VERSION [-t ...]");
 }
 
@@ -1398,7 +1284,7 @@ export fn tc_cmd_toolchain(p: Project*) -> int32 {
   if (s_eq(sub, "list") || s_eq(sub, "ls")) {
     return tcx_cmd_list(p);
   }
-  if (s_eq(sub, "install") || s_eq(sub, "use") || s_eq(sub, "remove") || s_eq(sub, "rm")) {
+  if (s_eq(sub, "install") || s_eq(sub, "remove") || s_eq(sub, "rm")) {
     if (rest->len != 2) {
       error_msg("mbuild toolchain " + sub + " takes one VERSION");
       tcx_usage();
@@ -1407,9 +1293,6 @@ export fn tc_cmd_toolchain(p: Project*) -> int32 {
     var v: string = sl_get(rest, 1);
     if (s_eq(sub, "install")) {
       return tcx_cmd_install(p, v);
-    }
-    if (s_eq(sub, "use")) {
-      return tcx_cmd_use(p, v);
     }
     return tcx_cmd_remove(p, v);
   }
