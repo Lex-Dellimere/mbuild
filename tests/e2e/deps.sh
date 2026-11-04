@@ -341,6 +341,100 @@ drv "$P" breaks apilib v1.1.5
 check "publish check: removed export" has "$S/last.out" "removed  fn al_mul"
 check "publish check: new line" has "$S/last.out" "a breaking change needs a new line: publish v2.0.0"
 
+echo "== get, update, --locked"
+P="$S/getup"
+MAIN='import "vecmath/vecmath";
+fn main() -> int32 { return vm_one(); }' proj "$P" <<'EOF'
+mb_dep("vecmath", "v0.1.0");
+EOF
+drv "$P" ensure
+check "MVS: strutil v1.0.0 under vecmath v0.1.0" [ "$(lockv "$P" strutil)" = v1.0.0 ]
+drv "$P" deps --tree
+check "tree: vecmath with its C" has "$S/last.out" '`-- vecmath v0.1.0 (default) [native: C; c libs: m]'
+check "tree: strutil under vecmath" has "$S/last.out" '    `-- strutil v1.0.0 (default)'
+drv "$P" get vecmath@v0.2.0
+check "get: mbuild.mettle" has "$P/mbuild.mettle" 'mb_dep("vecmath", "v0.2.0");'
+check "get: strutil moves by MVS" [ "$(lockv "$P" strutil)" = v1.1.0 ]
+check "get: says so" has "$S/last.out" "Updating strutil v1.0.0 -> v1.1.0"
+cp "$P/mbuild.lock" "$S/getup.lock"
+cp "$P/mbuild.mettle" "$S/getup.mettle"
+drv "$P" get strutil@v2.0.0-rc.1
+check "get pre-release of another line exits 1" code_is 1
+check "get pre-release: conflict" has "$S/last.out" "error: strutil is required at incompatible versions:"
+check "get pre-release: the lines" has "$S/last.out" "v2.0.0-rc.1 (line v2) by mbuild.mettle"
+check "get pre-release: restored" has "$S/last.out" "Restored mbuild.mettle and mbuild.lock"
+check "get pre-release: lock unchanged" cmp -s "$P/mbuild.lock" "$S/getup.lock"
+check "get pre-release: mbuild.mettle unchanged" cmp -s "$P/mbuild.mettle" "$S/getup.mettle"
+drv "$P" get strutil@v1
+check "get @v1 takes the highest v1" has "$P/mbuild.mettle" 'mb_dep("strutil", "v1.1.0");'
+drv "$P" get strutil@v1.9.0
+check "unknown version fails" code_is 1
+check "unknown version lists the versions" has "$S/last.out" "available versions: v1.0.0, v1.1.0, v2.0.0-rc.1"
+# The compiler resolves imports through the mettle.deps mbuild writes.
+printf 'import "std/io";\nimport "strutil/strutil";\nimport "vecmath/vecmath";\nfn main() -> int32 {\n  println(su_twice(vm_banner()));\n  println(su_version());\n  return 0;\n}\n' >"$P/check.mettle"
+( cd "$P" && "$METTLE" --build check.mettle -o "$S/check" && "$S/check" ) >"$S/last.out" 2>&1
+check "the compiler resolves through mettle.deps" has "$S/last.out" "vecmath!vecmath!"
+check "and sees the selected strutil" has "$S/last.out" "strutil v1.1.0"
+drv "$P" update
+check "update names the new line" has "$S/last.out" "Newer vecmath v0.3.0 is a new compatibility line (v0.3): \`mbuild update --major vecmath\`"
+check "update stays in the line" has "$P/mbuild.mettle" 'mb_dep("vecmath", "v0.2.0");'
+drv "$P" update --major
+check "update --major" has "$P/mbuild.mettle" 'mb_dep("vecmath", "v0.3.0");'
+check "update --major: says so" has "$S/last.out" "Updating vecmath v0.2.0 -> v0.3.0"
+drv "$P" update
+check "then up to date" has "$S/last.out" "Checked dependencies are up to date"
+cp "$P/mbuild.mettle" "$S/getup.mettle"
+drv "$P" get zero --locked
+check "get --locked fails" code_is 1
+check "get --locked says why" has "$S/last.out" "--locked forbids it"
+check "get --locked leaves mbuild.mettle" cmp -s "$P/mbuild.mettle" "$S/getup.mettle"
+drv "$P" ensure --locked
+check "ensure --locked passes when nothing changes" code_is 0
+drv "$P" why nothere
+check "why of a non-dependency" has "$S/last.out" "'nothere' is not a dependency of this project (with two arguments, \`mbuild why A B\` asks the compiler)"
+rm -rf "$P/.mbuild"
+MBUILD_HOME="$S/empty-home" drv "$P" ensure --offline
+check "offline with an empty cache fails" code_is 1
+
+echo "== path packages"
+L="$S/mylib"
+proj "$L" <<'EOF'
+mb_dep("zero", "v0.1.0");
+EOF
+rm -rf "$L/src"
+printf 'import "zero/zero";\nexport fn ml() -> int32 { return z_one(); }\n' >"$L/mylib.mettle"
+P="$S/pathapp"
+MAIN='import "std/io";
+import "mylib/mylib";
+fn main() -> int32 { println("ml={ml()}"); return 0; }' proj "$P" <<'EOF'
+mb_dep_path("mylib", "../mylib");
+EOF
+drv "$P" ensure
+check "path package: ensure" code_is 0
+check "path package: DepModule" has "$S/last.out" "MOD mylib   registry= path=1 man=1"
+check "its dependencies join the graph" [ "$(lockv "$P" zero)" = v0.1.0 ]
+check "root mettle.deps names it" has "$P/mettle.deps" "mylib=../mylib"
+check "it gets a mettle.deps" has "$L/mettle.deps" "zero=../pathapp/.mbuild/deps/zero"
+( cd "$P" && "$METTLE" --build src/main.mettle -o "$S/pathapp.bin" && "$S/pathapp.bin" ) >"$S/last.out" 2>&1
+check "path package: the program runs" has "$S/last.out" "ml=1"
+
+echo "== mettle.deps lines mbuild does not manage"
+P="$S/unmanaged"
+proj "$P" </dev/null
+mkdir -p "$S/foo"
+printf 'export fn f5() -> int32 { return 5; }\n' >"$S/foo/foo.mettle"
+drv "$P" ensure
+echo 'foo=../foo' >>"$P/mettle.deps"
+drv "$P" ensure
+check "unmanaged line warning" has "$S/last.out" "warning: mettle.deps:5: foo=../foo is not managed by mbuild (its dependencies and C code are ignored)"
+check "unmanaged line help" has "$S/last.out" 'help: run mbuild tidy to move it into mbuild.mettle as mb_dep_path("foo", "../foo");'
+drv "$P" adopt
+check "adopt" has "$S/last.out" "Adopted foo = ../foo from mettle.deps"
+check "adopt writes mb_dep_path" has "$P/mbuild.mettle" 'mb_dep_path("foo", "../foo");'
+drv "$P" ensure
+check "adopted: a path package" has "$S/last.out" "MOD foo   registry= path=1 man=0"
+check "adopted: no warning" hasnt "$S/last.out" "not managed"
+
 echo "== with mbuild"
 if [ -z "${MB:-}" ]; then
   "$METTLE" --build "$here/src/main.mettle" -o "$S/mbuild" >"$S/mbuild.log" 2>&1 || { cat "$S/mbuild.log"; exit 1; }
