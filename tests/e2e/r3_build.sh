@@ -89,11 +89,13 @@ fn main() -> int32 {
 EOF
 mb build
 check "hook: first build compiles" has "Compiling hello"
-mb build
+mb build -v
 check "hook: second build is Fresh" has "Fresh hello"
+check "hook: one Running line" [ "$(grep -c "Running hook_pre_build (linux, debug)" "$S/last.out")" = 1 ]
 touch fail-hook
 mb build
 check "failing hook stops the build" sh -c 'grep -qF "error: hook_pre_build failed (exit 2) for linux debug" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "failing hook: one error" [ "$(grep -c "hook_pre_build failed" "$S/last.out")" = 1 ]
 mb build --no-hooks
 check "--no-hooks skips it" code_is 0
 rm -f fail-hook

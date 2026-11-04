@@ -917,7 +917,8 @@ fn bx_has_hook(p: Project*, name: string) -> bool {
   return sl_has(g_bx_info->hooks, name) || sl_has(g_bx_info->hooks, "hook_" + name);
 }
 
-// Runs hook_NAME once per (target, profile) of the command (13.7).
+// Runs hook_NAME once per (target, profile) of the command (13.7);
+// cfg_run_hook prints the Running line and the failure.
 fn bx_hook(s: BxSess*, name: string, target: string, out_dir: string, bins: StrList*, built: StrList*) {
   var p: Project* = s->p;
   if (!bx_has_hook(p, name)) {
@@ -928,9 +929,6 @@ fn bx_hook(s: BxSess*, name: string, target: string, out_dir: string, bins: StrL
     return;
   }
   sl_push(s->hooks_run, key);
-  if (g_verbose) {
-    status("Running", "hook_" + name + " (" + target + ", " + s->profile + ")");
-  }
   var h: CfgHook* = new CfgHook;
   h->name = name;
   h->target = target;
@@ -941,7 +939,6 @@ fn bx_hook(s: BxSess*, name: string, target: string, out_dir: string, bins: StrL
   var rc: int32 = cfg_run_hook(p, h);
   free(h);
   if (rc != 0) {
-    error_msg("hook_" + name + " failed (exit " + s_int(rc) + ") for " + target + " " + s->profile);
     exit_with(1);
   }
 }
