@@ -1,5 +1,5 @@
 // manifest_test: typed build settings, [replace], [package] mettle,
-// mbuild.local.toml and the round 3 schema (DESIGN.md 12.21, 13.5, 16.4 Group M).
+// mbuild.local.mettle and the round 3 schema (DESIGN.md 12.21, 13.5, 16.4 Group M).
 //
 //   mettle test tests/manifest_test.mettle     (leak warnings are expected)
 //   tools/mcheck.sh tests/manifest_test.mettle --run
@@ -232,7 +232,7 @@ fn test_replace_and_removed() {
 
   var tw: Manifest* = man_of(pkg("[tools]\ngit = \"/usr/bin/git\"\n[workspace]\nmembers = []\n"));
   t_eq("tools: parsed", sl_join(tw->tools, ","), "git=/usr/bin/git");
-  t_eq("tools/workspace warnings", sl_join(tw->warnings, "|"), "/p/mbuild.toml:3: [tools] is machine-specific: move it to mbuild.local.toml|/p/mbuild.toml:5: workspaces are not supported yet; use path dependencies (docs/dependencies.md)");
+  t_eq("tools/workspace warnings", sl_join(tw->warnings, "|"), "/p/mbuild.toml:3: [tools] is machine-specific: move it to mbuild.local.mettle|/p/mbuild.toml:5: workspaces are not supported yet; use path dependencies (docs/dependencies.md)");
 
   var it: Toml* = toml_parse("a = {{ s = [\"x\", \"y\"], b = false }\n", "t.toml");
   t_eq("toml: inline array", it->error + toml_field(toml_get(it, "", "a"), "s") + " " + toml_field_kind(toml_get(it, "", "a"), "s"), "[\"x\", \"y\"] 4");
@@ -241,14 +241,14 @@ fn test_replace_and_removed() {
 }
 
 fn local_of(text: string) -> Manifest* {
-  return man_parse_local(toml_parse(text, "/p/mbuild.local.toml"), "/p");
+  return man_parse_local(toml_parse(text, "/p/mbuild.local.mettle"), "/p");
 }
 
 fn test_local() {
   var bad: Manifest* = local_of("[tools]\ngit = \"g\"\n[dependencies]\nb = \"v1\"\n");
-  t_eq("local: [dependencies]", bad->error, "/p/mbuild.local.toml:3: [dependencies] is not allowed here (mbuild.local.toml holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
+  t_eq("local: [dependencies]", bad->error, "/p/mbuild.local.mettle:3: [dependencies] is not allowed here (mbuild.local.mettle holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
   var bb: Manifest* = local_of("[build]\nflags = [\"-x\"]\n");
-  t_has("local: [build] flags", bb->error, "[build] flags is not allowed in mbuild.local.toml");
+  t_has("local: [build] flags", bb->error, "[build] flags is not allowed in mbuild.local.mettle");
 
   var m: Manifest* = man_of(pkg("[build]\ntargets = [\"linux\", \"windows\"]\n[tools]\ncc = \"gcc\"\ngit = \"git\"\n[profile.release]\ncflags = [\"-O2\"]\n[replace]\njson = {{ version = \"v1.4.1\" }\nstrutil = {{ version = \"v1.0.0\" }\n[registry.corp]\nurl = \"https://pkgs.example.com/mettle\"\n"));
   t_eq("local main: valid", m->error, "");
@@ -269,7 +269,7 @@ fn test_local() {
   t_ok("merge: replace count", m->nreplaces == 2);
   var rs: Settings* = man_settings(m, query("release", "", "linux", (StrList*)0));
   keep(rs);
-  t_eq("merge: origin from local", sl_join(rs->origins, ","), "safe=mbuild.local.toml:7");
+  t_eq("merge: origin from local", sl_join(rs->origins, ","), "safe=mbuild.local.mettle:7");
   t_eq("merge: local components", sl_join(m->local_components, ","), "logger=quiet");
   t_eq("merge: registry mirror", man_reg_find(m, "corp")->url, "/mirror/corp");
   t_ok("merge: undeclared mirror stays local", m->nregs == 1 && s_eq(man_reg_find(m->local, "default")->url, "/mirror/default"));

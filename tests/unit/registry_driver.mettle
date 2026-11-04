@@ -1,6 +1,7 @@
 // registry_driver: a small CLI over sha256.mettle and registry.mettle for
-// tests/e2e/r3_registry.sh. ROOT is a project directory (its mbuild.toml and
-// mbuild.local.toml are read when present).
+// tests/e2e/r3_registry.sh. ROOT is a project directory (manifest.toml and
+// local.toml, what mbuild.mettle and mbuild.local.mettle emit, are read when
+// present).
 //
 //   registry_driver sha-string TEXT             sha_string
 //   registry_driver sha-repeat CHAR N           sha_hex of N copies of CHAR
@@ -60,9 +61,9 @@ fn drv_project(root: string, offline: bool) -> Project* {
   p->opts = opts;
   p->state_dir = root + "/.mbuild";
   p->mbfile = s_empty();
-  var r: FsRead = fs_read(root + "/mbuild.toml");
+  var r: FsRead = fs_read(root + "/manifest.toml");
   if (r.ok) {
-    p->man = man_parse(toml_parse(r.data, root + "/mbuild.toml"), root);
+    p->man = man_parse(toml_parse(r.data, root + "/manifest.toml"), root);
     p->has_manifest = true;
     if (slen(p->man->error) > 0) {
       fail(p->man->error);
@@ -70,9 +71,9 @@ fn drv_project(root: string, offline: bool) -> Project* {
   } else {
     p->man = man_empty(root, "app");
   }
-  var lr: FsRead = fs_read(root + "/mbuild.local.toml");
+  var lr: FsRead = fs_read(root + "/local.toml");
   if (lr.ok) {
-    man_merge_local(p->man, man_parse_local(toml_parse(lr.data, root + "/mbuild.local.toml"), root));
+    man_merge_local(p->man, man_parse_local(toml_parse(lr.data, root + "/local.toml"), root));
   }
   return p;
 }

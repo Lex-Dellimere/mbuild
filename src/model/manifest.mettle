@@ -10,7 +10,7 @@
 // Build settings (DESIGN.md 12.12): typed keys in [profile.NAME] and
 // [bin.NAME], resolved by man_settings through built-in profile ->
 // mbuild.toml inherits chain (ancestor first, each followed by the same
-// profile of mbuild.local.toml) -> [bin.NAME] -> --set; raw flags
+// profile of mbuild.local.mettle) -> [bin.NAME] -> --set; raw flags
 // concatenate in that order and [build] flags come last. With a target,
 // the chain's [profile.NAME.os] sections follow the chain (ancestor first).
 
@@ -64,7 +64,7 @@ export struct ReplaceSpec {
   url: string;
   version: string;
   line: int64;
-  local: bool;        // from mbuild.local.toml
+  local: bool;        // from mbuild.local.mettle
 }
 
 export struct Manifest {
@@ -90,7 +90,7 @@ export struct Manifest {
   replaces: ReplaceSpec*; // effective [replace] entries (local ones first after man_merge_local)
   nreplaces: int64;
   tools: StrList*;        // [tools] as "key=value"
-  local: Manifest*;       // the merged mbuild.local.toml, 0 when none
+  local: Manifest*;       // the merged mbuild.local.mettle, 0 when none
   comps: CompSpec*;
   ncomps: int64;
   regs: RegSpec*;         // in declaration order
@@ -98,7 +98,7 @@ export struct Manifest {
   rules: StrList*;        // absolute
   include: StrList*;      // [package] include
   meta: StrList*;         // "key=value": description, license, repository, authors
-  local_components: StrList*;  // "name=impl" from mbuild.local.toml [components]
+  local_components: StrList*;  // "name=impl" from mbuild.local.mettle [components]
 }
 
 export struct SettingsQuery {
@@ -704,7 +704,7 @@ fn mnx_unknowns(m: Manifest*) {
       mnx_warn(m, mnx_section_line(m->doc, sec), msg);
     } else if (!s_eq(sec, "dependencies") && !s_starts(sec, "dependencies.")) {
       if (s_eq(sec, "tools")) {
-        mnx_warn(m, mnx_section_line(m->doc, sec), "[tools] is machine-specific: move it to mbuild.local.toml");
+        mnx_warn(m, mnx_section_line(m->doc, sec), "[tools] is machine-specific: move it to mbuild.local.mettle");
       }
       mnx_unknown_keys(m, sec);
     }
@@ -1780,7 +1780,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
 // ---------------------------------------------------------------------------
 
 // "debug", "release", then the [profile.NAME] sections of mbuild.toml and
-// of the merged mbuild.local.toml, in first-seen order.
+// of the merged mbuild.local.mettle, in first-seen order.
 export fn man_profile_names(m: Manifest*) -> StrList* {
   var names: StrList* = sl_new();
   sl_push(names, "debug");
@@ -1816,7 +1816,7 @@ export fn man_profile_flags(m: Manifest*, profile: string) -> StrList* {
 }
 
 // Extra C compiler flags for builds in this profile: the cflags of its
-// inherits chain (ancestor first), each followed by mbuild.local.toml's.
+// inherits chain (ancestor first), each followed by mbuild.local.mettle's.
 export fn man_profile_cflags(m: Manifest*, profile: string) -> StrList* {
   var q: SettingsQuery* = new SettingsQuery;
   q->profile = profile;
@@ -1944,7 +1944,7 @@ export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
   return res;
 }
 
-// The [replace] entry for a module (mbuild.local.toml's first); 0 when none.
+// The [replace] entry for a module (mbuild.local.mettle's first); 0 when none.
 export fn man_replace_find(m: Manifest*, module: string) -> ReplaceSpec* {
   var pass: int32 = 0;
   while (pass < 2) {
@@ -1960,12 +1960,12 @@ export fn man_replace_find(m: Manifest*, module: string) -> ReplaceSpec* {
   return (ReplaceSpec*)0;
 }
 
-// mbuild.local.toml (DESIGN.md 12.5, 13.5): only [replace], [tools],
+// mbuild.local.mettle (DESIGN.md 12.5, 13.5): only [replace], [tools],
 // [profile.NAME] (and .os), [build] targets, [components] and
 // [registry.NAME] url.
 export fn man_parse_local(doc: Toml*, dir: string) -> Manifest* {
   var m: Manifest* = man_empty(dir, s_empty());
-  m->file = dir + "/mbuild.local.toml";
+  m->file = dir + "/mbuild.local.mettle";
   m->doc = doc;
   if (slen(doc->error) > 0) {
     m->error = doc->error;
@@ -1986,7 +1986,7 @@ export fn man_parse_local(doc: Toml*, dir: string) -> Manifest* {
     var is_prof: bool = mnx_is_named(sec, "profile") || mnx_is_os_profile(sec);
     var ok: bool = is_prof || s_eq(sec, "replace") || s_starts(sec, "replace.") || s_eq(sec, "tools") || s_eq(sec, "build") || s_eq(sec, "components") || mnx_is_named(sec, "registry");
     if (!ok) {
-      mnx_error(m, mnx_section_line(doc, sec), "[" + sec + "] is not allowed here (mbuild.local.toml holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
+      mnx_error(m, mnx_section_line(doc, sec), "[" + sec + "] is not allowed here (mbuild.local.mettle holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
       return m;
     }
     i = i + 1;
@@ -1996,7 +1996,7 @@ export fn man_parse_local(doc: Toml*, dir: string) -> Manifest* {
   while (i < bkeys->len) {
     var bk: string = sl_get(bkeys, i);
     if (!s_eq(bk, "targets")) {
-      mnx_error(m, toml_get(doc, "build", bk)->line, "[build] " + bk + " is not allowed in mbuild.local.toml (only targets; shared settings belong in mbuild.toml)");
+      mnx_error(m, toml_get(doc, "build", bk)->line, "[build] " + bk + " is not allowed in mbuild.local.mettle (only targets; shared settings belong in mbuild.mettle)");
       free(bkeys);
       return m;
     }
@@ -2063,7 +2063,7 @@ fn mnx_local_components(m: Manifest*) {
   free(keys);
 }
 
-// Layers a parsed mbuild.local.toml over m: its profiles (read by
+// Layers a parsed mbuild.local.mettle over m: its profiles (read by
 // man_settings), [build] targets, [tools] per key and [replace] per module
 // win; [components] become m->local_components; a [registry.NAME] url
 // replaces the url of a registry m declares (the others, e.g. a mirror of

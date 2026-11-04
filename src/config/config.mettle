@@ -377,7 +377,7 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
   m->file = file;
   if (slen(local_file) > 0) {
     var lm: Manifest* = man_parse_local(cfx_doc(p, lout, ltext, lshown), dir);
-    cfx_relabel_all(lm, dir + "/mbuild.local.toml", lshown);
+    cfx_relabel_all(lm, dir + "/mbuild.local.mettle", lshown);
     if (slen(lm->error) > 0) {
       fail(lm->error);
     }

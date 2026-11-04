@@ -82,15 +82,15 @@ suite() { # MODE
   echo "== registry list ($mode)"
   run list "$T/app"; check "default from MBUILD_REGISTRY ($mode)" [ "$(cat "$S/last.out")" = "default $REG" ]
   mkdir -p "$T/corpapp"
-  printf '[package]\nname = "corpapp"\n\n[registry.corp]\nurl = "../corp"\n' >"$T/corpapp/mbuild.toml"
+  printf '[package]\nname = "corpapp"\n\n[registry.corp]\nurl = "../corp"\n' >"$T/corpapp/manifest.toml"
   run list "$T/corpapp"; check "declared registries come first ($mode)" [ "$(cat "$S/last.out")" = "$(printf 'corp ../corp\ndefault %s' "$REG")" ]
   run dir "$T/corpapp" corp; check "a relative path registry is against the root ($mode)" [ "$(cat "$S/last.out")" = "$T/corp" ]
-  printf '[registry.corp]\nurl = "/local/corp"\n' >"$T/corpapp/mbuild.local.toml"
-  run list "$T/corpapp"; check "mbuild.local.toml overrides mbuild.mettle ($mode)" has "corp /local/corp"
+  printf '[registry.corp]\nurl = "/local/corp"\n' >"$T/corpapp/local.toml"
+  run list "$T/corpapp"; check "mbuild.local.mettle overrides mbuild.mettle ($mode)" has "corp /local/corp"
   MBUILD_REGISTRY_CORP="file:///env/corp" run list "$T/corpapp"; check "MBUILD_REGISTRY_CORP overrides both ($mode)" has "corp file:///env/corp"
   MBUILD_REGISTRY_CORP="file:///env/corp" run dir "$T/corpapp" corp; check "reg_dir_of file:// ($mode)" [ "$(cat "$S/last.out")" = "/env/corp" ]
   MBUILD_REGISTRY_CORP="https://x.invalid/r" run dir "$T/corpapp" corp; check "reg_dir_of https is empty ($mode)" [ "$(cat "$S/last.out")" = "<none>" ]
-  rm "$T/corpapp/mbuild.local.toml"
+  rm "$T/corpapp/local.toml"
   MBUILD_REGISTRY= run index "$T/app" default strutil
   check "no default registry ($mode)" eval 'code_is 1 && has "no default registry is configured" && has "help: set MBUILD_REGISTRY"'
 

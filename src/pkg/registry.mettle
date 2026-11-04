@@ -131,7 +131,7 @@ fn rgx_env_name(name: string) -> string {
   return buf_take(b);
 }
 
-// $MBUILD_REGISTRY_<NAME>, then mbuild.local.toml, then mbuild.mettle
+// $MBUILD_REGISTRY_<NAME>, then mbuild.local.mettle, then mbuild.mettle
 // (`declared`), then for default $MBUILD_REGISTRY and REG_DEFAULT_URL.
 fn rgx_url_of(p: Project*, name: string, declared: string) -> string {
   var ev: string = env_get(rgx_env_name(name));
