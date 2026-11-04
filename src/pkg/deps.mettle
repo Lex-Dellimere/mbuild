@@ -2209,7 +2209,11 @@ fn dx_block_write(bl: DxBlock*) {
           warn("path dependency '" + pd->key + "' uses a name that is already published in mettle.deps");
         }
       } else {
-        sl_push(lines, pd->key + "=" + dx_rel(bl->dir, man_import_dir(pp->man, pp->dir)));
+        var to: string = man_import_dir(pp->man, pp->dir);
+        if (!p_is_abs(pd->path)) {
+          to = dx_rel(bl->dir, to);
+        }
+        sl_push(lines, pd->key + "=" + to);
         sl_push(used, pd->key);
       }
     }

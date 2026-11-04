@@ -343,6 +343,11 @@ EOF
 drv "$P" ensure
 check "the directory name does not matter" code_is 0
 check "... mapped by its package name" has "$P/mettle.deps" "raize=../raize_web"
+proj "$P" <<EOF
+mb_dep_path("raize", "$S/raize_web");
+EOF
+drv "$P" ensure
+check "absolute path dep stays absolute" has "$P/mettle.deps" "raize=$S/raize_web"
 proj "$P" <<'EOF'
 mb_dep("strutil", "v1.0.0");
 mb_replace_path("strutil", "../raize_web");
