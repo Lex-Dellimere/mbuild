@@ -60,7 +60,8 @@ export struct RegPublish {
 
 var g_rgx_err: string;
 var g_rgx_kind: string;
-// Per command: "registry/name" of every index fetched, registries warned about.
+// Per command: the cached path of every index fetched (or found missing),
+// registries warned about.
 var g_rgx_fetched: StrList* = (StrList*)0;
 var g_rgx_warned: StrList* = (StrList*)0;
 var g_rgx_seq: int64 = 0;
@@ -434,16 +435,27 @@ fn rgx_offline_msg(what: string) -> string {
 export fn reg_index(p: Project*, registry: string, name: string, refresh: bool) -> RegIndex* {
   rgx_clear();
   var url: string = rgx_lookup(p, registry);
-  var ix: RegIndex* = rgx_index_new(name, registry, url);
   if (slen(url) == 0) {
-    return rgx_index_fail(ix);
+    return rgx_index_fail(rgx_index_new(name, registry, url));
   }
+  return rgx_index(p, registry, url, name, refresh);
+}
+
+// The index of name in the registry directory dir (publish --to DIR), which
+// need not be one of the project's registries; named after the directory.
+export fn reg_index_dir(p: Project*, dir: string, name: string, refresh: bool) -> RegIndex* {
+  rgx_clear();
+  return rgx_index(p, p_base(dir), dir, name, refresh);
+}
+
+fn rgx_index(p: Project*, registry: string, url: string, name: string, refresh: bool) -> RegIndex* {
+  var ix: RegIndex* = rgx_index_new(name, registry, url);
   var cached: string = rgx_cache_dir(registry, url) + "/index/" + name;
   var have: bool = fs_is_file(cached);
   if (g_rgx_fetched == (StrList*)0) {
     g_rgx_fetched = sl_new();
   }
-  var key: string = registry + "/" + name;
+  var key: string = cached;
   var fetch: bool = (refresh || !have) && !sl_has(g_rgx_fetched, key);
   if (fetch && p->opts->offline) {
     if (!have) {
