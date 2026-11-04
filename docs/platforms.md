@@ -88,7 +88,7 @@ With a Windows compiler named in `mbuild.local.mettle`:
 ```text
 Selected compilers:
   linux    /home/you/Mettle/bin/mettle  ($METTLE)
-  windows  /home/you/win/mettle.exe  (tools mettle-windows (mbuild.local.mettle), through wine)
+  windows  /home/you/win/mettle.exe  (mb_tool("mettle-windows") in mbuild.local.mettle, through wine)
 ```
 
 `mbuild doctor` shows the same with each compiler's version, and

@@ -64,9 +64,9 @@ printf '[package]\nname = "tp"\n' > "$P/manifest.toml"
 printf '[tools]\nmettle-linux = "%s"\n' "$W/fake-local/bin/mettle" > "$P/local.toml"
 o=$("$D" --root "$P" --mettle "$W/fake-flag/bin/mettle" select linux 2>&1)
 expect "mb_tool in mbuild.local.mettle beats --mettle" "$o" "path=$W/fake-local/bin/mettle"
-expect "mb_tool: origin" "$o" "source=tools mettle-linux (mbuild.local.mettle)"
+expect "mb_tool: origin" "$o" "source=mb_tool(\"mettle-linux\") in mbuild.local.mettle"
 o=$(MBUILD_METTLE_LINUX="$W/fake-local/bin/mettle" "$D" --root "$P" select linux 2>&1)
-expect "the same value in the variable keeps the origin" "$o" "source=tools mettle-linux (mbuild.local.mettle)"
+expect "the same value in the variable keeps the origin" "$o" "source=mb_tool(\"mettle-linux\") in mbuild.local.mettle"
 o=$(MBUILD_METTLE_LINUX="$W/fake-env/bin/mettle" "$D" --root "$P" select linux 2>&1)
 expect "MBUILD_METTLE_LINUX beats mb_tool" "$o" "path=$W/fake-env/bin/mettle"
 expect "MBUILD_METTLE_LINUX source" "$o" "source=MBUILD_METTLE_LINUX"
@@ -74,7 +74,7 @@ o=$(MBUILD_METTLE_LINUX="$W/nope/mettle" "$D" select linux 2>&1); rc=$?
 expect_rc "a missing MBUILD_METTLE_LINUX fails" $rc 1
 expect "a missing MBUILD_METTLE_LINUX: message" "$o" "does not exist"
 o=$("$D" --root "$P" toolchain list 2>&1)
-expect "toolchain list shows the origin" "$o" "$W/fake-local/bin/mettle  (tools mettle-linux (mbuild.local.mettle))"
+expect "toolchain list shows the origin" "$o" "$W/fake-local/bin/mettle  (mb_tool(\"mettle-linux\") in mbuild.local.mettle)"
 expect "toolchain list: no windows compiler" "$o" "windows  none: no Mettle compiler for windows"
 
 echo "== selection (windows)"
@@ -217,7 +217,7 @@ if [ -n "$METTLE_WIN" ]; then
   o=$(MBUILD_HOME="$W/home-wine" MBUILD_METTLE_LINUX="$DEV" wine "$DW" -v unsupported linux --safe --bogus 2>&1)
   expect "[wine] probing a host compiler" "$o" "unsupported=[--bogus]"
   o=$(wine "$DW" --root "$P" select linux 2>&1)
-  expect "[wine] mb_tool origin" "$o" "source=tools mettle-linux (mbuild.local.mettle)"
+  expect "[wine] mb_tool origin" "$o" "source=mb_tool(\"mettle-linux\") in mbuild.local.mettle"
 else
   echo "note: wine skipped (METTLE_WIN names no Windows dev compiler)"
 fi

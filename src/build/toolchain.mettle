@@ -358,7 +358,7 @@ fn tcx_pick(p: Project*, target: string) -> Mettle* {
   var tools_key: string = "mettle-" + target;
   var tools_val: string = tcx_tools_value(p, tools_key);
   if (slen(tools_val) > 0 && (slen(ev) == 0 || s_eq(ev, tools_val))) {
-    return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), "tools " + tools_key + " (mbuild.local.mettle)");
+    return tcx_make(target, tcx_resolve(tcx_tools_path(p, tools_val)), "mb_tool(\"" + tools_key + "\") in mbuild.local.mettle");
   }
   if (slen(ev) > 0) {
     return tcx_make(target, tcx_resolve(ev), env_name);

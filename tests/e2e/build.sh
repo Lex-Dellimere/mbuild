@@ -143,7 +143,7 @@ mb toolchain use v0.99.0
 check "toolchain use writes mb_tool" grep -qF "mb_tool(\"mettle-linux\", \"$TC/bin/mettle\");" mbuild.local.mettle
 check "toolchain use keeps mb_use" grep -qF 'mb_use("logger", "quiet");' mbuild.local.mettle
 mb toolchain
-check "toolchain lists it" has "$TC/bin/mettle  (tools mettle-linux (mbuild.local.mettle))"
+check "toolchain lists it" has "$TC/bin/mettle  (mb_tool(\"mettle-linux\") in mbuild.local.mettle)"
 
 # --- rules (15.8)
 mkdir -p "$W/rules/src" "$W/rules/rules" && cd "$W/rules"
@@ -549,7 +549,7 @@ proj "$W/tools" </dev/null
 cd "$W/tools" && printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
 printf 'import "mbuild/api";\n\nfn local() {\n  mb_tool("mettle-linux", "%s");\n}\n' "$METTLE" > mbuild.local.mettle
 mb doctor
-check "doctor names mbuild.local.mettle" has "(mbuild.local.mettle)"
+check "doctor names mbuild.local.mettle" has "mb_tool(\"mettle-linux\") in mbuild.local.mettle"
 ln -s "$METTLE" "$S/mettle-link"
 MBUILD_METTLE_LINUX="$S/mettle-link" mb doctor
 check "the variable wins" has "MBUILD_METTLE_LINUX"
