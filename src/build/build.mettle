@@ -468,7 +468,8 @@ fn bx_is_lib_file(name: string) -> bool {
 }
 
 // A library package (a manifest, no bins): its top-level and src/ .mettle
-// files, each one an entry for `check`. Empty for anything else.
+// files but the project files, each one an entry for `check`. Empty for
+// anything else.
 fn bx_lib_set(p: Project*) -> BinSet* {
   var bs: BinSet* = new BinSet;
   bs->items = (BinInfo*)0;
@@ -495,7 +496,7 @@ fn bx_lib_set(p: Project*) -> BinSet* {
       var i: int64 = 0;
       while (i < files->len) {
         var f: string = sl_get(files, i);
-        if (bx_is_lib_file(f)) {
+        if (bx_is_lib_file(f) && !(slen(sub) == 0 && (s_eq(f, "mbuild.mettle") || s_eq(f, "mbuild.local.mettle")))) {
           var rel: string = prefix + f;
           bx_binset_push(bs, s_sub(rel, 0, slen(rel) - 7), rel);
         }

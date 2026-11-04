@@ -496,6 +496,7 @@ printf 'export fn twice(a: int32) -> int32 {\n  return a * 2;\n}\n' > helpers.me
 printf 'import "src/lib";\n@test fn adds() -> int32 {\n  if (add(1, 2) != 3) { return 1; }\n  return 0;\n}\n' > lib_test.mettle
 mb check
 check "library check" sh -c 'grep -qF "Checking src/lib (linux)" "$0/last.out" && grep -qF "Checking helpers (linux)" "$0/last.out" && ! grep -qF "lib_test" "$0/last.out"' "$S"
+check "library check leaves out mbuild.mettle" hasnt "Checking mbuild (linux)"
 mb build
 check "library build: nothing to link" has "library: nothing to link"
 mb run

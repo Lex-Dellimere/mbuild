@@ -124,8 +124,8 @@ A bin builds to `build/<target>/<profile>/<bin>`, with `.exe` for Windows.
 one you name: `mbuild run tool -- --input data.txt`.
 
 A package without bins is a library: `mbuild build` and `mbuild check`
-type-check its files, `mbuild test` works, `mbuild run` says there's nothing
-to run.
+type-check its `.mettle` files at the top and in `src/` (not `mbuild.mettle`
+or tests), `mbuild test` works, `mbuild run` says there's nothing to run.
 
 ### Native code, components, rules
 
