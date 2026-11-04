@@ -134,8 +134,8 @@ the one you name: `mbuild run tool -- --input data.txt`.
 
 `mb_dep_bin("meosql", "server")` builds a dependency's bin along with
 yours, for the same target and profile, with the dependency's own settings
-and C code, into the same directory. `mbuild run` doesn't start it; your
-program can.
+and C code, into the same directory. `mbuild run` starts it when it is
+declared a [service](#services).
 
 ```text
 $ mbuild build
@@ -160,6 +160,61 @@ error: mb_dep_bin("meosql", "sever"): meosql has no bin `sever`
 A package without bins is a library: `mbuild build` and `mbuild check`
 type-check its `.mettle` files at the top and in `src/`, `mbuild test`
 works, `mbuild run` says there's nothing to run.
+
+### Services
+
+Processes `mbuild run` starts before your program and stops after it, like
+a Procfile:
+
+| Call | Meaning |
+|---|---|
+| `mb_service(name, cmdline)` | A process to run alongside the app. The line is split into words like a shell does (quotes, backslashes), with no other shell features; a first word naming a bin of this project or of `mb_dep_bin` runs it from `build/<target>/<profile>/`. |
+| `mb_service_port(name, port)` | Wait until `127.0.0.1:port` accepts a connection before going on. |
+| `mb_service_wait(name, ms)` | How long to wait for it (default 10000). |
+| `mb_service_env(name, "K=V")` | A variable for that process. |
+
+They start in declaration order, each waited for on its port; then the
+program runs; when it exits (Ctrl-C too) they stop in reverse order
+(terminated, killed after 2 s), and the exit code is the program's.
+`mbuild run --no-services` skips them, `mbuild services` lists them.
+Their output goes to `.mbuild/logs/NAME.log`. The fixture server of the
+tests (`tests/fixtures/svc_srv.mettle`) as a bin `srv`:
+
+```mettle
+fn project() {
+  mb_package("app", "0.1.0");
+  mb_bin("app", "src/main.mettle");
+  mb_bin("srv", "tools/srv.mettle");
+  mb_service("db", "srv 6543 db.pid 300");
+  mb_service_port("db", 6543);
+}
+```
+
+```text
+$ mbuild run -- 6543 0
+   Compiling app (linux, debug)
+   Compiling srv (linux, debug)
+    Finished in 0.0s
+    Starting db (build/linux/debug/srv 6543 db.pid 300)
+       Ready db on :6543 (0.3s)
+     Running build/linux/debug/app
+app got: hi
+    Stopping db
+$ mbuild services
+db  srv 6543 db.pid 300  :6543
+```
+
+A service that exits early, or never opens its port, stops the rest and
+shows the end of its log:
+
+```text
+    Starting db (build/linux/debug/srv 6543 db.pid 0 quiet)
+error: service db: port 6543 not open after 1.0s
+  last lines of .mbuild/logs/db.log:
+    srv 6543: starting
+    srv 6543: not listening
+    Stopping db
+```
 
 ### Native code, components, rules
 
@@ -292,6 +347,9 @@ A command named like a built-in can't be reached; `mbuild help` lists it as
 | `mb_cmd_run(c)` | runs it with your terminal, returns the exit code (127: could not start) |
 | `mb_cmd_output(c)` | runs it, returns stdout without one trailing newline; the exit code is then `mb_cmd_status(c)` |
 | `mb_sh(line)` | runs a line through `sh -c` (Linux) or `cmd /c` (Windows) |
+| `mb_spawn(c)` | starts it in the background, output to `.mbuild/logs/PROGRAM.log` (`mb_proc_log(p)`); returns an `MbProc*` |
+| `mb_proc_running(p)`, `mb_proc_code(p)`, `mb_stop(p)` | still running?; its exit code once it isn't; terminate it (killed after 2 s) |
+| `mb_wait_port(port, ms)` | true once `127.0.0.1:port` accepts a connection, false after `ms` |
 | `mb_env(name)`, `mb_home()` | an environment variable, the home directory |
 | `mb_exists(p)`, `mb_is_dir(p)` | |
 | `mb_read(p)` | the file's content, `""` when unreadable |
@@ -301,7 +359,8 @@ A command named like a built-in can't be reached; `mbuild help` lists it as
 | `mb_mkdirs(p)`, `mb_remove(p)` | `mb_remove` takes a file or a whole directory |
 | `mb_say(s)`, `mb_warn(s)`, `mb_fail(s)` | prints to stdout; `warning: s` on stderr; `error: s` on stderr and exit 1 |
 
-Relative paths are relative to the project root.
+Relative paths are relative to the project root. What a command or hook
+starts with `mb_spawn` and doesn't stop is stopped when it returns.
 
 ## Hooks
 

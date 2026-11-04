@@ -168,7 +168,8 @@ this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_W
 | `mbuild init` | new project in this folder (`--package` for a publishable one, `--from PKG` for a package's starter files) |
 | `mbuild new NAME --from PKG` | new project in `NAME/` from a package's `init.rules` |
 | `mbuild build` | build the programs (`-r` release, `-t linux\|windows\|all`) |
-| `mbuild run` | build and run (`-- args` go to the program) |
+| `mbuild run` | build and run (`-- args` go to the program), with its `mb_service` processes around it |
+| `mbuild services` | list the processes `mbuild run` starts |
 | `mbuild live` | run the program and patch it as you save |
 | `mbuild test` | run `@test` functions, cached |
 | `mbuild check` | type check without linking |
