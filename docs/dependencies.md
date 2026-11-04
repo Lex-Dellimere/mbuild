@@ -423,7 +423,8 @@ error: greet v1.1.0 breaks the API of v1.0.0 (inside line v1, which should not b
 
 What gets packed: `mb_publish_include(csv)` when given, else every file
 except `build/`, `.mbuild/`, `vendor/`, `dist/`, dot-files, `mbuild.lock`,
-`mbuild.local.mettle` and `mettle.deps`. `mbuild.mettle`, `init.rules` and
+`mbuild.local.mettle`, `mettle.deps` and subdirectories with their own
+`mbuild.mettle` (nested packages publish on their own). `mbuild.mettle`, `init.rules` and
 `AGENT.rules` always go in. Links and files over 16 MB are refused.
 
 A published version can't be deleted, because locks name it. Yank it

@@ -4905,6 +4905,11 @@ fn bx_pub_walk(root: string, rel: string, out: StrList*) {
       if (slen(rel) > 0) {
         sub = rel + "/" + d;
       }
+      // a nested package is published on its own
+      var nested: string = root + "/" + sub + "/mbuild.mettle";
+      if (fs_is_file(nested)) {
+        continue;
+      }
       bx_pub_walk(root, sub, out);
     }
   }

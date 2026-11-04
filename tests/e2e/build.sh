@@ -252,10 +252,16 @@ check "init --package: fn deps()" grep -qx "fn deps() {" mbuild.mettle
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("strx", "1.0.0");\n}\n' > mbuild.mettle
 rm -f src/main.mettle
 printf '# strx\n# >>> mbuild: AGENT.rules of this project'"'"'s dependencies (generated)\n# x\n# <<< mbuild\n' >> AGENT.rules
+mkdir -p libs/inner libs/kept
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("inner", "0.1.0");\n}\n' > libs/inner/mbuild.mettle
+printf 'export fn inner_x() -> int32 { return 1; }\n' > libs/inner/x.mettle
+printf 'export fn kept_k() -> int32 { return 1; }\n' > libs/kept/k.mettle
 mb publish --to "$S/reg-$mode"
 check "publish transcript" sh -c 'grep -qF "Packaging strx v1.0.0" "$0/last.out" && grep -qF "Published strx v1.0.0 to" "$0/last.out" && grep -qF "next: upload" "$0/last.out"' "$S"
 mkdir -p "$S/unpack-$mode" && tar -xzf "$S/reg-$mode/pkg/strx/strx-v1.0.0.tar.gz" -C "$S/unpack-$mode"
 check "published AGENT.rules has no block" sh -c '! grep -q ">>> mbuild" "$0/unpack-'$mode'/AGENT.rules"' "$S"
+check "nested package left out" [ ! -e "$S/unpack-$mode/libs/inner" ]
+check "plain subdir packed" [ -f "$S/unpack-$mode/libs/kept/k.mettle" ]
 sed -i 's/1.0.0/1.1.0/' mbuild.mettle
 printf 'export fn strx_a() -> int32 { return 1; }\n' > strx.mettle
 mb publish --to "$S/reg-$mode"
