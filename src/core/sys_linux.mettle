@@ -585,15 +585,6 @@ export fn sys_node_run(state: rawptr, size: int64, handles: int64, sig_tag: int6
   var pid: int64 = alph_node_spawn_bytes(node, 0, state, size, handler);
   if (sig_tag > 0) {
     alph_node_signals(node, pid, sig_tag);
-    // SIGINT is blocked now. A shell may have started mbuild with it
-    // ignored, which the signalfd would never see and children would
-    // inherit: back to the default (rt_sigaction).
-    var dfl: int64[4];
-    dfl[0] = 0;
-    dfl[1] = 0;
-    dfl[2] = 0;
-    dfl[3] = 0;
-    syscall(13, ALPH_SIGINT, &dfl[0], 0, 8);
   }
   var code: int64 = alph_node_wait(node);
   flush_out();
