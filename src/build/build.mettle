@@ -4212,82 +4212,216 @@ export fn build_cmd_agents(p: Project*) -> int32 {
 
 struct BxCmd {
   name: string;
-  usage: string;
+  group: string;
   summary: string;
-  details: string;
+  usage: string;
+  doc: string;
+  ex: StrList*;
+  ex_why: StrList*;
+  flags: StrList*;
+  flag_why: StrList*;
+  notes: StrList*;
 }
 
 var g_bx_cmds: BxCmd* = (BxCmd*)0;
 var g_bx_ncmds: int64 = 0;
+var g_bx_group: string = "";
 
-fn bx_def(name: string, usage: string, summary: string, details: string) {
+fn bx_group(name: string) {
+  g_bx_group = name;
+}
+
+fn bx_def(name: string, summary: string, usage: string, doc: string) {
   g_bx_cmds = (BxCmd*)realloc(g_bx_cmds, (g_bx_ncmds + 1) * sizeof(BxCmd));
-  g_bx_cmds[g_bx_ncmds].name = name;
-  g_bx_cmds[g_bx_ncmds].usage = usage;
-  g_bx_cmds[g_bx_ncmds].summary = summary;
-  g_bx_cmds[g_bx_ncmds].details = details;
+  var c: BxCmd* = &g_bx_cmds[g_bx_ncmds];
+  c->name = name;
+  c->group = g_bx_group;
+  c->summary = summary;
+  c->usage = usage;
+  c->doc = doc;
+  c->ex = sl_new();
+  c->ex_why = sl_new();
+  c->flags = sl_new();
+  c->flag_why = sl_new();
+  c->notes = sl_new();
   g_bx_ncmds = g_bx_ncmds + 1;
+}
+
+// An example invocation of the last command, with a short comment or "".
+fn bx_ex(line: string, why: string) {
+  sl_push(g_bx_cmds[g_bx_ncmds - 1].ex, line);
+  sl_push(g_bx_cmds[g_bx_ncmds - 1].ex_why, why);
+}
+
+fn bx_fl(flag: string, why: string) {
+  sl_push(g_bx_cmds[g_bx_ncmds - 1].flags, flag);
+  sl_push(g_bx_cmds[g_bx_ncmds - 1].flag_why, why);
+}
+
+fn bx_note(text: string) {
+  sl_push(g_bx_cmds[g_bx_ncmds - 1].notes, text);
 }
 
 fn bx_init_cmds() {
   if (g_bx_ncmds > 0) {
     return;
   }
-  bx_def("init", "mbuild init [NAME] [--package] | mbuild init --from PKG[@V] [--opt K=V]... [--yes] [--dry-run]", "start a project here",
-    "writes mbuild.mettle (package NAME, default: the directory name), a hello world\nsrc/main.mettle unless there's a main file, and the .gitignore lines. lines of an\nexisting mettle.deps become dependencies. --package also writes init.rules,\nAGENT.rules and a template. --from adds a package's starter files to this project.");
-  bx_def("new", "mbuild new NAME --from PKG[@V] [--opt K=V]... [--yes] [--dry-run]", "start a project from a package's init.rules",
-    "makes NAME/ from the plan in PKG's init.rules (a registry package, or a path).\noptions come from --opt, a prompt, or their defaults (--yes). --dry-run only\nshows what it would write; --force writes into a non-empty NAME/.");
-  bx_def("build", "mbuild build [BINS...] [-t T] [-r | -p PROFILE] [--set KEY=VALUE] [--flag ARG] [--force]", "build the programs",
-    "builds every bin (or the named ones) for each target into\nbuild/<target>/<profile>/. unchanged ones are Fresh. imports of packages that\naren't dependencies yet get added (unless --locked or --offline). a package\nwith no bins (a library) is type-checked instead.");
-  bx_def("run", "mbuild run [BIN] [-t T] [-r] [-- ARGS...]", "build and run a program",
-    "builds one bin for one target (default: the host) and runs it with ARGS.\nthe exit code is the program's.");
-  bx_def("live", "mbuild live [BIN] [-p PROFILE] [-- ARGS...]", "run a program and patch it as you edit",
-    "`mettle live` with the project's dependencies, native libraries, components and\npre-build hook, host target only. saved files patch the running program at its\nnext `quiesce;`; `mbuild use` in another terminal switches a component.");
-  bx_def("test", "mbuild test [FILES...] [--filter S] [--force]", "run @test functions",
-    "runs `mettle test` on the given files, or on every project file with an @test.\npassing files are cached (`ok FILE (cached)`). --filter S runs tests whose names\ncontain S. tests run in the compiler's interpreter, which can't call externs.");
-  bx_def("check", "mbuild check [BINS...] [-t T]", "type-check without linking",
-    "compiles each bin to an object (types, borrow analysis, warnings) and throws it\naway. in a library each top-level and src/ .mettle file is checked.");
-  bx_def("clean", "mbuild clean [--all]", "remove build outputs",
-    "removes build/ and .mbuild/{{cache,stamps,tmp}. --all removes .mbuild entirely.");
-  bx_def("get", "mbuild get NAME[@VERSION]... [--no-verify] [--test]", "add or upgrade a dependency",
-    "adds NAME to mbuild.mettle (default: the newest version) and updates\nmbuild.lock, then checks every bin still compiles for every target (--test: and\nthe tests pass). when it doesn't, both files are put back. --no-verify takes it\nanyway.");
-  bx_def("remove", "mbuild remove NAME... [--no-verify]", "drop a dependency",
-    "removes NAME from mbuild.mettle and mbuild.lock, then checks the project still\ncompiles (putting both back when it doesn't).");
-  bx_def("update", "mbuild update [NAME...] [--all] [--major] [--dry-run] [--no-verify] [--test]", "move dependencies forward, verified",
-    "moves each requirement to the newest version in its line (--major: the newest\noverall; --all: transitive ones too). a version that breaks the code is held\nback and the newest one that works is taken. --dry-run shows the plan and the\nAPI changes.");
-  bx_def("tidy", "mbuild tidy [--no-verify]", "add missing and drop unused dependencies",
-    "adds packages the code imports, drops requirements nothing imports and adopts\nhand-written mettle.deps lines, then verifies the project.");
-  bx_def("deps", "mbuild deps [--tree]", "show the resolved dependencies", "lists the selected packages with their versions, registries and native libraries.");
-  bx_def("why", "mbuild why NAME | mbuild why A B", "why a package is in the build",
-    "with one name: the requirement chains and the files that import it. with two,\nruns `mettle why` on the first bin's main file (`mbuild why main Audit`).");
-  bx_def("outdated", "mbuild outdated [-v] [NAME]", "show newer dependency versions",
-    "lists each dependency with its version, the newest compatible one and the\nnewest overall. NAME shows one package and its API changes.");
-  bx_def("fetch", "mbuild fetch", "download everything the lock names", "fetches every locked package into the cache, so later builds work --offline.");
-  bx_def("vendor", "mbuild vendor [--remove]", "copy dependencies into vendor/",
-    "copies each dependency to vendor/; while it matches mbuild.lock, builds use it\nand touch no registry. --remove deletes it.");
-  bx_def("publish", "mbuild publish [--to DIR] [--registry NAME] [--dry-run] [--allow-breaking] [--no-verify]", "put this package in a registry",
-    "checks the package (version, init.rules, AGENT.rules, API against the last\nversion in its line, a verify build), packs it and writes it into the registry\ndirectory DIR (or the --registry's local path). you upload that directory.\n--dry-run shows the files and the manifest.");
-  bx_def("yank", "mbuild yank NAME@VERSION --to DIR [--undo]", "mark a published version as yanked",
-    "yanked versions stay for existing locks but are never picked for new ones.\n--undo clears the mark.");
-  bx_def("registry", "mbuild registry init DIR [--name NAME]", "create a registry directory", "writes registry.toml, index/ and pkg/ in DIR.");
-  bx_def("components", "mbuild components [-t T] [-p PROFILE] [--check]", "show component selections",
-    "lists each component, its impls and the one selected for the target and\nprofile, with where the choice comes from. --check compiles every impl.");
-  bx_def("use", "mbuild use NAME=IMPL | mbuild use NAME", "pick a component impl on this machine",
-    "writes the choice into mbuild.local.mettle (NAME alone removes it) and\nregenerates the selectors, so a running `mbuild live` switches too.");
-  bx_def("agents", "mbuild agents [NAME] [--all]", "show dependencies' AGENT.rules",
-    "refreshes the block in AGENT.rules and prints each direct dependency's file\n(--all: every dependency's).");
-  bx_def("profiles", "mbuild profiles", "show the resolved build settings",
-    "lists each profile with its settings, where they're set, and the compiler flags\nit passes, per bin when a bin changes them.");
-  bx_def("doctor", "mbuild doctor [-t T]", "check the environment",
-    "shows the host, the tools mbuild uses (curl, tar, the C compilers, pkg-config,\nwine), the compiler for each target and the native-code audit.");
-  bx_def("toolchain", "mbuild toolchain [list | install VERSION [-t T] | use VERSION | remove VERSION [-t T]]", "list or install Mettle compilers",
-    "lists the compiler per target, or installs / removes a release under the\nmbuild home; use also writes it as this machine's compiler into\nmbuild.local.mettle. releases up to v0.17.0 can't build current projects:\nuse a compiler built from ../Mettle.");
-  bx_def("mettle", "mbuild mettle [-t T] -- ARGS...", "run the selected compiler",
-    "runs the compiler mbuild would use, in the project root, with ARGS and the\nfirst bin's component dir. example: mbuild mettle -- --version");
-  bx_def("trace", "mbuild trace FN [ARGS...]", "trace a function (mettle trace)", "runs `mettle trace` on the first bin's main file.");
-  bx_def("explain", "mbuild explain CODE", "explain a diagnostic code", "runs `mettle explain CODE`, e.g. mbuild explain E0003.");
-  bx_def("version", "mbuild version", "print the mbuild version", "prints the mbuild version and the host.");
-  bx_def("help", "mbuild help [COMMAND]", "show help", "shows the commands, or the help of one.");
+  bx_group("build");
+  bx_def("init", "start a project here", "mbuild init [NAME] [--package] [--from PKG[@V]]", "project.md");
+  bx_ex("mbuild init", "package named after the folder");
+  bx_ex("mbuild init --package", "one others can depend on");
+  bx_ex("mbuild init --from webfw", "add a package's starter files");
+  bx_fl("--package", "also write init.rules, AGENT.rules and a template");
+  bx_fl("--from PKG[@V]", "add PKG's starter files to this project");
+  bx_fl("--opt K=V", "answer one of its options (repeatable)");
+  bx_fl("--yes", "take the defaults, don't ask");
+  bx_fl("--dry-run", "show what it would write");
+  bx_note("writes mbuild.mettle, a hello world src/main.mettle unless there's a main file, and the .gitignore lines.");
+  bx_note("lines of an existing mettle.deps become dependencies.");
+  bx_def("new", "start a project from a package", "mbuild new NAME --from PKG[@V]", "packages.md");
+  bx_ex("mbuild new blog --from webfw", "");
+  bx_ex("mbuild new blog --from ../webfw --yes", "a path; every option at its default");
+  bx_fl("--from PKG[@V]", "a registry package or a path, with an init.rules");
+  bx_fl("--opt K=V", "answer one of its options (repeatable)");
+  bx_fl("--yes", "take the defaults, don't ask");
+  bx_fl("--dry-run", "show what it would write");
+  bx_fl("--force", "write into a non-empty NAME/");
+  bx_def("build", "build the programs", "mbuild build [BINS...] [-t T] [-r | -p PROFILE]", "project.md");
+  bx_ex("mbuild build", "");
+  bx_ex("mbuild build -r", "release");
+  bx_ex("mbuild build -t all", "linux and windows");
+  bx_ex("mbuild build server", "one bin");
+  bx_fl("-t T", "linux, windows, all or host (repeatable)");
+  bx_fl("-r, -p NAME", "the release profile, or another one");
+  bx_fl("--set KEY=VALUE", "a typed build setting (repeatable)");
+  bx_fl("--flag ARG", "a raw compiler flag (repeatable)");
+  bx_fl("--use NAME=IMPL", "a component impl (repeatable)");
+  bx_fl("--no-hooks", "skip hook_pre_build and hook_post_build");
+  bx_fl("--force", "rebuild what's fresh too");
+  bx_note("output goes to build/<target>/<profile>/.");
+  bx_note("imports of packages that aren't dependencies yet get added, unless --locked or --offline.");
+  bx_note("a package with no bins (a library) is type-checked instead.");
+  bx_def("run", "build and run a program", "mbuild run [BIN] [-t T] [-r | -p PROFILE] [-- ARGS...]", "project.md");
+  bx_ex("mbuild run", "");
+  bx_ex("mbuild run -- --port 8080", "args after -- go to the program");
+  bx_ex("mbuild run -t windows", "through wine");
+  bx_fl("-t T", "one target (default: the host)");
+  bx_fl("-r, -p NAME", "the release profile, or another one");
+  bx_note("the exit code is the program's.");
+  bx_def("live", "run a program and patch it as you edit", "mbuild live [BIN] [-p PROFILE] [-- ARGS...]", "components.md");
+  bx_ex("mbuild live", "");
+  bx_ex("mbuild use render=gl", "in another terminal: switch a component");
+  bx_note("saved files patch the running program at its next `quiesce;`. host target only.");
+  bx_def("test", "run @test functions", "mbuild test [FILES...] [--filter S]", "incremental.md");
+  bx_ex("mbuild test", "every file with an @test");
+  bx_ex("mbuild test --filter parse", "tests whose names contain parse");
+  bx_ex("mbuild test src/lex.mettle", "");
+  bx_fl("--filter S", "only tests whose names contain S");
+  bx_fl("--force", "run cached files too");
+  bx_note("passing files are cached (`ok FILE (cached)`).");
+  bx_note("tests run in the compiler's interpreter, which can't call externs.");
+  bx_def("check", "type-check without linking", "mbuild check [BINS...] [-t T]", "project.md");
+  bx_ex("mbuild check", "");
+  bx_ex("mbuild check -t all", "");
+  bx_note("in a library each top-level and src/ .mettle file is checked.");
+  bx_def("clean", "remove build outputs", "mbuild clean [--all]", "incremental.md");
+  bx_ex("mbuild clean", "build/ and .mbuild/{{cache,stamps,tmp}");
+  bx_ex("mbuild clean --all", "all of .mbuild/ too");
+  bx_group("dependencies");
+  bx_def("get", "add or upgrade a dependency", "mbuild get NAME[@VERSION]... [--test] [--no-verify]", "dependencies.md");
+  bx_ex("mbuild get strutil", "the newest version");
+  bx_ex("mbuild get strutil@v1.2.0", "");
+  bx_ex("mbuild get strutil --test", "the tests must pass too");
+  bx_fl("--test", "the tests must pass too");
+  bx_fl("--no-verify", "take it even when the code breaks");
+  bx_note("every bin must still compile for every target, or mbuild.mettle and mbuild.lock are put back.");
+  bx_def("remove", "drop a dependency", "mbuild remove NAME... [--no-verify]", "dependencies.md");
+  bx_ex("mbuild remove strutil", "");
+  bx_fl("--no-verify", "drop it even when the code breaks");
+  bx_note("the project must still compile, or both files are put back.");
+  bx_def("update", "move dependencies forward, verified", "mbuild update [NAME...] [--all] [--major] [--dry-run]", "dependencies.md");
+  bx_ex("mbuild update", "the newest in each line");
+  bx_ex("mbuild update --dry-run", "the plan and the API changes");
+  bx_ex("mbuild update --major strutil", "across a major version");
+  bx_fl("--all", "transitive ones too");
+  bx_fl("--major", "the newest overall, not only in the line");
+  bx_fl("--dry-run", "show the plan, change nothing");
+  bx_fl("--test", "the tests must pass too");
+  bx_fl("--no-verify", "take the newest even when the code breaks");
+  bx_note("a version that breaks the code is held back and the newest one that works is taken.");
+  bx_def("tidy", "add missing and drop unused dependencies", "mbuild tidy [--no-verify]", "dependencies.md");
+  bx_ex("mbuild tidy", "");
+  bx_note("adopts hand-written mettle.deps lines too, then verifies the project.");
+  bx_def("deps", "show the resolved dependencies", "mbuild deps [--tree]", "dependencies.md");
+  bx_ex("mbuild deps", "versions, registries, native libraries");
+  bx_ex("mbuild deps --tree", "who requires what");
+  bx_def("why", "why a package is in the build", "mbuild why NAME | mbuild why A B", "dependencies.md");
+  bx_ex("mbuild why strutil", "requirement chains and the files that import it");
+  bx_ex("mbuild why main Audit", "`mettle why` on the first bin");
+  bx_def("outdated", "show newer dependency versions", "mbuild outdated [NAME]", "dependencies.md");
+  bx_ex("mbuild outdated", "");
+  bx_ex("mbuild outdated strutil", "one package and its API changes");
+  bx_def("fetch", "download everything the lock names", "mbuild fetch", "dependencies.md");
+  bx_ex("mbuild fetch", "");
+  bx_ex("mbuild build --offline", "later, with no network");
+  bx_def("vendor", "copy dependencies into vendor/", "mbuild vendor [--remove]", "dependencies.md");
+  bx_ex("mbuild vendor", "");
+  bx_ex("mbuild vendor --remove", "");
+  bx_note("while vendor/ matches mbuild.lock, builds use it and touch no registry.");
+  bx_group("packages");
+  bx_def("publish", "put this package in a registry", "mbuild publish [--to DIR | --registry NAME] [--dry-run]", "dependencies.md");
+  bx_ex("mbuild publish --dry-run", "the files and the manifest");
+  bx_ex("mbuild publish --to ../registry", "");
+  bx_fl("--to DIR", "the registry directory");
+  bx_fl("--registry NAME", "a configured registry's local path");
+  bx_fl("--dry-run", "show it, write nothing");
+  bx_fl("--allow-breaking", "publish API breaks in the same line");
+  bx_fl("--no-verify", "skip the verify build");
+  bx_note("checks the version, init.rules, AGENT.rules and the API against the last version in its line. you upload the directory.");
+  bx_def("yank", "mark a published version as yanked", "mbuild yank NAME@VERSION --to DIR [--undo]", "dependencies.md");
+  bx_ex("mbuild yank strutil@v1.2.0 --to ../registry", "");
+  bx_ex("mbuild yank strutil@v1.2.0 --to ../registry --undo", "");
+  bx_note("existing locks keep a yanked version; new ones never pick it.");
+  bx_def("registry", "create a registry directory", "mbuild registry init DIR [--name NAME]", "dependencies.md");
+  bx_ex("mbuild registry init ../registry", "registry.toml, index/ and pkg/");
+  bx_def("agents", "show dependencies' AGENT.rules", "mbuild agents [NAME] [--all]", "packages.md");
+  bx_ex("mbuild agents", "direct dependencies");
+  bx_ex("mbuild agents strutil", "");
+  bx_ex("mbuild agents --all", "every dependency");
+  bx_note("refreshes the generated block in this project's AGENT.rules.");
+  bx_group("components");
+  bx_def("components", "show component selections", "mbuild components [-t T] [-p PROFILE] [--check]", "components.md");
+  bx_ex("mbuild components", "each impl and where the choice comes from");
+  bx_ex("mbuild components --check", "compile every impl");
+  bx_def("use", "pick a component impl on this machine", "mbuild use NAME=IMPL | mbuild use NAME", "components.md");
+  bx_ex("mbuild use render=gl", "");
+  bx_ex("mbuild use render", "back to the default");
+  bx_note("writes mbuild.local.mettle, so a running `mbuild live` switches too.");
+  bx_def("profiles", "show the resolved build settings", "mbuild profiles", "project.md");
+  bx_ex("mbuild profiles", "settings, where they're set, compiler flags");
+  bx_group("tools");
+  bx_def("doctor", "check the environment", "mbuild doctor [-t T]", "native.md");
+  bx_ex("mbuild doctor", "tools, compilers, the native-code audit");
+  bx_ex("mbuild doctor -t windows", "");
+  bx_def("toolchain", "list or install Mettle compilers", "mbuild toolchain [list | install V [-t T] | use V | remove V [-t T]]", "platforms.md");
+  bx_ex("mbuild toolchain", "the compiler per target");
+  bx_ex("mbuild toolchain install VERSION -t windows", "");
+  bx_ex("mbuild toolchain use VERSION", "this machine's compiler");
+  bx_note("releases up to v0.17.0 can't build current projects: use a compiler built from ../Mettle.");
+  bx_def("mettle", "run the selected compiler", "mbuild mettle [-t T] -- ARGS...", "platforms.md");
+  bx_ex("mbuild mettle -- --version", "");
+  bx_ex("mbuild mettle -t windows -- --version", "");
+  bx_note("runs in the project root, with the first bin's component dir.");
+  bx_def("trace", "trace a function", "mbuild trace FN [ARGS...]", "");
+  bx_ex("mbuild trace parse", "`mettle trace` on the first bin");
+  bx_def("explain", "explain a diagnostic code", "mbuild explain CODE", "");
+  bx_ex("mbuild explain E0003", "");
+  bx_def("version", "print the mbuild version", "mbuild version", "");
+  bx_ex("mbuild version", "and the host");
+  bx_def("help", "show help", "mbuild help [COMMAND]", "");
+  bx_ex("mbuild help", "every command");
+  bx_ex("mbuild help build", "");
+  bx_ex("mbuild help flags", "the global flags");
 }
 
 fn bx_find_cmd(name: string) -> BxCmd* {
@@ -4307,25 +4441,51 @@ export fn build_is_builtin(name: string) -> bool {
   return bx_find_cmd(name) != (BxCmd*)0;
 }
 
-fn bx_global_help() -> string {
-  var b: Buf* = buf_new();
-  buf_line(b, "global flags:");
-  buf_line(b, "  -v, --verbose          print every command mbuild runs");
-  buf_line(b, "  -q, --quiet            only errors and program output");
-  buf_line(b, "  --color WHEN           auto (default), always or never");
-  buf_line(b, "  -t, --target T         linux, windows, all or host (repeatable)");
-  buf_line(b, "  -r, --release          the release profile");
-  buf_line(b, "  -p, --profile NAME     another profile");
-  buf_line(b, "  -j, --jobs N           parallel compiles");
-  buf_line(b, "  --force                ignore every up-to-date stamp");
-  buf_line(b, "  --offline              never touch the network");
-  buf_line(b, "  --locked               fail rather than change mbuild.mettle or mbuild.lock");
-  buf_line(b, "  --mettle PATH          the compiler for the host target");
-  buf_line(b, "  --set KEY=VALUE        a typed build setting (repeatable)");
-  buf_line(b, "  --flag ARG             a raw compiler flag (repeatable)");
-  buf_line(b, "  --use NAME=IMPL        a component impl (repeatable)");
-  buf_line(b, "  --no-hooks             skip hook_pre_build and hook_post_build");
-  return buf_take(b);
+// "    a    why" rows, the whys lined up; a row with no why gets no padding.
+fn bx_say_rows(indent: string, left: StrList*, right: StrList*, prefix: string) {
+  var w: int64 = 0;
+  var i: int64 = 0;
+  while (i < left->len) {
+    if (slen(sl_get(left, i)) > w) {
+      w = slen(sl_get(left, i));
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < left->len) {
+    var r: string = sl_get(right, i);
+    if (slen(r) == 0) {
+      say(indent + sl_get(left, i));
+    } else {
+      say(indent + s_pad_right(sl_get(left, i), w + 2) + prefix + r);
+    }
+    i = i + 1;
+  }
+}
+
+fn bx_global_help() {
+  var l: StrList* = sl_new();
+  var r: StrList* = sl_new();
+  sl_push(l, "-v, --verbose");   sl_push(r, "print every command mbuild runs");
+  sl_push(l, "-q, --quiet");     sl_push(r, "only errors and program output");
+  sl_push(l, "--color WHEN");    sl_push(r, "auto (default), always or never");
+  sl_push(l, "-t, --target T");  sl_push(r, "linux, windows, all or host (repeatable)");
+  sl_push(l, "-r, --release");   sl_push(r, "the release profile");
+  sl_push(l, "-p, --profile NAME"); sl_push(r, "another profile");
+  sl_push(l, "-j, --jobs N");    sl_push(r, "parallel compiles");
+  sl_push(l, "--force");         sl_push(r, "ignore every up-to-date stamp");
+  sl_push(l, "--offline");       sl_push(r, "never touch the network");
+  sl_push(l, "--locked");        sl_push(r, "fail rather than change mbuild.mettle or mbuild.lock");
+  sl_push(l, "--mettle PATH");   sl_push(r, "the compiler for the host target");
+  sl_push(l, "--set KEY=VALUE"); sl_push(r, "a typed build setting (repeatable)");
+  sl_push(l, "--flag ARG");      sl_push(r, "a raw compiler flag (repeatable)");
+  sl_push(l, "--use NAME=IMPL"); sl_push(r, "a component impl (repeatable)");
+  sl_push(l, "--no-hooks");      sl_push(r, "skip hook_pre_build and hook_post_build");
+  say(bold("flags") + " - for every command");
+  say("");
+  bx_say_rows("  ", l, r, "");
+  free(l);
+  free(r);
 }
 
 // mbuild.mettle's commands, scanned (nothing is compiled); 0 when none.
@@ -4345,10 +4505,11 @@ fn bx_project_cmd(info: MbfInfo*, name: string) -> MbfCommand* {
     return (MbfCommand*)0;
   }
   var dashed: string = s_replace_byte(name, 95, 45);
+  var fname: string = "cmd_" + name;
   var i: int64 = 0;
   while (i < info->ncommands) {
     var c: MbfCommand* = &info->commands[i];
-    if (s_eq(c->name, name) || s_eq(c->name, dashed) || s_eq(c->fn_name, "cmd_" + name)) {
+    if (s_eq(c->name, name) || s_eq(c->name, dashed) || s_eq(c->fn_name, fname)) {
       return c;
     }
     i = i + 1;
@@ -4356,9 +4517,11 @@ fn bx_project_cmd(info: MbfInfo*, name: string) -> MbfCommand* {
   return (MbfCommand*)0;
 }
 
-// error: no command 'x' + a suggestion over built-ins and project commands;
+var g_bx_sug_proj: bool = false;
+
+// The closest built-in or project command to name, "" when none is close;
 // on a tie the project's command wins (helo: hello, not help).
-fn bx_unknown_cmd(info: MbfInfo*, name: string) {
+fn bx_suggest(info: MbfInfo*, name: string) -> string {
   bx_init_cmds();
   var cands: StrList* = sl_new();
   var i: int64 = 0;
@@ -4375,24 +4538,94 @@ fn bx_unknown_cmd(info: MbfInfo*, name: string) {
     i = i + 1;
   }
   var sug: string = man_suggest(name, cands);
-  var is_proj: bool = sl_index(cands, sug) < nproj;
+  g_bx_sug_proj = slen(sug) > 0 && sl_index(cands, sug) < nproj;
   free(cands);
+  return sug;
+}
+
+// error: no command 'x' + a suggestion over built-ins and project commands.
+fn bx_unknown_cmd(info: MbfInfo*, name: string) {
+  var sug: string = bx_suggest(info, name);
   var msg: string = "no command '" + name + "'";
   if (slen(sug) == 0) {
     fail_hint(msg, "run `mbuild help` for the commands");
   }
-  if (is_proj) {
+  if (g_bx_sug_proj) {
     fail_hint(msg, "did you mean " + sug + "? (mbuild.mettle)");
   }
   fail_hint(msg, "did you mean " + sug + "?");
 }
 
-fn bx_say_cmd_line(name: string, summary: string) {
-  var pad: int64 = 12;
-  if (slen(name) + 1 > pad) {
-    pad = slen(name) + 1;
+// mbuild help X with no command X.
+fn bx_unknown_topic(info: MbfInfo*, name: string) {
+  var sug: string = bx_suggest(info, name);
+  error_msg("no command named " + name);
+  if (slen(sug) > 0) {
+    var tag: string = "";
+    if (g_bx_sug_proj) {
+      tag = " (mbuild.mettle)";
+    }
+    err_line("  " + cyan("help") + ": did you mean " + sug + "?" + tag);
   }
-  say("  " + s_pad_right(name, pad) + summary);
+  err_line("  " + cyan("help") + ": run `mbuild help` for the list");
+  exit_with(1);
+}
+
+fn bx_say_cmd_help(c: BxCmd*) {
+  say(bold(c->name) + " - " + c->summary);
+  say("");
+  say("  usage: " + c->usage);
+  if (c->ex->len > 0) {
+    say("");
+    say("  " + bold("Common:"));
+    bx_say_rows("    ", c->ex, c->ex_why, "# ");
+  }
+  if (c->flags->len > 0) {
+    say("");
+    say("  " + bold("Flags:"));
+    bx_say_rows("    ", c->flags, c->flag_why, "");
+  }
+  if (c->notes->len > 0) {
+    say("");
+    say("  " + bold("Notes:"));
+    var i: int64 = 0;
+    while (i < c->notes->len) {
+      say("    " + sl_get(c->notes, i));
+      i = i + 1;
+    }
+  }
+  if (slen(c->doc) > 0) {
+    say("Doc: docs/" + c->doc);
+  }
+}
+
+fn bx_say_project_cmd_help(pc: MbfCommand*) {
+  var summ: string = pc->summary;
+  if (slen(summ) == 0) {
+    summ = "a command from mbuild.mettle";
+  }
+  say(bold(pc->name) + " - " + summ);
+  say("");
+  say("  usage: mbuild " + pc->name + " [ARGS...]");
+  var lines: StrList* = s_split(pc->help, 10);
+  var i: int64 = 1;
+  while (i < lines->len && slen(s_trim(sl_get(lines, i))) == 0) {
+    i = i + 1;
+  }
+  if (i < lines->len) {
+    say("");
+    while (i < lines->len) {
+      var ln: string = sl_get(lines, i);
+      if (slen(ln) == 0) {
+        say("");
+      } else {
+        say("  " + ln);
+      }
+      i = i + 1;
+    }
+  }
+  free(lines);
+  say("From: mbuild.mettle:" + s_int(pc->line) + " (fn " + pc->fn_name + ")");
 }
 
 // mbuild help [topic]. p may be unloaded (build_find): help compiles nothing.
@@ -4406,55 +4639,76 @@ export fn build_help(p: Project*, topic: string) -> int32 {
   if (slen(topic) > 0) {
     var c: BxCmd* = bx_find_cmd(topic);
     if (c != (BxCmd*)0) {
-      say("usage: " + c->usage);
-      say("");
-      say(c->details);
-      say("");
-      print(bx_global_help());
+      bx_say_cmd_help(c);
+      return 0;
+    }
+    if (s_eq(topic, "flags")) {
+      bx_global_help();
       return 0;
     }
     var pc: MbfCommand* = bx_project_cmd(info, topic);
     if (pc == (MbfCommand*)0) {
-      bx_unknown_cmd(info, topic);
+      bx_unknown_topic(info, topic);
     }
-    say("usage: mbuild " + pc->name + " [ARGS...]   (mbuild.mettle:" + s_int(pc->line) + ")");
-    say("");
-    if (slen(pc->help) > 0) {
-      say(pc->help);
-    } else {
-      say("(no description)");
-    }
+    bx_say_project_cmd_help(pc);
     return 0;
   }
-  say(bold("mbuild") + " " + build_version_text + ": build tool and package manager for Mettle");
-  say("");
-  say("usage: mbuild [-v] [-q] [-t TARGET] [-r] [-p PROFILE] COMMAND [args]");
-  say("");
-  say("commands:");
+  var nproj: int64 = 0;
+  if (info != (MbfInfo*)0) {
+    nproj = info->ncommands;
+  }
+  var w: int64 = 0;
   var i: int64 = 0;
   while (i < g_bx_ncmds) {
-    bx_say_cmd_line(g_bx_cmds[i].name, g_bx_cmds[i].summary);
+    if (slen(g_bx_cmds[i].name) > w) {
+      w = slen(g_bx_cmds[i].name);
+    }
     i = i + 1;
   }
-  if (info != (MbfInfo*)0 && info->ncommands > 0) {
+  i = 0;
+  while (i < nproj) {
+    if (slen(info->commands[i].name) > w) {
+      w = slen(info->commands[i].name);
+    }
+    i = i + 1;
+  }
+  w = w + 2;
+  say(bold("mbuild") + " " + build_version_text + " - build tool and package manager for Mettle");
+  say("");
+  say("usage: mbuild COMMAND [args]");
+  var group: string = "";
+  i = 0;
+  while (i < g_bx_ncmds) {
+    var bc: BxCmd* = &g_bx_cmds[i];
+    if (!s_eq(bc->group, group)) {
+      group = bc->group;
+      say("");
+      say(bold(group + ":"));
+    }
+    say("  " + s_pad_right(bc->name, w) + bc->summary);
+    i = i + 1;
+  }
+  if (nproj > 0) {
     say("");
-    say("project commands (mbuild.mettle):");
+    say(bold("this project (mbuild.mettle):"));
     i = 0;
-    while (i < info->ncommands) {
+    while (i < nproj) {
       var c2: MbfCommand* = &info->commands[i];
       var summ: string = c2->summary;
-      if (slen(summ) == 0) {
-        summ = "(no description)";
-      }
       if (build_is_builtin(c2->name)) {
         summ = "(shadowed by the built-in " + c2->name + "; rename " + c2->fn_name + ")";
       }
-      bx_say_cmd_line(c2->name, summ);
+      if (slen(summ) == 0) {
+        say("  " + c2->name);
+      } else {
+        say("  " + s_pad_right(c2->name, w) + summ);
+      }
       i = i + 1;
     }
   }
   say("");
-  say("run `mbuild help COMMAND` for more");
+  say("run `mbuild help COMMAND` for details");
+  say("flags: -v -q -t T -r -p NAME --offline --locked -j N --force (`mbuild help flags`)");
   return 0;
 }
 
