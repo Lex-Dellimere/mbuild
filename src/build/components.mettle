@@ -1323,7 +1323,27 @@ export fn cmp_cmd_components(p: Project*, ds: DepState*) -> int32 {
     free(cs);
     return 1;
   }
-  var rows: StrList** = (StrList**)malloc((cs->n + 1) * 8);
+  // A bin whose own components pick differently gets a row under the component.
+  var bins: StrList* = toml_sections(p->man->doc, "bin.");
+  var bpicks: CmxPick** = (CmxPick**)malloc((bins->len + 1) * 8);
+  var bi: int64 = 0;
+  while (bi < bins->len) {
+    var bb: CmpBuild = b;
+    bb.bin = s_from(sl_get(bins, bi), 4);
+    bb.settings = cmx_settings(p, b.target, b.profile, bb.bin);
+    bpicks[bi] = (CmxPick*)malloc((cs->n + 1) * sizeof(CmxPick));
+    var berr: string = bb.settings->error;
+    if (slen(berr) == 0) {
+      berr = cmx_select(p, cs, &bb, bpicks[bi]);
+    }
+    if (slen(berr) > 0) {
+      error_msg(berr);
+      return 1;
+    }
+    bi = bi + 1;
+  }
+  var rows: StrList** = (StrList**)malloc((cs->n * (bins->len + 1) + 1) * 8);
+  var nrows: int64 = 1;
   rows[0] = sl_new();
   sl_push(rows[0], "COMPONENT");
   sl_push(rows[0], "MODE");
@@ -1349,22 +1369,49 @@ export fn cmp_cmd_components(p: Project*, ds: DepState*) -> int32 {
       sl_push(r, picks[i].iname + " (all linked)");
     }
     sl_push(r, picks[i].origin);
-    var k: int64 = 0;
-    while (k < 5) {
-      if (slen(sl_get(r, k)) > widths[k]) {
-        widths[k] = slen(sl_get(r, k));
+    rows[nrows] = r;
+    nrows = nrows + 1;
+    bi = 0;
+    while (bi < bins->len) {
+      var bp: CmxPick* = bpicks[bi];
+      if (!s_eq(bp[i].iname, picks[i].iname)) {
+        var br: StrList* = sl_new();
+        sl_push(br, "  bin " + s_from(sl_get(bins, bi), 4));
+        sl_push(br, "");
+        sl_push(br, "");
+        sl_push(br, bp[i].iname);
+        sl_push(br, bp[i].origin);
+        rows[nrows] = br;
+        nrows = nrows + 1;
       }
-      k = k + 1;
+      bi = bi + 1;
     }
-    rows[i + 1] = r;
     i = i + 1;
   }
   i = 0;
-  while (i <= cs->n) {
+  while (i < nrows) {
+    var k: int64 = 0;
+    while (k < 5) {
+      if (slen(sl_get(rows[i], k)) > widths[k]) {
+        widths[k] = slen(sl_get(rows[i], k));
+      }
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < nrows) {
     say(cmx_row(rows[i], widths));
     cmx_free(rows[i]);
     i = i + 1;
   }
+  bi = 0;
+  while (bi < bins->len) {
+    free(bpicks[bi]);
+    bi = bi + 1;
+  }
+  free(bpicks);
+  cmx_free(bins);
   free(rows);
   free(widths);
   free(picks);

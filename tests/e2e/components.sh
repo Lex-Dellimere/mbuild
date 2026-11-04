@@ -292,6 +292,11 @@ expect_line "components row" "$tab" "logger     static  stdout quiet file  quiet
 "$D-debug" "$W" use logger > /dev/null 2>&1
 tab=$("$D-debug" "$W" components 2>&1)
 expect_line "components row after use NAME" "$tab" "logger     static  stdout quiet file  stdout                   default"
+W2="$T/work-bin"
+rm -rf "$W2"; mkdir -p "$W2"; cp -r "$W/static" "$W2/static"
+printf '[bin.tool]\nmain = "src/main.mettle"\ncomponents = ["logger=file"]\n' >> "$W2/static/manifest.toml"
+tab=$("$D-debug" "$W2" components 2>&1)
+expect_line "components: a bin's own pick" "$tab" "  bin tool                             file                     mbuild.toml:11"
 use_out=$("$D-debug" "$W" use logger quiet 2>&1)
 expect_line "use prints the choice" "$use_out" "       Using logger = quiet (mbuild.local.mettle)"
 "$D-debug" "$W" use logger > /dev/null 2>&1
