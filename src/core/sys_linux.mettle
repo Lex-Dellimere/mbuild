@@ -182,6 +182,61 @@ export fn sys_stdin_ready(ms: int64) -> bool {
   return syscall(7, &fds[0], 1, ms) > 0 && ((fds[1] >> 16) & 0x19) != 0;
 }
 
+// A new FIFO at path, opened read-write and non-blocking (so writers never
+// block on open and it never reads as ended); -1 when it can't be made.
+export fn sys_fifo_open(path: string) -> int32 {
+  syscall(87, s_c(path));                                  // unlink
+  if (syscall(259, -100, s_c(path), 0x1180, 0) != 0) {     // mknodat S_IFIFO|0600
+    return -1;
+  }
+  return (int32)syscall(257, -100, s_c(path), 0x80802, 0); // openat O_RDWR|O_NONBLOCK|O_CLOEXEC
+}
+
+// What fd has now, added to b; the number of bytes.
+export fn sys_fd_drain(fd: int32, b: Buf*) -> int64 {
+  var n: int64 = 0;
+  while (fd >= 0) {
+    buf_reserve(b, 4096);
+    var got: int64 = syscall(0, fd, &b->data[b->len], 4096);
+    if (got <= 0) {
+      break;
+    }
+    b->len = b->len + got;
+    n = n + got;
+  }
+  return n;
+}
+
+export fn sys_fd_close(fd: int32) {
+  if (fd >= 0) {
+    syscall(3, fd);
+  }
+}
+
+// Within ms: 1 when stdin has input, 2 when fd has (-1: none), 3 both, 0 neither.
+export fn sys_wait_input(fd: int32, ms: int64) -> int32 {
+  var fds: int32[4];
+  fds[0] = 0;
+  fds[1] = 1;                                     // POLLIN
+  fds[2] = fd;
+  fds[3] = 1;
+  var n: int64 = 1;
+  if (fd >= 0) {
+    n = 2;
+  }
+  if (syscall(7, &fds[0], n, ms) <= 0) {
+    return 0;
+  }
+  var r: int32 = 0;
+  if (((fds[1] >> 16) & 0x19) != 0) {
+    r = r | 1;
+  }
+  if (fd >= 0 && ((fds[3] >> 16) & 0x19) != 0) {
+    r = r | 2;
+  }
+  return r;
+}
+
 // One byte from stdin, unbuffered; -1 at its end.
 export fn sys_read_byte() -> int32 {
   var b: uint8[1];

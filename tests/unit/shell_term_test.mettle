@@ -1,0 +1,135 @@
+// shell_term_test: program output above the shell's prompt, played on a fake terminal.
+//   tools/mcheck.sh tests/unit/shell_term_test.mettle --run   (tests/e2e/shell.sh runs it)
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/build/shell_term";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+// A terminal with output processing on (\n also returns): rows, a cursor.
+struct Term {
+  rows: StrList*;
+  row: int64;
+  col: int64;
+}
+
+fn term_new() -> Term* {
+  var t: Term* = new Term;
+  t->rows = sl_new();
+  sl_push(t->rows, s_empty());
+  t->row = 0;
+  t->col = 0;
+  return t;
+}
+
+fn term_put(t: Term*, c: int32) {
+  var r: string = sl_get(t->rows, t->row);
+  while (slen(r) < t->col) {
+    r = r + " ";
+  }
+  var b: Buf* = buf_new();
+  buf_addb(b, c);
+  var ch: string = buf_take(b);
+  var next: string = s_sub(r, 0, t->col) + ch;
+  if (t->col + 1 < slen(r)) {
+    next = next + s_from(r, t->col + 1);
+  }
+  sl_set(t->rows, t->row, next);
+  t->col = t->col + 1;
+}
+
+fn term_play(t: Term*, s: string) {
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    i = i + 1;
+    if (c == 13) {
+      t->col = 0;
+    } else if (c == 10) {
+      t->row = t->row + 1;
+      t->col = 0;
+      if (t->row >= t->rows->len) {
+        sl_push(t->rows, s_empty());
+      }
+    } else if (c == 27 && i < slen(s) && s_byte(s, i) == 91) {
+      i = i + 1;
+      var n: int64 = 0;
+      while (i < slen(s) && s_byte(s, i) >= 48 && s_byte(s, i) <= 57) {
+        n = n * 10 + (int64)(s_byte(s, i) - 48);
+        i = i + 1;
+      }
+      var op: int32 = s_byte(s, i);
+      i = i + 1;
+      if (op == 75) {
+        sl_set(t->rows, t->row, s_sub(sl_get(t->rows, t->row), 0, t->col));
+      } else if (op == 68) {
+        t->col = t->col - n;
+      }
+    } else {
+      term_put(t, c);
+    }
+  }
+}
+
+// The screen as "row|row|..." and the cursor as "@row,col".
+fn term_show(t: Term*) -> string {
+  return sl_join(t->rows, "|") + "@" + s_int(t->row) + "," + s_int(t->col);
+}
+
+fn typed(t: Term*, prompt: string, line: string, at: int64) {
+  term_play(t, shx_term_line(prompt, line, at));
+}
+
+fn main() -> int32 {
+  esc_init();
+  var p: string = "mettle> ";
+
+  var t: Term* = term_new();
+  term_play(t, p);
+  typed(t, p, "w", 1);
+  typed(t, p, "wo", 2);
+  t_eq("typing", term_show(t), "mettle> wo@0,10");
+  term_play(t, shx_term_above(p, "wo", 2, "tick 1\n"));
+  t_eq("a line goes above the prompt, the input stays", term_show(t), "tick 1|mettle> wo@1,10");
+  typed(t, p, "wor", 3);
+  term_play(t, shx_term_above(p, "wor", 3, "tick 2\ntick 3\n"));
+  t_eq("two lines, then typing goes on", term_show(t), "tick 1|tick 2|tick 3|mettle> wor@3,11");
+
+  var u: Term* = term_new();
+  typed(u, p, "harvest(world.pop)", 8);
+  t_eq("cursor inside the line", term_show(u), "mettle> harvest(world.pop)@0,16");
+  term_play(u, shx_term_above(p, "harvest(world.pop)", 8, "tick 9"));
+  t_eq("the cursor goes back where it was; an unended line is ended", term_show(u), "tick 9|mettle> harvest(world.pop)@1,16");
+  typed(u, p, "harvest(Xworld.pop)", 9);
+  t_eq("an edit at the cursor after output", term_show(u), "tick 9|mettle> harvest(Xworld.pop)@1,17");
+
+  var v: Term* = term_new();
+  typed(v, p, "a long input line", 17);
+  term_play(v, shx_term_above(p, "a long input line", 17, "x\n"));
+  t_eq("output shorter than the input leaves no input behind", term_show(v), "x|mettle> a long input line@1,25");
+  term_play(v, shx_term_above(p, "", 0, "y\n"));
+  t_eq("an empty input", term_show(v), "x|y|mettle> @2,8");
+
+  say("");
+  say("shell_term_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  flush_out();
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}

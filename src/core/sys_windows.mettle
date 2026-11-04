@@ -193,6 +193,21 @@ export fn sys_read_byte() -> int32 {
   return -1;
 }
 
+export fn sys_fifo_open(path: string) -> int32 {
+  return -1;
+}
+
+export fn sys_fd_drain(fd: int32, b: Buf*) -> int64 {
+  return 0;
+}
+
+export fn sys_fd_close(fd: int32) {
+}
+
+export fn sys_wait_input(fd: int32, ms: int64) -> int32 {
+  return 1;
+}
+
 export fn sys_pid_alive(pid: int64) -> bool {
   return false;
 }
