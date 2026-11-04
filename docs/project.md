@@ -258,7 +258,8 @@ error: service db: port 6543 not open after 1.0s
 ### Native code, components, rules
 
 `mb_c_sources`, `mb_c_include`, `mb_c_flags`, `mb_c_libs`, `mb_link_libs`,
-`mb_link_paths`, `mb_pkgconfig` are in [native code](native.md).
+`mb_link_lib_any`, `mb_link_paths`, `mb_pkgconfig` are in
+[native code](native.md).
 `mb_component`, `mb_component_on`, `mb_use` and `mb_rule` are in
 [components](components.md).
 

@@ -30,6 +30,7 @@ struct NatPkg {
   depth: int64;       // requirement depth from the root (link order)
   lib_path: string;   // the built C library, "" when none
   mi: int64;          // index in DepState mods, -1 for the root
+  any_libs: StrList*; // the pick of each mb_link_lib_any list
 }
 
 // Everything known about native code for one target.
@@ -273,6 +274,7 @@ fn natx_load_pkgs(c: NatCtx*) {
   root.depth = 0;
   root.lib_path = s_empty();
   root.mi = -1;
+  root.any_libs = sl_new();
   natx_push_pkg(c, root);
   var i: int64 = 0;
   while (c->ds != 0 && i < c->ds->n) {
@@ -305,6 +307,7 @@ fn natx_load_pkgs(c: NatCtx*) {
     pk.depth = 1;
     pk.lib_path = s_empty();
     pk.mi = i;
+    pk.any_libs = sl_new();
     natx_push_pkg(c, pk);
     i = i + 1;
   }
@@ -376,6 +379,13 @@ fn natx_list(c: NatCtx*, i: int64, section_key: string) -> StrList* {
     return sl_new();
   }
   return man_os_list(m, section_key, c->os);
+}
+
+// [link] libs, then the picks of libs-any.
+fn natx_libs(c: NatCtx*, i: int64) -> StrList* {
+  var l: StrList* = natx_list(c, i, "link.libs");
+  sl_extend(l, c->pkgs[i].any_libs);
+  return l;
 }
 
 fn natx_manifest_file(c: NatCtx*, i: int64) -> string {
@@ -834,7 +844,7 @@ fn natx_link_deps(c: NatCtx*, i: int64, cm: Cmd*) -> StrList* {
       }
       q = q + 1;
     }
-    var libs: StrList* = natx_list(c, dj, "link.libs");
+    var libs: StrList* = natx_libs(c, dj);
     q = 0;
     while (q < libs->len) {
       var ln: string = sl_get(libs, q);
@@ -1069,7 +1079,7 @@ fn natx_gather(c: NatCtx*) {
       sl_push(abs_paths, d);
       k = k + 1;
     }
-    var libs: StrList* = natx_list(c, i, "link.libs");
+    var libs: StrList* = natx_libs(c, i);
     k = 0;
     while (k < libs->len) {
       var ln: string = sl_get(libs, k);
@@ -1109,10 +1119,78 @@ fn natx_gather(c: NatCtx*) {
   }
 }
 
+// The file a link name stands for: libx.so / x.dll, or the exact :file.
+fn natx_lib_shown(c: NatCtx*, name: string) -> string {
+  if (s_starts(name, ":")) {
+    return s_from(name, 1);
+  }
+  if (natx_is_windows(c)) {
+    return name + ".dll";
+  }
+  return "lib" + name + ".so";
+}
+
+// mb_link_lib_any: for each list of every package, the first name the
+// linker would find (the graph's mb_link_paths, then the standard dirs).
+fn natx_pick_any(c: NatCtx*) {
+  var dirs: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < c->n) {
+    var paths: StrList* = natx_list(c, i, "link.paths");
+    var k: int64 = 0;
+    while (k < paths->len) {
+      sl_add_uniq(dirs, p_clean(p_join(c->pkgs[i].dir, s_replace_byte(sl_get(paths, k), 92, 47))));
+      k = k + 1;
+    }
+    natx_free_list(paths);
+    i = i + 1;
+  }
+  var saved: StrList* = c->ldirs;
+  c->ldirs = dirs;
+  i = 0;
+  while (i < c->n) {
+    var groups: StrList* = natx_list(c, i, "link.libs-any");
+    var g: int64 = 0;
+    while (g < groups->len) {
+      var csv: string = sl_get(groups, g);
+      var names: StrList* = s_split(csv, 44);
+      var tried: StrList* = sl_new();
+      var pick: string = s_empty();
+      var k: int64 = 0;
+      while (k < names->len && slen(pick) == 0) {
+        var nm: string = s_trim(sl_get(names, k));
+        if (slen(nm) > 0) {
+          sl_push(tried, natx_lib_shown(c, nm));
+          var found: StrList* = natx_resolve(c, nm);
+          if (found->len > 0) {
+            pick = nm;
+          }
+          natx_free_list(found);
+        }
+        k = k + 1;
+      }
+      var call: string = "mb_link_lib_any(\"" + csv + "\") of " + c->pkgs[i].label;
+      if (slen(pick) == 0) {
+        fail_hint(call + ": no library found for " + c->os + " (tried " + sl_join(tried, ", ") + ")", "install one, or add its directory with mb_link_paths in " + natx_manifest_file(c, i) + "; searched the mb_link_paths directories, then the standard ones (docs/native.md)");
+      }
+      verbose(call + ": linking " + pick);
+      sl_push(c->pkgs[i].any_libs, pick);
+      natx_free_list(names);
+      natx_free_list(tried);
+      g = g + 1;
+    }
+    natx_free_list(groups);
+    i = i + 1;
+  }
+  c->ldirs = saved;
+  natx_free_list(dirs);
+}
+
 // Builds every C library of the graph, dependencies before their dependents
 // (a C library links the C libraries below it), then gathers the link
 // inputs, dependents first.
 fn natx_prepare_ctx(c: NatCtx*) {
+  natx_pick_any(c);
   var i: int64 = c->n - 1;
   while (i >= 0) {
     if (c->pkgs[i].man != 0 && man_has_c(c->pkgs[i].man)) {

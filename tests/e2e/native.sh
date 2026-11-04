@@ -497,6 +497,26 @@ if [ $MINGW = 1 ] && [ $WINE = 1 ]; then
   check "replace under wine: C built from the real directory" has "$R/.mbuild/cache/windows/c/cdup2/dup.c.o.d" "cdup2-local/dup.c"
 fi
 
+echo "== link fallbacks"
+# libs-any: the first name on the search path wins; a dependency's pick reaches the app
+L="$W/anyl"
+LD="$L/.mbuild/deps/anydep"
+mkdir -p "$L/src" "$LD/lib"
+printf '[package]\nname = "app"\n\n[dependencies]\nanydep = "v0.1.0"\n\n[link]\nlibs-any = ["nosuch_zz, m"]\n' > "$L/manifest.toml"
+printf 'fn main() -> int32 {\n  return 0;\n}\n' > "$L/src/main.mettle"
+printf 'anydep=./.mbuild/deps/anydep\n' > "$L/mettle.deps"
+printf '[package]\nname = "anydep"\nversion = "v0.1.0"\n\n[link]\npaths = ["lib"]\nlibs-any = ["nosuch_yy, :libalt.so.2"]\n' > "$LD/manifest.toml"
+echo 'int alt_val(void) { return 2; }' > "$W/alt.c"
+gcc -shared -fPIC -o "$LD/lib/libalt.so.2" -Wl,-soname,libalt.so.2 "$W/alt.c"
+prepare "$L" linux "$W/a1" && ok "fallbacks: prepare linux" || bad "fallbacks: prepare linux" "$W/a1"
+check "fallbacks: a missing first name falls back to the second" has "$W/a1" "^arg -lm$"
+check "fallbacks: the missing name is not linked" hasnt "$W/a1" "nosuch"
+check "fallbacks: a dependency's pick reaches the app" has "$W/a1" "^arg -l:libalt.so.2$"
+check "fallbacks: ... and ships beside the binary" has "$W/a1" "^copy .*/lib/libalt.so.2$"
+sed -i 's|libs-any = \["nosuch_zz, m"\]|libs-any = ["nosuch_a, :libnosuch_b.so.9"]|' "$L/manifest.toml"
+prepare "$L" linux "$W/a2" && bad "fallbacks: none resolving fails" "$W/a2" || ok "fallbacks: none resolving fails"
+check "fallbacks: the error lists what was tried" hasf "$W/a2" 'mb_link_lib_any("nosuch_a, :libnosuch_b.so.9") of app: no library found for linux (tried libnosuch_a.so, libnosuch_b.so.9)'
+
 echo "== importing yourself"
 S="$W/selfy"
 mkdir -p "$S/csrc" "$S/cmd/demo" "$S/.mbuild/deps"

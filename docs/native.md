@@ -16,7 +16,7 @@ and [Shared libraries](https://github.com/The-Mettle-Project/Mettle/blob/main/do
 | Calls | For |
 |---|---|
 | `mb_c_sources`, `mb_c_include`, `mb_c_flags`, `mb_c_libs` | C source files that belong to the package. mbuild compiles them into one shared library per package. |
-| `mb_link_libs`, `mb_link_paths`, `mb_pkgconfig` | Libraries that already exist: system libraries, pkg-config packages, prebuilt `.so` and `.dll` files shipped in the package. |
+| `mb_link_libs`, `mb_link_lib_any`, `mb_link_paths`, `mb_pkgconfig` | Libraries that already exist: system libraries, pkg-config packages, prebuilt `.so` and `.dll` files shipped in the package. |
 
 Each takes a comma-separated list. After `mb_on("linux")` or
 `mb_on("windows")` they add to that target only, until `mb_on("")`.
@@ -169,6 +169,32 @@ $ readelf -d build/linux/debug/vend | grep -i 'needed\|runpath'
 ```
 
 Ship one directory per target and the program finds its libraries.
+
+### Fallbacks
+
+`mb_link_lib_any` links one library: the first name in its list that the
+linker would find. Use it when a system ships a library without the
+development link (`libsodium.so`), only the versioned file:
+
+```mettle
+  mb_link_lib_any("sodium, :libsodium.so.23");
+```
+
+`x` means `libx.so` (`x.dll` for Windows), `:file` that exact file. mbuild
+looks at build time in the `mb_link_paths` directories of the whole build,
+then, for Linux, `/usr/local/lib/x86_64-linux-gnu /usr/local/lib64
+/usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib
+/lib/x86_64-linux-gnu /lib64 /lib`; for Windows, `PATH` (on Windows) and
+system32. Each call is one list, `mb_on` applies, and a dependency's pick
+links into its dependents like `mb_link_libs`. When nothing is found:
+
+```text
+$ mbuild build
+error: mb_link_lib_any("openlibm, :libm.so.9") of mathy: no library found for linux (tried libopenlibm.so, libm.so.9)
+  help: install one, or add its directory with mb_link_paths in mbuild.mettle; searched the mb_link_paths directories, then the standard ones (docs/native.md)
+```
+
+`-v` shows the pick: `mb_link_lib_any("openlibm, m") of mathy: linking m`.
 
 ## Shipping
 

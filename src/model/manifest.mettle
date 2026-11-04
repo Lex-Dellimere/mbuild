@@ -559,7 +559,7 @@ fn mnx_known_keys(section: string) -> StrList* {
     return mnx_list("sources include cflags libs");
   }
   if (s_eq(section, "link") || s_eq(section, "link.linux") || s_eq(section, "link.windows")) {
-    return mnx_list("libs paths pkgconfig");
+    return mnx_list("libs libs-any paths pkgconfig");
   }
   if (s_starts(section, "dependencies.")) { return mnx_dep_fields(); }
   return sl_new();
@@ -1830,7 +1830,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
     i = i + 1;
   }
   mnx_check_lists(m, "c", "sources include cflags libs");
-  mnx_check_lists(m, "link", "libs paths pkgconfig");
+  mnx_check_lists(m, "link", "libs libs-any paths pkgconfig");
   if (slen(m->error) > 0) {
     return m;
   }

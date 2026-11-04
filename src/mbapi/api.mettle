@@ -843,6 +843,11 @@ export fn mb_link_libs(csv: string) {
   mbi_put(mbi_os_section("link"), "libs", mbi_csv_literal(csv));
 }
 
+// One library: the first of csv the linker finds ("sodium, :libsodium.so.23").
+export fn mb_link_lib_any(csv: string) {
+  mbi_append(mbi_os_section("link"), "libs-any", mbi_quote(csv));
+}
+
 // Directories searched for those libraries; libraries found there ship beside the binary.
 export fn mb_link_paths(csv: string) {
   mbi_put(mbi_os_section("link"), "paths", mbi_csv_literal(csv));

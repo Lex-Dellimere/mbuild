@@ -214,6 +214,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     if (s_eq(key, "libs")) { sl_push(c, "mb_c_libs||" + section); }
   } else if (s_eq(section, "link") || s_starts(section, "link.")) {
     if (s_eq(key, "libs")) { sl_push(c, "mb_link_libs||" + section); }
+    if (s_eq(key, "libs-any")) { sl_push(c, "mb_link_lib_any||" + section); }
     if (s_eq(key, "paths")) { sl_push(c, "mb_link_paths||" + section); }
     if (s_eq(key, "pkgconfig")) { sl_push(c, "mb_pkgconfig||" + section); }
   } else if (s_starts(section, "bin.") || s_starts(section, "profile.")) {
