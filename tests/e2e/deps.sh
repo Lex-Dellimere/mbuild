@@ -469,6 +469,20 @@ fn main() -> int32 { return 0; }' proj "$P" </dev/null
 mb "$P" build
 check "build: E0006" has "$S/last.out" "E0006"
 check "build: no registry note" has "$S/last.out" "no registry has a package named nosuch"
+L="$S/blib"
+proj "$L" </dev/null
+rm -rf "$L/src"
+printf 'export fn bl() -> int32 { return 4; }\n' >"$L/blib.mettle"
+mb "$L" check
+check "a path package built on its own has its own API file" [ -f "$L/.mbuild/api/mbuild/api.mettle" ]
+P="$S/b-pathapp"
+MAIN='import "blib/blib";
+fn main() -> int32 { return bl() - 4; }' proj "$P" <<'EOF'
+mb_dep_path("blib", "../blib");
+EOF
+mb "$P" run
+check "a path package with its own API file: one API" code_is 0
+check "... no duplicate declaration" hasnt "$S/last.out" "Duplicate declaration"
 
 echo
 echo "deps: $pass passed, $failed failed"
