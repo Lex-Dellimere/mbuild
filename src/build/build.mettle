@@ -4318,44 +4318,25 @@ fn bx_registry_dir(p: Project*, to: string, registry: string) -> string {
   return dir;
 }
 
-// The index of name in a registry directory: versions and their archive
-// sha256, parallel; yanked ones too.
-struct BxIndex {
-  vers: StrList*;
-  shas: StrList*;
-}
-
-fn bx_read_index(dir: string, name: string) -> BxIndex* {
-  var ix: BxIndex* = new BxIndex;
-  ix->vers = sl_new();
-  ix->shas = sl_new();
+// The versions in the index of name in a registry directory, yanked ones too.
+fn bx_index_versions(dir: string, name: string) -> StrList* {
+  var vers: StrList* = sl_new();
   var rd: FsRead = fs_read(dir + "/index/" + name);
   if (!rd.ok) {
-    return ix;
+    return vers;
   }
   var lines: StrList* = s_lines(rd.data);
   var i: int64 = 0;
   while (i < lines->len) {
     var f: StrList* = s_fields(sl_get(lines, i));
     i = i + 1;
-    if (f->len == 0 || s_starts(sl_get(f, 0), "#") || !sv_is(sl_get(f, 0))) {
-      free(f);
-      continue;
+    if (f->len > 0 && !s_starts(sl_get(f, 0), "#") && sv_is(sl_get(f, 0))) {
+      sl_push(vers, sv_canonical(sl_get(f, 0)));
     }
-    var sha: string = "";
-    var k: int64 = 1;
-    while (k < f->len) {
-      if (s_starts(sl_get(f, k), "sha256=")) {
-        sha = s_from(sl_get(f, k), 7);
-      }
-      k = k + 1;
-    }
-    sl_push(ix->vers, sv_canonical(sl_get(f, 0)));
-    sl_push(ix->shas, sha);
     free(f);
   }
   free(lines);
-  return ix;
+  return vers;
 }
 
 fn bx_size_text(n: int64) -> string {
@@ -4507,66 +4488,6 @@ fn bx_pub_manifest(p: Project*) -> string {
   return buf_take(b);
 }
 
-// Step 4: the API against the newest earlier version of the same line in
-// the registry directory. "" or the error report.
-fn bx_pub_api(p: Project*, dir: string, ix: BxIndex*, version: string) -> string {
-  var name: string = p->man->name;
-  var prev: string = "";
-  var prev_sha: string = "";
-  var i: int64 = 0;
-  while (i < ix->vers->len) {
-    var v: string = sl_get(ix->vers, i);
-    if (s_eq(sv_line(v), sv_line(version)) && sv_cmp(v, version) < 0 && (slen(prev) == 0 || sv_cmp(v, prev) > 0)) {
-      prev = v;
-      prev_sha = sl_get(ix->shas, i);
-    }
-    i = i + 1;
-  }
-  if (slen(prev) == 0) {
-    return s_empty();
-  }
-  var dest: string = p->state_dir + "/tmp/api/" + name + "@" + prev;
-  if (!fs_is_dir(dest)) {
-    var archive: string = dir + "/pkg/" + name + "/" + name + "-" + prev + ".tar.gz";
-    var err: string = reg_extract(archive, prev_sha, dest, name + " " + prev + " sha256:" + prev_sha);
-    if (slen(err) > 0) {
-      warn("cannot compare the API with " + name + " " + prev + ": " + err);
-      return s_empty();
-    }
-  }
-  var d: ApiDiff* = api_diff(api_surface_dir(dest), api_surface_dir(p->root));
-  var br: ApiDiff* = api_breaking(d);
-  var report: string = s_empty();
-  if (br->what->len > 0) {
-    report = name + " " + version + " breaks the API of " + prev + ":\n" + api_render(br, (StrList*)0) + "\n  help: a breaking change needs a new line: publish " + bx_next_line(version) + " (or pass --allow-breaking)";
-  } else if (d->what->len > 0 && s_eq(bx_minor_of(prev), bx_minor_of(version))) {
-    warn(name + " " + version + " adds exports with only a patch bump over " + prev + "; consider a minor version");
-  }
-  free(d);
-  free(br);
-  return report;
-}
-
-// "v1.2.3" -> "v1.2"
-fn bx_minor_of(v: string) -> string {
-  var dot: int64 = s_rfind_byte(v, 46);
-  if (dot < 0) {
-    return v;
-  }
-  return s_sub(v, 0, dot);
-}
-
-// The first version of the next compatibility line: v2.0.0, or v0.N+1.0.
-fn bx_next_line(v: string) -> string {
-  var sv: SemVer = sv_parse(v);
-  if (sv.major == 0) {
-    var m: int64 = sv.minor + 1;
-    return "v0.{m}.0";
-  }
-  var mj: int64 = sv.major + 1;
-  return "v{mj}.0.0";
-}
-
 // mbuild publish [--to DIR] [--registry NAME] [--dry-run] [--allow-breaking] [--no-verify]
 export fn build_cmd_publish(p: Project*) -> int32 {
   var to: string = bx_take_opt(p, "--to");
@@ -4587,14 +4508,14 @@ export fn build_cmd_publish(p: Project*) -> int32 {
   if (!fs_is_file(dir + "/registry.toml")) {
     fail_hint(dir + " is not a registry (no registry.toml)", "make one with `mbuild registry init " + bx_show(dir) + "`");
   }
-  var ix: BxIndex* = bx_read_index(dir, name);
-  if (sl_has(ix->vers, version)) {
+  var vers: StrList* = bx_index_versions(dir, name);
+  if (sl_has(vers, version)) {
     fail(name + " " + version + " is already in " + bx_show(dir) + "; publish a new version");
   }
   var newest: string = "";
   var i: int64 = 0;
-  while (i < ix->vers->len) {
-    var v: string = sl_get(ix->vers, i);
+  while (i < vers->len) {
+    var v: string = sl_get(vers, i);
     if (s_eq(sv_line(v), sv_line(version)) && sv_cmp(v, version) > 0 && (slen(newest) == 0 || sv_cmp(v, newest) > 0)) {
       newest = v;
     }
@@ -4629,7 +4550,7 @@ export fn build_cmd_publish(p: Project*) -> int32 {
     warn("mbuild.mettle replaces dependencies; users of " + name + " ignore that");
   }
   if (!allow) {
-    var rep: string = bx_pub_api(p, dir, ix, version);
+    var rep: string = deps_api_breaks(p, name, version, dir);
     if (slen(rep) > 0) {
       bx_fail_text(rep);
     }

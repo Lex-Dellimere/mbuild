@@ -5,7 +5,7 @@
 // Commands: ensure | add-missing NAME... | auto NAME... | get SPEC... | remove NAME... |
 // update [NAME... | --all] | tidy USED... | deps [--tree] | fetch | why NAME |
 // outdated [NAME] | adopt | plan [--all] [--major] [NAME...] | apply NAME VERSION... |
-// restore-after NAME VERSION... | api NAME FROM TO [--added] | breaks NAME VERSION |
+// restore-after NAME VERSION... | api NAME FROM TO [--added] | breaks NAME VERSION [DIR] |
 // mettle | vendor [--remove]
 // The project's mbuild.mettle is loaded with cfg_load. `ensure` prints one
 // line per selected package:
@@ -176,7 +176,11 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     q->with_added = sl_has(opts->rest, "--added");
     say(deps_api_report(p, q));
   } else if (s_eq(command, "breaks")) {
-    var rep: string = deps_api_breaks(p, sl_get(opts->rest, 0), sl_get(opts->rest, 1));
+    var dir: string = s_empty();
+    if (opts->rest->len > 2) {
+      dir = sl_get(opts->rest, 2);
+    }
+    var rep: string = deps_api_breaks(p, sl_get(opts->rest, 0), sl_get(opts->rest, 1), dir);
     if (slen(rep) == 0) {
       say("NO BREAKS");
     } else {

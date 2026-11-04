@@ -4046,13 +4046,20 @@ fn dx_next_line(version: string) -> string {
 }
 
 // publish step 4 (14.7): the project's surface against the newest earlier
-// version of name in version's line, from the registry. "" when nothing
-// breaks (or there is no earlier version), else the report.
-export fn deps_api_breaks(p: Project*, name: string, version: string) -> string {
+// version of name in version's line, from the registry directory dir (""
+// = the registry order). "" when nothing breaks (or there is no earlier
+// version), else the error with its help line; added exports with only a
+// patch bump are a warning.
+export fn deps_api_breaks(p: Project*, name: string, version: string, dir: string) -> string {
   if (!sv_is(version)) {
     return s_empty();
   }
-  var ix: RegIndex* = reg_find(p, name, "", !p->opts->offline);
+  var ix: RegIndex* = (RegIndex*)0;
+  if (slen(dir) > 0) {
+    ix = reg_index_dir(p, dir, name, !p->opts->offline);
+  } else {
+    ix = reg_find(p, name, "", !p->opts->offline);
+  }
   g_dx_last_ix = ix;
   if (!ix->ok || !ix->found) {
     return s_empty();
@@ -4073,16 +4080,25 @@ export fn deps_api_breaks(p: Project*, name: string, version: string) -> string 
   }
   var old: ApiSurface* = dx_surface_ix(p, ix, prev);
   if (old == (ApiSurface*)0) {
+    warn("cannot compare the API with " + name + " " + prev + " (mbuild -v says why)");
     return s_empty();
   }
-  var d: ApiDiff* = api_breaking(api_diff(old, api_surface_dir(p->root)));
+  var all: ApiDiff* = api_diff(old, api_surface_dir(p->root));
+  var d: ApiDiff* = api_breaking(all);
   var n: int64 = d->what->len;
   var listed: string = api_render(d, sl_new());
   free(d);
   if (n == 0) {
+    var a: SemVer = sv_parse(prev);
+    var b: SemVer = sv_parse(version);
+    if (all->what->len > 0 && a.major == b.major && a.minor == b.minor) {
+      warn(name + " " + version + " adds exports with only a patch bump over " + prev + "; consider a minor version");
+    }
+    free(all);
     return s_empty();
   }
-  return "  API changes from " + prev + " to " + version + " (inside line " + sv_line(version) + ", which should not break):\n" + listed + "\n  a breaking change needs a new line: publish " + dx_next_line(version);
+  free(all);
+  return name + " " + version + " breaks the API of " + prev + " (inside line " + sv_line(version) + ", which should not break):\n" + listed + "\n  help: a breaking change needs a new line: publish " + dx_next_line(version) + " (or pass --allow-breaking)";
 }
 
 // ---------------------------------------------------------------------------
