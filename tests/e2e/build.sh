@@ -542,6 +542,22 @@ ln -s "$METTLE" "$S/mettle-link"
 MBUILD_METTLE_LINUX="$S/mettle-link" mb doctor
 check "the variable wins" has "MBUILD_METTLE_LINUX"
 
+proj "$W/cmdout" </dev/null
+cd "$W/cmdout" || exit 1
+printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
+cat >> mbuild.mettle <<'EOF'
+
+// out: what mb_cmd_output gives
+fn cmd_out(a: MbArgs*) -> int32 {
+  var c: MbCmd* = mb_cmd("printf");
+  mb_cmd_arg(c, "one\\ntwo\\n\\n");
+  mb_say("[" + mb_cmd_output(c) + "]");
+  return 0;
+}
+EOF
+mb out
+check "mb_cmd_output drops one trailing newline" sh -c 'printf "[one\ntwo\n]\n" | cmp -s - "$0"' "$S/last.out"
+
 echo "== packages from the registry"
 cp -r "$F/app" "$W/fxapp"
 cd "$W/fxapp" || exit 1

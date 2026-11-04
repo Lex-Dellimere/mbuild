@@ -371,6 +371,9 @@ check "get pre-release: the lines" has "$S/last.out" "v2.0.0-rc.1 (line v2) by m
 check "get pre-release: restored" has "$S/last.out" "Restored mbuild.mettle and mbuild.lock"
 check "get pre-release: lock unchanged" cmp -s "$P/mbuild.lock" "$S/getup.lock"
 check "get pre-release: mbuild.mettle unchanged" cmp -s "$P/mbuild.mettle" "$S/getup.mettle"
+drv "$P" get strutil@v2
+check "a partial version skips pre-releases" has "$S/last.out" "error: strutil has no stable version v2 (required by the command line); its pre-releases: v2.0.0-rc.1"
+check "and names the full version" has "$S/last.out" "help: a pre-release is selected only by its full version, e.g. strutil@v2.0.0-rc.1"
 drv "$P" get strutil@v1
 check "get @v1 takes the highest v1" has "$P/mbuild.mettle" 'mb_dep("strutil", "v1.1.0");'
 drv "$P" get strutil@v1.9.0

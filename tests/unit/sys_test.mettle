@@ -520,6 +520,25 @@ fn test_jobs(dir: string) {
   free(codes2);
 }
 
+fn views_tail() -> string {
+  return "rel/file.mettle";
+}
+
+// Views into a temporary `a + b` argument stay valid: each junk string has
+// its view's source length, so it would reuse a freed block.
+fn test_views() {
+  var d: string = p_dir("/to/vendor/x7/" + views_tail());
+  var j1: string = "##############" + views_tail();
+  var b: string = p_base("/to/" + views_tail());
+  var j2: string = "####" + views_tail();
+  var t: string = s_trim("  " + views_tail() + "  ");
+  var j3: string = "##" + views_tail() + "##";
+  var l: StrList* = s_split("a/" + views_tail(), 47);
+  var j4: string = "##" + views_tail();
+  check_eq("views into temporaries", "{d}|{b}|{t}|{sl_join(l, ",")}|{slen(j1) + slen(j2) + slen(j3) + slen(j4)}", "/to/vendor/x7/rel|file.mettle|rel/file.mettle|a,rel,file.mettle|84");
+  free(l);
+}
+
 // Links (sys_make_link, sys_is_link, sys_remove_link) and sys_remove_tree over them.
 fn test_links(dir: string) {
   check("links: mkdirs", fs_mkdirs(dir));
@@ -577,6 +596,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   var dir: string = fs_temp_dir() + "/mbuild-sys_test-" + sys_os() + "-{sys_now_ms()}";
   sys_remove_tree(dir);
   test_path();
+  test_views();
   test_basics();
   test_fs(dir);
   test_tools(dir);

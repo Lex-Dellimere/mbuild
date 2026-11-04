@@ -35,8 +35,15 @@ line mcheck $code "$logs/mcheck.log" $(($(date +%s) - start))
 suites="${*:-build config registry deps api components init native toolchain platform}"
 for s in $suites; do
   start=$(date +%s)
-  MBTEST_TMP="$base/$s" sh "$here/tests/e2e/$s.sh" >"$logs/$s.log" 2>&1
-  line "$s" $? "$logs/$s.log" $(($(date +%s) - start))
+  # from an empty directory, which must stay empty (a dangling view once made garbage dirs)
+  cwd="$base/cwd-$s"
+  rm -rf "$cwd"
+  mkdir -p "$cwd"
+  ( cd "$cwd" && MBTEST_TMP="$base/$s" sh "$here/tests/e2e/$s.sh" ) >"$logs/$s.log" 2>&1
+  code=$?
+  left=$(cd "$cwd" && LC_ALL=C find . -mindepth 1 | cat -v)
+  [ -z "$left" ] || { printf 'FAIL left in the working directory:\n%s\n' "$left" >>"$logs/$s.log"; code=1; }
+  line "$s" $code "$logs/$s.log" $(($(date +%s) - start))
 done
 
 skipped=$(cat "$logs"/*.log | grep -h '^note: .*skipped\|^\[windows\] skipped' | sort | uniq -c | sed 's/^ *//')
