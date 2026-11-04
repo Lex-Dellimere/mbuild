@@ -92,12 +92,15 @@ mbuild skips dot directories, `build/` directories, path packages and nested
 projects (a subdirectory with its own `mbuild.mettle`); run `mbuild test`
 inside a nested project to test it.
 
+Test programs ([project](project.md#test-programs)) are cached the same way,
+by their build inputs.
+
 `mettle test` runs tests in the compiler's interpreter, which can't call C.
 When a test that reaches an `extern` fails, mbuild says so:
 
 ```text
 FAILED src/e_test.mettle
-note: `mettle test` runs tests in the compiler's interpreter, which cannot call C functions: the externs this file reaches (say_c) give an undefined result there. Test code that needs them in a program (`mbuild run`).
+note: `mettle test` runs tests in the compiler's interpreter, which cannot call C functions: the externs this file reaches (say_c) give an undefined result there. Test code that needs them in a test program (mb_test_bin, docs/project.md).
 ```
 
 ## Dependencies

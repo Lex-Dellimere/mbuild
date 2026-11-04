@@ -192,6 +192,8 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     sl_push(c, "mb_replace_version|" + key + "|");
   } else if (s_eq(section, "dep-bins")) {
     sl_push(c, "mb_dep_bin|" + key + "|");
+  } else if (s_eq(section, "test-bins")) {
+    sl_push(c, "mb_test_bin|" + key + "|");
   } else if (s_eq(section, "rules")) {
     sl_push(c, "mb_rule||");
   } else if (s_eq(section, "tools")) {

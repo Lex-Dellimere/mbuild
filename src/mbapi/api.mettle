@@ -709,6 +709,11 @@ export fn mb_bin_kind(name: string, kind: string, triple: string) {
   }
 }
 
+// A program `mbuild test` builds and runs; exit 0 passes ("" = tests/<name>_test.mettle).
+export fn mb_test_bin(name: string, main: string) {
+  mbi_put("test-bins", name, mbi_quote(main));
+}
+
 // A dependency from the registries: "v1.2.0" (minimum), "v1", "latest".
 export fn mb_dep(name: string, version: string) {
   mbi_put("dependencies", name, mbi_quote(version));

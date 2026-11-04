@@ -455,6 +455,46 @@ mb test src/calc.mettle
 check "test with an explicit file" code_is 0
 rm src/broken_test.mettle
 
+# test programs: a library with C code, tests/NAME_test.mettle with fn main
+proj "$W/adder" <<'EOF'
+mb_c_sources("csrc");
+EOF
+cd "$W/adder" || exit 1
+mkdir -p csrc tests
+printf 'int ad_add(int a, int b) { return a + b; }\n' > csrc/add.c
+printf 'export extern fn ad_add(a: int32, b: int32) -> int32 = "ad_add";\n\n@test fn pure() -> int32 {\n  return 0;\n}\n' > src/adder.mettle
+printf 'import "adder/src/adder";\nfn main() -> int32 {\n  return ad_add(2, 3) - 5;\n}\n' > tests/add_test.mettle
+mb test
+check "a test program calls the package's C code" sh -c 'grep -qF "ok     add (tests/add_test.mettle)" "$0/last.out" && grep -qF "ok     src/adder.mettle (1 passed)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "... after the @test files, one summary" sh -c 'grep "^ok" "$0/last.out" | head -1 | grep -q adder.mettle && [ "$(grep -c "^test result: ok. 2 passed, 0 cached, 0 failed" "$0/last.out")" = 1 ]' "$S"
+check "... built into .mbuild/test-bins" test -x .mbuild/test-bins/linux/debug/add
+mb test
+check "a passing test program is cached" has "ok     add (tests/add_test.mettle) (cached)"
+check "... and not rebuilt" hasnt "Compiling test add"
+printf 'import "std/io";\nfn main() -> int32 {\n  println("expected 4, got 5");\n  return 3;\n}\n' > tests/bad_test.mettle
+mb test
+check "a failing test program fails the run" code_is 1
+check "... with its output" sh -c 'grep -qxF "expected 4, got 5" "$0/last.out" && grep -qF "FAILED bad (tests/bad_test.mettle) (exit 3)" "$0/last.out"' "$S"
+mb test
+check "a failing test program is never cached" has "FAILED bad"
+mb test add
+check "test NAME runs one test program" sh -c 'grep -qF "ok     add" "$0/last.out" && ! grep -q "bad\|adder.mettle" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb test nope
+check "an unknown test program lists them" has "help: the test programs are: add, bad"
+mb test -r add
+check "test -r builds release" sh -c 'grep -qF "Compiling test add (linux, release)" "$0/last.out" && [ -x .mbuild/test-bins/linux/release/add ]' "$S"
+mb build
+check "build skips test programs" sh -c '! grep -q "test add\|test bad" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+rm tests/bad_test.mettle
+printf '@test fn also() -> int32 {\n  return 9;\n}\n' >> tests/add_test.mettle
+mb test
+check "a test program's main file is no @test file" sh -c 'grep -qF "ok     add (tests/add_test.mettle)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+sed -i 's|  mb_c_sources("csrc");|&\n  mb_test_bin("sum", "tests/add_test.mettle");|' mbuild.mettle
+printf 'fn main() -> int32 {\n  return 1;\n}\n' > tests/bad_test.mettle
+mb test
+check "mb_test_bin replaces the detected ones" sh -c 'grep -qF "ok     sum (tests/add_test.mettle)" "$0/last.out" && ! grep -q "bad" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+cd "$W/app" || exit 1
+
 echo "== check, clean"
 mb check
 check "check passes" sh -c 'grep -qF "Checking app (linux)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"

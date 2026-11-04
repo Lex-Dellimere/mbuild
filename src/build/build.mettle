@@ -67,6 +67,7 @@ struct BxSess {
   dep: string;         // "" or the dependency whose bins this session builds (mb_dep_bin)
   app: Project*;       // the project they are built for (out dirs, profile); s->p itself otherwise
   app_profile: string;
+  tests: bool;         // the units are test programs (mb_test_bin)
 }
 
 // Objects other modules may keep pointers to: held here, never freed.
@@ -719,6 +720,7 @@ fn bx_sess_x(p: Project*, targets: StrList*, check_min: bool) -> BxSess* {
   s->dep = s_empty();
   s->app = p;
   s->app_profile = s->profile;
+  s->tests = false;
   s->mettles = (Mettle**)malloc((targets->len + 1) * 8);
   var i: int64 = 0;
   while (i < targets->len) {
@@ -776,6 +778,7 @@ struct BxUnit {
   cmp: CmpOut*;      // 0 when the build has no components and no rules
   entry: string;     // what the compiler gets: file, or the rules wrapper
   g: Graph*;
+  job: BxJob*;       // set by bx_compile_units
 }
 
 struct BxUnits {
@@ -800,6 +803,7 @@ fn bx_unit_add(us: BxUnits*, b: BinInfo*, file: string, ti: int64, target: strin
   u->cmp = (CmpOut*)0;
   u->entry = file;
   u->g = (Graph*)0;
+  u->job = (BxJob*)0;
   us->items = (BxUnit**)realloc(us->items, (us->n + 1) * 8);
   us->items[us->n] = u;
   us->n = us->n + 1;
@@ -879,6 +883,9 @@ fn bx_unit_cmp(s: BxSess*, u: BxUnit*, bin_for_files: string) {
   cb->bin = bin_for_files;
   if (u->b != (BinInfo*)0 && slen(bin_for_files) == 0) {
     cb->bin = s_replace_byte(u->b->name, 47, 95);
+    if (s->tests) {
+      cb->bin = "test-" + cb->bin;
+    }
   }
   cb->entry = u->file;
   cb->settings = bx_settings_of(s->p, s->profile, bx_unit_bin(u), bx_unit_os(u));
@@ -1687,6 +1694,9 @@ fn bx_stamp_ok(p: Project*, stamp: string, fp: string) -> bool {
 }
 
 fn bx_label(s: BxSess*, b: BinInfo*, t: TargetCtx*) -> string {
+  if (s->tests) {
+    return "test " + b->name + " (" + t->target + ", " + t->profile + ")";
+  }
   if (slen(s->dep) > 0) {
     return s->dep + "/" + b->name + " (" + t->target + ", " + t->profile + ")";
   }
@@ -1705,6 +1715,11 @@ fn bx_copy_beside(nl: NatLink*, t: TargetCtx*) {
   }
 }
 
+// Recorded when a test program (by its compile fingerprint) passed.
+fn bx_test_pass_stamp(p: Project*, fp: string) -> string {
+  return p->state_dir + "/stamps/test-bin-" + fp;
+}
+
 // One (bin, target) compile.
 struct BxJob {
   b: BinInfo*;
@@ -1715,7 +1730,7 @@ struct BxJob {
   outp: string;
   stamp: string;
   fp: string;
-  state: int32;     // 0 = to compile, 1 = fresh, 2 = cannot start
+  state: int32;     // 0 = to compile, 1 = fresh, 2 = cannot start, 3 = test passed before
   g: Graph*;
 }
 
@@ -1787,10 +1802,22 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   bx_hash_pgo(&h, p, st);
   free(st);
   j->fp = h_hex(&h);
-  j->stamp = p->state_dir + "/stamps/" + t->target + "-" + t->profile + "-" + b->name + ".stamp";
+  var tag: string = "";
+  if (s->tests) {
+    tag = "test-bin-";
+  }
+  j->stamp = p->state_dir + "/stamps/" + tag + t->target + "-" + t->profile + "-" + b->name + ".stamp";
 
+  if (s->tests && fs_is_file(j->outp) && bx_stamp_ok(p, bx_test_pass_stamp(p, j->fp), j->fp)) {
+    j->state = 3;
+    return j;
+  }
   if (fs_is_file(j->outp) && bx_stamp_ok(p, j->stamp, j->fp)) {
-    status("Fresh", bx_label(s, b, t));
+    if (s->tests) {
+      verbose("Fresh " + bx_label(s, b, t));
+    } else {
+      status("Fresh", bx_label(s, b, t));
+    }
     bx_copy_beside(nl, t);
     j->state = 1;
     return j;
@@ -1933,6 +1960,9 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
 fn bx_tctx_new(s: BxSess*, target: string, m: Mettle*) -> TargetCtx* {
   var t: TargetCtx* = targetctx_new(s->p, target, s->profile);
   t->out_dir = s->app->root + "/build/" + target + "/" + s->app_profile;
+  if (s->tests) {
+    t->out_dir = s->app->state_dir + "/test-bins/" + target + "/" + s->app_profile;
+  }
   // A dependency's bins share the app's native cache: its C builds once.
   t->cache_dir = s->app->state_dir + "/cache/" + target;
   t->app = s->app;
@@ -2011,6 +2041,7 @@ fn bx_compile_units(s: BxSess*, us: BxUnits*, built: StrList*) -> int32 {
     var u: BxUnit* = us->items[i];
     var at: int64 = bx_unit_tctx(s, u, ctxs, nls);
     var j: BxJob* = bx_plan(s, u, ctxs[at], nls[at]);
+    u->job = j;
     if (j->state == 2) {
       return 1;
     }
@@ -2452,34 +2483,63 @@ fn bx_owned_files(p: Project*) -> StrList* {
   return found;
 }
 
-fn bx_test_files(p: Project*) -> StrList* {
-  var files: StrList* = sl_new();
-  var given: StrList* = bx_positional(p->opts->rest);
-  defer free(given);
-  var cwd: string = bx_cwd();
-  var i: int64 = 0;
-  if (given->len > 0) {
-    while (i < given->len) {
-      var a: string = p_clean(p_join(cwd, bx_slash(sl_get(given, i))));
-      if (!fs_is_file(a)) {
-        fail("no such test file: " + sl_get(given, i));
+// Test programs: mb_test_bin, else tests/<name>_test.mettle files with fn main.
+fn bx_test_bins(p: Project*) -> BinSet* {
+  var bs: BinSet* = new BinSet;
+  bs->items = (BinInfo*)0;
+  bs->n = 0;
+  bs->root = p->root;
+  var decl: StrList* = p->man->test_bins;
+  if (decl->len > 0) {
+    var i: int64 = 0;
+    while (i < decl->len) {
+      var e: string = sl_get(decl, i);
+      var eq: int64 = s_find_byte(e, 61);
+      var mainp: string = s_from(e, eq + 1);
+      if (!fs_is_file(p->root + "/" + mainp)) {
+        fail("mb_test_bin(\"" + s_sub(e, 0, eq) + "\", ...): " + mainp + " does not exist");
       }
-      sl_push(files, a);
+      bx_binset_push(bs, s_sub(e, 0, eq), mainp);
       i = i + 1;
     }
-    return files;
+    return bs;
   }
+  var files: StrList* = sl_new();
+  defer free(files);
+  var dirs: StrList* = sl_new();
+  defer free(dirs);
+  if (sys_list_dir(p->root + "/tests", files, dirs)) {
+    sl_sort(files);
+    var k: int64 = 0;
+    while (k < files->len) {
+      var f: string = sl_get(files, k);
+      if (s_ends(f, "_test.mettle") && slen(f) > 12) {
+        var rd: FsRead = fs_read(p->root + "/tests/" + f);
+        if (rd.ok && scan_source(rd.data)->has_main) {
+          var rel: string = "tests/" + f;
+          bx_binset_push(bs, bx_safe_name(s_sub(f, 0, slen(f) - 12)), rel);
+        }
+      }
+      k = k + 1;
+    }
+  }
+  return bs;
+}
+
+// Files with @test functions, but the main files of test programs.
+fn bx_test_files(p: Project*, progs: BinSet*, files: StrList*) {
   var all: StrList* = bx_owned_files(p);
   defer free(all);
+  var i: int64 = 0;
   while (i < all->len) {
     var rel: string = sl_get(all, i);
-    var rd: FsRead = fs_read(p->root + "/" + rel);
-    if (rd.ok && scan_source(rd.data)->has_tests) {
-      sl_push(files, p->root + "/" + rel);
+    var abs: string = p->root + "/" + rel;
+    var rd: FsRead = fs_read(abs);
+    if (rd.ok && scan_source(rd.data)->has_tests && bx_bin_of_entry(progs, abs) == (BinInfo*)0) {
+      sl_push(files, abs);
     }
     i = i + 1;
   }
-  return files;
 }
 
 // "3 passed" from the compiler's summary line ("3 passed (x.mettle)").
@@ -2539,20 +2599,20 @@ fn bx_note_test_externs(g: Graph*, stdlib_dir: string) {
     if (names->len > 6) {
       shown = shown + ", ...";
     }
-    note("`mettle test` runs tests in the compiler's interpreter, which cannot call C functions: the externs this file reaches (" + shown + ") give an undefined result there. Test code that needs them in a program (`mbuild run`).");
+    note("`mettle test` runs tests in the compiler's interpreter, which cannot call C functions: the externs this file reaches (" + shown + ") give an undefined result there. Test code that needs them in a test program (mb_test_bin, docs/project.md).");
   }
   free(names);
 }
 
-export fn build_cmd_test(p: Project*) -> int32 {
-  var t0: int64 = sys_now_ms();
-  var files: StrList* = bx_test_files(p);
-  if (files->len == 0) {
-    status("Finished", "no test files (no function is marked @test)");
-    return 0;
-  }
-  var s: BxSess* = bx_sess(p, bx_targets_or_host(p));
-  g_bx_sess = s;
+struct BxTally {
+  passed: int64;
+  cached: int64;
+  failed: int64;
+}
+
+// The @test files: one `mettle test` each, cached by their fingerprint.
+fn bx_run_test_files(s: BxSess*, files: StrList*, n: BxTally*) {
+  var p: Project* = s->p;
   var bins: BinSet* = build_bins(p);
   var us: BxUnits* = bx_units_new();
   g_bx_units = us;
@@ -2566,9 +2626,6 @@ export fn build_cmd_test(p: Project*) -> int32 {
     ui = ui + 1;
   }
   bx_prepare(s, us, "test");
-  var passed: int64 = 0;
-  var cached: int64 = 0;
-  var failed: int64 = 0;
   var ti: int64 = 0;
   while (ti < s->targets->len) {
     var target: string = sl_get(s->targets, ti);
@@ -2606,7 +2663,7 @@ export fn build_cmd_test(p: Project*) -> int32 {
       var shown: string = bx_show(file) + suffix;
       if (bx_stamp_ok(p, stamp, fp)) {
         say(green("ok") + "     " + shown + " " + dim("(cached)"));
-        cached = cached + 1;
+        n->cached = n->cached + 1;
       } else {
         var cap: Captured = proc_capture_all(c);
         if (cap.code == 0) {
@@ -2619,12 +2676,12 @@ export fn build_cmd_test(p: Project*) -> int32 {
             summ = " (" + summ + ")";
           }
           say(green("ok") + "     " + shown + summ);
-          passed = passed + 1;
+          n->passed = n->passed + 1;
         } else {
           bx_print_block(cap.out);
           say(red("FAILED") + " " + shown);
           bx_note_test_externs(g, m->stdlib_dir);
-          failed = failed + 1;
+          n->failed = n->failed + 1;
         }
       }
       flush_out();
@@ -2632,8 +2689,149 @@ export fn build_cmd_test(p: Project*) -> int32 {
     }
     ti = ti + 1;
   }
-  var line: string = "{passed} passed, {cached} cached, {failed} failed in " + bx_secs(sys_now_ms() - t0);
-  if (failed > 0) {
+}
+
+// The test programs: built like the bins (into .mbuild/test-bins/), then run
+// from the root. One that passed with the same compile fingerprint is cached.
+fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
+  var p: Project* = s->p;
+  s->tests = true;
+  var us: BxUnits* = bx_bin_units(s, progs);
+  g_bx_units = us;
+  bx_prepare(s, us, s_empty());
+  var built: StrList* = sl_new();
+  defer free(built);
+  if (bx_compile_units(s, us, built) != 0) {
+    error_msg("could not build the test programs");
+    n->failed = n->failed + 1;
+    return;
+  }
+  var i: int64 = 0;
+  while (i < us->n) {
+    var j: BxJob* = us->items[i]->job;
+    var shown: string = j->b->name + " (" + j->b->main + ")";
+    if (s->targets->len > 1) {
+      shown = shown + " [" + j->t->target + "]";
+    }
+    var pass_stamp: string = bx_test_pass_stamp(p, j->fp);
+    if (j->state == 3) {
+      say(green("ok") + "     " + shown + " " + dim("(cached)"));
+      n->cached = n->cached + 1;
+    } else {
+      var c: Cmd* = tc_run_program_cmd(j->t->target, j->outp);
+      if (c == (Cmd*)0) {
+        say(red("FAILED") + " " + shown + ": cannot run a " + j->t->target + " program on this " + sys_os() + " host");
+        n->failed = n->failed + 1;
+      } else {
+        c->cwd = p->root;
+        var cap: Captured = proc_capture_all(c);
+        if (cap.code == 0) {
+          if (g_verbose) {
+            bx_print_block(cap.out);
+          }
+          fs_write(pass_stamp, j->fp + "\n");
+          say(green("ok") + "     " + shown);
+          n->passed = n->passed + 1;
+        } else {
+          bx_print_block(cap.out);
+          say(red("FAILED") + " " + shown + " (exit {cap.code})");
+          n->failed = n->failed + 1;
+        }
+        free(c);
+      }
+    }
+    flush_out();
+    i = i + 1;
+  }
+}
+
+fn bx_no_test_bins(p: Project*) -> BinSet* {
+  var none: BinSet* = new BinSet;
+  none->items = (BinInfo*)0;
+  none->n = 0;
+  none->root = p->root;
+  return none;
+}
+
+// The test programs whose names contain s ("" = all).
+fn bx_filter_bins(p: Project*, all: BinSet*, s: string) -> BinSet* {
+  var names: StrList* = sl_new();
+  defer free(names);
+  var i: int64 = 0;
+  while (i < all->n) {
+    if (slen(s) == 0 || s_contains(all->items[i].name, s)) {
+      sl_push(names, all->items[i].name);
+    }
+    i = i + 1;
+  }
+  if (names->len == all->n) {
+    return all;
+  }
+  if (names->len == 0) {
+    return bx_no_test_bins(p);
+  }
+  return bx_select_from(p, all, names);
+}
+
+// mbuild test [NAME | FILE]...: @test files, then test programs, one summary.
+export fn build_cmd_test(p: Project*) -> int32 {
+  var t0: int64 = sys_now_ms();
+  var all_progs: BinSet* = bx_test_bins(p);
+  var prog_names: StrList* = bx_bin_names(all_progs);
+  defer free(prog_names);
+  var given: StrList* = bx_positional(p->opts->rest);
+  defer free(given);
+  var files: StrList* = sl_new();
+  defer free(files);
+  var progs: BinSet* = all_progs;
+  if (given->len > 0) {
+    var picked: StrList* = sl_new();
+    defer free(picked);
+    var cwd: string = bx_cwd();
+    var i: int64 = 0;
+    while (i < given->len) {
+      var arg: string = sl_get(given, i);
+      var a: string = p_clean(p_join(cwd, bx_slash(arg)));
+      if (sl_has(prog_names, arg)) {
+        sl_add_uniq(picked, arg);
+      } else if (fs_is_file(a)) {
+        sl_push(files, a);
+      } else if (prog_names->len > 0) {
+        fail_hint("no test program or test file `" + arg + "`", "the test programs are: " + sl_join(prog_names, ", "));
+      } else {
+        fail("no such test file: " + arg);
+      }
+      i = i + 1;
+    }
+    progs = bx_no_test_bins(p);
+    if (picked->len > 0) {
+      progs = bx_select_from(p, all_progs, picked);
+    }
+  } else {
+    bx_test_files(p, all_progs, files);
+    progs = bx_filter_bins(p, all_progs, p->opts->filter);
+  }
+  if (files->len == 0 && progs->n == 0) {
+    status("Finished", "no tests (no function is marked @test and there are no test programs)");
+    return 0;
+  }
+  var s: BxSess* = bx_sess(p, bx_targets_or_host(p));
+  g_bx_sess = s;
+  var n: BxTally;
+  n.passed = 0;
+  n.cached = 0;
+  n.failed = 0;
+  if (files->len > 0) {
+    bx_run_test_files(s, files, &n);
+  }
+  if (progs->n > 0) {
+    bx_run_test_bins(s, progs, &n);
+  }
+  var np: int64 = n.passed;
+  var nc: int64 = n.cached;
+  var nf: int64 = n.failed;
+  var line: string = "{np} passed, {nc} cached, {nf} failed in " + bx_secs(sys_now_ms() - t0);
+  if (nf > 0) {
     say("test result: " + red("FAILED") + ". " + line);
     return 1;
   }
@@ -2716,6 +2914,7 @@ export fn build_cmd_clean(p: Project*) -> int32 {
     bx_remove(p, p->state_dir + "/stamps");
     bx_remove(p, p->state_dir + "/tmp");
     bx_remove(p, p->state_dir + "/dep-bins");
+    bx_remove(p, p->state_dir + "/test-bins");
   }
   return 0;
 }
@@ -4378,14 +4577,17 @@ fn bx_init_cmds() {
   bx_ex("mbuild live", "");
   bx_ex("mbuild use render=gl", "in another terminal: switch a component");
   bx_note("saved files patch the running program at its next `quiesce;`. host target only.");
-  bx_def("test", "run @test functions", "mbuild test [FILES...] [--filter S]", "incremental.md");
-  bx_ex("mbuild test", "every file with an @test");
-  bx_ex("mbuild test --filter parse", "tests whose names contain parse");
+  bx_def("test", "run @test functions and test programs", "mbuild test [NAMES | FILES...] [--filter S] [-r]", "project.md");
+  bx_ex("mbuild test", "every file with an @test, then every test program");
+  bx_ex("mbuild test --filter parse", "tests and test programs whose names contain parse");
   bx_ex("mbuild test src/lex.mettle", "");
+  bx_ex("mbuild test sodium", "only the test program sodium");
+  bx_ex("mbuild test -r", "test programs built release");
   bx_fl("--filter S", "only tests whose names contain S");
-  bx_fl("--force", "run cached files too");
-  bx_note("passing files are cached (`ok FILE (cached)`).");
-  bx_note("tests run in the compiler's interpreter, which can't call externs.");
+  bx_fl("--force", "run cached tests too");
+  bx_note("@test functions run in the compiler's interpreter, which can't call externs.");
+  bx_note("test programs (mb_test_bin, else tests/NAME_test.mettle with fn main) are built like the bins, C code included, and pass on exit 0.");
+  bx_note("passing tests are cached (`ok ... (cached)`) until their inputs change.");
   bx_def("check", "type-check without linking", "mbuild check [BINS...] [-t T]", "project.md");
   bx_ex("mbuild check", "");
   bx_ex("mbuild check -t all", "");

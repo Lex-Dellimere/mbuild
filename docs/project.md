@@ -162,6 +162,44 @@ A package without bins is a library: `mbuild build` and `mbuild check`
 type-check its `.mettle` files at the top and in `src/`, `mbuild test`
 works, `mbuild run` says there's nothing to run.
 
+### Test programs
+
+`@test` functions run in the compiler's interpreter, which can't call C. A
+test that needs the package's C code or a C library is a test program:
+
+| Call | Meaning |
+|---|---|
+| `mb_test_bin(name, main)` | A program `mbuild test` builds and runs (`""` = `tests/<name>_test.mettle`). |
+
+Without any `mb_test_bin`, every `tests/<name>_test.mettle` with `fn main`
+is a test program named `<name>`. They build like the bins (settings, C
+code, link libraries; `-r` for release) into `.mbuild/test-bins/`, run from
+the project root, and pass on exit code 0; a failing one shows its output.
+`mbuild build`, `mbuild run` and dependents never build them, and
+`mb_dep_bin` can't name them. A test program's main file is never run as an
+`@test` file.
+
+`mbuild test` runs the `@test` files, then the test programs, with one
+summary. One that passed is cached until its compile inputs change.
+
+```text
+$ mbuild test
+ok     src/adder.mettle (1 passed)
+   Compiling adder (C, 1 file)
+   Compiling test add (linux, debug)
+   Compiling test bad (linux, debug)
+ok     add (tests/add_test.mettle)
+expected 4, got 5
+FAILED bad (tests/bad_test.mettle) (exit 3)
+test result: FAILED. 2 passed, 0 cached, 1 failed in 0.0s
+$ mbuild test add
+ok     add (tests/add_test.mettle) (cached)
+test result: ok. 0 passed, 1 cached, 0 failed in 0.0s
+```
+
+`mbuild test NAME` runs that test program, `mbuild test FILE` that `@test`
+file; `--filter S` also picks the test programs whose names contain `S`.
+
 ### Services
 
 Processes `mbuild run` starts before your program and stops after it, like
