@@ -1,0 +1,2208 @@
+// manifest: the mbuild.toml model (DESIGN.md section 6).
+//
+// man_parse checks types and dependency rules (first problem -> m->error as
+// "file:line: message") and reports unknown sections and keys as warnings,
+// with a "did you mean" when one known name is within edit distance 2.
+// Dependencies may be written inline (`x = "v1"`, `x = {{ ... }`) or as a
+// table (`[dependencies.x]`); keys are package names (DESIGN.md 13.5). Keys
+// removed in round 3 are errors naming the replacement.
+//
+// Build settings (DESIGN.md 12.12): typed keys in [profile.NAME] and
+// [bin.NAME], resolved by man_settings through built-in profile ->
+// mbuild.toml inherits chain (ancestor first, each followed by the same
+// profile of mbuild.local.toml) -> [bin.NAME] -> --set; raw flags
+// concatenate in that order and [build] flags come last. With a target,
+// the chain's [profile.NAME.os] sections follow the chain (ancestor first).
+
+import "../core/base";
+import "std/mem";
+import "toml";
+import "semver";
+import "../core/path";
+
+export struct BinSpec {
+  name: string;
+  main: string;
+  flags: StrList*;
+  kind: string;       // "exe" | "shared" | "object" | "flat"
+  triple: string;     // "" = the target's
+}
+
+export struct DepSpec {
+  key: string;        // package name
+  module: string;     // unused since round 3
+  version: string;    // "" for a path dependency; "latest" when unstated
+  path: string;
+  url: string;        // unused since round 3
+  line: int64;
+  subs_mode: string;  // unused since round 3
+  subs: StrList*;     // unused since round 3
+  registry: string;   // "" = search order
+}
+
+// [component.NAME] (DESIGN.md 15.2).
+export struct CompSpec {
+  name: string;
+  dir: string;           // absolute
+  mode: string;          // "static" | "dyn" | "swap"
+  impls: StrList*;       // the first is the default
+  os_defaults: StrList*; // "linux=impl"
+  owner: string;         // package name of the declaring manifest
+  line: int64;
+}
+
+export struct RegSpec {
+  name: string;
+  url: string;
+  line: int64;
+}
+
+// One [replace] entry (DESIGN.md 12.5): path or version.
+export struct ReplaceSpec {
+  module: string;
+  path: string;
+  url: string;
+  version: string;
+  line: int64;
+  local: bool;        // from mbuild.local.toml
+}
+
+export struct Manifest {
+  dir: string;
+  file: string;
+  doc: Toml*;
+  name: string;
+  version: string;
+  module: string;
+  toolchain: string;
+  targets: StrList*;
+  flags: StrList*;
+  prelude: bool;
+  bins: BinSpec*;
+  nbins: int64;
+  deps: DepSpec*;
+  ndeps: int64;
+  warnings: StrList*;
+  error: string;
+  mettle_min: string;     // [package] mettle, canonical ("v0.17.0"), "" when absent
+  subs_mode: string;      // [package] submodules: "all" (default), "none" or "list"
+  subs: StrList*;
+  replaces: ReplaceSpec*; // effective [replace] entries (local ones first after man_merge_local)
+  nreplaces: int64;
+  tools: StrList*;        // [tools] as "key=value"
+  local: Manifest*;       // the merged mbuild.local.toml, 0 when none
+  comps: CompSpec*;
+  ncomps: int64;
+  regs: RegSpec*;         // in declaration order
+  nregs: int64;
+  rules: StrList*;        // absolute
+  include: StrList*;      // [package] include
+  meta: StrList*;         // "key=value": description, license, repository, authors
+  local_components: StrList*;  // "name=impl" from mbuild.local.toml [components]
+}
+
+export struct SettingsQuery {
+  profile: string;
+  bin: string;            // "" for no bin
+  target: string;         // "linux" | "windows"
+  sets: StrList*;         // --set KEY=VALUE items; 0 or empty for none
+}
+
+// Resolved build settings for one compile. flags holds the raw flags in
+// layer order ([build] flags last); origins "key=file:line" or "key=--set"
+// for every key not from a built-in; warnings the covered-raw-flag warnings.
+export struct Settings {
+  optimize: string;
+  pgo: string;
+  pgo_file: string;
+  ml_opt: string;
+  subsystem: string;
+  safe: bool;
+  stack_trace: bool;
+  debug_info: bool;
+  crash_report: bool;
+  native_heap: bool;
+  verify: bool;
+  assume_nso: bool;
+  check_overflow: bool;
+  check_proofs: bool;
+  check_effects: bool;
+  check_deadlines: bool;
+  check_tasks: bool;
+  profile_runtime: bool;
+  image_base: string;
+  components: StrList*;   // "name=impl" in layering order
+  flags: StrList*;
+  cflags: StrList*;
+  origins: StrList*;
+  error: string;
+  warnings: StrList*;
+}
+
+// ---------------------------------------------------------------------------
+// Edit distance
+// ---------------------------------------------------------------------------
+
+export fn man_edit_distance(a: string, b: string) -> int64 {
+  var n: int64 = slen(a);
+  var m: int64 = slen(b);
+  var prev: int64* = (int64*)malloc((m + 1) * 8);
+  var cur: int64* = (int64*)malloc((m + 1) * 8);
+  var j: int64 = 0;
+  while (j <= m) {
+    prev[j] = j;
+    j = j + 1;
+  }
+  var i: int64 = 1;
+  while (i <= n) {
+    cur[0] = i;
+    j = 1;
+    while (j <= m) {
+      var cost: int64 = 1;
+      if (s_byte(a, i - 1) == s_byte(b, j - 1)) {
+        cost = 0;
+      }
+      var best: int64 = prev[j - 1] + cost;
+      if (prev[j] + 1 < best) { best = prev[j] + 1; }
+      if (cur[j - 1] + 1 < best) { best = cur[j - 1] + 1; }
+      cur[j] = best;
+      j = j + 1;
+    }
+    var tmp: int64* = prev;
+    prev = cur;
+    cur = tmp;
+    i = i + 1;
+  }
+  var d: int64 = prev[m];
+  free(prev);
+  free(cur);
+  return d;
+}
+
+// The closest candidate within distance 2, or "".
+export fn man_suggest(word: string, candidates: StrList*) -> string {
+  var best: string = s_empty();
+  var best_d: int64 = 3;
+  var i: int64 = 0;
+  while (i < candidates->len) {
+    var c: string = sl_get(candidates, i);
+    var d: int64 = man_edit_distance(word, c);
+    if (d < best_d && d > 0) {
+      best = c;
+      best_d = d;
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn mnx_list(words: string) -> StrList* {
+  return s_split(words, 32);
+}
+
+fn mnx_where(m: Manifest*, line: int64) -> string {
+  if (line > 0) {
+    return m->file + ":" + s_int(line) + ": ";
+  }
+  return m->file + ": ";
+}
+
+fn mnx_error(m: Manifest*, line: int64, msg: string) {
+  if (slen(m->error) == 0) {
+    m->error = mnx_where(m, line) + msg;
+  }
+}
+
+fn mnx_warn(m: Manifest*, line: int64, msg: string) {
+  sl_push(m->warnings, mnx_where(m, line) + msg);
+}
+
+fn mnx_section_line(doc: Toml*, section: string) -> int64 {
+  var i: int64 = 0;
+  while (i < doc->nheaders) {
+    if (s_eq(doc->headers[i]->name, section)) {
+      return doc->headers[i]->line;
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < doc->n) {
+    if (s_eq(doc->entries[i]->section, section)) {
+      return doc->entries[i]->line;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+fn mnx_label(section: string, key: string) -> string {
+  if (slen(section) == 0) {
+    return key;
+  }
+  return "[" + section + "] " + key;
+}
+
+// A string value; "" when absent (an error when another type).
+fn mnx_str(m: Manifest*, section: string, key: string) -> string {
+  var v: TomlValue* = toml_get(m->doc, section, key);
+  if (v == (TomlValue*)0) {
+    return s_empty();
+  }
+  if (v->kind != 1) {
+    mnx_error(m, v->line, mnx_label(section, key) + " must be a string, not " + toml_kind_name(v->kind));
+    return s_empty();
+  }
+  return v->text;
+}
+
+fn mnx_bool(m: Manifest*, section: string, key: string) -> bool {
+  var v: TomlValue* = toml_get(m->doc, section, key);
+  if (v == (TomlValue*)0) {
+    return false;
+  }
+  if (v->kind != 3) {
+    mnx_error(m, v->line, mnx_label(section, key) + " must be true or false, not " + toml_kind_name(v->kind));
+    return false;
+  }
+  return s_eq(v->text, "true");
+}
+
+// An array of strings (a single string counts as one item).
+fn mnx_strs(m: Manifest*, section: string, key: string) -> StrList* {
+  var v: TomlValue* = toml_get(m->doc, section, key);
+  if (v == (TomlValue*)0) {
+    return sl_new();
+  }
+  if (v->kind == 1) {
+    return sl_of(v->text);
+  }
+  if (v->kind != 4) {
+    mnx_error(m, v->line, mnx_label(section, key) + " must be an array of strings, not " + toml_kind_name(v->kind));
+    return sl_new();
+  }
+  var i: int64 = 0;
+  while (i < v->item_kinds->len) {
+    if (!s_eq(sl_get(v->item_kinds, i), "1")) {
+      mnx_error(m, v->line, mnx_label(section, key) + " must be an array of strings");
+      return sl_new();
+    }
+    i = i + 1;
+  }
+  return sl_copy(v->items);
+}
+
+fn mnx_first_component(s: string) -> string {
+  var at: int64 = s_find_byte(s, 47);
+  if (at < 0) {
+    return s;
+  }
+  return s_sub(s, 0, at);
+}
+
+// A host name: letters, digits, '-' and '.', at least one inner dot, no dot
+// at either end. "github.com" is one; ".", "..", "x.mettle/" pieces are not.
+fn mnx_is_host(c: string) -> bool {
+  var n: int64 = slen(c);
+  if (n < 3) {
+    return false;
+  }
+  if (s_byte(c, 0) == 46 || s_byte(c, n - 1) == 46) {
+    return false;
+  }
+  var dots: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    var b: int32 = s_byte(c, i);
+    if (b == 46) {
+      dots = dots + 1;
+    } else if (!(is_alpha_b(b) || is_digit_b(b) || b == 45)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return dots > 0;
+}
+
+// A remote module path: a host name, then '/' and more ("github.com/x/y").
+export fn man_is_remote_module(s: string) -> bool {
+  var first: string = mnx_first_component(s);
+  if (slen(first) >= slen(s) || s_ends(first, ".mettle")) {
+    return false;
+  }
+  return mnx_is_host(first);
+}
+
+// "github.com/a/b/x/y" -> "github.com/a/b"; "" for a non-remote path.
+export fn man_module_of_import(path: string) -> string {
+  if (!man_is_remote_module(path)) {
+    return s_empty();
+  }
+  var parts: StrList* = s_split(path, 47);
+  var result: string = s_empty();
+  if (parts->len >= 3) {
+    result = sl_get(parts, 0) + "/" + sl_get(parts, 1) + "/" + sl_get(parts, 2);
+  }
+  free(parts);
+  return result;
+}
+
+// The module an import belongs to, given the module paths already known
+// (declared in manifests or selected in the lock): the longest one that is
+// the import itself or a prefix of it at a '/' boundary. That covers
+// gitlab subgroups and two-part vanity paths; with no match the first three
+// components are taken, as man_module_of_import does.
+export fn man_module_of_import_in(known: StrList*, path: string) -> string {
+  var best: string = s_empty();
+  var i: int64 = 0;
+  while (i < known->len) {
+    var k: string = sl_get(known, i);
+    if (slen(k) > slen(best) && man_is_remote_module(k)) {
+      if (s_eq(path, k) || s_starts(path, k + "/")) {
+        best = k;
+      }
+    }
+    i = i + 1;
+  }
+  if (slen(best) > 0) {
+    return best;
+  }
+  return man_module_of_import(path);
+}
+
+fn mnx_push_bin(m: Manifest*, b: BinSpec) {
+  if (m->nbins % 8 == 0) {
+    m->bins = (BinSpec*)realloc(m->bins, (m->nbins + 8) * sizeof(BinSpec));
+  }
+  m->bins[m->nbins] = b;
+  m->nbins = m->nbins + 1;
+}
+
+fn mnx_push_dep(m: Manifest*, d: DepSpec) {
+  if (m->ndeps % 8 == 0) {
+    m->deps = (DepSpec*)realloc(m->deps, (m->ndeps + 8) * sizeof(DepSpec));
+  }
+  m->deps[m->ndeps] = d;
+  m->ndeps = m->ndeps + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies
+// ---------------------------------------------------------------------------
+
+fn mnx_dep_fields() -> StrList* {
+  return mnx_list("version path registry");
+}
+
+// A table section ([dependencies.x], [replace.x]) as an inline-table value.
+fn mnx_table_as_inline(doc: Toml*, sec: string, line: int64) -> TomlValue* {
+  var v: TomlValue* = new TomlValue;
+  v->kind = 5;
+  v->text = s_empty();
+  v->items = sl_new();
+  v->fields = toml_keys(doc, sec);
+  v->field_values = sl_new();
+  v->field_kinds = sl_new();
+  v->item_kinds = sl_new();
+  v->line = line;
+  v->field_vals = (TomlValue**)malloc((v->fields->len + 1) * 8);
+  var k: int64 = 0;
+  while (k < v->fields->len) {
+    var fv: TomlValue* = toml_get(doc, sec, sl_get(v->fields, k));
+    v->field_vals[k] = fv;
+    sl_push(v->field_values, fv->text);
+    sl_push(v->field_kinds, s_int((int64)fv->kind));
+    k = k + 1;
+  }
+  return v;
+}
+
+// The replacement for a dependency field removed in round 3; "" when f is not one.
+fn mnx_dep_removed(f: string) -> string {
+  if (s_eq(f, "url")) { return "url was removed: packages come from a registry (registry = \"NAME\" with [registry.NAME] url) or a path"; }
+  if (s_eq(f, "module")) { return "module was removed: the key is the package name"; }
+  if (s_eq(f, "submodules")) { return "submodules was removed: a registry package carries its files in its archive ([package] include)"; }
+  return s_empty();
+}
+
+// Fills d from an inline table (or a [dependencies.x] table as one).
+fn mnx_dep_from_fields(m: Manifest*, d: DepSpec*, v: TomlValue*) {
+  var known: StrList* = mnx_dep_fields();
+  defer free(known);
+  var i: int64 = 0;
+  while (i < v->fields->len && slen(m->error) == 0) {
+    var f: string = sl_get(v->fields, i);
+    var gone: string = mnx_dep_removed(f);
+    if (slen(gone) > 0) {
+      mnx_error(m, d->line, "dependency '" + d->key + "': " + gone);
+    } else if (!sl_has(known, f)) {
+      var sug: string = man_suggest(f, known);
+      var msg: string = "unknown field '" + f + "' in dependency '" + d->key + "'";
+      if (slen(sug) > 0) {
+        msg = msg + " (did you mean '" + sug + "'?)";
+      }
+      mnx_warn(m, d->line, msg);
+    } else if (!s_eq(sl_get(v->field_kinds, i), "1")) {
+      mnx_error(m, d->line, "dependency '" + d->key + "': " + f + " must be a string");
+    } else {
+      var val: string = sl_get(v->field_values, i);
+      if (s_eq(f, "version")) { d->version = val; }
+      if (s_eq(f, "path")) { d->path = val; }
+      if (s_eq(f, "registry")) { d->registry = val; }
+    }
+    i = i + 1;
+  }
+}
+
+fn mnx_dep_new(key: string, line: int64) -> DepSpec {
+  var d: DepSpec;
+  d.key = key;
+  d.module = s_empty();
+  d.version = s_empty();
+  d.path = s_empty();
+  d.url = s_empty();
+  d.line = line;
+  d.subs_mode = s_empty();
+  d.subs = sl_new();
+  d.registry = s_empty();
+  return d;
+}
+
+// What is wrong with a dependency or [replace] key; "" when it is a package name.
+fn mnx_key_problem(key: string) -> string {
+  if (man_is_remote_module(key) || s_find_byte(key, 47) >= 0) {
+    return "'" + key + "' is a module path: dependencies are package names now (e.g. " + p_base(key) + " = \"v1.0.0\"; mbuild migrate converts an mbuild.toml)";
+  }
+  if (!man_is_package_name(key)) {
+    return "'" + key + "' is not a package name (package names are a lower-case letter, then lower-case letters, digits and '_', at most 64)";
+  }
+  if (s_eq(key, "std") || s_eq(key, "mbuild")) {
+    return "'" + key + "' is reserved and cannot name a package";
+  }
+  return s_empty();
+}
+
+fn mnx_dep_finish(m: Manifest*, d: DepSpec*, has_version: bool) {
+  var problem: string = mnx_key_problem(d->key);
+  if (slen(problem) > 0) {
+    mnx_error(m, d->line, "dependency " + problem);
+    return;
+  }
+  if (slen(d->path) > 0) {
+    if (has_version) {
+      mnx_error(m, d->line, "dependency '" + d->key + "' has both a path and a version");
+      return;
+    }
+    if (slen(d->registry) > 0) {
+      mnx_error(m, d->line, "dependency '" + d->key + "' has both a path and a registry");
+      return;
+    }
+  } else {
+    if (has_version && slen(d->version) == 0) {
+      mnx_error(m, d->line, "dependency '" + d->key + "': the version is empty (use \"latest\", \"v1\", \"v1.2\" or \"v1.2.0\")");
+      return;
+    }
+    if (slen(d->version) == 0) {
+      d->version = "latest";
+    }
+  }
+  mnx_push_dep(m, *d);
+}
+
+fn mnx_deps(m: Manifest*) {
+  var keys: StrList* = toml_keys(m->doc, "dependencies");
+  defer free(keys);
+  var i: int64 = 0;
+  while (i < keys->len) {
+    var key: string = sl_get(keys, i);
+    var v: TomlValue* = toml_get(m->doc, "dependencies", key);
+    var d: DepSpec = mnx_dep_new(key, v->line);
+    var has_version: bool = false;
+    if (v->kind == 1) {
+      d.version = v->text;
+      has_version = true;
+    } else if (v->kind == 5) {
+      mnx_dep_from_fields(m, &d, v);
+      has_version = sl_has(v->fields, "version");
+    } else {
+      mnx_error(m, v->line, "dependency '" + key + "' must be a version string or an inline table, not " + toml_kind_name(v->kind));
+      return;
+    }
+    if (slen(m->error) > 0) {
+      return;
+    }
+    mnx_dep_finish(m, &d, has_version);
+    if (slen(m->error) > 0) {
+      return;
+    }
+    i = i + 1;
+  }
+  var secs: StrList* = toml_sections(m->doc, "dependencies.");
+  defer free(secs);
+  i = 0;
+  while (i < secs->len) {
+    var sec: string = sl_get(secs, i);
+    var dkey: string = s_from(sec, slen("dependencies."));
+    if (toml_get(m->doc, "dependencies", dkey) != (TomlValue*)0) {
+      mnx_error(m, mnx_section_line(m->doc, sec), "dependency '" + dkey + "' is declared twice");
+      return;
+    }
+    var tv: TomlValue* = mnx_table_as_inline(m->doc, sec, mnx_section_line(m->doc, sec));
+    var td: DepSpec = mnx_dep_new(dkey, tv->line);
+    mnx_dep_from_fields(m, &td, tv);
+    var tv_version: bool = sl_has(tv->fields, "version");
+    free(tv);
+    if (slen(m->error) > 0) {
+      return;
+    }
+    mnx_dep_finish(m, &td, tv_version);
+    if (slen(m->error) > 0) {
+      return;
+    }
+    i = i + 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Unknown names
+// ---------------------------------------------------------------------------
+
+fn mnx_known_keys(section: string) -> StrList* {
+  if (s_eq(section, "package")) { return mnx_list("name version mettle include description license repository authors"); }
+  if (s_eq(section, "build")) { return mnx_list("targets flags prelude"); }
+  // bound to locals: mnx_list keeps views into its argument (DESIGN.md 2, issue 6)
+  if (s_starts(section, "profile.")) {
+    var pw: string = "flags cflags inherits components " + mnx_typed_words();
+    if (mnx_is_os_profile(section)) {
+      pw = "flags cflags components " + mnx_typed_words();
+    }
+    return mnx_list(pw);
+  }
+  if (s_starts(section, "bin.")) {
+    var bw: string = "main kind triple flags components " + mnx_typed_words();
+    return mnx_list(bw);
+  }
+  if (s_starts(section, "component.")) { return mnx_list("dir mode impls linux windows"); }
+  if (s_starts(section, "registry.")) { return mnx_list("url"); }
+  if (s_eq(section, "rules")) { return mnx_list("files"); }
+  if (s_eq(section, "tools")) { return mnx_list("git cc cc-windows mettle-linux mettle-windows pkg-config"); }
+  if (s_eq(section, "c") || s_eq(section, "c.linux") || s_eq(section, "c.windows")) {
+    return mnx_list("sources include cflags libs");
+  }
+  if (s_eq(section, "link") || s_eq(section, "link.linux") || s_eq(section, "link.windows")) {
+    return mnx_list("libs paths pkgconfig");
+  }
+  if (s_starts(section, "dependencies.")) { return mnx_dep_fields(); }
+  return sl_new();
+}
+
+// [profile.NAME.linux] / [profile.NAME.windows]
+fn mnx_is_os_profile(section: string) -> bool {
+  if (!s_starts(section, "profile.")) {
+    return false;
+  }
+  var rest: string = s_from(section, 8);
+  var dot: int64 = s_find_byte(rest, 46);
+  if (dot <= 0) {
+    return false;
+  }
+  var os: string = s_from(rest, dot + 1);
+  return s_eq(os, "linux") || s_eq(os, "windows");
+}
+
+// "head.NAME" with one non-empty NAME part.
+fn mnx_is_named(section: string, head: string) -> bool {
+  var n: int64 = slen(head) + 1;
+  return s_starts(section, head + ".") && slen(section) > n && s_find_byte(s_from(section, n), 46) < 0;
+}
+
+fn mnx_section_known(section: string) -> bool {
+  if (sl_has(mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows replace tools rules"), section)) {
+    return true;
+  }
+  if (mnx_is_os_profile(section)) {
+    return true;
+  }
+  var dot: int64 = s_find_byte(section, 46);
+  if (dot > 0 && dot + 1 < slen(section)) {
+    var head: string = s_sub(section, 0, dot);
+    if (s_eq(head, "dependencies") || s_eq(head, "replace")) {
+      return true;
+    }
+    if ((s_eq(head, "profile") || s_eq(head, "bin") || s_eq(head, "component") || s_eq(head, "registry")) && s_find_byte(s_from(section, dot + 1), 46) < 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn mnx_section_suggestion(section: string) -> string {
+  if (s_eq(section, "bin") || s_eq(section, "profile") || s_eq(section, "component") || s_eq(section, "registry")) {
+    return "[" + section + ".NAME]";
+  }
+  var plain: StrList* = mnx_list("package build dependencies c c.linux c.windows link link.linux link.windows rules");
+  var sug: string = man_suggest(section, plain);
+  free(plain);
+  if (slen(sug) > 0) {
+    return "[" + sug + "]";
+  }
+  var dot: int64 = s_find_byte(section, 46);
+  var head: string = section;
+  var rest: string = s_empty();
+  if (dot >= 0) {
+    head = s_sub(section, 0, dot);
+    rest = s_from(section, dot);
+  }
+  var heads: StrList* = mnx_list("profile bin dependencies component registry");
+  var known: bool = sl_has(heads, head);
+  var h: string = man_suggest(head, heads);
+  free(heads);
+  if (known) {
+    if (slen(rest) == 0) {
+      return "[" + head + ".NAME]";
+    }
+    return "";
+  }
+  if (slen(h) > 0) {
+    if (slen(rest) == 0) {
+      return "[" + h + ".NAME]";
+    }
+    return "[" + h + rest + "]";
+  }
+  return "";
+}
+
+fn mnx_unknowns(m: Manifest*) {
+  var top: StrList* = toml_keys(m->doc, "");
+  defer free(top);
+  var i: int64 = 0;
+  while (i < top->len) {
+    var tk: string = sl_get(top, i);
+    var tv: TomlValue* = toml_get(m->doc, "", tk);
+    mnx_warn(m, tv->line, "key '" + tk + "' is outside any section and is ignored");
+    i = i + 1;
+  }
+  var secs: StrList* = m->doc->sections;
+  i = 0;
+  while (i < secs->len) {
+    var sec: string = sl_get(secs, i);
+    if (s_eq(sec, "workspace") || s_starts(sec, "workspace.")) {
+      if (s_eq(sec, "workspace")) {
+        mnx_warn(m, mnx_section_line(m->doc, sec), "workspaces are not supported yet; use path dependencies (docs/dependencies.md)");
+      }
+    } else if (s_eq(sec, "replace") || s_starts(sec, "replace.")) {
+      // checked by mnx_replaces
+    } else if (!mnx_section_known(sec)) {
+      var msg: string = "unknown section [" + sec + "]";
+      var sug: string = mnx_section_suggestion(sec);
+      if (slen(sug) > 0) {
+        msg = msg + " (did you mean " + sug + "?)";
+      }
+      mnx_warn(m, mnx_section_line(m->doc, sec), msg);
+    } else if (!s_eq(sec, "dependencies") && !s_starts(sec, "dependencies.")) {
+      if (s_eq(sec, "tools")) {
+        mnx_warn(m, mnx_section_line(m->doc, sec), "[tools] is machine-specific: move it to mbuild.local.toml");
+      }
+      mnx_unknown_keys(m, sec);
+    }
+    i = i + 1;
+  }
+}
+
+fn mnx_unknown_keys(m: Manifest*, sec: string) {
+  var known: StrList* = mnx_known_keys(sec);
+  var keys: StrList* = toml_keys(m->doc, sec);
+  var k: int64 = 0;
+  while (k < keys->len) {
+    var key: string = sl_get(keys, k);
+    if (!sl_has(known, key)) {
+      var kv: TomlValue* = toml_get(m->doc, sec, key);
+      var kmsg: string = "unknown key '" + key + "' in [" + sec + "]";
+      var ksug: string = man_suggest(key, known);
+      if (slen(ksug) > 0) {
+        kmsg = kmsg + " (did you mean '" + ksug + "'?)";
+      }
+      mnx_warn(m, kv->line, kmsg);
+    }
+    k = k + 1;
+  }
+  free(known);
+  free(keys);
+}
+
+// ---------------------------------------------------------------------------
+// Build settings (DESIGN.md 12.12)
+// ---------------------------------------------------------------------------
+
+fn mnx_typed_words() -> string {
+  return "optimize safe stack-trace debug-info crash-report native-heap check-overflow check-proofs check-effects check-deadlines check-tasks assume-no-signed-overflow pgo pgo-file verify ml-opt subsystem profile-runtime image-base";
+}
+
+fn mnx_enum_words(key: string) -> string {
+  if (s_eq(key, "optimize")) { return "off checked full"; }
+  if (s_eq(key, "pgo")) { return "off auto instrument use"; }
+  if (s_eq(key, "ml-opt")) { return "off on speculative"; }
+  if (s_eq(key, "subsystem")) { return "console windows"; }
+  return s_empty();
+}
+
+fn mnx_is_typed(key: string) -> bool {
+  var words: StrList* = mnx_list(mnx_typed_words());
+  var found: bool = sl_has(words, key);
+  free(words);
+  return found;
+}
+
+// "off", "checked", "full"
+fn mnx_quoted(words: StrList*) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < words->len) {
+    if (i > 0) {
+      buf_add(b, ", ");
+    }
+    buf_add(b, toml_quote(sl_get(words, i)));
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// The nearest enum value: distance at most 3 and below the word's length.
+fn mnx_suggest_value(word: string, cands: StrList*) -> string {
+  var best: string = s_empty();
+  var best_d: int64 = 4;
+  var i: int64 = 0;
+  while (i < cands->len) {
+    var c: string = sl_get(cands, i);
+    var d: int64 = man_edit_distance(word, c);
+    if (d < best_d && d < slen(word)) {
+      best = c;
+      best_d = d;
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+fn mnx_base(file: string) -> string {
+  return s_from(file, s_rfind_byte(file, 47) + 1);
+}
+
+// What is wrong with a settings value (typed key, flags, cflags, inherits); "" when nothing.
+fn mnx_setting_problem(key: string, v: TomlValue*) -> string {
+  var ew: string = mnx_enum_words(key);
+  if (slen(ew) > 0) {
+    var words: StrList* = mnx_list(ew);
+    var choices: string = mnx_quoted(words);
+    var msg: string = s_empty();
+    if (v->kind != 1) {
+      msg = "`" + key + "` must be one of " + choices;
+    } else if (!sl_has(words, v->text)) {
+      msg = key + " = " + toml_quote(v->text) + " is not one of " + choices;
+      var sug: string = mnx_suggest_value(v->text, words);
+      if (slen(sug) > 0) {
+        msg = msg + " (did you mean " + toml_quote(sug) + "?)";
+      }
+    }
+    free(words);
+    return msg;
+  }
+  if (s_eq(key, "pgo-file")) {
+    if (v->kind != 1) {
+      return "`pgo-file` must be a string (a path relative to the project root)";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "inherits")) {
+    if (v->kind != 1) {
+      return "`inherits` must be a profile name (a string)";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "image-base")) {
+    if (v->kind != 1 || !mnx_is_hex_addr(v->text)) {
+      return "`image-base` must be a hex address string such as \"0x500000\"";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "components")) {
+    if (v->kind == 4 && !sl_has(v->item_kinds, "2") && !sl_has(v->item_kinds, "3")) {
+      var i: int64 = 0;
+      while (i < v->items->len) {
+        if (!mnx_is_use(sl_get(v->items, i))) {
+          return "components = [" + toml_quote(sl_get(v->items, i)) + "]: entries are \"component=impl\"";
+        }
+        i = i + 1;
+      }
+      return s_empty();
+    }
+    if (v->kind == 1 && mnx_is_use(v->text)) {
+      return s_empty();
+    }
+    return "`components` must be an array of \"component=impl\" strings";
+  }
+  if (s_eq(key, "flags") || s_eq(key, "cflags")) {
+    if (v->kind == 1) {
+      return s_empty();
+    }
+    if (v->kind != 4 || sl_has(v->item_kinds, "2") || sl_has(v->item_kinds, "3")) {
+      return "`" + key + "` must be an array of strings";
+    }
+    return s_empty();
+  }
+  if (mnx_is_typed(key) && v->kind != 3) {
+    return "`" + key + "` must be true or false";
+  }
+  return s_empty();
+}
+
+fn mnx_is_hex_addr(s: string) -> bool {
+  if (slen(s) < 3 || !(s_starts(s, "0x") || s_starts(s, "0X"))) {
+    return false;
+  }
+  var i: int64 = 2;
+  while (i < slen(s)) {
+    if (!is_hex_b(s_byte(s, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+// "name=impl" with both parts non-empty.
+fn mnx_is_use(s: string) -> bool {
+  var eq: int64 = s_find_byte(s, 61);
+  return eq > 0 && eq + 1 < slen(s) && s_find_byte(s_from(s, eq + 1), 61) < 0;
+}
+
+fn mnx_settings_new() -> Settings* {
+  var st: Settings* = new Settings;
+  st->optimize = "off";
+  st->pgo = "off";
+  st->pgo_file = s_empty();
+  st->ml_opt = "off";
+  st->subsystem = "console";
+  st->crash_report = true;
+  st->image_base = s_empty();
+  st->components = sl_new();
+  st->flags = sl_new();
+  st->cflags = sl_new();
+  st->origins = sl_new();
+  st->error = s_empty();
+  st->warnings = sl_new();
+  return st;
+}
+
+fn mnx_set_origin(st: Settings*, key: string, origin: string) {
+  var i: int64 = 0;
+  while (i < st->origins->len) {
+    if (s_starts(sl_get(st->origins, i), key + "=")) {
+      sl_remove_at(st->origins, i);
+    } else {
+      i = i + 1;
+    }
+  }
+  sl_push(st->origins, key + "=" + origin);
+}
+
+// Stores a checked typed value.
+fn mnx_assign(st: Settings*, key: string, v: TomlValue*) {
+  var t: string = v->text;
+  var on: bool = s_eq(t, "true");
+  if (s_eq(key, "optimize")) { st->optimize = t; }
+  else if (s_eq(key, "pgo")) { st->pgo = t; }
+  else if (s_eq(key, "pgo-file")) { st->pgo_file = t; }
+  else if (s_eq(key, "ml-opt")) { st->ml_opt = t; }
+  else if (s_eq(key, "subsystem")) { st->subsystem = t; }
+  else if (s_eq(key, "safe")) { st->safe = on; }
+  else if (s_eq(key, "stack-trace")) { st->stack_trace = on; }
+  else if (s_eq(key, "debug-info")) { st->debug_info = on; }
+  else if (s_eq(key, "crash-report")) { st->crash_report = on; }
+  else if (s_eq(key, "native-heap")) { st->native_heap = on; }
+  else if (s_eq(key, "verify")) { st->verify = on; }
+  else if (s_eq(key, "assume-no-signed-overflow")) { st->assume_nso = on; }
+  else if (s_eq(key, "check-overflow")) { st->check_overflow = on; }
+  else if (s_eq(key, "check-proofs")) { st->check_proofs = on; }
+  else if (s_eq(key, "check-effects")) { st->check_effects = on; }
+  else if (s_eq(key, "check-deadlines")) { st->check_deadlines = on; }
+  else if (s_eq(key, "check-tasks")) { st->check_tasks = on; }
+  else if (s_eq(key, "profile-runtime")) { st->profile_runtime = on; }
+  else if (s_eq(key, "image-base")) { st->image_base = t; }
+}
+
+fn mnx_builtin(st: Settings*, profile: string) {
+  if (s_eq(profile, "debug")) {
+    st->stack_trace = true;
+  }
+  if (s_eq(profile, "release")) {
+    st->optimize = "full";
+  }
+}
+
+// The typed key that covers a raw compiler flag, as "key = value"; "" when none.
+fn mnx_covered(flag: string) -> string {
+  if (s_eq(flag, "--release") || s_eq(flag, "-r")) { return "optimize = \"full\""; }
+  if (s_eq(flag, "-O") || s_eq(flag, "--optimize")) { return "optimize = \"checked\""; }
+  if (s_eq(flag, "--safe")) { return "safe = true"; }
+  if (s_eq(flag, "-s") || s_eq(flag, "--stack-trace")) { return "stack-trace = true"; }
+  if (s_eq(flag, "-g")) { return "debug-info = true"; }
+  if (s_eq(flag, "--no-crash-report")) { return "crash-report = false"; }
+  if (s_eq(flag, "--native-heap")) { return "native-heap = true"; }
+  if (s_eq(flag, "--check-overflow")) { return "check-overflow = true"; }
+  if (s_eq(flag, "--check-proofs")) { return "check-proofs = true"; }
+  if (s_eq(flag, "--check-effects")) { return "check-effects = true"; }
+  if (s_eq(flag, "--check-deadlines")) { return "check-deadlines = true"; }
+  if (s_eq(flag, "--check-tasks")) { return "check-tasks = true"; }
+  if (s_eq(flag, "--assume-no-signed-overflow")) { return "assume-no-signed-overflow = true"; }
+  if (s_eq(flag, "--pgo")) { return "pgo = \"auto\""; }
+  if (s_eq(flag, "--pgo-gen")) { return "pgo = \"instrument\""; }
+  if (s_starts(flag, "--pgo-use")) { return "pgo = \"use\" with pgo-file"; }
+  if (s_eq(flag, "--verify")) { return "verify = true"; }
+  if (s_eq(flag, "--ml-opt")) { return "ml-opt = \"on\""; }
+  if (s_eq(flag, "--ml-opt-speculative")) { return "ml-opt = \"speculative\""; }
+  if (s_eq(flag, "--subsystem")) { return "subsystem = \"windows\""; }
+  if (s_eq(flag, "--profile-runtime")) { return "profile-runtime = true"; }
+  if (s_eq(flag, "--image-base")) { return "image-base = \"ADDR\""; }
+  return s_empty();
+}
+
+fn mnx_covered_warnings(st: Settings*, loc: string, fl: StrList*) {
+  var i: int64 = 0;
+  while (i < fl->len) {
+    var c: string = mnx_covered(sl_get(fl, i));
+    if (slen(c) > 0) {
+      sl_add_uniq(st->warnings, loc + "flags = [" + mnx_quoted(fl) + "]: use " + c + " (mbuild passes it for you)");
+    }
+    i = i + 1;
+  }
+}
+
+// Applies [section] of mm's file: typed keys win, flags (and cflags in a
+// profile) concatenate; inherits and main are not settings.
+fn mnx_apply_section(st: Settings*, mm: Manifest*, section: string) {
+  var is_bin: bool = s_starts(section, "bin.");
+  var keys: StrList* = toml_keys(mm->doc, section);
+  var i: int64 = 0;
+  while (i < keys->len && slen(st->error) == 0) {
+    var key: string = sl_get(keys, i);
+    var v: TomlValue* = toml_get(mm->doc, section, key);
+    var is_list: bool = s_eq(key, "flags") || (s_eq(key, "cflags") && !is_bin);
+    if (s_eq(key, "components")) {
+      var problem_c: string = mnx_setting_problem(key, v);
+      if (slen(problem_c) > 0) {
+        st->error = mnx_where(mm, v->line) + problem_c;
+      } else {
+        var cl: StrList* = toml_list(mm->doc, section, key);
+        sl_extend(st->components, cl);
+        free(cl);
+      }
+    } else if (is_list || mnx_is_typed(key)) {
+      var problem: string = mnx_setting_problem(key, v);
+      if (slen(problem) > 0) {
+        st->error = mnx_where(mm, v->line) + problem;
+      } else if (is_list) {
+        var fl: StrList* = toml_list(mm->doc, section, key);
+        if (s_eq(key, "flags")) {
+          mnx_covered_warnings(st, mnx_where(mm, v->line), fl);
+          sl_extend(st->flags, fl);
+        } else {
+          sl_extend(st->cflags, fl);
+        }
+        free(fl);
+      } else {
+        mnx_assign(st, key, v);
+        mnx_set_origin(st, key, mnx_base(mm->file) + ":" + s_int(v->line));
+      }
+    }
+    i = i + 1;
+  }
+  free(keys);
+}
+
+// One --set KEY=VALUE: the value is a TOML scalar (true/false, else a string; quotes optional).
+fn mnx_apply_set(st: Settings*, item: string) {
+  var label: string = "--set " + item + ": ";
+  var eq: int64 = s_find_byte(item, 61);
+  if (eq <= 0) {
+    st->error = label + "expected KEY=VALUE";
+    return;
+  }
+  var key: string = s_trim(s_sub(item, 0, eq));
+  var text: string = s_trim(s_from(item, eq + 1));
+  if (s_eq(key, "flags") || s_eq(key, "cflags")) {
+    st->error = label + key + " cannot be set with --set (pass raw compiler flags with --flag ARG)";
+    return;
+  }
+  if (s_eq(key, "inherits")) {
+    st->error = label + "inherits cannot be set with --set (choose the profile with -p NAME)";
+    return;
+  }
+  if (s_eq(key, "components")) {
+    st->error = label + "components cannot be set with --set (use --use NAME=IMPL)";
+    return;
+  }
+  if (!mnx_is_typed(key)) {
+    var words: StrList* = mnx_list(mnx_typed_words());
+    var msg: string = label + "unknown key '" + key + "'";
+    var sug: string = man_suggest(key, words);
+    if (slen(sug) > 0) {
+      msg = msg + " (did you mean '" + sug + "'?)";
+    }
+    free(words);
+    st->error = msg;
+    return;
+  }
+  var v: TomlValue* = new TomlValue;
+  v->kind = 1;
+  v->text = text;
+  v->items = sl_new();
+  v->item_kinds = sl_new();
+  v->fields = sl_new();
+  v->field_values = sl_new();
+  v->field_kinds = sl_new();
+  v->field_vals = (TomlValue**)0;
+  v->line = 0;
+  var n: int64 = slen(text);
+  if (s_eq(text, "true") || s_eq(text, "false")) {
+    v->kind = 3;
+  } else if (n >= 2 && ((s_byte(text, 0) == 34 && s_byte(text, n - 1) == 34) || (s_byte(text, 0) == 39 && s_byte(text, n - 1) == 39))) {
+    v->text = s_sub(text, 1, n - 1);
+  }
+  var problem: string = mnx_setting_problem(key, v);
+  if (slen(problem) > 0) {
+    st->error = label + problem;
+    free(v);
+    return;
+  }
+  mnx_assign(st, key, v);
+  mnx_set_origin(st, key, "--set");
+  free(v);
+}
+
+// The manifest (main or local) whose [profile.NAME] has an inherits key; 0 when none.
+fn mnx_inherits_owner(m: Manifest*, name: string) -> Manifest* {
+  var sec: string = "profile." + name;
+  if (m->local != (Manifest*)0 && toml_get(m->local->doc, sec, "inherits") != (TomlValue*)0) {
+    return m->local;
+  }
+  if (toml_get(m->doc, sec, "inherits") != (TomlValue*)0) {
+    return m;
+  }
+  return (Manifest*)0;
+}
+
+// The inherits chain of a profile, the profile first; problems go to st->error.
+fn mnx_chain(m: Manifest*, profile: string, st: Settings*) -> StrList* {
+  var chain: StrList* = sl_new();
+  var names: StrList* = man_profile_names(m);
+  if (!sl_has(names, profile)) {
+    var msg: string = "unknown profile '" + profile + "'";
+    var sug: string = man_suggest(profile, names);
+    if (slen(sug) > 0) {
+      msg = msg + " (did you mean '" + sug + "'?)";
+    }
+    st->error = msg;
+    free(names);
+    return chain;
+  }
+  var cur: string = profile;
+  while (true) {
+    if (sl_has(chain, cur)) {
+      var last: string = sl_get(chain, chain->len - 1);
+      var cycle: string = sl_join(chain, " -> ") + " -> " + cur;
+      var lo: Manifest* = mnx_inherits_owner(m, last);
+      if (lo != (Manifest*)0) {
+        var lv: TomlValue* = toml_get(lo->doc, "profile." + last, "inherits");
+        st->error = mnx_where(lo, lv->line) + "[profile." + last + "] inherits = " + toml_quote(cur) + ": the inherits chain is a cycle (" + cycle + ")";
+      } else {
+        st->error = mnx_where(m, 0) + "[profile." + last + "] inherits debug: the inherits chain is a cycle (" + cycle + ")";
+      }
+      break;
+    }
+    sl_push(chain, cur);
+    var owner: Manifest* = mnx_inherits_owner(m, cur);
+    if (owner != (Manifest*)0) {
+      var iv: TomlValue* = toml_get(owner->doc, "profile." + cur, "inherits");
+      if (iv->kind != 1) {
+        st->error = mnx_where(owner, iv->line) + "`inherits` must be a profile name (a string)";
+        break;
+      }
+      if (!sl_has(names, iv->text)) {
+        var imsg: string = "[profile." + cur + "] inherits = " + toml_quote(iv->text) + " is not a profile";
+        var isug: string = man_suggest(iv->text, names);
+        if (slen(isug) > 0) {
+          imsg = imsg + " (did you mean " + toml_quote(isug) + "?)";
+        }
+        st->error = mnx_where(owner, iv->line) + imsg;
+        break;
+      }
+      cur = iv->text;
+    } else if (s_eq(cur, "debug") || s_eq(cur, "release")) {
+      break;
+    } else {
+      cur = "debug";
+    }
+  }
+  free(names);
+  return chain;
+}
+
+// Type checks of the settings keys in [profile.*] and [bin.*]; with chains,
+// every profile's inherits chain too.
+fn mnx_check_settings(m: Manifest*, chains: bool) {
+  var secs: StrList* = m->doc->sections;
+  var i: int64 = 0;
+  while (i < secs->len && slen(m->error) == 0) {
+    var sec: string = sl_get(secs, i);
+    var is_prof: bool = mnx_is_named(sec, "profile");
+    var is_bin: bool = mnx_is_named(sec, "bin");
+    if (is_prof || is_bin || mnx_is_os_profile(sec)) {
+      var keys: StrList* = toml_keys(m->doc, sec);
+      var k: int64 = 0;
+      while (k < keys->len && slen(m->error) == 0) {
+        var key: string = sl_get(keys, k);
+        if (mnx_is_typed(key) || s_eq(key, "components") || (is_prof && s_eq(key, "inherits"))) {
+          var v: TomlValue* = toml_get(m->doc, sec, key);
+          var problem: string = mnx_setting_problem(key, v);
+          if (slen(problem) > 0) {
+            mnx_error(m, v->line, problem);
+          }
+        }
+        k = k + 1;
+      }
+      free(keys);
+    }
+    i = i + 1;
+  }
+  if (!chains || slen(m->error) > 0) {
+    return;
+  }
+  var names: StrList* = man_profile_names(m);
+  i = 0;
+  while (i < names->len && slen(m->error) == 0) {
+    var st: Settings* = mnx_settings_new();
+    var ch: StrList* = mnx_chain(m, sl_get(names, i), st);
+    if (slen(st->error) > 0) {
+      m->error = st->error;
+    }
+    free(ch);
+    free(st);
+    i = i + 1;
+  }
+  free(names);
+}
+
+// ---------------------------------------------------------------------------
+// [package] extras, [replace], [tools]
+// ---------------------------------------------------------------------------
+
+fn mnx_package_extra(m: Manifest*) {
+  var mv: TomlValue* = toml_get(m->doc, "package", "mettle");
+  if (mv != (TomlValue*)0) {
+    if (mv->kind != 1) {
+      mnx_error(m, mv->line, "[package] mettle must be a string, not " + toml_kind_name(mv->kind));
+      return;
+    }
+    var canon: string = sv_canonical(mv->text);
+    if (slen(canon) == 0) {
+      mnx_error(m, mv->line, "[package] mettle = " + toml_quote(mv->text) + " is not a Mettle version (write the oldest release the package builds with, e.g. \"v0.17.0\")");
+      return;
+    }
+    m->mettle_min = canon;
+  }
+  m->include = mnx_strs(m, "package", "include");
+  var keys: StrList* = mnx_list("description license repository");
+  var i: int64 = 0;
+  while (i < keys->len) {
+    var k: string = sl_get(keys, i);
+    if (toml_has(m->doc, "package", k)) {
+      sl_push(m->meta, k + "=" + mnx_str(m, "package", k));
+    }
+    i = i + 1;
+  }
+  free(keys);
+  if (toml_has(m->doc, "package", "authors")) {
+    var au: StrList* = mnx_strs(m, "package", "authors");
+    sl_push(m->meta, "authors=" + sl_join(au, ", "));
+    free(au);
+  }
+}
+
+// Keys removed in round 3 (DESIGN.md 13.5), each an error naming its replacement.
+fn mnx_removed(m: Manifest*) {
+  var mv: TomlValue* = toml_get(m->doc, "package", "module");
+  if (mv != (TomlValue*)0) {
+    mnx_error(m, mv->line, "[package] module was removed: a package is known by its [package] name and published to a registry (mbuild migrate converts an mbuild.toml)");
+    return;
+  }
+  var sv: TomlValue* = toml_get(m->doc, "package", "submodules");
+  if (sv != (TomlValue*)0) {
+    mnx_error(m, sv->line, "[package] submodules was removed: list the files a published package carries in [package] include");
+    return;
+  }
+  if (toml_has_section(m->doc, "toolchain")) {
+    mnx_error(m, mnx_section_line(m->doc, "toolchain"), "[toolchain] was removed: mbuild uses the dev compiler (--mettle PATH or $METTLE); a minimum release goes in [package] mettle");
+  }
+}
+
+fn mnx_push_replace(m: Manifest*, r: ReplaceSpec) {
+  if (m->nreplaces % 8 == 0) {
+    m->replaces = (ReplaceSpec*)realloc(m->replaces, (m->nreplaces + 8) * sizeof(ReplaceSpec));
+  }
+  m->replaces[m->nreplaces] = r;
+  m->nreplaces = m->nreplaces + 1;
+}
+
+fn mnx_replace_one(m: Manifest*, key: string, v: TomlValue*, line: int64, is_local: bool) {
+  var label: string = "[replace] " + toml_quote(key);
+  var problem: string = mnx_key_problem(key);
+  if (slen(problem) > 0) {
+    mnx_error(m, line, "[replace] key " + problem);
+    return;
+  }
+  if (v->kind != 5) {
+    mnx_error(m, line, label + " must be an inline table such as {{ path = \"../dir\" } or {{ version = \"v1.2.0\" }");
+    return;
+  }
+  var r: ReplaceSpec;
+  r.module = key;
+  r.path = s_empty();
+  r.url = s_empty();
+  r.version = s_empty();
+  r.line = line;
+  r.local = is_local;
+  var known: StrList* = mnx_list("path version");
+  var i: int64 = 0;
+  while (i < v->fields->len && slen(m->error) == 0) {
+    var f: string = sl_get(v->fields, i);
+    if (s_eq(f, "url")) {
+      mnx_error(m, line, label + ": url was removed: replace with a path (a local checkout) or a version");
+    } else if (!sl_has(known, f)) {
+      var msg: string = "unknown field '" + f + "' in " + label;
+      var sug: string = man_suggest(f, known);
+      if (slen(sug) > 0) {
+        msg = msg + " (did you mean '" + sug + "'?)";
+      }
+      mnx_warn(m, line, msg);
+    } else if (!s_eq(sl_get(v->field_kinds, i), "1")) {
+      mnx_error(m, line, label + ": " + f + " must be a string");
+    } else {
+      var val: string = sl_get(v->field_values, i);
+      if (s_eq(f, "path")) { r.path = val; }
+      if (s_eq(f, "version")) { r.version = val; }
+    }
+    i = i + 1;
+  }
+  free(known);
+  if (slen(m->error) > 0) {
+    return;
+  }
+  if (slen(r.path) > 0 && slen(r.version) > 0) {
+    mnx_error(m, line, label + ": path excludes version (a local checkout is used as it is)");
+    return;
+  }
+  if (slen(r.path) == 0 && slen(r.version) == 0) {
+    mnx_error(m, line, label + " needs a path or a version");
+    return;
+  }
+  if (man_replace_find(m, key) != (ReplaceSpec*)0) {
+    mnx_error(m, line, "module '" + key + "' is replaced twice");
+    return;
+  }
+  mnx_push_replace(m, r);
+}
+
+fn mnx_replaces(m: Manifest*, is_local: bool) {
+  var keys: StrList* = toml_keys(m->doc, "replace");
+  var i: int64 = 0;
+  while (i < keys->len && slen(m->error) == 0) {
+    var key: string = sl_get(keys, i);
+    var v: TomlValue* = toml_get(m->doc, "replace", key);
+    mnx_replace_one(m, key, v, v->line, is_local);
+    i = i + 1;
+  }
+  free(keys);
+  var secs: StrList* = toml_sections(m->doc, "replace.");
+  i = 0;
+  while (i < secs->len && slen(m->error) == 0) {
+    var sec: string = sl_get(secs, i);
+    var line: int64 = mnx_section_line(m->doc, sec);
+    mnx_replace_one(m, s_from(sec, 8), mnx_table_as_inline(m->doc, sec, line), line, is_local);
+    i = i + 1;
+  }
+  free(secs);
+}
+
+fn mnx_tools(m: Manifest*) {
+  var keys: StrList* = toml_keys(m->doc, "tools");
+  var i: int64 = 0;
+  while (i < keys->len && slen(m->error) == 0) {
+    var key: string = sl_get(keys, i);
+    var v: TomlValue* = toml_get(m->doc, "tools", key);
+    if (v->kind != 1) {
+      mnx_error(m, v->line, "[tools] " + key + " must be a string (a program name or path), not " + toml_kind_name(v->kind));
+    } else {
+      sl_push(m->tools, key + "=" + v->text);
+    }
+    i = i + 1;
+  }
+  free(keys);
+}
+
+// ---------------------------------------------------------------------------
+// [registry.NAME], [component.NAME], [rules] (DESIGN.md 14.2, 15)
+// ---------------------------------------------------------------------------
+
+fn mnx_push_reg(m: Manifest*, r: RegSpec) {
+  if (m->nregs % 8 == 0) {
+    m->regs = (RegSpec*)realloc(m->regs, (m->nregs + 8) * sizeof(RegSpec));
+  }
+  m->regs[m->nregs] = r;
+  m->nregs = m->nregs + 1;
+}
+
+fn mnx_push_comp(m: Manifest*, c: CompSpec) {
+  if (m->ncomps % 8 == 0) {
+    m->comps = (CompSpec*)realloc(m->comps, (m->ncomps + 8) * sizeof(CompSpec));
+  }
+  m->comps[m->ncomps] = c;
+  m->ncomps = m->ncomps + 1;
+}
+
+// [a-z] then [a-z0-9_] and extra, at most max bytes.
+fn mnx_lower_name(s: string, max: int64, extra: int32) -> bool {
+  var n: int64 = slen(s);
+  if (n == 0 || n > max) {
+    return false;
+  }
+  var c0: int32 = s_byte(s, 0);
+  if (c0 < 97 || c0 > 122) {
+    return false;
+  }
+  var i: int64 = 1;
+  while (i < n) {
+    var c: int32 = s_byte(s, i);
+    if (!((c >= 97 && c <= 122) || is_digit_b(c) || c == 95 || c == extra)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn mnx_regs(m: Manifest*) {
+  var i: int64 = 0;
+  while (i < m->doc->sections->len && slen(m->error) == 0) {
+    var sec: string = sl_get(m->doc->sections, i);
+    if (mnx_is_named(sec, "registry")) {
+      var r: RegSpec;
+      r.name = s_from(sec, 9);
+      r.line = mnx_section_line(m->doc, sec);
+      r.url = mnx_str(m, sec, "url");
+      if (!mnx_lower_name(r.name, 64, 45)) {
+        mnx_error(m, r.line, "registry name '" + r.name + "' may only hold lower-case letters, digits, '_' and '-', starting with a letter");
+      } else if (slen(m->error) == 0 && slen(r.url) == 0) {
+        mnx_error(m, r.line, "[" + sec + "] needs url = \"https://...\" (or a directory)");
+      } else if (slen(m->error) == 0) {
+        mnx_push_reg(m, r);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+// impls as an array, or one comma- or space-separated string (mb_component's csv).
+fn mnx_impls(m: Manifest*, sec: string) -> StrList* {
+  var v: TomlValue* = toml_get(m->doc, sec, "impls");
+  if (v == (TomlValue*)0 || v->kind != 1) {
+    return mnx_strs(m, sec, "impls");
+  }
+  var out: StrList* = sl_new();
+  var parts: StrList* = s_split(s_replace_byte(v->text, 44, 32), 32);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var w: string = s_trim(sl_get(parts, i));
+    if (slen(w) > 0) {
+      sl_push(out, w);
+    }
+    i = i + 1;
+  }
+  free(parts);
+  return out;
+}
+
+// A suggestion for a mode: a prefix match first ("dynamic" -> "dyn"), else the nearest.
+fn mnx_suggest_mode(word: string, modes: StrList*) -> string {
+  var i: int64 = 0;
+  while (i < modes->len) {
+    var c: string = sl_get(modes, i);
+    if (slen(word) > 0 && (s_starts(word, c) || s_starts(c, word))) {
+      return c;
+    }
+    i = i + 1;
+  }
+  return mnx_suggest_value(word, modes);
+}
+
+fn mnx_comp_one(m: Manifest*, sec: string) {
+  var c: CompSpec;
+  c.name = s_from(sec, 10);
+  c.line = mnx_section_line(m->doc, sec);
+  c.owner = m->name;
+  c.os_defaults = sl_new();
+  var label: string = "[" + sec + "] ";
+  if (!mnx_lower_name(c.name, 32, 95)) {
+    mnx_error(m, c.line, "component name '" + c.name + "' may only hold lower-case letters, digits and '_', starting with a letter (at most 32)");
+    return;
+  }
+  var dir: string = mnx_str(m, sec, "dir");
+  c.mode = mnx_str(m, sec, "mode");
+  c.impls = mnx_impls(m, sec);
+  if (slen(m->error) > 0) {
+    return;
+  }
+  if (slen(dir) == 0) {
+    mnx_error(m, c.line, label + "needs dir = \"src/" + c.name + "\" (the directory of its impl files)");
+    return;
+  }
+  c.dir = p_clean(p_join(m->dir, dir));
+  if (slen(c.mode) == 0) {
+    c.mode = "static";
+  }
+  var modes: StrList* = mnx_list("static dyn swap");
+  if (!sl_has(modes, c.mode)) {
+    var msg: string = label + "mode = " + toml_quote(c.mode) + " is not one of " + mnx_quoted(modes);
+    var sug: string = mnx_suggest_mode(c.mode, modes);
+    if (slen(sug) > 0) {
+      msg = msg + " (did you mean " + toml_quote(sug) + "?)";
+    }
+    free(modes);
+    mnx_error(m, toml_get(m->doc, sec, "mode")->line, msg);
+    return;
+  }
+  free(modes);
+  if (c.impls->len == 0) {
+    mnx_error(m, c.line, label + "needs impls = [\"...\"] (the first is the default)");
+    return;
+  }
+  var i: int64 = 0;
+  while (i < c.impls->len) {
+    var im: string = sl_get(c.impls, i);
+    if (!mnx_name_ok(im) || s_find_byte(im, 46) >= 0) {
+      mnx_error(m, toml_get(m->doc, sec, "impls")->line, label + "impl '" + im + "' is not a file name (letters, digits, '_' and '-')");
+      return;
+    }
+    if (sl_index(c.impls, im) < i) {
+      mnx_error(m, toml_get(m->doc, sec, "impls")->line, label + "impl '" + im + "' is listed twice");
+      return;
+    }
+    i = i + 1;
+  }
+  var oses: StrList* = mnx_list("linux windows");
+  i = 0;
+  while (i < oses->len && slen(m->error) == 0) {
+    var os: string = sl_get(oses, i);
+    var ov: TomlValue* = toml_get(m->doc, sec, os);
+    var pick: string = mnx_str(m, sec, os);
+    if (ov != (TomlValue*)0 && slen(m->error) == 0) {
+      if (!sl_has(c.impls, pick)) {
+        var omsg: string = label + os + " = " + toml_quote(pick) + " is not one of its impls (" + sl_join(c.impls, ", ") + ")";
+        var osug: string = man_suggest(pick, c.impls);
+        if (slen(osug) > 0) {
+          omsg = omsg + " (did you mean " + toml_quote(osug) + "?)";
+        }
+        mnx_error(m, ov->line, omsg);
+      } else {
+        sl_push(c.os_defaults, os + "=" + pick);
+      }
+    }
+    i = i + 1;
+  }
+  free(oses);
+  if (slen(m->error) == 0) {
+    mnx_push_comp(m, c);
+  }
+}
+
+fn mnx_comps(m: Manifest*) {
+  var i: int64 = 0;
+  while (i < m->doc->sections->len && slen(m->error) == 0) {
+    var sec: string = sl_get(m->doc->sections, i);
+    if (mnx_is_named(sec, "component")) {
+      mnx_comp_one(m, sec);
+    }
+    i = i + 1;
+  }
+}
+
+fn mnx_rules(m: Manifest*) {
+  var files: StrList* = mnx_strs(m, "rules", "files");
+  var i: int64 = 0;
+  while (i < files->len) {
+    sl_push(m->rules, p_clean(p_join(m->dir, sl_get(files, i))));
+    i = i + 1;
+  }
+  free(files);
+}
+
+fn mnx_bin_kind(m: Manifest*, sec: string, b: BinSpec*) {
+  var label: string = "[" + sec + "] ";
+  var kv: TomlValue* = toml_get(m->doc, sec, "kind");
+  if (kv == (TomlValue*)0) {
+    b->kind = "exe";
+  }
+  var kinds: StrList* = mnx_list("exe shared object flat");
+  if (kv != (TomlValue*)0 && slen(m->error) == 0 && !sl_has(kinds, b->kind)) {
+    var msg: string = label + "kind = " + toml_quote(b->kind) + " is not one of " + mnx_quoted(kinds);
+    var sug: string = mnx_suggest_mode(b->kind, kinds);
+    if (slen(sug) > 0) {
+      msg = msg + " (did you mean " + toml_quote(sug) + "?)";
+    }
+    mnx_error(m, kv->line, msg);
+  }
+  free(kinds);
+  if (slen(m->error) == 0 && s_eq(b->kind, "flat") && !s_ends(b->triple, "-none")) {
+    var line: int64 = mnx_section_line(m->doc, sec);
+    if (kv != (TomlValue*)0) {
+      line = kv->line;
+    }
+    mnx_error(m, line, label + "kind = \"flat\" needs a freestanding triple (triple = \"x86_64-none\") and an image-base");
+  }
+}
+
+fn mnx_tool_key(entry: string) -> string {
+  var eq: int64 = s_find_byte(entry, 61);
+  if (eq < 0) {
+    return entry;
+  }
+  return s_sub(entry, 0, eq);
+}
+
+fn mnx_add_profile_sections(names: StrList*, doc: Toml*) {
+  var i: int64 = 0;
+  while (i < doc->sections->len) {
+    var sec: string = sl_get(doc->sections, i);
+    if (s_starts(sec, "profile.") && slen(sec) > 8 && s_find_byte(s_from(sec, 8), 46) < 0) {
+      sl_add_uniq(names, s_from(sec, 8));
+    }
+    i = i + 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+fn mnx_name_ok(s: string) -> bool {
+  if (slen(s) == 0) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (!(is_ident_b(c) || c == 45 || c == 46)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn mnx_check_lists(m: Manifest*, base_section: string, keys: string) {
+  var names: StrList* = mnx_list(keys);
+  defer free(names);
+  var variants: StrList* = sl_new();
+  defer free(variants);
+  sl_push(variants, base_section);
+  sl_push(variants, base_section + ".linux");
+  sl_push(variants, base_section + ".windows");
+  var i: int64 = 0;
+  while (i < variants->len) {
+    var k: int64 = 0;
+    while (k < names->len) {
+      var l: StrList* = mnx_strs(m, sl_get(variants, i), sl_get(names, k));
+      free(l);
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+}
+
+// A manifest with no file behind it (zero-config projects).
+export fn man_empty(dir: string, name: string) -> Manifest* {
+  var m: Manifest* = new Manifest;
+  m->dir = dir;
+  m->file = dir + "/mbuild.toml";
+  m->doc = toml_parse("", m->file);
+  m->name = name;
+  m->version = s_empty();
+  m->module = s_empty();
+  m->toolchain = s_empty();
+  m->targets = sl_new();
+  m->flags = sl_new();
+  m->prelude = false;
+  m->bins = (BinSpec*)0;
+  m->nbins = 0;
+  m->deps = (DepSpec*)0;
+  m->ndeps = 0;
+  m->warnings = sl_new();
+  m->error = s_empty();
+  m->mettle_min = s_empty();
+  m->subs_mode = "all";
+  m->subs = sl_new();
+  m->replaces = (ReplaceSpec*)0;
+  m->nreplaces = 0;
+  m->tools = sl_new();
+  m->local = (Manifest*)0;
+  m->comps = (CompSpec*)0;
+  m->ncomps = 0;
+  m->regs = (RegSpec*)0;
+  m->nregs = 0;
+  m->rules = sl_new();
+  m->include = sl_new();
+  m->meta = sl_new();
+  m->local_components = sl_new();
+  return m;
+}
+
+export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
+  var m: Manifest* = man_empty(dir, s_empty());
+  m->doc = doc;
+  if (slen(doc->error) > 0) {
+    m->error = doc->error;
+    return m;
+  }
+  m->name = mnx_str(m, "package", "name");
+  m->version = mnx_str(m, "package", "version");
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  if (toml_get(doc, "package", "name") == (TomlValue*)0) {
+    mnx_error(m, mnx_section_line(doc, "package"), "[package] name is required");
+    return m;
+  }
+  if (!mnx_name_ok(m->name)) {
+    mnx_error(m, toml_get(doc, "package", "name")->line, "package name '" + m->name + "' may only hold letters, digits, '_', '-' and '.'");
+    return m;
+  }
+  if (slen(m->version) > 0 && !sv_is(m->version)) {
+    mnx_warn(m, toml_get(doc, "package", "version")->line, "package version '" + m->version + "' is not a semantic version");
+  }
+  mnx_removed(m);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  mnx_package_extra(m);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  m->targets = mnx_strs(m, "build", "targets");
+  m->flags = mnx_strs(m, "build", "flags");
+  m->prelude = mnx_bool(m, "build", "prelude");
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  var t: int64 = 0;
+  while (t < m->targets->len) {
+    var tg: string = sl_get(m->targets, t);
+    if (!s_eq(tg, "linux") && !s_eq(tg, "windows")) {
+      mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected \"linux\" or \"windows\")");
+      return m;
+    }
+    t = t + 1;
+  }
+  var profiles: StrList* = toml_sections(doc, "profile.");
+  defer free(profiles);
+  var i: int64 = 0;
+  while (i < profiles->len) {
+    var pl: StrList* = mnx_strs(m, sl_get(profiles, i), "flags");
+    free(pl);
+    var pc: StrList* = mnx_strs(m, sl_get(profiles, i), "cflags");
+    free(pc);
+    i = i + 1;
+  }
+  mnx_check_settings(m, true);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  var bins: StrList* = toml_sections(doc, "bin.");
+  defer free(bins);
+  i = 0;
+  while (i < bins->len) {
+    var sec: string = sl_get(bins, i);
+    var bname: string = s_from(sec, 4);
+    if (s_find_byte(bname, 46) < 0) {
+      var b: BinSpec;
+      b.name = bname;
+      b.main = mnx_str(m, sec, "main");
+      b.flags = mnx_strs(m, sec, "flags");
+      b.kind = mnx_str(m, sec, "kind");
+      b.triple = mnx_str(m, sec, "triple");
+      mnx_bin_kind(m, sec, &b);
+      if (slen(m->error) > 0) {
+        return m;
+      }
+      if (!mnx_name_ok(bname)) {
+        mnx_error(m, mnx_section_line(doc, sec), "bin name '" + bname + "' may only hold letters, digits, '_', '-' and '.'");
+        return m;
+      }
+      mnx_push_bin(m, b);
+    }
+    i = i + 1;
+  }
+  mnx_check_lists(m, "c", "sources include cflags libs");
+  mnx_check_lists(m, "link", "libs paths pkgconfig");
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  mnx_deps(m);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  mnx_replaces(m, false);
+  mnx_tools(m);
+  mnx_regs(m);
+  mnx_comps(m);
+  mnx_rules(m);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  mnx_unknowns(m);
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+// "debug", "release", then the [profile.NAME] sections of mbuild.toml and
+// of the merged mbuild.local.toml, in first-seen order.
+export fn man_profile_names(m: Manifest*) -> StrList* {
+  var names: StrList* = sl_new();
+  sl_push(names, "debug");
+  sl_push(names, "release");
+  mnx_add_profile_sections(names, m->doc);
+  if (m->local != (Manifest*)0) {
+    mnx_add_profile_sections(names, m->local->doc);
+  }
+  return names;
+}
+
+export fn man_has_profile(m: Manifest*, profile: string) -> bool {
+  var names: StrList* = man_profile_names(m);
+  var found: bool = sl_has(names, profile);
+  free(names);
+  return found;
+}
+
+// The raw profile flags as before typed settings: [profile.NAME] flags, else
+// ["--release"] for release, else nothing. Kept for existing callers (its
+// results differ from man_settings_flags, which adds the built-in -s for
+// debug and keeps --release under a release flags list); new code uses
+// man_settings / man_settings_flags.
+export fn man_profile_flags(m: Manifest*, profile: string) -> StrList* {
+  var sec: string = "profile." + profile;
+  if (toml_get(m->doc, sec, "flags") != (TomlValue*)0) {
+    return toml_list(m->doc, sec, "flags");
+  }
+  if (s_eq(profile, "release")) {
+    return sl_of("--release");
+  }
+  return sl_new();
+}
+
+// Extra C compiler flags for builds in this profile: the cflags of its
+// inherits chain (ancestor first), each followed by mbuild.local.toml's.
+export fn man_profile_cflags(m: Manifest*, profile: string) -> StrList* {
+  var q: SettingsQuery* = new SettingsQuery;
+  q->profile = profile;
+  q->bin = s_empty();
+  q->target = s_empty();
+  q->sets = (StrList*)0;
+  var st: Settings* = man_settings(m, q);
+  free(q);
+  var cf: StrList* = st->cflags;
+  free(st);
+  return cf;
+}
+
+// The build settings of one compile (DESIGN.md 12.12). Problems go to the
+// result's error ("file:line: message", or "--set ITEM: message").
+export fn man_settings(m: Manifest*, q: SettingsQuery*) -> Settings* {
+  var st: Settings* = mnx_settings_new();
+  var chain: StrList* = mnx_chain(m, q->profile, st);
+  var i: int64 = chain->len - 1;
+  while (i >= 0 && slen(st->error) == 0) {
+    var name: string = sl_get(chain, i);
+    mnx_builtin(st, name);
+    mnx_apply_section(st, m, "profile." + name);
+    if (m->local != (Manifest*)0 && slen(st->error) == 0) {
+      mnx_apply_section(st, m->local, "profile." + name);
+    }
+    i = i - 1;
+  }
+  if (s_eq(q->target, "linux") || s_eq(q->target, "windows")) {
+    i = chain->len - 1;
+    while (i >= 0 && slen(st->error) == 0) {
+      var osec: string = "profile." + sl_get(chain, i) + "." + q->target;
+      mnx_apply_section(st, m, osec);
+      if (m->local != (Manifest*)0 && slen(st->error) == 0) {
+        mnx_apply_section(st, m->local, osec);
+      }
+      i = i - 1;
+    }
+  }
+  free(chain);
+  if (slen(st->error) == 0 && slen(q->bin) > 0) {
+    mnx_apply_section(st, m, "bin." + q->bin);
+  }
+  if (q->sets != (StrList*)0) {
+    i = 0;
+    while (i < q->sets->len && slen(st->error) == 0) {
+      mnx_apply_set(st, sl_get(q->sets, i));
+      i = i + 1;
+    }
+  }
+  if (slen(st->error) == 0 && m->flags->len > 0) {
+    var bv: TomlValue* = toml_get(m->doc, "build", "flags");
+    var line: int64 = 0;
+    if (bv != (TomlValue*)0) {
+      line = bv->line;
+    }
+    mnx_covered_warnings(st, mnx_where(m, line), m->flags);
+    sl_extend(st->flags, m->flags);
+  }
+  if (slen(st->error) == 0 && s_eq(st->pgo, "use") && slen(st->pgo_file) == 0) {
+    var at: string = s_empty();
+    var k: int64 = 0;
+    while (k < st->origins->len) {
+      if (s_starts(sl_get(st->origins, k), "pgo=")) {
+        at = s_from(sl_get(st->origins, k), 4) + ": ";
+      }
+      k = k + 1;
+    }
+    st->error = at + "pgo = \"use\" needs pgo-file = \"PATH\" (the profile a pgo = \"instrument\" build recorded)";
+  }
+  return st;
+}
+
+// Compiler flags for settings on one target: typed flags in the order of
+// the 12.12 table, then the raw flags (a raw flag a typed one already
+// passes is dropped; --subsystem only for windows).
+export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
+  var res: StrList* = sl_new();
+  if (s_eq(st->optimize, "checked")) { sl_push(res, "-O"); }
+  if (s_eq(st->optimize, "full")) { sl_push(res, "--release"); }
+  if (st->safe) { sl_push(res, "--safe"); }
+  if (st->stack_trace) { sl_push(res, "-s"); }
+  if (st->debug_info) { sl_push(res, "-g"); }
+  if (!st->crash_report) { sl_push(res, "--no-crash-report"); }
+  if (st->native_heap) { sl_push(res, "--native-heap"); }
+  if (st->check_overflow) { sl_push(res, "--check-overflow"); }
+  if (st->check_proofs) { sl_push(res, "--check-proofs"); }
+  if (st->check_effects) { sl_push(res, "--check-effects"); }
+  if (st->check_deadlines) { sl_push(res, "--check-deadlines"); }
+  if (st->check_tasks) { sl_push(res, "--check-tasks"); }
+  if (st->assume_nso) { sl_push(res, "--assume-no-signed-overflow"); }
+  if (s_eq(st->pgo, "auto")) { sl_push(res, "--pgo"); }
+  if (s_eq(st->pgo, "instrument")) { sl_push(res, "--pgo-gen"); }
+  if (s_eq(st->pgo, "use")) { sl_push(res, "--pgo-use=" + st->pgo_file); }
+  if (st->verify) { sl_push(res, "--verify"); }
+  if (s_eq(st->ml_opt, "on")) { sl_push(res, "--ml-opt"); }
+  if (s_eq(st->ml_opt, "speculative")) { sl_push(res, "--ml-opt-speculative"); }
+  if (st->profile_runtime) { sl_push(res, "--profile-runtime"); }
+  if (slen(st->image_base) > 0) {
+    sl_push(res, "--image-base");
+    sl_push(res, st->image_base);
+  }
+  if (s_eq(st->subsystem, "windows") && s_eq(target, "windows")) {
+    sl_push(res, "--subsystem");
+    sl_push(res, "windows");
+  }
+  var i: int64 = 0;
+  while (i < st->flags->len) {
+    var f: string = sl_get(st->flags, i);
+    if (s_eq(f, "--subsystem") || s_eq(f, "--image-base")) {
+      if (sl_has(res, f)) {
+        i = i + 1;
+      } else {
+        sl_push(res, f);
+        if (i + 1 < st->flags->len) {
+          sl_push(res, sl_get(st->flags, i + 1));
+          i = i + 1;
+        }
+      }
+    } else if (!(slen(mnx_covered(f)) > 0 && sl_has(res, f))) {
+      sl_push(res, f);
+    }
+    i = i + 1;
+  }
+  return res;
+}
+
+// The [replace] entry for a module (mbuild.local.toml's first); 0 when none.
+export fn man_replace_find(m: Manifest*, module: string) -> ReplaceSpec* {
+  var pass: int32 = 0;
+  while (pass < 2) {
+    var i: int64 = 0;
+    while (i < m->nreplaces) {
+      if ((m->replaces[i].local == (pass == 0)) && s_eq(m->replaces[i].module, module)) {
+        return &m->replaces[i];
+      }
+      i = i + 1;
+    }
+    pass = pass + 1;
+  }
+  return (ReplaceSpec*)0;
+}
+
+// mbuild.local.toml (DESIGN.md 12.5, 13.5): only [replace], [tools],
+// [profile.NAME] (and .os), [build] targets, [components] and
+// [registry.NAME] url.
+export fn man_parse_local(doc: Toml*, dir: string) -> Manifest* {
+  var m: Manifest* = man_empty(dir, s_empty());
+  m->file = dir + "/mbuild.local.toml";
+  m->doc = doc;
+  if (slen(doc->error) > 0) {
+    m->error = doc->error;
+    return m;
+  }
+  var top: StrList* = toml_keys(doc, "");
+  var i: int64 = 0;
+  while (i < top->len) {
+    var tv: TomlValue* = toml_get(doc, "", sl_get(top, i));
+    mnx_warn(m, tv->line, "key '" + sl_get(top, i) + "' is outside any section and is ignored");
+    i = i + 1;
+  }
+  free(top);
+  var secs: StrList* = doc->sections;
+  i = 0;
+  while (i < secs->len) {
+    var sec: string = sl_get(secs, i);
+    var is_prof: bool = mnx_is_named(sec, "profile") || mnx_is_os_profile(sec);
+    var ok: bool = is_prof || s_eq(sec, "replace") || s_starts(sec, "replace.") || s_eq(sec, "tools") || s_eq(sec, "build") || s_eq(sec, "components") || mnx_is_named(sec, "registry");
+    if (!ok) {
+      mnx_error(m, mnx_section_line(doc, sec), "[" + sec + "] is not allowed here (mbuild.local.toml holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
+      return m;
+    }
+    i = i + 1;
+  }
+  var bkeys: StrList* = toml_keys(doc, "build");
+  i = 0;
+  while (i < bkeys->len) {
+    var bk: string = sl_get(bkeys, i);
+    if (!s_eq(bk, "targets")) {
+      mnx_error(m, toml_get(doc, "build", bk)->line, "[build] " + bk + " is not allowed in mbuild.local.toml (only targets; shared settings belong in mbuild.toml)");
+      free(bkeys);
+      return m;
+    }
+    i = i + 1;
+  }
+  free(bkeys);
+  m->targets = mnx_strs(m, "build", "targets");
+  i = 0;
+  while (i < m->targets->len && slen(m->error) == 0) {
+    var tg: string = sl_get(m->targets, i);
+    if (!s_eq(tg, "linux") && !s_eq(tg, "windows")) {
+      mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected \"linux\" or \"windows\")");
+    }
+    i = i + 1;
+  }
+  var profiles: StrList* = toml_sections(doc, "profile.");
+  i = 0;
+  while (i < profiles->len) {
+    var pl: StrList* = mnx_strs(m, sl_get(profiles, i), "flags");
+    free(pl);
+    var pc: StrList* = mnx_strs(m, sl_get(profiles, i), "cflags");
+    free(pc);
+    i = i + 1;
+  }
+  free(profiles);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  mnx_check_settings(m, false);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  mnx_replaces(m, true);
+  mnx_tools(m);
+  mnx_regs(m);
+  mnx_local_components(m);
+  if (slen(m->error) > 0) {
+    return m;
+  }
+  i = 0;
+  while (i < secs->len) {
+    var ks: string = sl_get(secs, i);
+    if (s_eq(ks, "tools") || s_starts(ks, "profile.") || s_starts(ks, "registry.")) {
+      mnx_unknown_keys(m, ks);
+    }
+    i = i + 1;
+  }
+  return m;
+}
+
+fn mnx_local_components(m: Manifest*) {
+  var keys: StrList* = toml_keys(m->doc, "components");
+  var i: int64 = 0;
+  while (i < keys->len && slen(m->error) == 0) {
+    var key: string = sl_get(keys, i);
+    var v: TomlValue* = toml_get(m->doc, "components", key);
+    if (v->kind != 1 || slen(v->text) == 0) {
+      mnx_error(m, v->line, "[components] " + key + " must be an impl name (a string), e.g. " + key + " = \"quiet\"");
+    } else {
+      sl_push(m->local_components, key + "=" + v->text);
+    }
+    i = i + 1;
+  }
+  free(keys);
+}
+
+// Layers a parsed mbuild.local.toml over m: its profiles (read by
+// man_settings), [build] targets, [tools] per key and [replace] per module
+// win; [components] become m->local_components; a [registry.NAME] url
+// replaces the url of a registry m declares (the others, e.g. a mirror of
+// default, stay in m->local->regs). Its warnings join m's; its error becomes
+// m's when m has none.
+export fn man_merge_local(m: Manifest*, local: Manifest*) {
+  m->local = local;
+  if (slen(local->error) > 0 && slen(m->error) == 0) {
+    m->error = local->error;
+  }
+  sl_extend(m->warnings, local->warnings);
+  if (toml_has(local->doc, "build", "targets")) {
+    m->targets = sl_copy(local->targets);
+  }
+  var i: int64 = 0;
+  while (i < local->tools->len) {
+    var entry: string = sl_get(local->tools, i);
+    var key: string = mnx_tool_key(entry);
+    var k: int64 = 0;
+    while (k < m->tools->len) {
+      if (s_eq(mnx_tool_key(sl_get(m->tools, k)), key)) {
+        sl_remove_at(m->tools, k);
+      } else {
+        k = k + 1;
+      }
+    }
+    sl_push(m->tools, entry);
+    i = i + 1;
+  }
+  var old: ReplaceSpec* = m->replaces;
+  var oldn: int64 = m->nreplaces;
+  m->replaces = (ReplaceSpec*)0;
+  m->nreplaces = 0;
+  i = 0;
+  while (i < local->nreplaces) {
+    var r: ReplaceSpec = local->replaces[i];
+    r.local = true;
+    mnx_push_replace(m, r);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < oldn) {
+    if (man_replace_find(local, old[i].module) == (ReplaceSpec*)0) {
+      mnx_push_replace(m, old[i]);
+    }
+    i = i + 1;
+  }
+  free(old);
+  m->local_components = sl_copy(local->local_components);
+  i = 0;
+  while (i < local->nregs) {
+    var r: RegSpec* = man_reg_find(m, local->regs[i].name);
+    if (r != (RegSpec*)0) {
+      r->url = local->regs[i].url;
+    }
+    i = i + 1;
+  }
+}
+
+// `[S].K` followed by `[S.os].K`, for section_key "S.K" (e.g. "link.libs").
+// (One string rather than section and key: see the report on v0.17.0 calls.)
+export fn man_os_list(m: Manifest*, section_key: string, os: string) -> StrList* {
+  var dot: int64 = s_rfind_byte(section_key, 46);
+  var section: string = s_sub(section_key, 0, dot);
+  var key: string = s_from(section_key, dot + 1);
+  var l: StrList* = toml_list(m->doc, section, key);
+  var extra: StrList* = toml_list(m->doc, section + "." + os, key);
+  sl_extend(l, extra);
+  free(extra);
+  return l;
+}
+
+// Whether the package compiles C code (any [c] sources, for any OS).
+export fn man_has_c(m: Manifest*) -> bool {
+  var sections: StrList* = mnx_list("c c.linux c.windows");
+  defer free(sections);
+  var i: int64 = 0;
+  while (i < sections->len) {
+    var l: StrList* = toml_list(m->doc, sl_get(sections, i), "sources");
+    var n: int64 = l->len;
+    free(l);
+    if (n > 0) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// The dependency with this key, else the one with this module; 0 when absent.
+export fn man_dep_find(m: Manifest*, key_or_module: string) -> DepSpec* {
+  var i: int64 = 0;
+  while (i < m->ndeps) {
+    if (s_eq(m->deps[i].key, key_or_module)) {
+      return &m->deps[i];
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < m->ndeps) {
+    if (slen(m->deps[i].module) > 0 && s_eq(m->deps[i].module, key_or_module)) {
+      return &m->deps[i];
+    }
+    i = i + 1;
+  }
+  return (DepSpec*)0;
+}
+
+export fn man_bin(m: Manifest*, i: int64) -> BinSpec* {
+  return &m->bins[i];
+}
+
+export fn man_dep(m: Manifest*, i: int64) -> DepSpec* {
+  return &m->deps[i];
+}
+
+export fn man_comp_find(m: Manifest*, name: string) -> CompSpec* {
+  var i: int64 = 0;
+  while (i < m->ncomps) {
+    if (s_eq(m->comps[i].name, name)) {
+      return &m->comps[i];
+    }
+    i = i + 1;
+  }
+  return (CompSpec*)0;
+}
+
+export fn man_reg_find(m: Manifest*, name: string) -> RegSpec* {
+  var i: int64 = 0;
+  while (i < m->nregs) {
+    if (s_eq(m->regs[i].name, name)) {
+      return &m->regs[i];
+    }
+    i = i + 1;
+  }
+  return (RegSpec*)0;
+}
+
+// [a-z][a-z0-9_]{0,63}; std and mbuild match but are reserved.
+export fn man_is_package_name(s: string) -> bool {
+  return mnx_lower_name(s, 64, 95);
+}

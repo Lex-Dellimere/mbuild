@@ -1,0 +1,16 @@
+// agents: stub, owned by group N (DESIGN.md 16.3).
+
+import "../core/base";
+import "../model/project";
+
+export fn agt_refresh(p: Project*, ds: DepState*) -> bool {
+  return false;
+}
+
+export fn agt_cmd_agents(p: Project*, ds: DepState*) -> int32 {
+  return 1;
+}
+
+export fn agt_strip_block(text: string) -> string {
+  return text;
+}

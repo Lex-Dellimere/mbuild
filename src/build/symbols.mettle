@@ -1,0 +1,741 @@
+// symbols: the names a binary defines, read straight from the file.
+//
+//   ELF64 shared object  .dynsym  (defined GLOBAL/WEAK/UNIQUE FUNC/OBJECT/IFUNC)
+//   ELF64 relocatable    .symtab  (the same, plus NOTYPE: assembler labels)
+//   PE image (DLL, EXE)  the export directory's name table
+//   COFF object (.obj)   external symbols defined in a section
+//
+// Written in Mettle rather than shelling out to nm/objdump so it behaves the
+// same natively and under wine. Only the parts needed are read (headers, one
+// symbol table, its string table); files over 512 MB are skipped, and every
+// offset is checked against the file size, so garbage input answers nothing.
+
+import "std/io";
+import "std/mem";
+import "../core/base";
+
+extern fn symx_c_fseek(fp: cstring, off: int64, origin: int32) -> int32 = "_fseeki64";
+extern fn symx_c_ftell(fp: cstring) -> int64 = "_ftelli64";
+
+const SYMX_MAX_FILE: int64 = 536870912;
+const SYMX_MAX_PART: int64 = 268435456;
+
+struct SymxFile {
+  fp: cstring;
+  size: int64;
+}
+
+// One file's answer, cached per path by sym_defined.
+struct SymxCache {
+  paths: StrList*;
+  lists: StrList**;
+  cap: int64;
+}
+
+var g_symx_cache: SymxCache* = 0;
+
+fn symx_open(f: SymxFile*, path: string) -> bool {
+  f->fp = fopen(s_c(path), "rb");
+  f->size = 0;
+  if (f->fp == 0) {
+    return false;
+  }
+  if (symx_c_fseek(f->fp, 0, 2) != 0) {
+    fclose(f->fp);
+    f->fp = 0;
+    return false;
+  }
+  f->size = symx_c_ftell(f->fp);
+  if (f->size <= 0 || f->size > SYMX_MAX_FILE) {
+    fclose(f->fp);
+    f->fp = 0;
+    return false;
+  }
+  return true;
+}
+
+// n bytes at off (malloc'd, plus a nul), or 0 when out of range or short.
+fn symx_read(f: SymxFile*, off: int64, n: int64) -> uint8* {
+  if (off < 0 || n <= 0 || n > SYMX_MAX_PART || off > f->size || n > f->size - off) {
+    return (uint8*)0;
+  }
+  if (symx_c_fseek(f->fp, off, 0) != 0) {
+    return (uint8*)0;
+  }
+  var p: uint8* = (uint8*)malloc(n + 1);
+  var got: int64 = fread((cstring)p, 1, n, f->fp);
+  if (got != n) {
+    free(p);
+    return (uint8*)0;
+  }
+  p[n] = 0;
+  return p;
+}
+
+fn symx_u16(p: uint8*, off: int64) -> int64 {
+  return (int64)p[off] | ((int64)p[off + 1] << 8);
+}
+
+fn symx_u32(p: uint8*, off: int64) -> int64 {
+  return symx_u16(p, off) | (symx_u16(p, off + 2) << 16);
+}
+
+fn symx_u64(p: uint8*, off: int64) -> int64 {
+  return symx_u32(p, off) | (symx_u32(p, off + 4) << 32);
+}
+
+// The nul-terminated string at off inside a buffer of n bytes ("" when off is
+// outside or no nul follows).
+fn symx_cstr(p: uint8*, n: int64, off: int64) -> string {
+  if (off < 0 || off >= n) {
+    return s_empty();
+  }
+  var e: int64 = off;
+  while (e < n && p[e] != 0) {
+    e = e + 1;
+  }
+  if (e >= n) {
+    return s_empty();
+  }
+  return s_dup(s_view(&p[off], e - off));
+}
+
+// Collects a name: everything when wanted is 0, else only wanted names.
+fn symx_take(found: StrList*, wanted: StrList*, name: string) {
+  if (slen(name) == 0) {
+    return;
+  }
+  if (wanted == 0) {
+    sl_push(found, name);
+    return;
+  }
+  if (sl_has(wanted, name)) {
+    sl_add_uniq(found, name);
+  }
+}
+
+// Whether "name\0" occurs in a string table. Not "\0name\0": linkers
+// share tails, so "cos" may be the end of "acos".
+fn symx_strtab_has(p: uint8*, n: int64, name: string) -> bool {
+  var m: int64 = slen(name);
+  if (m == 0 || m + 1 > n) {
+    return false;
+  }
+  var first: uint8 = name.chars[0];
+  var i: int64 = 0;
+  while (i + m < n) {
+    if (p[i] == first && p[i + m] == 0 && memcmp((rawptr)&p[i], (rawptr)name.chars, m) == 0) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// ELF64
+// ---------------------------------------------------------------------------
+
+fn symx_elf_symtab(f: SymxFile*, sh: uint8*, shnum: int64, idx: int64, wanted: StrList*, found: StrList*) {
+  var s: int64 = idx * 64;
+  var symoff: int64 = symx_u64(sh, s + 24);
+  var symsize: int64 = symx_u64(sh, s + 32);
+  var link: int64 = symx_u32(sh, s + 40);
+  var entsize: int64 = symx_u64(sh, s + 56);
+  if (entsize < 24) {
+    entsize = 24;
+  }
+  if (link <= 0 || link >= shnum) {
+    return;
+  }
+  var stroff: int64 = symx_u64(sh, link * 64 + 24);
+  var strsize: int64 = symx_u64(sh, link * 64 + 32);
+  var strtab: uint8* = symx_read(f, stroff, strsize);
+  if (strtab == (uint8*)0) {
+    return;
+  }
+  defer free(strtab);
+  if (wanted != 0) {
+    var hit: bool = false;
+    var w: int64 = 0;
+    while (w < wanted->len && !hit) {
+      hit = symx_strtab_has(strtab, strsize, sl_get(wanted, w));
+      w = w + 1;
+    }
+    if (!hit) {
+      return;
+    }
+  }
+  var syms: uint8* = symx_read(f, symoff, symsize);
+  if (syms == (uint8*)0) {
+    return;
+  }
+  defer free(syms);
+  var count: int64 = symsize / entsize;
+  var i: int64 = 1;
+  while (i < count) {
+    var e: int64 = i * entsize;
+    var info: int64 = (int64)syms[e + 4];
+    var bind: int64 = info >> 4;
+    var typ: int64 = info & 15;
+    var shndx: int64 = symx_u16(syms, e + 6);
+    if ((bind == 1 || bind == 2 || bind == 10) && (typ == 0 || typ == 1 || typ == 2 || typ == 10) && shndx != 0 && shndx != 65521) {
+      symx_take(found, wanted, symx_cstr(strtab, strsize, symx_u32(syms, e)));
+    }
+    i = i + 1;
+  }
+}
+
+fn symx_elf(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
+  if (hdr[4] != 2 || hdr[5] != 1) {
+    return;
+  }
+  var etype: int64 = symx_u16(hdr, 16);
+  var shoff: int64 = symx_u64(hdr, 40);
+  var shentsize: int64 = symx_u16(hdr, 58);
+  var shnum: int64 = symx_u16(hdr, 60);
+  if (shentsize != 64 || shnum <= 0) {
+    return;
+  }
+  var sh: uint8* = symx_read(f, shoff, shnum * 64);
+  if (sh == (uint8*)0) {
+    return;
+  }
+  defer free(sh);
+  // A shared object answers what it exports; an object file what it defines.
+  var first: int64 = 2;
+  var second: int64 = 11;
+  if (etype == 3) {
+    first = 11;
+    second = 2;
+  }
+  var pick: int64 = -1;
+  var i: int64 = 0;
+  while (i < shnum) {
+    if (symx_u32(sh, i * 64 + 4) == first) {
+      pick = i;
+      break;
+    }
+    i = i + 1;
+  }
+  if (pick < 0) {
+    i = 0;
+    while (i < shnum) {
+      if (symx_u32(sh, i * 64 + 4) == second) {
+        pick = i;
+        break;
+      }
+      i = i + 1;
+    }
+  }
+  if (pick >= 0) {
+    symx_elf_symtab(f, sh, shnum, pick, wanted, found);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PE export directory
+// ---------------------------------------------------------------------------
+
+// A section loaded into memory, to resolve RVAs inside it.
+struct SymxSec {
+  va: int64;
+  len: int64;
+  data: uint8*;
+}
+
+// The file offset of an RVA, -1 when no section holds it.
+fn symx_rva_off(secs: uint8*, nsec: int64, rva: int64) -> int64 {
+  var i: int64 = 0;
+  while (i < nsec) {
+    var s: int64 = i * 40;
+    var vsize: int64 = symx_u32(secs, s + 8);
+    var va: int64 = symx_u32(secs, s + 12);
+    var rawsize: int64 = symx_u32(secs, s + 16);
+    var rawptr_: int64 = symx_u32(secs, s + 20);
+    var span: int64 = vsize;
+    if (rawsize > span) {
+      span = rawsize;
+    }
+    if (rva >= va && rva < va + span) {
+      if (rva - va >= rawsize) {
+        return -1;
+      }
+      return rawptr_ + (rva - va);
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// The name at an RVA: from the loaded section when it lies there, else read
+// from the file.
+fn symx_pe_name(f: SymxFile*, ls: SymxSec*, secs: uint8*, nsec: int64, rva: int64) -> string {
+  if (rva >= ls->va && rva < ls->va + ls->len) {
+    return symx_cstr(ls->data, ls->len, rva - ls->va);
+  }
+  var off: int64 = symx_rva_off(secs, nsec, rva);
+  if (off < 0) {
+    return s_empty();
+  }
+  var n: int64 = 512;
+  if (off + n > f->size) {
+    n = f->size - off;
+  }
+  var p: uint8* = symx_read(f, off, n);
+  if (p == (uint8*)0) {
+    return s_empty();
+  }
+  var name: string = symx_cstr(p, n, 0);
+  free(p);
+  return name;
+}
+
+fn symx_pe(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
+  var lfanew: int64 = symx_u32(hdr, 60);
+  var ph: uint8* = symx_read(f, lfanew, 24);
+  if (ph == (uint8*)0) {
+    return;
+  }
+  defer free(ph);
+  if (ph[0] != 80 || ph[1] != 69 || ph[2] != 0 || ph[3] != 0) {
+    return;
+  }
+  var nsec: int64 = symx_u16(ph, 6);
+  var optsize: int64 = symx_u16(ph, 20);
+  if (nsec <= 0 || optsize < 96) {
+    return;
+  }
+  var opt: uint8* = symx_read(f, lfanew + 24, optsize);
+  if (opt == (uint8*)0) {
+    return;
+  }
+  defer free(opt);
+  var magic: int64 = symx_u16(opt, 0);
+  var dd: int64 = 0;
+  var nrva_at: int64 = 0;
+  if (magic == 523) {
+    dd = 112;
+    nrva_at = 108;
+  } else if (magic == 267) {
+    dd = 96;
+    nrva_at = 92;
+  } else {
+    return;
+  }
+  if (dd + 8 > optsize || symx_u32(opt, nrva_at) < 1) {
+    return;
+  }
+  var exp_rva: int64 = symx_u32(opt, dd);
+  if (exp_rva == 0) {
+    return;
+  }
+  var secs: uint8* = symx_read(f, lfanew + 24 + optsize, nsec * 40);
+  if (secs == (uint8*)0) {
+    return;
+  }
+  defer free(secs);
+  // Load the section holding the export directory.
+  var ls: SymxSec;
+  ls.va = 0;
+  ls.len = 0;
+  ls.data = (uint8*)0;
+  var i: int64 = 0;
+  while (i < nsec) {
+    var s: int64 = i * 40;
+    var va: int64 = symx_u32(secs, s + 12);
+    var rawsize: int64 = symx_u32(secs, s + 16);
+    var raw: int64 = symx_u32(secs, s + 20);
+    if (exp_rva >= va && exp_rva < va + rawsize) {
+      if (raw + rawsize > f->size) {
+        rawsize = f->size - raw;
+      }
+      ls.va = va;
+      ls.len = rawsize;
+      ls.data = symx_read(f, raw, rawsize);
+      break;
+    }
+    i = i + 1;
+  }
+  if (ls.data == (uint8*)0) {
+    return;
+  }
+  defer free(ls.data);
+  var ed: int64 = exp_rva - ls.va;
+  if (ed + 40 > ls.len) {
+    return;
+  }
+  var nnames: int64 = symx_u32(ls.data, ed + 24);
+  var names_rva: int64 = symx_u32(ls.data, ed + 32);
+  if (nnames <= 0 || nnames > 1000000) {
+    return;
+  }
+  var arr: uint8* = (uint8*)0;
+  var arr_owned: bool = false;
+  if (names_rva >= ls.va && names_rva + nnames * 4 <= ls.va + ls.len) {
+    arr = &ls.data[names_rva - ls.va];
+  } else {
+    var aoff: int64 = symx_rva_off(secs, nsec, names_rva);
+    if (aoff < 0) {
+      return;
+    }
+    arr = symx_read(f, aoff, nnames * 4);
+    if (arr == (uint8*)0) {
+      return;
+    }
+    arr_owned = true;
+  }
+  var k: int64 = 0;
+  while (k < nnames) {
+    symx_take(found, wanted, symx_pe_name(f, &ls, secs, nsec, symx_u32(arr, k * 4)));
+    k = k + 1;
+  }
+  if (arr_owned) {
+    free(arr);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// COFF object
+// ---------------------------------------------------------------------------
+
+fn symx_coff(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
+  var symptr: int64 = symx_u32(hdr, 8);
+  var nsyms: int64 = symx_u32(hdr, 12);
+  if (symptr <= 0 || nsyms <= 0 || nsyms > 20000000) {
+    return;
+  }
+  var syms: uint8* = symx_read(f, symptr, nsyms * 18);
+  if (syms == (uint8*)0) {
+    return;
+  }
+  defer free(syms);
+  var stroff: int64 = symptr + nsyms * 18;
+  var strtab: uint8* = (uint8*)0;
+  var strsize: int64 = 0;
+  var sz: uint8* = symx_read(f, stroff, 4);
+  if (sz != (uint8*)0) {
+    strsize = symx_u32(sz, 0);
+    free(sz);
+    if (strsize > 4) {
+      strtab = symx_read(f, stroff, strsize);
+    }
+  }
+  if (strtab == (uint8*)0) {
+    strsize = 0;
+  }
+  var i: int64 = 0;
+  while (i < nsyms) {
+    var e: int64 = i * 18;
+    var sclass: int64 = (int64)syms[e + 16];
+    var secnum: int64 = symx_u16(syms, e + 12);
+    var naux: int64 = (int64)syms[e + 17];
+    if (sclass == 2 && secnum > 0 && secnum < 65280) {
+      var name: string = s_empty();
+      if (symx_u32(syms, e) == 0) {
+        if (strtab != (uint8*)0) {
+          name = symx_cstr(strtab, strsize, symx_u32(syms, e + 4));
+        }
+      } else {
+        var n: int64 = 0;
+        while (n < 8 && syms[e + n] != 0) {
+          n = n + 1;
+        }
+        name = s_dup(s_view(&syms[e], n));
+      }
+      symx_take(found, wanted, name);
+    }
+    i = i + 1 + naux;
+  }
+  if (strtab != (uint8*)0) {
+    free(strtab);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+// "elf-so", "elf-o", "pe", "coff", or "" for anything else.
+fn symx_kind(hdr: uint8*, n: int64) -> string {
+  if (n >= 64 && hdr[0] == 127 && hdr[1] == 69 && hdr[2] == 76 && hdr[3] == 70) {
+    var et: int64 = symx_u16(hdr, 16);
+    if (et == 3) {
+      return "elf-so";
+    }
+    if (et == 1) {
+      return "elf-o";
+    }
+    return "elf";
+  }
+  if (n >= 64 && hdr[0] == 77 && hdr[1] == 90) {
+    return "pe";
+  }
+  if (n >= 20) {
+    var machine: int64 = symx_u16(hdr, 0);
+    if ((machine == 34404 || machine == 332 || machine == 43620) && symx_u16(hdr, 16) == 0) {
+      return "coff";
+    }
+  }
+  return s_empty();
+}
+
+fn symx_scan(path: string, wanted: StrList*, found: StrList*) -> string {
+  var f: SymxFile;
+  if (!symx_open(&f, path)) {
+    return s_empty();
+  }
+  var n: int64 = 64;
+  if (f.size < n) {
+    n = f.size;
+  }
+  var hdr: uint8* = symx_read(&f, 0, n);
+  var kind: string = s_empty();
+  if (hdr != (uint8*)0) {
+    kind = symx_kind(hdr, n);
+    if (s_starts(kind, "elf")) {
+      symx_elf(&f, hdr, wanted, found);
+    } else if (s_eq(kind, "pe")) {
+      symx_pe(&f, hdr, wanted, found);
+    } else if (s_eq(kind, "coff")) {
+      symx_coff(&f, hdr, wanted, found);
+    }
+    free(hdr);
+  }
+  fclose(f.fp);
+  return kind;
+}
+
+// The binary format of a file: "elf-so" (shared object), "elf-o"
+// (relocatable), "elf" (another ELF), "pe" (DLL or EXE), "coff" (object), or
+// "" when it is none of these or cannot be read.
+export fn sym_format(path: string) -> string {
+  var f: SymxFile;
+  if (!symx_open(&f, path)) {
+    return s_empty();
+  }
+  var n: int64 = 64;
+  if (f.size < n) {
+    n = f.size;
+  }
+  var hdr: uint8* = symx_read(&f, 0, n);
+  var kind: string = s_empty();
+  if (hdr != (uint8*)0) {
+    kind = symx_kind(hdr, n);
+    free(hdr);
+  }
+  fclose(f.fp);
+  return kind;
+}
+
+// DT_SONAME of an ELF64 shared object read from its .dynamic section ("" when
+// there is none). No defer here: see DESIGN.md on head --release.
+fn symx_elf_soname(f: SymxFile*) -> string {
+  var hdr: uint8* = symx_read(f, 0, 64);
+  if (hdr == (uint8*)0) {
+    return s_empty();
+  }
+  var ok: bool = hdr[4] == 2 && hdr[5] == 1 && symx_u16(hdr, 16) == 3;
+  var shoff: int64 = symx_u64(hdr, 40);
+  var shentsize: int64 = symx_u16(hdr, 58);
+  var shnum: int64 = symx_u16(hdr, 60);
+  free(hdr);
+  if (!ok || shentsize != 64 || shnum <= 0) {
+    return s_empty();
+  }
+  var sh: uint8* = symx_read(f, shoff, shnum * 64);
+  if (sh == (uint8*)0) {
+    return s_empty();
+  }
+  var dyn: int64 = -1;
+  var i: int64 = 0;
+  while (i < shnum) {
+    if (symx_u32(sh, i * 64 + 4) == 6) {
+      dyn = i;
+      break;
+    }
+    i = i + 1;
+  }
+  if (dyn < 0) {
+    free(sh);
+    return s_empty();
+  }
+  var dynoff: int64 = symx_u64(sh, dyn * 64 + 24);
+  var dynsize: int64 = symx_u64(sh, dyn * 64 + 32);
+  var link: int64 = symx_u32(sh, dyn * 64 + 40);
+  if (link <= 0 || link >= shnum || dynsize > 1048576) {
+    free(sh);
+    return s_empty();
+  }
+  var stroff: int64 = symx_u64(sh, link * 64 + 24);
+  var strsize: int64 = symx_u64(sh, link * 64 + 32);
+  free(sh);
+  var dt: uint8* = symx_read(f, dynoff, dynsize);
+  if (dt == (uint8*)0) {
+    return s_empty();
+  }
+  var at: int64 = -1;
+  var e: int64 = 0;
+  while (e + 16 <= dynsize) {
+    var tag: int64 = symx_u64(dt, e);
+    if (tag == 0) {
+      break;
+    }
+    if (tag == 14) {
+      at = symx_u64(dt, e + 8);
+      break;
+    }
+    e = e + 16;
+  }
+  free(dt);
+  if (at < 0) {
+    return s_empty();
+  }
+  var strtab: uint8* = symx_read(f, stroff, strsize);
+  if (strtab == (uint8*)0) {
+    return s_empty();
+  }
+  var name: string = symx_cstr(strtab, strsize, at);
+  free(strtab);
+  return name;
+}
+
+// The soname an ELF shared object declares (DT_SONAME, e.g. "libz.so.1"),
+// "" for anything else or when it has none.
+export fn sym_soname(path: string) -> string {
+  var f: SymxFile;
+  if (!symx_open(&f, path)) {
+    return s_empty();
+  }
+  var name: string = s_empty();
+  if (f.size >= 64) {
+    name = symx_elf_soname(&f);
+  }
+  fclose(f.fp);
+  return name;
+}
+
+// Sorts and removes duplicates (merge sort: symbol lists run to tens of
+// thousands of names).
+export fn sym_sort_uniq(l: StrList*) {
+  if (l->len < 2) {
+    return;
+  }
+  var tmp: string* = (string*)malloc(l->len * 16);
+  defer free(tmp);
+  var width: int64 = 1;
+  while (width < l->len) {
+    var lo: int64 = 0;
+    while (lo < l->len) {
+      var mid: int64 = lo + width;
+      var hi: int64 = lo + 2 * width;
+      if (mid > l->len) { mid = l->len; }
+      if (hi > l->len) { hi = l->len; }
+      var a: int64 = lo;
+      var b: int64 = mid;
+      var k: int64 = lo;
+      while (a < mid || b < hi) {
+        if (b >= hi || (a < mid && s_cmp(l->items[a], l->items[b]) <= 0)) {
+          tmp[k] = l->items[a];
+          a = a + 1;
+        } else {
+          tmp[k] = l->items[b];
+          b = b + 1;
+        }
+        k = k + 1;
+      }
+      lo = hi;
+    }
+    var c: int64 = 0;
+    while (c < l->len) {
+      l->items[c] = tmp[c];
+      c = c + 1;
+    }
+    width = width * 2;
+  }
+  var w: int64 = 0;
+  var r: int64 = 0;
+  while (r < l->len) {
+    if (w == 0 || !s_eq(l->items[w - 1], l->items[r])) {
+      l->items[w] = l->items[r];
+      w = w + 1;
+    }
+    r = r + 1;
+  }
+  l->len = w;
+}
+
+// Binary search in a list sorted by sym_sort_uniq.
+export fn sym_sorted_has(l: StrList*, name: string) -> bool {
+  var lo: int64 = 0;
+  var hi: int64 = l->len;
+  while (lo < hi) {
+    var mid: int64 = (lo + hi) / 2;
+    var c: int32 = s_cmp(l->items[mid], name);
+    if (c == 0) {
+      return true;
+    }
+    if (c < 0) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return false;
+}
+
+fn symx_cache() -> SymxCache* {
+  if (g_symx_cache == 0) {
+    g_symx_cache = new SymxCache;
+    g_symx_cache->paths = sl_new();
+    g_symx_cache->lists = (StrList**)0;
+    g_symx_cache->cap = 0;
+  }
+  return g_symx_cache;
+}
+
+// Every name the file defines, sorted, without duplicates (empty for an
+// unreadable or unknown file). Cached per path for the life of the process.
+export fn sym_defined(path: string) -> StrList* {
+  var c: SymxCache* = symx_cache();
+  var at: int64 = sl_index(c->paths, path);
+  if (at >= 0) {
+    return c->lists[at];
+  }
+  var found: StrList* = sl_new();
+  symx_scan(path, (StrList*)0, found);
+  sym_sort_uniq(found);
+  if (c->paths->len >= c->cap) {
+    var nc: int64 = c->cap * 2;
+    if (nc < 16) { nc = 16; }
+    c->lists = (StrList**)realloc(c->lists, nc * 8);
+    c->cap = nc;
+  }
+  c->lists[c->paths->len] = found;
+  sl_push(c->paths, s_dup(path));
+  return found;
+}
+
+export fn sym_file_defines(path: string, name: string) -> bool {
+  return sym_sorted_has(sym_defined(path), name);
+}
+
+// Which of `names` the file defines, without caching the file's full list:
+// the right call for sweeping hundreds of system libraries for a few names.
+export fn sym_defines_which(path: string, names: StrList*) -> StrList* {
+  var c: SymxCache* = symx_cache();
+  var found: StrList* = sl_new();
+  var at: int64 = sl_index(c->paths, path);
+  if (at >= 0) {
+    var i: int64 = 0;
+    while (i < names->len) {
+      if (sym_sorted_has(c->lists[at], sl_get(names, i))) {
+        sl_add_uniq(found, sl_get(names, i));
+      }
+      i = i + 1;
+    }
+    return found;
+  }
+  symx_scan(path, names, found);
+  return found;
+}

@@ -1,0 +1,31 @@
+// init: stub, owned by group N (DESIGN.md 16.2).
+
+import "../core/base";
+import "../model/project";
+
+export struct IniRequest {
+  from: string;
+  name: string;
+  opts: StrList*;
+  registry: string;
+  existing: bool;
+  yes: bool;
+  dry_run: bool;
+  force: bool;
+}
+
+export fn ini_run(p: Project*, r: IniRequest*) -> int32 {
+  return 1;
+}
+
+export fn ini_check_package(p: Project*, dir: string) -> string {
+  return "init.rules is not implemented yet";
+}
+
+export fn ini_scaffold_package(dir: string, name: string) -> int32 {
+  return 1;
+}
+
+export fn ini_api_text() -> string {
+  return import_str "../mbapi/init.mettle";
+}

@@ -1,0 +1,2465 @@
+// native: C code and C libraries (DESIGN.md section 10).
+//
+// nat_prepare compiles each package's [c] sources into one shared library
+// (libmb_<pkg>.so / mb_<pkg>.dll, incrementally, one object per source) and
+// gathers the [link] libraries of the whole graph into the arguments, the
+// environment and the files one compile needs. nat_explain_failure turns a
+// failed link into "this extern, declared here, is defined by that library;
+// add these lines", and nat_doctor runs the same search over every extern.
+
+import "std/io";
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/proc";
+import "scan";
+import "../model/toml";
+import "../model/manifest";
+import "../model/project";
+import "symbols";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+// One package of the graph: the root or a dependency.
+struct NatPkg {
+  name: string;       // sanitised: the library is mb_<name>
+  label: string;      // for messages: the module path, or the root's name
+  dir: string;
+  man: Manifest*;     // 0 when the package has no mbuild.toml
+  depth: int64;       // requirement depth from the root (link order)
+  lib_path: string;   // the built C library, "" when none
+  mi: int64;          // index in DepState mods, -1 for the root
+}
+
+// Everything known about native code for one target.
+struct NatCtx {
+  p: Project*;
+  ds: DepState*;
+  t: TargetCtx*;
+  os: string;
+  pkgs: NatPkg*;
+  n: int64;
+  cc: Tool;
+  cc_ready: bool;
+  cc_id: string;
+  ldirs: StrList*;      // library directories, this process's path form
+  pc_dirs: StrList*;    // -L directories pkg-config named (host form)
+  libs: StrList*;       // link names in link order (dependents first)
+  lib_owner: StrList*;  // parallel: the package index that asked for it
+  copies: StrList*;     // files to ship beside the binary
+  ext: NatExterns*;     // filled by the audit, kept for its life
+  base: NatBase*;
+  linked: NatLinked*;
+  root_host: string;    // the project root in host (Linux under wine) form
+}
+
+// The context of the latest call: kept for the process's life.
+var g_natx_ctx: NatCtx* = 0;
+
+// Externs of the project and its dependencies.
+struct NatExterns {
+  link: StrList*;     // link name
+  name: StrList*;     // Mettle name
+  loc: StrList*;      // "file:line" for display
+  pkg: StrList*;      // package index
+  used: StrList*;     // "1" when a program can reach it: a root file, or a file some file imports
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+fn natx_free_list(l: StrList*) {
+  free(l->items);
+  free(l);
+}
+
+fn natx_cmd_free(cm: Cmd*) {
+  natx_free_list(cm->args);
+  natx_free_list(cm->kinds);
+  natx_free_list(cm->env);
+  free(cm);
+}
+
+fn natx_is_windows(c: NatCtx*) -> bool {
+  return s_eq(c->os, "windows");
+}
+
+// [a-z0-9_] only.
+fn natx_sanitise(s: string) -> string {
+  var b: Buf* = buf_new();
+  var lower: string = s_lower(s);
+  var i: int64 = 0;
+  while (i < slen(lower)) {
+    var ch: int32 = s_byte(lower, i);
+    if ((ch >= 97 && ch <= 122) || is_digit_b(ch) || ch == 95) {
+      buf_addb(b, ch);
+    } else {
+      buf_addb(b, 95);
+    }
+    i = i + 1;
+  }
+  var r: string = buf_take(b);
+  if (slen(r) == 0) {
+    return "pkg";
+  }
+  return r;
+}
+
+// A path shown relative to the project root when it lies inside it.
+fn natx_show(c: NatCtx*, path: string) -> string {
+  if (p_has_prefix_dir(path, c->p->root)) {
+    return p_rel(c->p->root, path);
+  }
+  return path;
+}
+
+// A host Linux path this process can open: under wine, through drive Z:.
+fn natx_host_open(path: string) -> string {
+  if (sys_is_wine() && s_starts(path, "/")) {
+    return "Z:" + path;
+  }
+  return path;
+}
+
+// "Z:\dir\sub": a Linux directory as wine sees it.
+fn natx_wine_form(dir: string) -> string {
+  var d: string = dir;
+  if (s_starts(d, "/")) {
+    d = "Z:" + d;
+  }
+  return p_to_backslash(d);
+}
+
+// A directory with links resolved ('/' separators); the path itself when it
+// cannot be resolved. The runtime's realpath does not follow links, so a
+// link (a [replace] path, DESIGN.md 12.5) is read with the host's
+// `readlink -f` (also under wine; native Windows junctions stay as they are).
+fn natx_real_dir(dir: string) -> string {
+  var d: string = p_clean(s_replace_byte(dir, 92, 47));
+  if (!sys_is_link(d)) {
+    return d;
+  }
+  var t: Tool = sys_find_tool("readlink");
+  if (!tool_found(t) || (s_eq(sys_os(), "windows") && !sys_is_wine())) {
+    return d;
+  }
+  var cm: Cmd* = cmd_new(t);
+  cmd_arg(cm, "-f");
+  cmd_arg(cm, "--");
+  cmd_path(cm, d);
+  var cap: Captured = proc_capture(cm);
+  natx_cmd_free(cm);
+  var r: string = s_trim(cap.out);
+  if (cap.code != 0 || !s_starts(r, "/")) {
+    return d;
+  }
+  if (sys_is_wine()) {
+    r = "Z:" + r;
+  }
+  return p_clean(r);
+}
+
+fn natx_ends_ci(s: string, suffix: string) -> bool {
+  return s_ends(s_lower(s), s_lower(suffix));
+}
+
+// The package index as a list entry.
+fn natx_idx(i: int64) -> string {
+  return s_int(i);
+}
+
+// ---------------------------------------------------------------------------
+// The package list
+// ---------------------------------------------------------------------------
+
+fn natx_push_pkg(c: NatCtx*, pk: NatPkg) {
+  c->pkgs = (NatPkg*)realloc(c->pkgs, (c->n + 1) * sizeof(NatPkg));
+  c->pkgs[c->n] = pk;
+  c->n = c->n + 1;
+}
+
+fn natx_unique_name(c: NatCtx*, want: string) -> string {
+  var cand: string = want;
+  var k: int64 = 2;
+  while (true) {
+    var clash: bool = false;
+    var i: int64 = 0;
+    while (i < c->n) {
+      if (s_eq(c->pkgs[i].name, cand)) {
+        clash = true;
+      }
+      i = i + 1;
+    }
+    if (!clash) {
+      return cand;
+    }
+    cand = want + "_" + s_int(k);
+    k = k + 1;
+  }
+  return cand;
+}
+
+// The package a requirement names, -1 when none.
+fn natx_find_dep(c: NatCtx*, d: DepSpec*) -> int64 {
+  var i: int64 = 0;
+  while (i < c->n) {
+    var mi: int64 = c->pkgs[i].mi;
+    if (mi >= 0) {
+      var dm: DepModule* = &c->ds->mods[mi];
+      if ((slen(d->module) > 0 && s_eq(dm->module, d->module)) || s_eq(dm->module, d->key) || (slen(dm->alias) > 0 && s_eq(dm->alias, d->key))) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// Every package package i requires, directly or through others, as package
+// indices in link order (dependents before their dependencies).
+fn natx_dep_closure(c: NatCtx*, i: int64) -> StrList* {
+  var mark: int32* = (int32*)malloc((c->n + 1) * 4);
+  var k: int64 = 0;
+  while (k < c->n) {
+    mark[k] = 0;
+    k = k + 1;
+  }
+  var queue: StrList* = sl_new();
+  sl_push(queue, natx_idx(i));
+  mark[i] = 1;
+  var at: int64 = 0;
+  while (at < queue->len) {
+    var cur: int64 = s_to_int(sl_get(queue, at));
+    var m: Manifest* = c->pkgs[cur].man;
+    if (m != 0) {
+      var d: int64 = 0;
+      while (d < m->ndeps) {
+        var b: int64 = natx_find_dep(c, &m->deps[d]);
+        if (b >= 0 && mark[b] == 0) {
+          mark[b] = 1;
+          sl_push(queue, natx_idx(b));
+        }
+        d = d + 1;
+      }
+    }
+    at = at + 1;
+  }
+  var r: StrList* = sl_new();
+  k = 0;
+  while (k < c->n) {
+    if (mark[k] != 0 && k != i) {
+      sl_push(r, natx_idx(k));
+    }
+    k = k + 1;
+  }
+  free(mark);
+  natx_free_list(queue);
+  return r;
+}
+
+// The root and every dependency, dependents before their dependencies.
+fn natx_load_pkgs(c: NatCtx*) {
+  var root: NatPkg;
+  var rname: string = c->p->man->name;
+  if (slen(rname) == 0) {
+    rname = p_base(c->p->root);
+  }
+  root.name = natx_sanitise(rname);
+  root.label = rname;
+  root.dir = c->p->root;
+  root.man = c->p->man;
+  root.depth = 0;
+  root.lib_path = s_empty();
+  root.mi = -1;
+  natx_push_pkg(c, root);
+  var i: int64 = 0;
+  while (c->ds != 0 && i < c->ds->n) {
+    var dm: DepModule* = &c->ds->mods[i];
+    // A replaced module lives where its link points: C sources, include
+    // directories and fingerprints use that real directory.
+    var real: string = dm->dir;
+    if (slen(dm->replaced) > 0) {
+      real = natx_real_dir(dm->dir);
+    }
+    // The project imported as itself (a link to the root) is the root.
+    var own: string = c->p->man->module;
+    if (s_eq(real, c->p->root) || (slen(own) > 0 && s_eq(dm->module, own))) {
+      verbose(dm->module + " is the project itself; its C code is built once, as the root's");
+      i = i + 1;
+      continue;
+    }
+    var pk: NatPkg;
+    var nm: string = s_empty();
+    if (dm->man != 0) {
+      nm = dm->man->name;
+    }
+    if (slen(nm) == 0) {
+      nm = p_base(dm->module);
+    }
+    pk.name = natx_unique_name(c, natx_sanitise(nm));
+    pk.label = dm->module;
+    pk.dir = real;
+    pk.man = dm->man;
+    pk.depth = 1;
+    pk.lib_path = s_empty();
+    pk.mi = i;
+    natx_push_pkg(c, pk);
+    i = i + 1;
+  }
+  // Longest requirement path from the root; bounded so a cycle ends.
+  var pass_no: int64 = 0;
+  var changed: bool = true;
+  while (changed && pass_no < c->n + 1) {
+    changed = false;
+    var a: int64 = 0;
+    while (a < c->n) {
+      var m: Manifest* = c->pkgs[a].man;
+      if (m != 0) {
+        var k: int64 = 0;
+        while (k < m->ndeps) {
+          var b: int64 = natx_find_dep(c, &m->deps[k]);
+          if (b > 0 && c->pkgs[b].depth < c->pkgs[a].depth + 1) {
+            c->pkgs[b].depth = c->pkgs[a].depth + 1;
+            changed = true;
+          }
+          k = k + 1;
+        }
+      }
+      a = a + 1;
+    }
+    pass_no = pass_no + 1;
+  }
+  // Stable insertion sort by depth (the root stays first at depth 0).
+  var s: int64 = 1;
+  while (s < c->n) {
+    var cur: NatPkg = c->pkgs[s];
+    var j: int64 = s - 1;
+    while (j >= 0 && c->pkgs[j].depth > cur.depth) {
+      c->pkgs[j + 1] = c->pkgs[j];
+      j = j - 1;
+    }
+    c->pkgs[j + 1] = cur;
+    s = s + 1;
+  }
+}
+
+fn natx_new(p: Project*, ds: DepState*, t: TargetCtx*) -> NatCtx* {
+  var c: NatCtx* = new NatCtx;
+  c->p = p;
+  c->ds = ds;
+  c->t = t;
+  c->os = t->target;
+  c->pkgs = (NatPkg*)0;
+  c->n = 0;
+  c->cc = tool_none();
+  c->cc_ready = false;
+  c->cc_id = s_empty();
+  c->ldirs = sl_new();
+  c->pc_dirs = sl_new();
+  c->libs = sl_new();
+  c->lib_owner = sl_new();
+  c->copies = sl_new();
+  c->ext = (NatExterns*)0;
+  c->base = (NatBase*)0;
+  c->linked = (NatLinked*)0;
+  c->root_host = s_replace_byte(sys_host_path(p->root), 92, 47);
+  natx_load_pkgs(c);
+  g_natx_ctx = c;
+  return c;
+}
+
+fn natx_list(c: NatCtx*, i: int64, section_key: string) -> StrList* {
+  var m: Manifest* = c->pkgs[i].man;
+  if (m == 0) {
+    return sl_new();
+  }
+  return man_os_list(m, section_key, c->os);
+}
+
+fn natx_manifest_file(c: NatCtx*, i: int64) -> string {
+  if (c->pkgs[i].man != 0) {
+    return natx_show(c, c->pkgs[i].man->file);
+  }
+  return natx_show(c, c->pkgs[i].dir + "/mbuild.toml");
+}
+
+// ---------------------------------------------------------------------------
+// The C compiler
+// ---------------------------------------------------------------------------
+
+// A program's identity, the same from Linux and from wine: its name (without
+// directory or ".exe"), size and modification time in seconds.
+fn natx_tool_id(t: Tool) -> string {
+  var fi: FileInfo = sys_stat(natx_host_open(t.path));
+  var secs: int64 = fi.mtime / 1000000000;
+  if (s_eq(sys_os(), "windows")) {
+    // FILETIME: 100 ns units since 1601.
+    secs = (fi.mtime - 116444736000000000) / 10000000;
+  }
+  var name: string = p_base(s_replace_byte(t.path, 92, 47));
+  if (natx_ends_ci(name, ".exe")) {
+    name = s_sub(name, 0, slen(name) - 4);
+  }
+  return name + "|" + s_int(fi.size) + "|" + s_int(secs);
+}
+
+// A path as fingerprints see it: relative to the project root when inside
+// it, else its host (Linux under wine) form, so Linux mbuild and wine
+// mbuild.exe agree on one project.
+fn natx_canon(c: NatCtx*, path: string) -> string {
+  var hp: string = s_replace_byte(path, 92, 47);
+  if (sys_is_wine() && !s_starts(hp, "/")) {
+    hp = s_replace_byte(sys_host_path(hp), 92, 47);
+  }
+  if (p_has_prefix_dir(hp, c->root_host)) {
+    return "@/" + p_rel(c->root_host, hp);
+  }
+  return hp;
+}
+
+// Hashes a command's arguments with paths in canonical form.
+fn natx_hash_args(c: NatCtx*, h: Hasher*, cm: Cmd*) {
+  var i: int64 = 0;
+  while (i < cm->args->len) {
+    if (cmd_is_path(cm, i)) {
+      h_str(h, natx_canon(c, sl_get(cm->args, i)));
+    } else {
+      h_str(h, sl_get(cm->args, i));
+    }
+    i = i + 1;
+  }
+}
+
+// `[profile.<profile>] cflags` of the root manifest: C flags for this build's
+// profile, applied to every package's C code.
+fn natx_profile_cflags(c: NatCtx*) -> StrList* {
+  var m: Manifest* = c->p->man;
+  if (m == 0 || m->doc == 0) {
+    return sl_new();
+  }
+  return toml_list(m->doc, "profile." + c->t->profile, "cflags");
+}
+
+// The cache subdirectory suffix for C output: "" unless the profile adds
+// C flags, so profiles that compile C differently do not overwrite each other.
+fn natx_c_suffix(c: NatCtx*) -> string {
+  var pf: StrList* = natx_profile_cflags(c);
+  var n: int64 = pf->len;
+  natx_free_list(pf);
+  if (n == 0) {
+    return s_empty();
+  }
+  return "-" + natx_sanitise(c->t->profile);
+}
+
+fn natx_try_tool(name: string, allow_unix: bool) -> Tool {
+  var t: Tool = sys_find_tool(name);
+  if (tool_found(t) && t.unix && !allow_unix) {
+    return tool_none();
+  }
+  return t;
+}
+
+// The C compiler for the target; fails with a hint when there is none.
+fn natx_cc(c: NatCtx*, why: string) -> Tool {
+  if (c->cc_ready) {
+    return c->cc;
+  }
+  var t: Tool = tool_none();
+  var env_name: string = "CC";
+  if (natx_is_windows(c)) {
+    env_name = "CC_WINDOWS";
+  }
+  var over: string = env_get(env_name);
+  if (slen(over) > 0) {
+    t = sys_find_tool(over);
+    if (!tool_found(t)) {
+      fail_hint(env_name + "=" + over + " does not name a program (needed to compile the C code of " + why + ")", "set " + env_name + " to a C compiler, or unset it");
+    }
+  } else if (natx_is_windows(c)) {
+    t = sys_find_tool("x86_64-w64-mingw32-gcc");
+    // A plain gcc or clang only targets Windows when it is a Windows program.
+    if (!tool_found(t) && s_eq(sys_os(), "windows")) {
+      t = natx_try_tool("gcc", false);
+      if (!tool_found(t)) {
+        t = natx_try_tool("clang", false);
+      }
+    }
+    if (!tool_found(t)) {
+      fail_hint("no C compiler for the windows target (needed to compile the C code of " + why + ")", "install MinGW-w64 (x86_64-w64-mingw32-gcc), or set CC_WINDOWS to a compiler that builds Windows DLLs");
+    }
+  } else {
+    if (s_eq(sys_os(), "windows") && !sys_is_wine()) {
+      fail_hint("cannot compile C code for the linux target on Windows (needed by " + why + ")", "build the linux target on Linux, or under WSL");
+    }
+    t = sys_find_tool("cc");
+    if (!tool_found(t)) {
+      t = sys_find_tool("gcc");
+    }
+    if (!tool_found(t)) {
+      t = sys_find_tool("clang");
+    }
+    if (!tool_found(t)) {
+      fail_hint("no C compiler for the linux target (needed to compile the C code of " + why + ")", "install gcc or clang, or set CC");
+    }
+  }
+  c->cc = t;
+  c->cc_id = natx_tool_id(t);
+  c->cc_ready = true;
+  verbose("C compiler for " + c->os + ": " + t.path);
+  return t;
+}
+
+// ---------------------------------------------------------------------------
+// Compiling one package's C sources
+// ---------------------------------------------------------------------------
+
+// The [c] sources of package i, as paths relative to its directory.
+fn natx_sources(c: NatCtx*, i: int64) -> StrList* {
+  var dir: string = c->pkgs[i].dir;
+  var entries: StrList* = natx_list(c, i, "c.sources");
+  var srcs: StrList* = sl_new();
+  var k: int64 = 0;
+  while (k < entries->len) {
+    var e: string = s_replace_byte(sl_get(entries, k), 92, 47);
+    var abs: string = p_join(dir, e);
+    if (s_ends(e, "/*.c") || s_eq(e, "*.c")) {
+      var sub: string = p_dir(e);
+      var files: StrList* = sl_new();
+      var dirs: StrList* = sl_new();
+      if (!sys_list_dir(p_join(dir, sub), files, dirs)) {
+        fail_hint("C sources '" + e + "' of " + c->pkgs[i].label + ": no such directory", "fix [c] sources in " + natx_manifest_file(c, i));
+      }
+      sl_sort(files);
+      var f: int64 = 0;
+      while (f < files->len) {
+        if (s_ends(sl_get(files, f), ".c")) {
+          sl_add_uniq(srcs, p_clean(p_join(sub, sl_get(files, f))));
+        }
+        f = f + 1;
+      }
+      natx_free_list(files);
+      natx_free_list(dirs);
+    } else if (fs_is_dir(abs)) {
+      var found: StrList* = fs_walk(abs, ".c", (StrList*)0);
+      var f2: int64 = 0;
+      while (f2 < found->len) {
+        sl_add_uniq(srcs, p_clean(p_join(e, sl_get(found, f2))));
+        f2 = f2 + 1;
+      }
+      natx_free_list(found);
+    } else if (fs_is_file(abs)) {
+      sl_add_uniq(srcs, p_clean(e));
+    } else {
+      fail_hint("C source '" + e + "' of " + c->pkgs[i].label + " does not exist", "fix [c] sources in " + natx_manifest_file(c, i));
+    }
+    k = k + 1;
+  }
+  natx_free_list(entries);
+  return srcs;
+}
+
+// Where an object goes: below the cache, named after the source.
+fn natx_obj_rel(src_rel: string) -> string {
+  var r: string = src_rel;
+  if (p_is_abs(r)) {
+    r = "abs/" + s_replace_byte(s_replace_byte(r, 58, 95), 92, 47);
+  }
+  return s_replace(r, "../", "__/") + ".o";
+}
+
+// Headers (and the source) a depfile names, as the C compiler wrote them
+// (host form; open them through natx_host_open).
+fn natx_depfile_inputs(dep: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var rd: FsRead = fs_read(dep);
+  if (!rd.ok) {
+    return l;
+  }
+  var text: string = s_replace(s_replace(rd.data, "\\\r\n", " "), "\\\n", " ");
+  var colon: int64 = s_find(text, ": ");
+  if (colon < 0) {
+    colon = s_find(text, ":\n");
+  }
+  if (colon < 0) {
+    return l;
+  }
+  var words: StrList* = s_fields(s_from(text, colon + 1));
+  var i: int64 = 0;
+  while (i < words->len) {
+    var w: string = sl_get(words, i);
+    if (s_ends(w, ":")) {
+      break;
+    }
+    if (!p_is_abs(w)) {
+      w = p_join(sys_cwd(), w);
+    }
+    sl_add_uniq(l, w);
+    i = i + 1;
+  }
+  natx_free_list(words);
+  return l;
+}
+
+// An object's fingerprint: compiler, argv, source and every header the
+// depfile names.
+fn natx_obj_fp(c: NatCtx*, cm: Cmd*, src: string, dep: string) -> string {
+  var h: Hasher = h_new();
+  h_str(&h, "mbuild-c-obj-2");
+  h_str(&h, c->cc_id);
+  natx_hash_args(c, &h, cm);
+  h_str(&h, fs_hash_file(src));
+  var ins: StrList* = natx_depfile_inputs(dep);
+  var i: int64 = 0;
+  while (i < ins->len) {
+    h_str(&h, natx_canon(c, sl_get(ins, i)));
+    h_str(&h, fs_hash_file(natx_host_open(sl_get(ins, i))));
+    i = i + 1;
+  }
+  natx_free_list(ins);
+  return h_hex(&h);
+}
+
+fn natx_read_stamp(path: string) -> string {
+  var rd: FsRead = fs_read(path);
+  if (!rd.ok) {
+    return s_empty();
+  }
+  return s_trim(rd.data);
+}
+
+fn natx_jobs(c: NatCtx*) -> int64 {
+  if (c->p->opts != 0 && c->p->opts->jobs > 0) {
+    return c->p->opts->jobs;
+  }
+  return proc_jobs();
+}
+
+fn natx_force(c: NatCtx*) -> bool {
+  return c->p->opts != 0 && c->p->opts->force;
+}
+
+fn natx_lib_file(c: NatCtx*, name: string) -> string {
+  var dir: string = c->t->cache_dir + "/lib" + natx_c_suffix(c);
+  if (natx_is_windows(c)) {
+    return dir + "/mb_" + name + ".dll";
+  }
+  return dir + "/libmb_" + name + ".so";
+}
+
+fn natx_print_log(path: string) {
+  var rd: FsRead = fs_read(path);
+  if (rd.ok && slen(s_trim(rd.data)) > 0) {
+    flush_out();
+    print_err(rd.data);
+    if (!s_ends(rd.data, "\n")) {
+      print_err("\n");
+    }
+  }
+}
+
+fn natx_plural(n: int64, word: string) -> string {
+  if (n == 1) {
+    return "1 " + word;
+  }
+  return s_int(n) + " " + word + "s";
+}
+
+// Compiles package i's C code (what changed) and links its library.
+fn natx_build_c(c: NatCtx*, i: int64) {
+  var pk: NatPkg* = &c->pkgs[i];
+  var srcs: StrList* = natx_sources(c, i);
+  if (srcs->len == 0) {
+    natx_free_list(srcs);
+    return;
+  }
+  var cc: Tool = natx_cc(c, pk->label);
+  var objdir: string = c->t->cache_dir + "/c" + natx_c_suffix(c) + "/" + pk->name;
+  // Include directories: the package's own, then every dependency's.
+  var own_incs: StrList* = natx_list(c, i, "c.include");
+  var incs: StrList* = sl_new();
+  var n0: int64 = 0;
+  while (n0 < own_incs->len) {
+    sl_add_uniq(incs, p_join(pk->dir, sl_get(own_incs, n0)));
+    n0 = n0 + 1;
+  }
+  natx_free_list(own_incs);
+  var deps: StrList* = natx_dep_closure(c, i);
+  n0 = 0;
+  while (n0 < deps->len) {
+    var di: int64 = s_to_int(sl_get(deps, n0));
+    var dincs: StrList* = natx_list(c, di, "c.include");
+    var n1: int64 = 0;
+    while (n1 < dincs->len) {
+      sl_add_uniq(incs, p_join(c->pkgs[di].dir, sl_get(dincs, n1)));
+      n1 = n1 + 1;
+    }
+    natx_free_list(dincs);
+    n0 = n0 + 1;
+  }
+  natx_free_list(deps);
+  var cflags: StrList* = natx_list(c, i, "c.cflags");
+  var pflags: StrList* = natx_profile_cflags(c);
+  sl_extend(cflags, pflags);
+  natx_free_list(pflags);
+  var objs: StrList* = sl_new();
+  var todo: Cmd** = (Cmd**)malloc((srcs->len + 1) * 8);
+  defer free(todo);
+  var todo_src: StrList* = sl_new();
+  var todo_dep: StrList* = sl_new();
+  var todo_stamp: StrList* = sl_new();
+  var logs: StrList* = sl_new();
+  var ntodo: int64 = 0;
+  var k: int64 = 0;
+  while (k < srcs->len) {
+    var rel: string = sl_get(srcs, k);
+    var src: string = p_join(pk->dir, rel);
+    var obj: string = objdir + "/" + natx_obj_rel(rel);
+    var dep: string = obj + ".d";
+    var stamp: string = obj + ".stamp";
+    sl_push(objs, obj);
+    var cm: Cmd* = cmd_new(cc);
+    cmd_arg(cm, "-c");
+    cmd_path(cm, src);
+    cmd_arg(cm, "-o");
+    cmd_path(cm, obj);
+    cmd_arg(cm, "-MMD");
+    cmd_arg(cm, "-MF");
+    cmd_path(cm, dep);
+    if (!natx_is_windows(c)) {
+      cmd_arg(cm, "-fPIC");
+    }
+    var n: int64 = 0;
+    while (n < incs->len) {
+      cmd_arg(cm, "-I");
+      cmd_path(cm, sl_get(incs, n));
+      n = n + 1;
+    }
+    cmd_args(cm, cflags);
+    var fresh: bool = false;
+    if (!natx_force(c) && fs_is_file(obj)) {
+      var want: string = natx_read_stamp(stamp);
+      fresh = slen(want) > 0 && s_eq(want, natx_obj_fp(c, cm, src, dep));
+    }
+    if (fresh) {
+      verbose("fresh: " + natx_show(c, obj));
+      natx_cmd_free(cm);
+    } else {
+      fs_mkdirs(p_dir(obj));
+      sys_remove_file(stamp);
+      todo[ntodo] = cm;
+      ntodo = ntodo + 1;
+      sl_push(todo_src, src);
+      sl_push(todo_dep, dep);
+      sl_push(todo_stamp, stamp);
+      sl_push(logs, obj + ".log");
+    }
+    k = k + 1;
+  }
+  if (ntodo > 0) {
+    status("Compiling", pk->name + " (C, " + natx_plural(ntodo, "file") + ")");
+    var codes: int32* = proc_run_jobs(todo, ntodo, logs, natx_jobs(c));
+    var failed: int64 = 0;
+    var j: int64 = 0;
+    while (j < ntodo) {
+      natx_print_log(sl_get(logs, j));
+      if (codes[j] != 0) {
+        failed = failed + 1;
+      } else {
+        fs_write(sl_get(todo_stamp, j), natx_obj_fp(c, todo[j], sl_get(todo_src, j), sl_get(todo_dep, j)) + "\n");
+      }
+      j = j + 1;
+    }
+    free(codes);
+    if (failed > 0) {
+      fail("could not compile the C code of " + pk->label + " (" + natx_plural(failed, "file") + " failed; compiler: " + cc.path + ")");
+    }
+  }
+  natx_link_c(c, i, objs);
+  var q: int64 = 0;
+  while (q < ntodo) {
+    natx_cmd_free(todo[q]);
+    q = q + 1;
+  }
+  natx_free_list(srcs);
+  natx_free_list(incs);
+  natx_free_list(cflags);
+  natx_free_list(objs);
+  natx_free_list(todo_src);
+  natx_free_list(todo_dep);
+  natx_free_list(todo_stamp);
+  natx_free_list(logs);
+}
+
+// Adds what package i's dependencies (all of them, transitively) provide to
+// the link of its C library: their C libraries (-L<dir> -lmb_<dep>; on
+// Linux with an rpath of $ORIGIN, where they ship) and their [link]
+// libraries. Answers the library files used, for the fingerprint.
+fn natx_link_deps(c: NatCtx*, i: int64, cm: Cmd*) -> StrList* {
+  var used: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  var deps: StrList* = natx_dep_closure(c, i);
+  var any_c: bool = false;   // anything linked that ships beside the binary
+  var k: int64 = 0;
+  while (k < deps->len) {
+    var di: int64 = s_to_int(sl_get(deps, k));
+    var lp: string = c->pkgs[di].lib_path;
+    if (slen(lp) > 0) {
+      if (!sl_has(dirs, p_dir(lp))) {
+        sl_push(dirs, p_dir(lp));
+        cmd_arg(cm, "-L");
+        cmd_path(cm, p_dir(lp));
+      }
+      cmd_arg(cm, "-lmb_" + c->pkgs[di].name);
+      sl_push(used, lp);
+      any_c = true;
+    }
+    k = k + 1;
+  }
+  k = 0;
+  while (k < deps->len) {
+    var dj: int64 = s_to_int(sl_get(deps, k));
+    var paths: StrList* = natx_list(c, dj, "link.paths");
+    var abs_paths: StrList* = sl_new();
+    var q: int64 = 0;
+    while (q < paths->len) {
+      var d: string = p_clean(p_join(c->pkgs[dj].dir, s_replace_byte(sl_get(paths, q), 92, 47)));
+      sl_push(abs_paths, d);
+      if (!natx_is_windows(c) && !sl_has(dirs, d)) {
+        sl_push(dirs, d);
+        cmd_arg(cm, "-L");
+        cmd_path(cm, d);
+      }
+      q = q + 1;
+    }
+    var libs: StrList* = natx_list(c, dj, "link.libs");
+    q = 0;
+    while (q < libs->len) {
+      var ln: string = sl_get(libs, q);
+      if (natx_is_windows(c)) {
+        // MinGW links a DLL named directly; one it cannot find is left to
+        // the program's link, which searches PATH.
+        var file: string = s_empty();
+        var d2: int64 = 0;
+        while (d2 < abs_paths->len && slen(file) == 0) {
+          var hits: StrList* = natx_lib_files_in(c, sl_get(abs_paths, d2), ln);
+          if (hits->len > 0) {
+            file = sl_get(hits, 0);
+          }
+          natx_free_list(hits);
+          d2 = d2 + 1;
+        }
+        if (slen(file) == 0) {
+          var found: StrList* = natx_resolve_windows(c, ln);
+          if (found->len > 0) {
+            file = sl_get(found, 0);
+          }
+          natx_free_list(found);
+        }
+        if (slen(file) > 0) {
+          cmd_path(cm, file);
+          sl_push(used, file);
+        } else {
+          verbose("C library of " + c->pkgs[i].label + ": [link] library " + ln + " of " + c->pkgs[dj].label + " not found; not linked into it");
+        }
+      } else {
+        cmd_arg(cm, "-l" + ln);
+        any_c = true;
+      }
+      q = q + 1;
+    }
+    natx_free_list(paths);
+    natx_free_list(abs_paths);
+    natx_free_list(libs);
+    k = k + 1;
+  }
+  if (any_c && !natx_is_windows(c)) {
+    cmd_arg(cm, "-Wl,-rpath,$ORIGIN");
+  }
+  natx_free_list(dirs);
+  natx_free_list(deps);
+  return used;
+}
+
+// Links package i's objects into its shared library when anything changed.
+fn natx_link_c(c: NatCtx*, i: int64, objs: StrList*) {
+  var pk: NatPkg* = &c->pkgs[i];
+  var lib: string = natx_lib_file(c, pk->name);
+  var cm: Cmd* = cmd_new(c->cc);
+  cmd_arg(cm, "-shared");
+  cmd_arg(cm, "-o");
+  cmd_path(cm, lib);
+  var k: int64 = 0;
+  while (k < objs->len) {
+    cmd_path(cm, sl_get(objs, k));
+    k = k + 1;
+  }
+  if (natx_is_windows(c)) {
+    cmd_arg(cm, "-static-libgcc");
+  } else {
+    cmd_arg(cm, "-Wl,-soname,libmb_" + pk->name + ".so");
+    // The package's C calls its own functions, never another library's
+    // copy of the same name (ELF interposition; DESIGN.md 12.14). PE DLLs
+    // bind their internal calls at link time already.
+    cmd_arg(cm, "-Wl,-Bsymbolic");
+  }
+  var paths: StrList* = natx_list(c, i, "link.paths");
+  k = 0;
+  while (k < paths->len) {
+    cmd_arg(cm, "-L");
+    cmd_path(cm, p_join(pk->dir, sl_get(paths, k)));
+    k = k + 1;
+  }
+  var clibs: StrList* = natx_list(c, i, "c.libs");
+  k = 0;
+  while (k < clibs->len) {
+    cmd_arg(cm, "-l" + sl_get(clibs, k));
+    k = k + 1;
+  }
+  // The C libraries and [link] libraries of every dependency, which this C
+  // code may call (dependencies are built first).
+  var dep_libs: StrList* = natx_link_deps(c, i, cm);
+  var h: Hasher = h_new();
+  h_str(&h, "mbuild-c-lib-2");
+  h_str(&h, c->cc_id);
+  natx_hash_args(c, &h, cm);
+  k = 0;
+  while (k < objs->len) {
+    h_str(&h, fs_hash_file(sl_get(objs, k)));
+    k = k + 1;
+  }
+  k = 0;
+  while (k < dep_libs->len) {
+    h_str(&h, fs_hash_file(sl_get(dep_libs, k)));
+    k = k + 1;
+  }
+  natx_free_list(dep_libs);
+  var fp: string = h_hex(&h);
+  var stamp: string = lib + ".stamp";
+  pk->lib_path = lib;
+  natx_free_list(paths);
+  natx_free_list(clibs);
+  if (!natx_force(c) && fs_is_file(lib) && s_eq(natx_read_stamp(stamp), fp)) {
+    natx_cmd_free(cm);
+    return;
+  }
+  fs_mkdirs(p_dir(lib));
+  sys_remove_file(stamp);
+  var cap: Captured = proc_capture_all(cm);
+  natx_cmd_free(cm);
+  if (slen(s_trim(cap.out)) > 0) {
+    flush_out();
+    print_err(cap.out);
+    if (!s_ends(cap.out, "\n")) {
+      print_err("\n");
+    }
+  }
+  if (cap.code != 0 || !fs_is_file(lib)) {
+    fail("could not link the C library of " + pk->label + " (" + p_base(lib) + "; compiler: " + c->cc.path + ")");
+  }
+  fs_write(stamp, fp + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Link inputs of the whole graph
+// ---------------------------------------------------------------------------
+
+fn natx_add_lib(c: NatCtx*, name: string, owner: int64) {
+  if (sl_has(c->libs, name)) {
+    return;
+  }
+  sl_push(c->libs, name);
+  sl_push(c->lib_owner, natx_idx(owner));
+}
+
+// The pkg-config for the target: Linux $PKG_CONFIG, else pkg-config;
+// Windows $PKG_CONFIG_WINDOWS, else x86_64-w64-mingw32-pkg-config (a host
+// program under wine is fine). tool_none() when there is none.
+fn natx_pkgconfig_tool(c: NatCtx*) -> Tool {
+  if (natx_is_windows(c)) {
+    return proc_tool("x86_64-w64-mingw32-pkg-config", "PKG_CONFIG_WINDOWS");
+  }
+  return proc_tool("pkg-config", "PKG_CONFIG");
+}
+
+// pkg-config --libs NAME: its -L and -l words.
+fn natx_pkgconfig(c: NatCtx*, i: int64, pc_name: string, t: Tool) {
+  if (!tool_found(t)) {
+    fail_hint("[link] pkgconfig = [\"" + pc_name + "\"] in " + natx_manifest_file(c, i) + " needs pkg-config, which is not installed", "install pkg-config (and the package's development files), or name the library under [link] libs");
+  }
+  var cm: Cmd* = cmd_new(t);
+  cmd_arg(cm, "--libs");
+  cmd_arg(cm, pc_name);
+  var cap: Captured = proc_capture_all(cm);
+  natx_cmd_free(cm);
+  if (cap.code != 0) {
+    var msg: string = s_trim(cap.out);
+    if (slen(msg) > 0) {
+      err_line(msg);
+    }
+    fail_hint("pkg-config does not know '" + pc_name + "' (needed by " + c->pkgs[i].label + ", " + natx_manifest_file(c, i) + ")", "install the development package that ships " + pc_name + ".pc, or point PKG_CONFIG_PATH at its directory");
+  }
+  var words: StrList* = s_fields(cap.out);
+  var k: int64 = 0;
+  while (k < words->len) {
+    var w: string = sl_get(words, k);
+    if (s_starts(w, "-L") && slen(w) > 2) {
+      sl_add_uniq(c->pc_dirs, s_from(w, 2));
+    } else if (s_starts(w, "-l") && slen(w) > 2) {
+      natx_add_lib(c, s_from(w, 2), i);
+    } else {
+      verbose("pkg-config " + pc_name + ": ignoring '" + w + "'");
+    }
+    k = k + 1;
+  }
+  natx_free_list(words);
+}
+
+// Library files in dir that a link of `name` uses (and so ship beside the
+// binary): lib<name>.so and its versions, or <name>.dll.
+fn natx_lib_files_in(c: NatCtx*, dir: string, name: string) -> StrList* {
+  var hits: StrList* = sl_new();
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  if (sys_list_dir(dir, files, dirs)) {
+    sl_sort(files);
+    var k: int64 = 0;
+    while (k < files->len) {
+      var f: string = sl_get(files, k);
+      if (natx_is_windows(c)) {
+        if (s_eq(s_lower(f), s_lower(name + ".dll"))) {
+          sl_push(hits, p_join(dir, f));
+        }
+      } else if (s_starts(name, ":")) {
+        if (s_eq(f, s_from(name, 1))) {
+          sl_push(hits, p_join(dir, f));
+        }
+      } else if (s_eq(f, "lib" + name + ".so") || s_starts(f, "lib" + name + ".so.")) {
+        sl_push(hits, p_join(dir, f));
+      }
+      k = k + 1;
+    }
+  }
+  natx_free_list(files);
+  natx_free_list(dirs);
+  return hits;
+}
+
+// Gathers C libraries and [link] sections over the graph (no building).
+fn natx_gather(c: NatCtx*) {
+  var i: int64 = 0;
+  while (i < c->n) {
+    var pk: NatPkg* = &c->pkgs[i];
+    if (slen(pk->lib_path) > 0) {
+      sl_add_uniq(c->ldirs, p_dir(pk->lib_path));
+      natx_add_lib(c, "mb_" + pk->name, i);
+      sl_add_uniq(c->copies, pk->lib_path);
+    }
+    var paths: StrList* = natx_list(c, i, "link.paths");
+    var abs_paths: StrList* = sl_new();
+    var k: int64 = 0;
+    while (k < paths->len) {
+      var d: string = p_clean(p_join(pk->dir, s_replace_byte(sl_get(paths, k), 92, 47)));
+      if (!fs_is_dir(d)) {
+        warn("[link] paths: " + natx_show(c, d) + " (from " + natx_manifest_file(c, i) + ") is not a directory");
+      }
+      sl_add_uniq(c->ldirs, d);
+      sl_push(abs_paths, d);
+      k = k + 1;
+    }
+    var libs: StrList* = natx_list(c, i, "link.libs");
+    k = 0;
+    while (k < libs->len) {
+      var ln: string = sl_get(libs, k);
+      natx_add_lib(c, ln, i);
+      var d2: int64 = 0;
+      while (d2 < abs_paths->len) {
+        var hits: StrList* = natx_lib_files_in(c, sl_get(abs_paths, d2), ln);
+        var h2: int64 = 0;
+        while (h2 < hits->len) {
+          sl_add_uniq(c->copies, sl_get(hits, h2));
+          h2 = h2 + 1;
+        }
+        natx_free_list(hits);
+        d2 = d2 + 1;
+      }
+      k = k + 1;
+    }
+    var pcs: StrList* = natx_list(c, i, "link.pkgconfig");
+    var pct: Tool = tool_none();
+    if (pcs->len > 0) {
+      pct = natx_pkgconfig_tool(c);
+    }
+    k = 0;
+    while (k < pcs->len) {
+      if (natx_is_windows(c) && !tool_found(pct)) {
+        warn("[link] pkgconfig '" + sl_get(pcs, k) + "' of " + pk->label + " is ignored for the windows target: no x86_64-w64-mingw32-pkg-config (or set PKG_CONFIG_WINDOWS); name the DLL under [link.windows] libs");
+      } else {
+        natx_pkgconfig(c, i, sl_get(pcs, k), pct);
+      }
+      k = k + 1;
+    }
+    natx_free_list(paths);
+    natx_free_list(abs_paths);
+    natx_free_list(libs);
+    natx_free_list(pcs);
+    i = i + 1;
+  }
+}
+
+// Builds every C library of the graph, dependencies before their dependents
+// (a C library links the C libraries below it), then gathers the link
+// inputs, dependents first.
+fn natx_prepare_ctx(c: NatCtx*) {
+  var i: int64 = c->n - 1;
+  while (i >= 0) {
+    if (c->pkgs[i].man != 0 && man_has_c(c->pkgs[i].man)) {
+      natx_build_c(c, i);
+    }
+    i = i - 1;
+  }
+  natx_gather(c);
+}
+
+export fn nat_prepare(p: Project*, ds: DepState*, t: TargetCtx*) -> NatLink* {
+  var c: NatCtx* = natx_new(p, ds, t);
+  natx_prepare_ctx(c);
+  var nl: NatLink* = natlink_empty();
+  // The fingerprint covers what decides the arguments, with paths in
+  // canonical form (the same from Linux and from wine).
+  var h: Hasher = h_new();
+  h_str(&h, "mbuild-native-2");
+  h_str(&h, t->target);
+  var k: int64 = 0;
+  while (k < c->libs->len) {
+    h_str(&h, "l:" + sl_get(c->libs, k));
+    k = k + 1;
+  }
+  k = 0;
+  while (k < c->ldirs->len) {
+    h_str(&h, "L:" + natx_canon(c, sl_get(c->ldirs, k)));
+    k = k + 1;
+  }
+  k = 0;
+  while (k < c->pc_dirs->len) {
+    h_str(&h, "P:" + natx_canon(c, sl_get(c->pc_dirs, k)));
+    k = k + 1;
+  }
+  k = 0;
+  if (natx_is_windows(c)) {
+    while (k < c->libs->len) {
+      sl_push(nl->mettle_args, "--link-arg");
+      sl_push(nl->mettle_args, "-l" + sl_get(c->libs, k));
+      k = k + 1;
+    }
+    // DLL directories: the graph's, then those pkg-config named (with the
+    // bin/ beside a lib/, where MinGW packages keep their DLLs).
+    var dll_dirs: StrList* = sl_copy(c->ldirs);
+    k = 0;
+    while (k < c->pc_dirs->len) {
+      var pd: string = natx_host_open(sl_get(c->pc_dirs, k));
+      sl_add_uniq(dll_dirs, pd);
+      var bin: string = p_join(p_dir(pd), "bin");
+      if (fs_is_dir(bin)) {
+        sl_add_uniq(dll_dirs, bin);
+      }
+      k = k + 1;
+    }
+    if (dll_dirs->len > 0) {
+      var dirs: StrList* = sl_new();
+      k = 0;
+      while (k < dll_dirs->len) {
+        if (s_eq(sys_os(), "linux")) {
+          sl_push(dirs, natx_wine_form(sl_get(dll_dirs, k)));
+        } else {
+          sl_push(dirs, p_to_backslash(sl_get(dll_dirs, k)));
+        }
+        k = k + 1;
+      }
+      var joined: string = sl_join(dirs, ";");
+      if (s_eq(sys_os(), "linux")) {
+        var old: string = env_get("WINEPATH");
+        if (slen(old) > 0) {
+          joined = joined + ";" + old;
+        }
+        sl_push(nl->env, "WINEPATH=" + joined);
+      } else {
+        var oldp: string = env_get("PATH");
+        if (slen(oldp) > 0) {
+          joined = joined + ";" + oldp;
+        }
+        sl_push(nl->env, "PATH=" + joined);
+      }
+      natx_free_list(dirs);
+    }
+    natx_free_list(dll_dirs);
+  } else {
+    var largs: StrList* = sl_new();
+    k = 0;
+    while (k < c->ldirs->len) {
+      sl_add_uniq(largs, "-L" + sys_host_path(sl_get(c->ldirs, k)));
+      k = k + 1;
+    }
+    k = 0;
+    while (k < c->pc_dirs->len) {
+      sl_add_uniq(largs, "-L" + sl_get(c->pc_dirs, k));
+      k = k + 1;
+    }
+    sl_extend(nl->mettle_args, largs);
+    natx_free_list(largs);
+    k = 0;
+    while (k < c->libs->len) {
+      sl_push(nl->mettle_args, "-l" + sl_get(c->libs, k));
+      k = k + 1;
+    }
+    if (c->libs->len > 0) {
+      sl_push(nl->mettle_args, "--rpath");
+      sl_push(nl->mettle_args, "$ORIGIN");
+    }
+  }
+  k = 0;
+  while (k < c->copies->len) {
+    var f: string = sl_get(c->copies, k);
+    sl_push(nl->copy_files, f);
+    h_str(&h, natx_canon(c, f));
+    h_str(&h, fs_hash_file(f));
+    k = k + 1;
+  }
+  nl->fingerprint = h_hex(&h);
+  natx_dup_check(c, nl->fingerprint);
+  return nl;
+}
+
+// ---------------------------------------------------------------------------
+// One C symbol in two package libraries (DESIGN.md 12.14)
+// ---------------------------------------------------------------------------
+
+// Names a library defines that are not the package's own API.
+fn natx_dup_ignored(name: string) -> bool {
+  if (s_starts(name, "_") || s_eq(name, "DllMain") || s_eq(name, "DllEntryPoint")) {
+    return true;
+  }
+  return s_eq(name, "edata") || s_eq(name, "end") || s_eq(name, "etext");
+}
+
+// Names exported by two or more package libraries, one entry per name:
+// "name\tlabel\tlibrary\tlabel\tlibrary...", packages in link order.
+fn natx_dup_scan(c: NatCtx*) -> StrList* {
+  var pairs: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < c->n) {
+    var lp: string = c->pkgs[i].lib_path;
+    if (slen(lp) > 0) {
+      var defs: StrList* = sym_defined(lp);
+      var k: int64 = 0;
+      while (k < defs->len) {
+        var nm: string = sl_get(defs, k);
+        if (!natx_dup_ignored(nm)) {
+          sl_push(pairs, nm + "\t" + s_pad_left(s_int(i), 8));
+        }
+        k = k + 1;
+      }
+    }
+    i = i + 1;
+  }
+  sl_sort(pairs);
+  var r: StrList* = sl_new();
+  var at: int64 = 0;
+  while (at < pairs->len) {
+    var tab: int64 = s_find_byte(sl_get(pairs, at), 9);
+    var nm2: string = s_sub(sl_get(pairs, at), 0, tab);
+    var line: string = nm2;
+    var count: int64 = 0;
+    var last: int64 = -1;
+    var j: int64 = at;
+    while (j < pairs->len && s_starts(sl_get(pairs, j), nm2 + "\t")) {
+      var pi: int64 = s_to_int(s_trim(s_from(sl_get(pairs, j), tab + 1)));
+      if (pi != last) {
+        line = line + "\t" + c->pkgs[pi].label + "\t" + p_base(c->pkgs[pi].lib_path);
+        count = count + 1;
+        last = pi;
+      }
+      j = j + 1;
+    }
+    if (count > 1) {
+      sl_push(r, line);
+    }
+    at = j;
+  }
+  natx_free_list(pairs);
+  return r;
+}
+
+// "both A (liba.so) and B (libb.so)", or "A (..), B (..) and C (..)".
+fn natx_dup_owners(parts: StrList*) -> string {
+  var n: int64 = (parts->len - 1) / 2;
+  var b: string = s_empty();
+  if (n == 2) {
+    b = "both ";
+  }
+  var k: int64 = 0;
+  while (k < n) {
+    if (k > 0 && k == n - 1) {
+      b = b + " and ";
+    } else if (k > 0) {
+      b = b + ", ";
+    }
+    b = b + sl_get(parts, 1 + k * 2) + " (" + sl_get(parts, 2 + k * 2) + ")";
+    k = k + 1;
+  }
+  return b;
+}
+
+// Finds duplicated exports (cached in <cache>/dupsyms, keyed by the native
+// fingerprint) and warns when a reachable Mettle extern binds one: it binds
+// the first library on the link, whatever the program meant.
+fn natx_dup_check(c: NatCtx*, fp: string) {
+  var nlibs: int64 = 0;
+  var q: int64 = 0;
+  while (q < c->n) {
+    if (slen(c->pkgs[q].lib_path) > 0) {
+      nlibs = nlibs + 1;
+    }
+    q = q + 1;
+  }
+  if (nlibs < 2) {
+    return;
+  }
+  var cache: string = c->t->cache_dir + "/dupsyms";
+  var dups: StrList* = sl_new();
+  var rd: FsRead = fs_read(cache);
+  var cached: bool = false;
+  if (rd.ok && !natx_force(c)) {
+    var lines: StrList* = s_split(s_replace(rd.data, "\r", ""), 10);
+    if (lines->len > 0 && s_eq(sl_get(lines, 0), fp)) {
+      cached = true;
+      var k: int64 = 1;
+      while (k < lines->len) {
+        if (slen(sl_get(lines, k)) > 0) {
+          sl_push(dups, sl_get(lines, k));
+        }
+        k = k + 1;
+      }
+    }
+    natx_free_list(lines);
+  }
+  if (!cached) {
+    natx_free_list(dups);
+    dups = natx_dup_scan(c);
+    var body: string = fp + "\n";
+    if (dups->len > 0) {
+      body = body + sl_join(dups, "\n") + "\n";
+    }
+    fs_mkdirs(p_dir(cache));
+    fs_write(cache, body);
+  }
+  if (dups->len == 0) {
+    natx_free_list(dups);
+    return;
+  }
+  var e: NatExterns* = natx_externs(c, true);
+  var i: int64 = 0;
+  while (i < dups->len) {
+    var parts: StrList* = s_split(sl_get(dups, i), 9);
+    if (parts->len >= 5) {
+      var sym: string = sl_get(parts, 0);
+      var loc: string = s_empty();
+      var x: int64 = 0;
+      while (x < e->link->len && slen(loc) == 0) {
+        if (s_eq(sl_get(e->link, x), sym) && s_eq(sl_get(e->used, x), "1")) {
+          loc = sl_get(e->loc, x);
+        }
+        x = x + 1;
+      }
+      var what: string = "the C function " + sym + " is defined by " + natx_dup_owners(parts);
+      if (slen(loc) > 0) {
+        warn(what + "; the extern at " + loc + " binds to " + sl_get(parts, 1) + "'s");
+        err_line("  " + cyan("help") + ": two packages build the same C code; depend on one package that wraps the library, or make the symbol static/hidden in one of them");
+      } else {
+        verbose(what + "; no extern binds it, so each library calls its own copy");
+      }
+    }
+    natx_free_list(parts);
+    i = i + 1;
+  }
+  natx_free_list(dups);
+}
+
+// ---------------------------------------------------------------------------
+// Finding where symbols are defined
+// ---------------------------------------------------------------------------
+
+// Double-precision libm names: the Mettle runtime deliberately has none
+// (docs/c-interop.md); std/math provides them.
+fn natx_is_f64_math(name: string) -> bool {
+  var l: StrList* = s_fields("sqrt sin cos tan pow exp exp2 log log2 log10 asin acos atan atan2 sinh cosh tanh floor ceil fmod round trunc hypot cbrt fabs");
+  var r: bool = sl_has(l, name);
+  natx_free_list(l);
+  return r;
+}
+
+// A DLL never to suggest: the C runtimes the Windows linker refuses, and
+// ntdll, whose C names are internals rather than an API.
+fn natx_is_excluded_dll(base: string) -> bool {
+  var b: string = s_lower(base);
+  return s_starts(b, "msvcrt") || s_starts(b, "ucrtbase") || s_starts(b, "msvcr") || s_starts(b, "msvcp") || s_starts(b, "vcruntime") || s_starts(b, "api-ms-win-crt-") || s_starts(b, "crtdll") || s_eq(b, "ntdll.dll");
+}
+
+fn natx_dll_tag(base: string) -> string {
+  if (s_eq(s_lower(base), "ntdll.dll")) {
+    return " (ntdll internals; not suggested)";
+  }
+  return " (a C runtime DLL; the Mettle linker refuses it)";
+}
+
+fn natx_linux_std_dirs() -> StrList* {
+  return s_fields("/usr/local/lib/x86_64-linux-gnu /usr/local/lib64 /usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu /lib64 /lib");
+}
+
+fn natx_linux_sweep_dirs() -> StrList* {
+  return s_fields("/usr/local/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib");
+}
+
+// The Windows system directory: wine's from Linux, else %SystemRoot%.
+fn natx_system32() -> string {
+  if (s_eq(sys_os(), "linux")) {
+    var d: string = sys_home() + "/.wine/drive_c/windows/system32";
+    var prefix: string = env_get("WINEPREFIX");
+    if (slen(prefix) > 0) {
+      d = prefix + "/drive_c/windows/system32";
+    }
+    if (fs_is_dir(d)) {
+      return d;
+    }
+    return s_empty();
+  }
+  var root: string = env_get("SystemRoot");
+  if (slen(root) == 0) {
+    root = env_get("windir");
+  }
+  if (slen(root) == 0) {
+    root = "C:/windows";
+  }
+  return s_replace_byte(root, 92, 47) + "/system32";
+}
+
+// The ELF files an -l name binds: lib<name>.so (an ld script followed to the
+// libraries it names), or the exact file for ":file".
+fn natx_resolve_linux(c: NatCtx*, name: string) -> StrList* {
+  var found: StrList* = sl_new();
+  var file: string = "lib" + name + ".so";
+  if (s_starts(name, ":")) {
+    file = s_from(name, 1);
+  }
+  var dirs: StrList* = sl_copy(c->ldirs);
+  var stdd: StrList* = natx_linux_std_dirs();
+  var k: int64 = 0;
+  while (k < c->pc_dirs->len) {
+    sl_add_uniq(dirs, natx_host_open(sl_get(c->pc_dirs, k)));
+    k = k + 1;
+  }
+  k = 0;
+  while (k < stdd->len) {
+    sl_add_uniq(dirs, natx_host_open(sl_get(stdd, k)));
+    k = k + 1;
+  }
+  k = 0;
+  while (k < dirs->len) {
+    var cand: string = sl_get(dirs, k) + "/" + file;
+    if (fs_is_file(cand)) {
+      var fmt: string = sym_format(cand);
+      if (s_starts(fmt, "elf")) {
+        sl_push(found, cand);
+      } else {
+        // An ld script: GROUP ( /lib/x86_64-linux-gnu/libm.so.6 ... )
+        var rd: FsRead = fs_read(cand);
+        if (rd.ok && slen(rd.data) < 65536) {
+          var words: StrList* = s_fields(s_replace_byte(s_replace_byte(rd.data, 40, 32), 41, 32));
+          var w: int64 = 0;
+          while (w < words->len) {
+            var ww: string = natx_host_open(sl_get(words, w));
+            if (s_contains(ww, ".so") && s_starts(sym_format(ww), "elf")) {
+              sl_add_uniq(found, ww);
+            }
+            w = w + 1;
+          }
+          natx_free_list(words);
+        }
+      }
+      break;
+    }
+    k = k + 1;
+  }
+  natx_free_list(dirs);
+  natx_free_list(stdd);
+  return found;
+}
+
+// Directories where a Windows build finds DLLs: the graph's, PATH, system32.
+fn natx_windows_dirs(c: NatCtx*) -> StrList* {
+  var dirs: StrList* = sl_copy(c->ldirs);
+  if (s_eq(sys_os(), "windows")) {
+    var parts: StrList* = s_split(env_get("PATH"), 59);
+    var k: int64 = 0;
+    while (k < parts->len) {
+      var d: string = s_replace_byte(s_trim(sl_get(parts, k)), 92, 47);
+      if (slen(d) > 0) {
+        sl_add_uniq(dirs, d);
+      }
+      k = k + 1;
+    }
+    natx_free_list(parts);
+  }
+  var s32: string = natx_system32();
+  if (slen(s32) > 0) {
+    sl_add_uniq(dirs, s32);
+  }
+  return dirs;
+}
+
+fn natx_resolve_windows(c: NatCtx*, name: string) -> StrList* {
+  var found: StrList* = sl_new();
+  var dirs: StrList* = natx_windows_dirs(c);
+  var k: int64 = 0;
+  while (k < dirs->len) {
+    var hits: StrList* = natx_lib_files_in(c, sl_get(dirs, k), name);
+    if (hits->len > 0) {
+      sl_push(found, sl_get(hits, 0));
+      natx_free_list(hits);
+      break;
+    }
+    natx_free_list(hits);
+    k = k + 1;
+  }
+  natx_free_list(dirs);
+  return found;
+}
+
+fn natx_resolve(c: NatCtx*, name: string) -> StrList* {
+  if (natx_is_windows(c)) {
+    return natx_resolve_windows(c, name);
+  }
+  return natx_resolve_linux(c, name);
+}
+
+// The -l name a library file answers to ("libm.so.6" -> "m", "foo.dll" -> "foo").
+fn natx_link_name(c: NatCtx*, file: string) -> string {
+  var b: string = p_base(file);
+  if (natx_is_windows(c) || natx_ends_ci(b, ".dll")) {
+    return s_sub(b, 0, slen(b) - 4);
+  }
+  var at: int64 = s_find(b, ".so");
+  if (s_starts(b, "lib") && at > 3) {
+    var stem: string = s_sub(b, 3, at);
+    // Without a development link (lib<stem>.so), name the file exactly.
+    var stdd: StrList* = natx_linux_std_dirs();
+    sl_push(stdd, p_dir(file));
+    var ok: bool = false;
+    var k: int64 = 0;
+    while (k < stdd->len && !ok) {
+      ok = fs_is_file(natx_host_open(sl_get(stdd, k)) + "/lib" + stem + ".so") || fs_is_file(sl_get(stdd, k) + "/lib" + stem + ".so");
+      k = k + 1;
+    }
+    natx_free_list(stdd);
+    if (ok) {
+      return stem;
+    }
+  }
+  return ":" + b;
+}
+
+// "libz.so" (what -lz names) rather than "libz.so.1"; any DLL counts.
+fn natx_is_dev_name(base: string) -> bool {
+  return s_ends(base, ".so") || natx_ends_ci(base, ".dll");
+}
+
+// The identity of a library file beyond size and mtime: its ELF soname, else
+// (a DLL, or an ELF file without one) its name.
+fn natx_lib_ident(path: string) -> string {
+  var son: string = sym_soname(path);
+  if (slen(son) > 0) {
+    return son;
+  }
+  return s_lower(p_base(path));
+}
+
+// The entry of `result` that is the same library as `full`, -1 when none.
+fn natx_same_library(seen: StrList*, result: StrList*, key: string, full: string) -> int64 {
+  var mine: string = s_empty();
+  var i: int64 = 0;
+  while (i < seen->len) {
+    if (s_eq(sl_get(seen, i), key)) {
+      if (slen(mine) == 0) {
+        mine = natx_lib_ident(full);
+      }
+      if (s_eq(natx_lib_ident(sl_get(result, i)), mine)) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// Every library file worth searching, each library once.
+fn natx_sweep_files(c: NatCtx*) -> StrList* {
+  var dirs: StrList* = sl_new();
+  if (natx_is_windows(c)) {
+    var wd: StrList* = natx_windows_dirs(c);
+    sl_extend(dirs, wd);
+    natx_free_list(wd);
+  } else {
+    sl_extend(dirs, c->ldirs);
+    var k0: int64 = 0;
+    while (k0 < c->pc_dirs->len) {
+      sl_add_uniq(dirs, natx_host_open(sl_get(c->pc_dirs, k0)));
+      k0 = k0 + 1;
+    }
+    var sd: StrList* = natx_linux_sweep_dirs();
+    k0 = 0;
+    while (k0 < sd->len) {
+      sl_add_uniq(dirs, natx_host_open(sl_get(sd, k0)));
+      k0 = k0 + 1;
+    }
+    natx_free_list(sd);
+  }
+  // One entry per library: libz.so, libz.so.1 and libz.so.1.3.1 are often
+  // one file through symlinks (and /lib and /usr/lib one directory). Files
+  // with the same size and mtime and the same ELF soname are the same
+  // library; the development name (libz.so) is kept as the entry.
+  var seen: StrList* = sl_new();
+  var result: StrList* = sl_new();
+  var k: int64 = 0;
+  while (k < dirs->len) {
+    var d: string = sl_get(dirs, k);
+    if (fs_is_dir(d)) {
+      var files: StrList* = sl_new();
+      var subdirs: StrList* = sl_new();
+      sys_list_dir(d, files, subdirs);
+      sl_sort(files);
+      var f: int64 = 0;
+      while (f < files->len) {
+        var fname: string = sl_get(files, f);
+        var take: bool = false;
+        if (natx_is_windows(c)) {
+          take = natx_ends_ci(fname, ".dll");
+        } else {
+          take = s_starts(fname, "lib") && s_contains(fname, ".so");
+        }
+        if (take) {
+          var full: string = d + "/" + fname;
+          var fi: FileInfo = sys_stat(full);
+          var key: string = s_int(fi.size) + "|" + s_int(fi.mtime);
+          if (fi.exists && !fi.is_dir) {
+            var dup: int64 = natx_same_library(seen, result, key, full);
+            if (dup < 0) {
+              sl_push(seen, key);
+              sl_push(result, full);
+            } else if (natx_is_dev_name(fname) && !natx_is_dev_name(p_base(sl_get(result, dup)))) {
+              sl_set(result, dup, full);
+            }
+          }
+        }
+        f = f + 1;
+      }
+      natx_free_list(files);
+      natx_free_list(subdirs);
+    }
+    k = k + 1;
+  }
+  natx_free_list(dirs);
+  natx_free_list(seen);
+  return result;
+}
+
+// For each name, the library files that define it (hits[i] for names[i]).
+struct NatFinds {
+  names: StrList*;
+  hits: StrList**;
+}
+
+fn natx_find_everywhere(c: NatCtx*, names: StrList*) -> NatFinds* {
+  var r: NatFinds* = new NatFinds;
+  r->names = names;
+  r->hits = (StrList**)malloc((names->len + 1) * 8);
+  var i: int64 = 0;
+  while (i < names->len) {
+    r->hits[i] = sl_new();
+    i = i + 1;
+  }
+  if (names->len == 0) {
+    return r;
+  }
+  var files: StrList* = natx_sweep_files(c);
+  verbose("searching " + s_int(files->len) + " libraries for " + sl_join(names, ", "));
+  var f: int64 = 0;
+  while (f < files->len) {
+    var which: StrList* = sym_defines_which(sl_get(files, f), names);
+    var w: int64 = 0;
+    while (w < which->len) {
+      var at: int64 = sl_index(names, sl_get(which, w));
+      if (at >= 0) {
+        sl_push(r->hits[at], sl_get(files, f));
+      }
+      w = w + 1;
+    }
+    natx_free_list(which);
+    f = f + 1;
+  }
+  natx_free_list(files);
+  return r;
+}
+
+// ---------------------------------------------------------------------------
+// Externs
+// ---------------------------------------------------------------------------
+
+fn natx_ext_new() -> NatExterns* {
+  var e: NatExterns* = new NatExterns;
+  e->link = sl_new();
+  e->name = sl_new();
+  e->loc = sl_new();
+  e->pkg = sl_new();
+  e->used = sl_new();
+  return e;
+}
+
+// The file an import of `ip` from `from` names, "" when not one of `files`.
+fn natx_import_target(c: NatCtx*, from: string, ip: string, files: StrList*) -> string {
+  if (s_starts(ip, "std/")) {
+    return s_empty();
+  }
+  var cands: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < c->n) {
+    var mi: int64 = c->pkgs[i].mi;
+    if (mi >= 0) {
+      var dm: DepModule* = &c->ds->mods[mi];
+      if (s_starts(ip, dm->module + "/")) {
+        sl_push(cands, c->pkgs[i].dir + "/" + s_from(ip, slen(dm->module) + 1));
+      }
+      if (slen(dm->alias) > 0 && s_starts(ip, dm->alias + "/")) {
+        sl_push(cands, c->pkgs[i].dir + "/" + s_from(ip, slen(dm->alias) + 1));
+      }
+    }
+    i = i + 1;
+  }
+  // Importing yourself: the root's own module path names the root.
+  var own: string = c->p->man->module;
+  if (slen(own) > 0 && s_starts(ip, own + "/")) {
+    sl_push(cands, c->p->root + "/" + s_from(ip, slen(own) + 1));
+  }
+  sl_push(cands, p_join(p_dir(from), ip));
+  sl_push(cands, p_join(c->p->root, ip));
+  var hit: string = s_empty();
+  i = 0;
+  while (i < cands->len) {
+    var a: string = p_clean(sl_get(cands, i));
+    if (sl_has(files, a)) {
+      hit = a;
+      break;
+    }
+    if (sl_has(files, a + ".mettle")) {
+      hit = a + ".mettle";
+      break;
+    }
+    i = i + 1;
+  }
+  natx_free_list(cands);
+  return hit;
+}
+
+// The .mettle files of one package (paths relative to its directory). Dot
+// directories, `build` directories and nested projects (a subdirectory
+// with its own mbuild.toml) are not entered.
+fn natx_walk(root: string, rel: string, found: StrList*, skip: StrList*) {
+  var dir: string = root;
+  if (slen(rel) > 0) {
+    dir = p_join(root, rel);
+    // Another package of the graph (a replacement inside the project).
+    if (sl_has(skip, p_clean(dir))) {
+      return;
+    }
+  }
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  if (sys_list_dir(dir, files, dirs)) {
+    var i: int64 = 0;
+    while (i < files->len) {
+      if (s_ends(sl_get(files, i), ".mettle")) {
+        sl_push(found, p_join(rel, sl_get(files, i)));
+      }
+      i = i + 1;
+    }
+    i = 0;
+    while (i < dirs->len) {
+      var d: string = sl_get(dirs, i);
+      if (!s_starts(d, ".") && !s_eq(d, "build") && !fs_is_file(p_join(p_join(dir, d), "mbuild.toml"))) {
+        natx_walk(root, p_join(rel, d), found, skip);
+      }
+      i = i + 1;
+    }
+  }
+  natx_free_list(files);
+  natx_free_list(dirs);
+}
+
+// Externs of every .mettle file of the root and its dependencies. With
+// for_target, a file that is only ever imported under another OS's guard
+// (`import "x" if windows;`), or named *.<other os>.mettle, is left out.
+fn natx_externs(c: NatCtx*, for_target: bool) -> NatExterns* {
+  var files: StrList* = sl_new();
+  var owner: StrList* = sl_new();
+  var pkg_dirs: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < c->n) {
+    sl_push(pkg_dirs, p_clean(c->pkgs[i].dir));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < c->n) {
+    var rels: StrList* = sl_new();
+    natx_walk(c->pkgs[i].dir, s_empty(), rels, pkg_dirs);
+    sl_sort(rels);
+    var k: int64 = 0;
+    while (k < rels->len) {
+      var f: string = p_clean(p_join(c->pkgs[i].dir, sl_get(rels, k)));
+      if (!sl_has(files, f)) {
+        sl_push(files, f);
+        sl_push(owner, natx_idx(i));
+      }
+      k = k + 1;
+    }
+    natx_free_list(rels);
+    i = i + 1;
+  }
+  var scans: ScanResult** = (ScanResult**)malloc((files->len + 1) * 8);
+  defer free(scans);
+  var imported: int32* = (int32*)malloc((files->len + 1) * 4);
+  defer free(imported);
+  i = 0;
+  while (i < files->len) {
+    var rd: FsRead = fs_read(sl_get(files, i));
+    var text: string = s_empty();
+    if (rd.ok) {
+      text = rd.data;
+    }
+    scans[i] = scan_source(text);
+    imported[i] = 0;
+    i = i + 1;
+  }
+  // imported: 0 never, 1 only under inactive guards, 2 under an active one.
+  i = 0;
+  while (i < files->len) {
+    var sr: ScanResult* = scans[i];
+    var k2: int64 = 0;
+    while (k2 < sr->nimports) {
+      var ir: ImportRef* = scan_import(sr, k2);
+      var tgt: string = natx_import_target(c, sl_get(files, i), ir->path, files);
+      if (slen(tgt) > 0) {
+        var at: int64 = sl_index(files, tgt);
+        if (scan_guard_active(ir->guard, c->os)) {
+          imported[at] = 2;
+        } else if (imported[at] == 0) {
+          imported[at] = 1;
+        }
+      }
+      k2 = k2 + 1;
+    }
+    i = i + 1;
+  }
+  var other: string = ".windows.mettle";
+  if (natx_is_windows(c)) {
+    other = ".linux.mettle";
+  }
+  var e: NatExterns* = natx_ext_new();
+  i = 0;
+  while (i < files->len) {
+    var f2: string = sl_get(files, i);
+    var keep: bool = true;
+    if (for_target && (imported[i] == 1 || s_ends(f2, other))) {
+      keep = false;
+    }
+    if (keep) {
+      var sr2: ScanResult* = scans[i];
+      var x: int64 = 0;
+      while (x < sr2->externs->len) {
+        sl_push(e->link, sl_get(sr2->externs, x));
+        sl_push(e->name, sl_get(sr2->extern_names, x));
+        sl_push(e->loc, natx_show(c, f2) + ":" + sl_get(sr2->extern_lines, x));
+        sl_push(e->pkg, sl_get(owner, i));
+        if (c->pkgs[s_to_int(sl_get(owner, i))].mi < 0 || imported[i] == 2) {
+          sl_push(e->used, "1");
+        } else {
+          sl_push(e->used, "0");
+        }
+        x = x + 1;
+      }
+    }
+    i = i + 1;
+  }
+  natx_free_list(files);
+  natx_free_list(owner);
+  natx_free_list(pkg_dirs);
+  c->ext = e;
+  return e;
+}
+
+// ---------------------------------------------------------------------------
+// Unresolved symbols in compiler output
+// ---------------------------------------------------------------------------
+
+// The text from `from` up to the first byte of `stops` (or a line end).
+fn natx_until(s: string, from: int64, stops: string) -> string {
+  var e: int64 = from;
+  while (e < slen(s)) {
+    var ch: int32 = s_byte(s, e);
+    if (ch == 10 || ch == 13 || s_find_byte(stops, ch) >= 0) {
+      break;
+    }
+    e = e + 1;
+  }
+  return s_sub(s, from, e);
+}
+
+fn natx_clean_symbol(s: string) -> string {
+  var r: string = s;
+  var at: int64 = s_find_byte(r, 64);
+  if (at > 0) {
+    r = s_sub(r, 0, at);
+  }
+  if (s_starts(r, "__imp_")) {
+    r = s_from(r, 6);
+  }
+  return r;
+}
+
+fn natx_collect_after(output: string, marker: string, stops: string, found: StrList*) {
+  var at: int64 = s_find(output, marker);
+  while (at >= 0) {
+    var from: int64 = at + slen(marker);
+    // `name' (GNU ld), 'name', or the UTF-8 quotes of a translated ld.
+    if (from < slen(output)) {
+      var q: int32 = s_byte(output, from);
+      if (q == 96 || q == 39) {
+        from = from + 1;
+      } else if (q == 226 && from + 2 < slen(output)) {
+        from = from + 3;
+      }
+    }
+    var name: string = natx_clean_symbol(natx_until(output, from, stops));
+    if (slen(name) > 0) {
+      sl_add_uniq(found, name);
+    }
+    at = s_find_from(output, marker, from);
+  }
+}
+
+// Symbol names a failed link reports as undefined, in order of appearance.
+fn natx_unresolved_in(output: string) -> StrList* {
+  var found: StrList* = sl_new();
+  var q: Buf* = buf_new();
+  buf_addb(q, 39);
+  buf_addb(q, 96);
+  buf_addb(q, 226);
+  buf_addb(q, 32);
+  var stops: string = buf_take(q);
+  natx_collect_after(output, "Unresolved external symbol ", stops, found);
+  natx_collect_after(output, "undefined reference to ", stops, found);
+  natx_collect_after(output, "Relocation target ", stops, found);
+  natx_collect_after(output, "undefined symbol: ", stops, found);
+  return found;
+}
+
+// -l names the linker could not find ("Could not find shared library
+// 'libfoo.so' for -lfoo ...").
+fn natx_missing_libs(output: string) -> StrList* {
+  var found: StrList* = sl_new();
+  var marker: string = "Could not find shared library '";
+  var at: int64 = s_find(output, marker);
+  while (at >= 0) {
+    var rest: int64 = s_find_from(output, "for -l", at);
+    if (rest >= 0) {
+      var nm: string = natx_until(output, rest + 6, " ");
+      if (slen(nm) > 0) {
+        sl_add_uniq(found, nm);
+      }
+    }
+    at = s_find_from(output, marker, at + slen(marker));
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// What each extern resolves to
+// ---------------------------------------------------------------------------
+
+// Symbols the target's link resolves without flags: the runtime objects of
+// the compiler (and, for Windows, the default DLL set).
+struct NatBase {
+  runtime: StrList*;      // sorted
+  runtime_known: bool;
+  dlls: StrList*;         // default DLL files found
+  dll_syms: StrList*;     // sorted names of those DLLs
+}
+
+fn natx_base(c: NatCtx*) -> NatBase* {
+  var b: NatBase* = new NatBase;
+  b->runtime = sl_new();
+  b->runtime_known = false;
+  b->dlls = sl_new();
+  b->dll_syms = sl_new();
+  var rt: string = c->t->compiler_runtime_dir;
+  if (slen(rt) > 0 && fs_is_dir(rt)) {
+    var files: StrList* = sl_new();
+    var dirs: StrList* = sl_new();
+    sys_list_dir(rt, files, dirs);
+    sl_sort(files);
+    var k: int64 = 0;
+    while (k < files->len) {
+      var f: string = rt + "/" + sl_get(files, k);
+      if (s_ends(f, ".o") || s_ends(f, ".obj")) {
+        var fmt: string = sym_format(f);
+        if ((natx_is_windows(c) && s_eq(fmt, "coff")) || (!natx_is_windows(c) && s_eq(fmt, "elf-o"))) {
+          sl_extend(b->runtime, sym_defined(f));
+          b->runtime_known = true;
+        }
+      }
+      k = k + 1;
+    }
+    sym_sort_uniq(b->runtime);
+    natx_free_list(files);
+    natx_free_list(dirs);
+  }
+  if (natx_is_windows(c)) {
+    var s32: string = natx_system32();
+    var defaults: StrList* = s_fields("kernel32 user32 gdi32 advapi32 ws2_32");
+    var k2: int64 = 0;
+    while (slen(s32) > 0 && k2 < defaults->len) {
+      var hits: StrList* = natx_lib_files_in(c, s32, sl_get(defaults, k2));
+      if (hits->len > 0) {
+        sl_push(b->dlls, sl_get(hits, 0));
+        sl_extend(b->dll_syms, sym_defined(sl_get(hits, 0)));
+      }
+      natx_free_list(hits);
+      k2 = k2 + 1;
+    }
+    sym_sort_uniq(b->dll_syms);
+    natx_free_list(defaults);
+  }
+  return b;
+}
+
+// The libraries the link names, with their files: [i] of names matches files.
+struct NatLinked {
+  names: StrList*;   // link names
+  files: StrList*;   // a library file, "" when not found
+  owner: StrList*;   // package index
+}
+
+fn natx_linked(c: NatCtx*) -> NatLinked* {
+  var l: NatLinked* = new NatLinked;
+  l->names = sl_new();
+  l->files = sl_new();
+  l->owner = sl_new();
+  var i: int64 = 0;
+  while (i < c->libs->len) {
+    var nm: string = sl_get(c->libs, i);
+    var files: StrList* = sl_new();
+    if (s_starts(nm, "mb_")) {
+      var k: int64 = 0;
+      while (k < c->n) {
+        if (s_eq("mb_" + c->pkgs[k].name, nm) && slen(c->pkgs[k].lib_path) > 0) {
+          sl_push(files, c->pkgs[k].lib_path);
+        }
+        k = k + 1;
+      }
+    }
+    if (files->len == 0) {
+      natx_free_list(files);
+      files = natx_resolve(c, nm);
+    }
+    if (files->len == 0) {
+      sl_push(l->names, nm);
+      sl_push(l->files, s_empty());
+      sl_push(l->owner, sl_get(c->lib_owner, i));
+    }
+    var f: int64 = 0;
+    while (f < files->len) {
+      sl_push(l->names, nm);
+      sl_push(l->files, sl_get(files, f));
+      sl_push(l->owner, sl_get(c->lib_owner, i));
+      f = f + 1;
+    }
+    natx_free_list(files);
+    i = i + 1;
+  }
+  return l;
+}
+
+// Where `sym` resolves, "" when nowhere the link looks.
+fn natx_where_resolves(c: NatCtx*, b: NatBase*, l: NatLinked*, sym: string) -> string {
+  var i: int64 = 0;
+  while (i < l->names->len) {
+    var f: string = sl_get(l->files, i);
+    if (slen(f) > 0 && sym_file_defines(f, sym)) {
+      var nm: string = sl_get(l->names, i);
+      var who: string = c->pkgs[s_to_int(sl_get(l->owner, i))].label;
+      if (s_starts(nm, "mb_")) {
+        return "C library " + p_base(f) + " (" + who + ")";
+      }
+      return "[link] library " + p_base(f) + " (" + who + ")";
+    }
+    i = i + 1;
+  }
+  if (sym_sorted_has(b->runtime, sym)) {
+    return "Mettle runtime";
+  }
+  if (sym_sorted_has(b->dll_syms, sym)) {
+    var k: int64 = 0;
+    while (k < b->dlls->len) {
+      if (sym_file_defines(sl_get(b->dlls, k), sym)) {
+        return "Windows default DLL " + s_lower(p_base(sl_get(b->dlls, k)));
+      }
+      k = k + 1;
+    }
+  }
+  return s_empty();
+}
+
+// ---------------------------------------------------------------------------
+// The report
+// ---------------------------------------------------------------------------
+
+fn natx_ext_where_list(e: NatExterns*, sym: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < e->link->len) {
+    if (s_eq(sl_get(e->link, i), sym)) {
+      var s: string = sl_get(e->loc, i) + " (extern fn " + sl_get(e->name, i) + ")";
+      if (!s_eq(sl_get(e->name, i), sym)) {
+        s = sl_get(e->loc, i) + " (extern " + sl_get(e->name, i) + " = \"" + sym + "\")";
+      }
+      sl_add_uniq(l, s);
+    }
+    i = i + 1;
+  }
+  return l;
+}
+
+// Ranks hits: libraries the link can name plainly first, excluded C runtimes
+// last, then shorter names.
+fn natx_rank(c: NatCtx*, f: string) -> int64 {
+  var base: string = p_base(f);
+  var r: int64 = slen(base);
+  if (natx_is_windows(c) || natx_ends_ci(base, ".dll")) {
+    if (natx_is_excluded_dll(base)) {
+      r = r + 10000;
+    }
+    return r;
+  }
+  if (s_starts(natx_link_name(c, f), ":")) {
+    r = r + 1000;
+  }
+  return r;
+}
+
+fn natx_sort_hits(c: NatCtx*, hits: StrList*) {
+  var i: int64 = 1;
+  while (i < hits->len) {
+    var cur: string = hits->items[i];
+    var rc: int64 = natx_rank(c, cur);
+    var j: int64 = i - 1;
+    while (j >= 0 && natx_rank(c, hits->items[j]) > rc) {
+      hits->items[j + 1] = hits->items[j];
+      j = j - 1;
+    }
+    hits->items[j + 1] = cur;
+    i = i + 1;
+  }
+}
+
+// One symbol's paragraph: where it is declared, what defines it, the fix.
+fn natx_report_symbol(c: NatCtx*, e: NatExterns*, sym: string, hits: StrList*, linked: NatLinked*) {
+  err_line("");
+  err_line("  " + bold("`" + sym + "`"));
+  var decl: StrList* = natx_ext_where_list(e, sym);
+  if (decl->len == 0) {
+    err_line("    no extern in the project or its dependencies declares it (C code or a library may need it)");
+  }
+  var i: int64 = 0;
+  while (i < decl->len) {
+    err_line("    declared at " + sl_get(decl, i));
+    i = i + 1;
+  }
+  natx_sort_hits(c, hits);
+  var shown: int64 = 0;
+  i = 0;
+  while (i < hits->len && shown < 6) {
+    var f: string = sl_get(hits, i);
+    var tag: string = "";
+    if (natx_is_excluded_dll(p_base(f)) && (natx_is_windows(c) || natx_ends_ci(f, ".dll"))) {
+      tag = natx_dll_tag(p_base(f));
+    }
+    var k: int64 = 0;
+    while (k < linked->files->len) {
+      if (s_eq(sl_get(linked->files, k), f)) {
+        tag = " (already on the link; is it out of date?)";
+      }
+      k = k + 1;
+    }
+    var son: string = sym_soname(f);
+    if (slen(son) > 0 && !s_eq(son, p_base(f))) {
+      tag = " (" + son + ")" + tag;
+    }
+    err_line("    defined in " + f + tag);
+    shown = shown + 1;
+    i = i + 1;
+  }
+  if (hits->len > shown) {
+    err_line("    ... and " + s_int(hits->len - shown) + " more");
+  }
+  var f64: bool = natx_is_f64_math(sym);
+  if (f64) {
+    err_line("    " + cyan("note") + ": `" + sym + "` is double-precision math. The Mettle runtime deliberately carries no float64 libm (only the float32 forms such as `" + sym + "f`); import \"std/math\" instead of declaring it (docs/c-interop.md).");
+  }
+  // The first usable library.
+  var pick: string = s_empty();
+  var on_link: bool = false;
+  i = 0;
+  while (i < hits->len) {
+    var f2: string = sl_get(hits, i);
+    if (sl_has(linked->files, f2)) {
+      on_link = true;
+    }
+    if (slen(pick) == 0 && !(natx_ends_ci(f2, ".dll") && natx_is_excluded_dll(p_base(f2)))) {
+      pick = f2;
+    }
+    i = i + 1;
+  }
+  if (on_link) {
+    err_line("    " + cyan("help") + ": a library on the link defines it, so the compiler did not get mbuild's link arguments, or the library changed since; rebuild with --force");
+  } else if (slen(pick) > 0) {
+    var lname: string = natx_link_name(c, pick);
+    var prefix: string = "to link it, add";
+    if (f64) {
+      prefix = "or, to link it anyway, add";
+    }
+    err_line("    " + cyan("help") + ": " + prefix + " to " + natx_show(c, c->p->man->file) + ":");
+    err_line("        [link." + c->os + "]");
+    err_line("        libs = [\"" + lname + "\"]");
+    var d: string = p_dir(pick);
+    var std_dir: bool = false;
+    var stdd: StrList* = natx_linux_std_dirs();
+    var k2: int64 = 0;
+    while (k2 < stdd->len) {
+      if (s_eq(natx_host_open(sl_get(stdd, k2)), d)) {
+        std_dir = true;
+      }
+      k2 = k2 + 1;
+    }
+    natx_free_list(stdd);
+    if (!natx_is_windows(c) && !std_dir && !sl_has(c->ldirs, d)) {
+      err_line("        paths = [\"" + d + "\"]");
+    }
+    if (natx_is_windows(c) && !sl_has(c->ldirs, d) && !s_eq(d, natx_system32())) {
+      err_line("        paths = [\"" + d + "\"]       # so the DLL ships beside the .exe");
+    }
+  } else if (hits->len == 0 && !f64) {
+    err_line("    " + cyan("help") + ": no library searched defines it. Check the `= \"symbol\"` link name and its spelling, or provide it in C ([c] sources in " + natx_show(c, c->p->man->file) + ").");
+  } else if (!f64) {
+    err_line("    " + cyan("help") + ": only a C runtime DLL defines it, and Mettle never links one; implement it in Mettle or in a [c] source.");
+  }
+  natx_free_list(decl);
+}
+
+export fn nat_explain_failure(p: Project*, ds: DepState*, t: TargetCtx*, output: string) {
+  var syms: StrList* = natx_unresolved_in(output);
+  var missing: StrList* = natx_missing_libs(output);
+  if (syms->len == 0 && missing->len == 0) {
+    natx_free_list(syms);
+    natx_free_list(missing);
+    return;
+  }
+  var c: NatCtx* = natx_new(p, ds, t);
+  // The libraries exist already (nat_prepare ran before the compile).
+  var i: int64 = 0;
+  while (i < c->n) {
+    if (c->pkgs[i].man != 0 && man_has_c(c->pkgs[i].man)) {
+      var lib: string = natx_lib_file(c, c->pkgs[i].name);
+      if (fs_is_file(lib)) {
+        c->pkgs[i].lib_path = lib;
+      }
+    }
+    i = i + 1;
+  }
+  natx_gather(c);
+  flush_out();
+  i = 0;
+  while (i < missing->len) {
+    var ml: string = sl_get(missing, i);
+    var owner: string = "the link";
+    var k: int64 = 0;
+    while (k < c->libs->len) {
+      if (s_eq(sl_get(c->libs, k), ml)) {
+        var oi: int64 = s_to_int(sl_get(c->lib_owner, k));
+        owner = natx_manifest_file(c, oi) + " ([link] libs of " + c->pkgs[oi].label + ")";
+      }
+      k = k + 1;
+    }
+    err_line(red("error") + ": library `" + ml + "` (from " + owner + ") is not installed: no lib" + ml + ".so on the library search path");
+    err_line("  " + cyan("help") + ": install its development package (it provides lib" + ml + ".so), or put the directory holding it under [link] paths");
+    i = i + 1;
+  }
+  natx_free_list(missing);
+  if (syms->len == 0) {
+    natx_free_list(syms);
+    return;
+  }
+  var e: NatExterns* = natx_externs(c, true);
+  var linked: NatLinked* = natx_linked(c);
+  // The linker stops at the first missing name; the audit finds the rest.
+  var base: NatBase* = natx_base(c);
+  c->ext = e;
+  c->linked = linked;
+  c->base = base;
+  var more: StrList* = sl_new();
+  if (base->runtime_known) {
+    i = 0;
+    while (i < e->link->len) {
+      var sym: string = sl_get(e->link, i);
+      if (!sl_has(syms, sym) && !sl_has(more, sym) && slen(natx_where_resolves(c, base, linked, sym)) == 0) {
+        sl_push(more, sym);
+      }
+      i = i + 1;
+    }
+  }
+  var all: StrList* = sl_copy(syms);
+  sl_extend(all, more);
+  var nfirst: int64 = syms->len;
+  natx_free_list(more);
+  natx_free_list(syms);
+  var finds: NatFinds* = natx_find_everywhere(c, all);
+  err_line("");
+  var what: string = "symbol";
+  if (nfirst > 1) {
+    what = "symbols";
+  }
+  err_line(red("error") + ": the " + c->os + " link is missing " + s_int(nfirst) + " " + what + " that nothing on it defines:");
+  i = 0;
+  while (i < all->len) {
+    if (i == nfirst) {
+      err_line("");
+      err_line(yellow("also") + ": these externs resolve nowhere on the link either (the linker reports one at a time):");
+    }
+    natx_report_symbol(c, e, sl_get(all, i), finds->hits[i], linked);
+    i = i + 1;
+  }
+  err_line("");
+  flush_out();
+}
+
+// ---------------------------------------------------------------------------
+// Doctor
+// ---------------------------------------------------------------------------
+
+export fn nat_doctor(p: Project*, ds: DepState*, t: TargetCtx*) -> int32 {
+  var c: NatCtx* = natx_new(p, ds, t);
+  var need_build: bool = false;
+  var i: int64 = 0;
+  while (i < c->n) {
+    if (c->pkgs[i].man != 0 && man_has_c(c->pkgs[i].man)) {
+      var lib: string = natx_lib_file(c, c->pkgs[i].name);
+      if (fs_is_file(lib)) {
+        c->pkgs[i].lib_path = lib;
+      } else {
+        need_build = true;
+      }
+    }
+    i = i + 1;
+  }
+  if (need_build) {
+    var k0: int64 = 0;
+    while (k0 < c->n) {
+      c->pkgs[k0].lib_path = s_empty();
+      k0 = k0 + 1;
+    }
+    natx_prepare_ctx(c);
+  } else {
+    natx_gather(c);
+  }
+  var e: NatExterns* = natx_externs(c, true);
+  var base: NatBase* = natx_base(c);
+  var linked: NatLinked* = natx_linked(c);
+  c->ext = e;
+  c->base = base;
+  c->linked = linked;
+  say("  " + bold(c->os) + ": " + natx_plural(e->link->len, "extern"));
+  if (!base->runtime_known) {
+    say("    " + yellow("note") + ": the compiler's runtime objects are unknown; runtime names cannot be checked");
+  }
+  if (natx_is_windows(c) && base->dlls->len == 0) {
+    say("    " + yellow("note") + ": the default DLLs (kernel32, ...) were not found to read; Win32 names cannot be checked");
+  }
+  i = 0;
+  while (i < linked->names->len) {
+    if (slen(sl_get(linked->files, i)) == 0) {
+      say("    " + yellow("note") + ": library `" + sl_get(linked->names, i) + "` (" + c->pkgs[s_to_int(sl_get(linked->owner, i))].label + ") was not found");
+    }
+    i = i + 1;
+  }
+  var width: int64 = 8;
+  i = 0;
+  while (i < e->link->len) {
+    if (slen(sl_get(e->link, i)) > width) {
+      width = slen(sl_get(e->link, i));
+    }
+    i = i + 1;
+  }
+  var wwidth: int64 = 8;
+  i = 0;
+  while (i < e->loc->len) {
+    if (slen(sl_get(e->loc, i)) > wwidth) {
+      wwidth = slen(sl_get(e->loc, i));
+    }
+    i = i + 1;
+  }
+  var unresolved: StrList* = sl_new();
+  var unknown: int64 = 0;
+  i = 0;
+  while (i < e->link->len) {
+    var sym: string = sl_get(e->link, i);
+    var res: string = natx_where_resolves(c, base, linked, sym);
+    if (slen(res) == 0) {
+      if (!base->runtime_known) {
+        res = dim("unknown (runtime not inspected)");
+        unknown = unknown + 1;
+      } else {
+        res = red("UNRESOLVED");
+        sl_add_uniq(unresolved, sym);
+      }
+    }
+    say("    " + s_pad_right(sym, width) + "  " + s_pad_right(sl_get(e->loc, i), wwidth) + "  " + res);
+    i = i + 1;
+  }
+  flush_out();
+  if (unresolved->len == 0) {
+    return 0;
+  }
+  var finds: NatFinds* = natx_find_everywhere(c, unresolved);
+  var verb: string = " resolve";
+  if (unresolved->len == 1) {
+    verb = " resolves";
+  }
+  err_line(red("error") + ": " + natx_plural(unresolved->len, "extern") + verb + " nowhere on the " + c->os + " link:");
+  i = 0;
+  while (i < unresolved->len) {
+    natx_report_symbol(c, e, sl_get(unresolved, i), finds->hits[i], linked);
+    i = i + 1;
+  }
+  err_line("");
+  flush_out();
+  return 1;
+}

@@ -1,0 +1,107 @@
+// registry: stub, owned by group R (DESIGN.md 14).
+
+import "../core/base";
+import "../model/manifest";
+import "../model/project";
+
+export struct RegVersion {
+  version: string;
+  sha: string;
+  manifest_sha: string;
+  yanked: bool;
+}
+
+export struct RegIndex {
+  name: string;
+  registry: string;
+  url: string;
+  found: bool;
+  ok: bool;
+  err: string;
+  versions: RegVersion*;
+  n: int64;
+}
+
+export struct RegList {
+  names: StrList*;
+  urls: StrList*;
+}
+
+export struct RegPublish {
+  dir: string;
+  name: string;
+  version: string;
+  root: string;
+  files: StrList*;
+  manifest_text: string;
+  dry_run: bool;
+}
+
+fn rgx_failed(name: string, registry: string) -> RegIndex* {
+  var ix: RegIndex* = new RegIndex;
+  ix->name = name;
+  ix->registry = registry;
+  ix->url = s_empty();
+  ix->err = "not implemented";
+  ix->versions = (RegVersion*)0;
+  return ix;
+}
+
+export fn reg_list(p: Project*) -> RegList* {
+  var l: RegList* = new RegList;
+  l->names = sl_new();
+  l->urls = sl_new();
+  return l;
+}
+
+export fn reg_index(p: Project*, registry: string, name: string, refresh: bool) -> RegIndex* {
+  return rgx_failed(name, registry);
+}
+
+export fn reg_find(p: Project*, name: string, pinned: string, refresh: bool) -> RegIndex* {
+  return rgx_failed(name, pinned);
+}
+
+export fn reg_version(ix: RegIndex*, version: string) -> RegVersion* {
+  return (RegVersion*)0;
+}
+
+export fn reg_manifest(p: Project*, ix: RegIndex*, version: string) -> Manifest* {
+  return (Manifest*)0;
+}
+
+export fn reg_fetch(p: Project*, ix: RegIndex*, version: string) -> string {
+  return s_empty();
+}
+
+export fn reg_extract(archive: string, sha: string, dest: string, marker: string) -> string {
+  return "not implemented";
+}
+
+export fn reg_marker(dest: string) -> string {
+  return s_empty();
+}
+
+export fn reg_error() -> string {
+  return "not implemented";
+}
+
+export fn reg_failure_kind() -> string {
+  return "other";
+}
+
+export fn reg_publish(r: RegPublish*) -> string {
+  return "not implemented";
+}
+
+export fn reg_yank(dir: string, name: string, version: string, undo: bool) -> string {
+  return "not implemented";
+}
+
+export fn reg_init_dir(dir: string, name: string) -> string {
+  return "not implemented";
+}
+
+export fn reg_dir_of(p: Project*, registry: string) -> string {
+  return s_empty();
+}

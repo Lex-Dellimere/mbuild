@@ -1,7 +1,6 @@
 # build output and mbuild state
 /build/
 /.mbuild/
-build/
 .mbuild/
 mbuild.local.toml
 

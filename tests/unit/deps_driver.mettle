@@ -1,0 +1,201 @@
+// deps_driver: a small CLI over deps.mettle for tests/deps_test.sh.
+//
+//   deps_driver <project-dir> <command> [args] [--offline] [--locked] [--force] [--verbose] [--quiet]
+//
+// Commands: ensure | add-missing MODULE... | auto MODULE... | get SPEC... | remove NAME... |
+// update [NAME... | --all] | tidy USED... | deps [--tree] | fetch
+// Round 2: why NAME | outdated [MODULE] | adopt | plan [--all] [--major] [MODULE...] |
+// apply MODULE VERSION... | restore-after MODULE VERSION... | api MODULE FROM TO [--added] |
+// mettle | vendor
+// `ensure` prints one line per selected module:
+//   MOD <module> <version> <commit> alias=<alias> path=<0|1> man=<0|1> replaced=<kind> subs=<a,b>
+// followed by `INCLUDE <include_dir>`.
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/model/toml";
+import "../../src/model/manifest";
+import "../../src/model/project";
+import "../../src/pkg/deps";
+import "../../src/core/fs";
+import "../../src/build/toolchain";
+import "../../src/core/sys_linux" if linux;
+import "../../src/core/sys_windows" if windows;
+
+fn drv_bool(b: bool) -> string {
+  if (b) {
+    return "1";
+  }
+  return "0";
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  if (argc < 3) {
+    err_line("usage: deps_driver <project-dir> <command> [args]");
+    return 2;
+  }
+  var opts: Options* = options_new();
+  var dir_arg: string = s_from_c(argv[1]);
+  var command: string = s_from_c(argv[2]);
+  var i: int32 = 3;
+  while (i < argc) {
+    var a: string = s_from_c(argv[i]);
+    if (s_eq(a, "--offline")) {
+      opts->offline = true;
+    } else if (s_eq(a, "--locked")) {
+      opts->locked = true;
+    } else if (s_eq(a, "--force")) {
+      opts->force = true;
+    } else if (s_eq(a, "--verbose") || s_eq(a, "-v")) {
+      opts->verbose = true;
+      g_verbose = true;
+    } else if (s_eq(a, "--quiet") || s_eq(a, "-q")) {
+      opts->quiet = true;
+      g_quiet = true;
+    } else {
+      sl_push(opts->rest, a);
+    }
+    i = i + 1;
+  }
+  var root: string = sys_realpath(dir_arg);
+  if (slen(root) == 0) {
+    err_line("no such directory: " + dir_arg);
+    return 2;
+  }
+  root = s_replace_byte(root, 92, 47);
+  var p: Project* = new Project;
+  p->root = root;
+  p->opts = opts;
+  p->state_dir = root + "/.mbuild";
+  var r: FsRead = fs_read(root + "/mbuild.toml");
+  if (r.ok) {
+    p->man = man_parse(toml_parse(r.data, root + "/mbuild.toml"), root);
+    p->has_manifest = true;
+    if (slen(p->man->error) > 0) {
+      fail(p->man->error);
+    }
+  } else {
+    p->man = man_empty(root, "app");
+    p->has_manifest = false;
+  }
+  var code: int32 = 0;
+  if (s_eq(command, "ensure")) {
+    var ds: DepState* = deps_ensure(p);
+    var k: int64 = 0;
+    while (k < ds->n) {
+      var dm: DepModule* = &ds->mods[k];
+      var subs: string = "";
+      if (dm->submodules != (StrList*)0) {
+        subs = sl_join(dm->submodules, ",");
+      }
+      say("MOD " + dm->module + " " + dm->version + " " + dm->commit + " alias=" + dm->alias + " path=" + drv_bool(dm->is_path) + " man=" + drv_bool(dm->man != (Manifest*)0) + " replaced=" + dm->replaced + " subs=" + subs + " dir=" + dm->dir);
+      k = k + 1;
+    }
+    say("INCLUDE " + ds->include_dir);
+  } else if (s_eq(command, "add-missing")) {
+    say("ADDED " + drv_bool(deps_add_missing(p, opts->rest)));
+  } else if (s_eq(command, "auto")) {
+    // What a build does: ensure, add what the imports miss, ensure again.
+    deps_ensure(p);
+    var added: bool = deps_add_missing(p, opts->rest);
+    say("ADDED " + drv_bool(added));
+    if (added) {
+      deps_ensure(p);
+    }
+  } else if (s_eq(command, "get")) {
+    code = deps_cmd_get(p);
+  } else if (s_eq(command, "remove")) {
+    code = deps_cmd_remove(p);
+  } else if (s_eq(command, "update")) {
+    code = deps_cmd_update(p);
+  } else if (s_eq(command, "tidy")) {
+    code = deps_cmd_tidy(p, opts->rest);
+  } else if (s_eq(command, "deps")) {
+    code = deps_cmd_list(p);
+  } else if (s_eq(command, "fetch")) {
+    code = deps_cmd_fetch(p);
+  } else if (s_eq(command, "why")) {
+    code = deps_cmd_why(p);
+  } else if (s_eq(command, "outdated")) {
+    code = deps_cmd_outdated(p);
+  } else if (s_eq(command, "vendor")) {
+    code = deps_cmd_vendor(p);
+  } else if (s_eq(command, "adopt")) {
+    var n: int32 = deps_adopt_mettle_deps(p, false);
+    say("WOULD " + s_int((int64)n));
+    n = deps_adopt_mettle_deps(p, true);
+    say("ADOPTED " + s_int((int64)n));
+  } else if (s_eq(command, "plan")) {
+    var req: UpdateReq* = new UpdateReq;
+    req->modules = sl_new();
+    var k: int64 = 0;
+    while (k < opts->rest->len) {
+      var arg: string = sl_get(opts->rest, k);
+      if (s_eq(arg, "--all")) {
+        req->all = true;
+      } else if (s_eq(arg, "--major")) {
+        req->major = true;
+      } else {
+        sl_push(req->modules, arg);
+      }
+      k = k + 1;
+    }
+    var plan: UpdatePlan* = deps_plan_update(p, req);
+    k = 0;
+    while (k < plan->mods->len) {
+      say("PLAN " + sl_get(plan->mods, k) + " " + sl_get(plan->froms, k) + " -> " + sl_get(plan->tos, k) + " " + sl_get(plan->kinds, k) + " [" + sl_get(plan->cands, k) + "]");
+      k = k + 1;
+    }
+    k = 0;
+    while (k < plan->lines_mods->len) {
+      say("LINE " + sl_get(plan->lines_mods, k) + " " + sl_get(plan->lines_vers, k));
+      k = k + 1;
+    }
+  } else if (s_eq(command, "apply") || s_eq(command, "restore-after")) {
+    var snap: DepSnap* = deps_snapshot(p);
+    var mods: StrList* = sl_new();
+    var vers: StrList* = sl_new();
+    var j: int64 = 0;
+    while (j + 1 < opts->rest->len) {
+      sl_push(mods, sl_get(opts->rest, j));
+      sl_push(vers, sl_get(opts->rest, j + 1));
+      j = j + 2;
+    }
+    var ads: DepState* = deps_apply(p, mods, vers);
+    say("APPLIED " + s_int(ads->n));
+    if (s_eq(command, "restore-after")) {
+      deps_restore(p, snap);
+      say("RESTORED");
+    }
+  } else if (s_eq(command, "api")) {
+    var q: ApiQuery* = new ApiQuery;
+    q->module = sl_get(opts->rest, 0);
+    q->from_version = sl_get(opts->rest, 1);
+    q->to_version = sl_get(opts->rest, 2);
+    q->files = (StrList*)0;
+    q->with_added = sl_has(opts->rest, "--added");
+    say(deps_api_report(p, q));
+  } else if (s_eq(command, "mettle")) {
+    var mds: DepState* = deps_ensure(p);
+    var need: StrList* = deps_mettle_minimum(mds);
+    say("MIN " + sl_join(need, " | "));
+    if (need->len >= 2) {
+      say("FALLBACK" + deps_mettle_fallback(p, sl_get(need, 1), "v0.17.0"));
+    }
+    var mc: Mettle* = tc_select(p, "linux");
+    var e: string = deps_mettle_check(p, mds, mc);
+    if (slen(e) > 0) {
+      error_msg(e);
+      code = 1;
+    } else {
+      say("METTLE OK");
+    }
+  } else {
+    err_line("unknown command " + command);
+    code = 2;
+  }
+  flush_out();
+  return code;
+}

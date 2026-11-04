@@ -5,19 +5,21 @@
 
 import "std/io";
 import "std/mem";
-import "base";
-import "manifest";
-import "project";
-import "build";
-import "deps";
-import "toolchain";
-import "sha256";
-import "registry";
-import "mbfile";
-import "config";
-import "components";
-import "sys_linux" if linux;
-import "sys_windows" if windows;
+import "core/base";
+import "model/manifest";
+import "model/project";
+import "build/build";
+import "pkg/deps";
+import "build/toolchain";
+import "core/sha256";
+import "pkg/registry";
+import "config/mbfile";
+import "config/config";
+import "config/init";
+import "config/agents";
+import "build/components";
+import "core/sys_linux" if linux;
+import "core/sys_windows" if windows;
 
 struct MxCmd {
   name: string;

@@ -1,0 +1,858 @@
+// scan: what mbuild needs from Mettle source text, without a full parser.
+//
+// A small tokenizer that follows src/lexer/lexer.c: `//` comments, nesting
+// `/* */` comments, string literals with interpolation (a `{` at depth 0
+// opens an expression, `{{` is literal, a `"` inside an expression toggles a
+// nested string), char literals, and `asm { ... }` bodies skipped the way the
+// parser skips them. Over the tokens it finds:
+//
+//   import "p" [as x] [if os]      import { a, b } from "p" [if os]
+//   import_str "p"                 extern fn / extern var (not extern kernel)
+//   @test fn (a decorated function)  fn main at brace depth 0
+//
+// Imports are kept in an array (imports[0..nimports)); line numbers are 1-based.
+
+import "../core/base";
+import "std/mem";
+
+export struct ImportRef {
+  path: string;
+  guard: string;        // "" | linux | windows | posix | macos
+  line: int64;
+}
+
+export struct ScanResult {
+  imports: ImportRef*;
+  nimports: int64;
+  embeds: StrList*;         // import_str paths
+  embed_lines: StrList*;    // their lines, parallel
+  externs: StrList*;        // link names: the `= "sym"` value, else the Mettle name
+  extern_lines: StrList*;   // their lines, parallel
+  extern_names: StrList*;   // the Mettle names, parallel
+  has_tests: bool;
+  has_main: bool;
+}
+
+// kind 1 word, 2 string (text = body as the lexer buffers it), 3 number or
+// char, 4 punctuation (one byte). depth = brace depth outside the token.
+struct ScxTok {
+  kind: int32;
+  text: string;
+  line: int64;
+  depth: int64;
+  spos: int64;          // source span [spos, epos)
+  epos: int64;
+}
+
+struct ScxLex {
+  src: string;
+  pos: int64;
+  line: int64;
+  depth: int64;
+  toks: ScxTok*;
+  n: int64;
+  cap: int64;
+}
+
+fn scx_c(lx: ScxLex*, k: int64) -> int32 {
+  if (lx->pos + k >= slen(lx->src)) {
+    return -1;
+  }
+  return s_byte(lx->src, lx->pos + k);
+}
+
+fn scx_push(lx: ScxLex*, kind: int32, text: string, line: int64, depth: int64) {
+  if (lx->n >= lx->cap) {
+    var nc: int64 = lx->cap * 2;
+    if (nc < 64) { nc = 64; }
+    lx->toks = (ScxTok*)realloc(lx->toks, nc * sizeof(ScxTok));
+    lx->cap = nc;
+  }
+  lx->toks[lx->n].kind = kind;
+  lx->toks[lx->n].text = text;
+  lx->toks[lx->n].line = line;
+  lx->toks[lx->n].depth = depth;
+  lx->toks[lx->n].spos = 0;
+  lx->toks[lx->n].epos = 0;
+  lx->n = lx->n + 1;
+}
+
+fn scx_adv(lx: ScxLex*) {
+  if (scx_c(lx, 0) == 10) {
+    lx->line = lx->line + 1;
+  }
+  lx->pos = lx->pos + 1;
+}
+
+// Nesting block comment, lx at "/*".
+fn scx_block_comment(lx: ScxLex*) {
+  lx->pos = lx->pos + 2;
+  var depth: int64 = 1;
+  while (lx->pos < slen(lx->src) && depth > 0) {
+    var c: int32 = scx_c(lx, 0);
+    if (c == 47 && scx_c(lx, 1) == 42) {
+      depth = depth + 1;
+      lx->pos = lx->pos + 2;
+    } else if (c == 42 && scx_c(lx, 1) == 47) {
+      depth = depth - 1;
+      lx->pos = lx->pos + 2;
+    } else {
+      scx_adv(lx);
+    }
+  }
+}
+
+fn scx_line_comment(lx: ScxLex*) {
+  while (lx->pos < slen(lx->src) && scx_c(lx, 0) != 10) {
+    lx->pos = lx->pos + 1;
+  }
+}
+
+// One pass of lexer_read_string_body from `from` (just past the opening
+// quote). Returns the offset of the closing quote, or -1 at end of input.
+fn scx_string_end(src: string, from: int64, aware: bool) -> int64 {
+  var i: int64 = from;
+  var n: int64 = slen(src);
+  var depth: int64 = 0;
+  var nested: bool = false;
+  while (i < n) {
+    var c: int32 = s_byte(src, i);
+    if (c == 34 && !(aware && depth > 0)) {
+      return i;
+    }
+    if (c == 92 && i + 1 < n) {
+      i = i + 2;
+      continue;
+    }
+    if (aware) {
+      if (!nested && depth == 0 && c == 123 && i + 1 < n && s_byte(src, i + 1) == 123) {
+        i = i + 2;
+        continue;
+      }
+      if (depth > 0 && c == 34) {
+        nested = !nested;
+      } else if (!nested) {
+        if (c == 123) {
+          depth = depth + 1;
+        } else if (c == 125 && depth > 0) {
+          depth = depth - 1;
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// The body between the quotes with the lexer's escapes decoded.
+fn scx_decode(raw: string) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < slen(raw)) {
+    var c: int32 = s_byte(raw, i);
+    if (c == 92 && i + 1 < slen(raw)) {
+      var e: int32 = s_byte(raw, i + 1);
+      if (e == (int32)'n') { buf_addb(b, 10); }
+      else if (e == (int32)'t') { buf_addb(b, 9); }
+      else if (e == (int32)'r') { buf_addb(b, 13); }
+      else if (e == 92) { buf_addb(b, 92); }
+      else if (e == 34) { buf_addb(b, 34); }
+      else if (e == (int32)'0') { buf_addb(b, 0); }
+      else {
+        buf_addb(b, 92);
+        buf_addb(b, e);
+      }
+      i = i + 2;
+      continue;
+    }
+    buf_addb(b, c);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+fn scx_count_lines(s: string, from: int64, to: int64) -> int64 {
+  var k: int64 = 0;
+  var i: int64 = from;
+  while (i < to) {
+    if (s_byte(s, i) == 10) {
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  return k;
+}
+
+fn scx_string(lx: ScxLex*) {
+  var line: int64 = lx->line;
+  var body: int64 = lx->pos + 1;
+  var end: int64 = scx_string_end(lx->src, body, true);
+  if (end < 0) {
+    end = scx_string_end(lx->src, body, false);
+  }
+  if (end < 0) {
+    end = slen(lx->src);
+  }
+  scx_push(lx, 2, scx_decode(s_sub(lx->src, body, end)), line, lx->depth);
+  lx->line = lx->line + scx_count_lines(lx->src, body, end);
+  lx->pos = end + 1;
+}
+
+// A char literal 'x' or '\n'; anything else is a lone apostrophe.
+fn scx_char(lx: ScxLex*) {
+  var c: int32 = scx_c(lx, 1);
+  var len: int64 = 0;
+  if (c == 92 && scx_c(lx, 2) != -1 && scx_c(lx, 3) == 39) {
+    len = 4;
+  } else if (c != -1 && c != 10 && c != 13 && c != 92 && scx_c(lx, 2) == 39) {
+    len = 3;
+  }
+  if (len == 0) {
+    scx_push(lx, 4, "'", lx->line, lx->depth);
+    lx->pos = lx->pos + 1;
+    return;
+  }
+  scx_push(lx, 3, s_sub(lx->src, lx->pos, lx->pos + len), lx->line, lx->depth);
+  lx->pos = lx->pos + len;
+}
+
+fn scx_skip_space(lx: ScxLex*) {
+  while (lx->pos < slen(lx->src)) {
+    var c: int32 = scx_c(lx, 0);
+    if (is_space_b(c)) {
+      scx_adv(lx);
+    } else if (c == 47 && scx_c(lx, 1) == 47) {
+      scx_line_comment(lx);
+    } else if (c == 47 && scx_c(lx, 1) == 42) {
+      scx_block_comment(lx);
+    } else {
+      return;
+    }
+  }
+}
+
+// An asm body, lx at its `{` (parser_parse_inline_asm's rules: `;` and `//`
+// line comments, flat `/* */`, quoted runs, brace counting).
+fn scx_asm_body(lx: ScxLex*) {
+  var src: string = lx->src;
+  var n: int64 = slen(src);
+  var i: int64 = lx->pos + 1;
+  var depth: int64 = 1;
+  while (i < n && depth > 0) {
+    var c: int32 = s_byte(src, i);
+    var c2: int32 = -1;
+    if (i + 1 < n) {
+      c2 = s_byte(src, i + 1);
+    }
+    if (c == 10) {
+      lx->line = lx->line + 1;
+      i = i + 1;
+    } else if (c == 59 || (c == 47 && c2 == 47)) {
+      while (i < n && s_byte(src, i) != 10) {
+        i = i + 1;
+      }
+    } else if (c == 47 && c2 == 42) {
+      i = i + 2;
+      while (i < n && !(s_byte(src, i) == 42 && i + 1 < n && s_byte(src, i + 1) == 47)) {
+        if (s_byte(src, i) == 10) {
+          lx->line = lx->line + 1;
+        }
+        i = i + 1;
+      }
+      i = i + 2;
+    } else if (c == 39 || c == 34) {
+      i = i + 1;
+      while (i < n && s_byte(src, i) != c) {
+        if (s_byte(src, i) == 92 && i + 1 < n) {
+          i = i + 1;
+        } else if (s_byte(src, i) == 10) {
+          lx->line = lx->line + 1;
+        }
+        i = i + 1;
+      }
+      i = i + 1;
+    } else {
+      if (c == 123) {
+        depth = depth + 1;
+      } else if (c == 125) {
+        depth = depth - 1;
+      }
+      i = i + 1;
+    }
+  }
+  if (i > n) {
+    i = n;
+  }
+  lx->pos = i;
+}
+
+fn scx_word_char(c: int32) -> bool {
+  return is_ident_b(c);
+}
+
+fn scx_tokenize(src: string) -> ScxLex* {
+  var lx: ScxLex* = new ScxLex;
+  lx->src = src;
+  lx->pos = 0;
+  lx->line = 1;
+  lx->depth = 0;
+  lx->toks = (ScxTok*)0;
+  lx->n = 0;
+  lx->cap = 0;
+  while (true) {
+    scx_skip_space(lx);
+    if (lx->pos >= slen(src)) {
+      break;
+    }
+    var c: int32 = scx_c(lx, 0);
+    var tstart: int64 = lx->pos;
+    var before: int64 = lx->n;
+    var tend: int64 = -1;
+    if (c == 34) {
+      scx_string(lx);
+    } else if (c == 39) {
+      scx_char(lx);
+    } else if (scx_word_char(c)) {
+      var start: int64 = lx->pos;
+      while (scx_word_char(scx_c(lx, 0))) {
+        lx->pos = lx->pos + 1;
+      }
+      tend = lx->pos;
+      var word: string = s_sub(src, start, lx->pos);
+      if (is_digit_b(c)) {
+        scx_push(lx, 3, word, lx->line, lx->depth);
+      } else {
+        scx_push(lx, 1, word, lx->line, lx->depth);
+        if (s_eq(word, "asm")) {
+          scx_skip_space(lx);
+          if (scx_c(lx, 0) == 123) {
+            scx_asm_body(lx);
+          }
+        }
+      }
+    } else {
+      if (c == 125 && lx->depth > 0) {
+        lx->depth = lx->depth - 1;
+      }
+      scx_push(lx, 4, s_sub(src, lx->pos, lx->pos + 1), lx->line, lx->depth);
+      if (c == 123) {
+        lx->depth = lx->depth + 1;
+      }
+      lx->pos = lx->pos + 1;
+    }
+    if (lx->n > before) {
+      if (tend < 0) {
+        tend = lx->pos;
+      }
+      lx->toks[before].spos = tstart;
+      lx->toks[before].epos = tend;
+    }
+  }
+  return lx;
+}
+
+fn scx_is(lx: ScxLex*, i: int64, kind: int32, text: string) -> bool {
+  if (i >= lx->n) {
+    return false;
+  }
+  return lx->toks[i].kind == kind && s_eq(lx->toks[i].text, text);
+}
+
+fn scx_kind(lx: ScxLex*, i: int64) -> int32 {
+  if (i >= lx->n) {
+    return 0;
+  }
+  return lx->toks[i].kind;
+}
+
+fn scx_add_import(r: ScanResult*, path: string, guard: string, line: int64) {
+  if (r->nimports % 16 == 0) {
+    r->imports = (ImportRef*)realloc(r->imports, (r->nimports + 16) * sizeof(ImportRef));
+  }
+  r->imports[r->nimports].path = path;
+  r->imports[r->nimports].guard = guard;
+  r->imports[r->nimports].line = line;
+  r->nimports = r->nimports + 1;
+}
+
+// After an import's path (token i): an optional `if os`. Returns the guard.
+fn scx_guard(lx: ScxLex*, i: int64) -> string {
+  if (scx_is(lx, i, 1, "if") && scx_kind(lx, i + 1) == 1) {
+    var g: string = lx->toks[i + 1].text;
+    if (s_eq(g, "linux") || s_eq(g, "windows") || s_eq(g, "posix") || s_eq(g, "macos")) {
+      return s_dup(g);
+    }
+  }
+  return s_empty();
+}
+
+// Token i is `import`. Returns the index to continue from.
+fn scx_import(lx: ScxLex*, i: int64, r: ScanResult*) -> int64 {
+  var line: int64 = lx->toks[i].line;
+  var j: int64 = i + 1;
+  if (scx_kind(lx, j) == 2) {
+    var path: string = lx->toks[j].text;
+    j = j + 1;
+    if (scx_is(lx, j, 1, "as") && scx_kind(lx, j + 1) == 1) {
+      j = j + 2;
+    }
+    scx_add_import(r, path, scx_guard(lx, j), line);
+    return j;
+  }
+  if (scx_is(lx, j, 4, "{{")) {
+    j = j + 1;
+    while (j < lx->n && (scx_kind(lx, j) == 1 || scx_is(lx, j, 4, ","))) {
+      j = j + 1;
+    }
+    if (scx_is(lx, j, 4, "}") && scx_is(lx, j + 1, 1, "from") && scx_kind(lx, j + 2) == 2) {
+      var spath: string = lx->toks[j + 2].text;
+      scx_add_import(r, spath, scx_guard(lx, j + 3), line);
+      return j + 3;
+    }
+    return j;
+  }
+  return j;
+}
+
+fn scx_stop_word(w: string) -> bool {
+  return s_eq(w, "fn") || s_eq(w, "function") || s_eq(w, "extern") || s_eq(w, "export") ||
+         s_eq(w, "import") || s_eq(w, "import_str") || s_eq(w, "struct") || s_eq(w, "enum") ||
+         s_eq(w, "trait") || s_eq(w, "impl") || s_eq(w, "var") || s_eq(w, "const") ||
+         s_eq(w, "kernel") || s_eq(w, "method") || s_eq(w, "effect") || s_eq(w, "return") ||
+         s_eq(w, "if") || s_eq(w, "while") || s_eq(w, "for");
+}
+
+// Token i is `extern`. Returns the index to continue from.
+fn scx_extern(lx: ScxLex*, i: int64, r: ScanResult*) -> int64 {
+  var j: int64 = i + 1;
+  var line: int64 = lx->toks[i].line;
+  var is_fn: bool = scx_is(lx, j, 1, "fn") || scx_is(lx, j, 1, "function");
+  if (!is_fn && !scx_is(lx, j, 1, "var")) {
+    return j;
+  }
+  if (scx_kind(lx, j + 1) != 1) {
+    return j + 1;
+  }
+  var name: string = s_dup(lx->toks[j + 1].text);
+  var link: string = name;
+  j = j + 2;
+  var parens: int64 = 0;
+  while (j < lx->n) {
+    var t: ScxTok* = &lx->toks[j];
+    if (t->kind == 4) {
+      var c: int32 = s_byte(t->text, 0);
+      if (c == 40 || c == 91) {
+        parens = parens + 1;
+      } else if (c == 41 || c == 93) {
+        parens = parens - 1;
+      } else if (parens <= 0) {
+        if (c == 59 || c == 123 || c == 125 || c == 64) {
+          break;
+        }
+        if (c == 61) {
+          if (scx_kind(lx, j + 1) == 2) {
+            link = lx->toks[j + 1].text;
+            j = j + 2;
+          }
+          break;
+        }
+      }
+    } else if (t->kind == 1 && parens <= 0 && scx_stop_word(t->text)) {
+      break;
+    }
+    j = j + 1;
+  }
+  sl_push(r->externs, link);
+  sl_push(r->extern_lines, s_int(line));
+  sl_push(r->extern_names, name);
+  return j;
+}
+
+fn scx_decorator_name(w: string) -> bool {
+  return s_eq(w, "inline") || s_eq(w, "noinline") || s_eq(w, "pure") || s_eq(w, "noalloc") ||
+         s_eq(w, "test") || s_eq(w, "swappable") || s_eq(w, "naked") || s_eq(w, "interrupt") ||
+         s_eq(w, "rule") || s_eq(w, "conflict_free") || s_eq(w, "uniform") || s_eq(w, "simd") ||
+         s_eq(w, "numerics") || s_eq(w, "parallel") || s_eq(w, "unroll");
+}
+
+// Token i is a top-level `@`. True when it starts a decorator chain the
+// compiler accepts (`@name`, optionally `!` or `(...)`, any number) holding
+// `@test` and followed by `fn` or `export fn`, all on one line: a newline
+// ends the chain in both compilers. `@rule` and `@unroll` reject the chain,
+// as does an unknown or duplicate decorator or a preceding `export`.
+// Returns the index after the chain; *found tells whether it declares a test.
+fn scx_test_decl(lx: ScxLex*, i: int64, found: bool*) -> int64 {
+  *found = false;
+  var j: int64 = i;
+  var tests: int64 = 0;
+  var bad: bool = false;
+  while (scx_is(lx, j, 4, "@") && lx->toks[j].line == lx->toks[i].line) {
+    if (scx_kind(lx, j + 1) != 1) {
+      return j + 1;
+    }
+    var name: string = lx->toks[j + 1].text;
+    if (!scx_decorator_name(name) || s_eq(name, "rule") || s_eq(name, "unroll")) {
+      bad = true;
+    }
+    if (s_eq(name, "test")) {
+      tests = tests + 1;
+    }
+    j = j + 2;
+    if (scx_is(lx, j, 4, "!")) {
+      j = j + 1;
+    } else if (scx_is(lx, j, 4, "(")) {
+      var parens: int64 = 0;
+      while (j < lx->n) {
+        if (scx_is(lx, j, 4, "(")) {
+          parens = parens + 1;
+        } else if (scx_is(lx, j, 4, ")")) {
+          parens = parens - 1;
+          if (parens == 0) {
+            break;
+          }
+        }
+        j = j + 1;
+      }
+      j = j + 1;
+    }
+  }
+  if (i > 0 && scx_is(lx, i - 1, 1, "export")) {
+    bad = true;
+  }
+  if (bad || tests != 1) {
+    return j;
+  }
+  var k: int64 = j;
+  if (scx_is(lx, k, 1, "export")) {
+    k = k + 1;
+  }
+  *found = scx_is(lx, k, 1, "fn") && lx->toks[k].line == lx->toks[i].line;
+  return j;
+}
+
+export fn scan_source(text: string) -> ScanResult* {
+  var r: ScanResult* = new ScanResult;
+  r->imports = (ImportRef*)0;
+  r->nimports = 0;
+  r->embeds = sl_new();
+  r->embed_lines = sl_new();
+  r->externs = sl_new();
+  r->extern_lines = sl_new();
+  r->extern_names = sl_new();
+  r->has_tests = false;
+  r->has_main = false;
+  var lx: ScxLex* = scx_tokenize(text);
+  var i: int64 = 0;
+  while (i < lx->n) {
+    var t: ScxTok* = &lx->toks[i];
+    if (t->kind == 1) {
+      if (s_eq(t->text, "import")) {
+        i = scx_import(lx, i, r);
+        continue;
+      }
+      if (s_eq(t->text, "import_str") && scx_kind(lx, i + 1) == 2) {
+        sl_push(r->embeds, lx->toks[i + 1].text);
+        sl_push(r->embed_lines, s_int(t->line));
+        i = i + 2;
+        continue;
+      }
+      if (s_eq(t->text, "extern")) {
+        i = scx_extern(lx, i, r);
+        continue;
+      }
+      if (s_eq(t->text, "fn") && t->depth == 0 && scx_is(lx, i + 1, 1, "main")) {
+        r->has_main = true;
+      }
+    } else if (t->kind == 4 && s_eq(t->text, "@") && t->depth == 0) {
+      var found: bool = false;
+      i = scx_test_decl(lx, i, &found);
+      if (found) {
+        r->has_tests = true;
+      }
+      continue;
+    }
+    i = i + 1;
+  }
+  free(lx->toks);
+  free(lx);
+  return r;
+}
+
+export fn scan_import(r: ScanResult*, i: int64) -> ImportRef* {
+  return &r->imports[i];
+}
+
+// Whether an import guard selects the target OS ("linux" or "windows").
+export fn scan_guard_active(guard: string, os: string) -> bool {
+  if (slen(guard) == 0) {
+    return true;
+  }
+  if (s_eq(os, "linux")) {
+    return s_eq(guard, "linux") || s_eq(guard, "posix");
+  }
+  if (s_eq(os, "windows")) {
+    return s_eq(guard, "windows");
+  }
+  if (s_eq(os, "macos")) {
+    return s_eq(guard, "macos") || s_eq(guard, "posix");
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Exported declarations and name uses (API reports)
+// ---------------------------------------------------------------------------
+
+// One top-level `export` declaration. kind: fn | extern | struct | enum | var
+// | const. sig: fn and extern, the text after the name ("(a: int32) -> int32",
+// an extern keeps its `= "sym"`); struct, its fields "a: int32; b: int32";
+// enum, its variants "A = 1, B"; var and const, the declared type or "".
+// Generic parameters, when present, lead a struct's or enum's sig.
+export struct ExportItem {
+  kind: string;
+  name: string;
+  sig: string;
+  line: int64;
+}
+
+export struct ExportList {
+  items: ExportItem*;
+  n: int64;
+}
+
+fn scx_punct(lx: ScxLex*, k: int64, c: int32) -> bool {
+  if (k >= lx->n || lx->toks[k].kind != 4) {
+    return false;
+  }
+  return s_byte(lx->toks[k].text, 0) == c;
+}
+
+// No space after ( [ and none before ) ] , ;
+fn scx_space_between(lx: ScxLex*, k: int64) -> bool {
+  if (lx->toks[k].spos <= lx->toks[k - 1].epos) {
+    return false;
+  }
+  if (scx_punct(lx, k - 1, 40) || scx_punct(lx, k - 1, 91)) {
+    return false;
+  }
+  if (scx_punct(lx, k, 41) || scx_punct(lx, k, 93) || scx_punct(lx, k, 44) || scx_punct(lx, k, 59)) {
+    return false;
+  }
+  return true;
+}
+
+// The source text of tokens [from, to) with comments dropped and every gap
+// between tokens collapsed to one space.
+fn scx_text(lx: ScxLex*, from: int64, to: int64) -> string {
+  var b: Buf* = buf_new();
+  var k: int64 = from;
+  while (k < to && k < lx->n) {
+    if (k > from && scx_space_between(lx, k)) {
+      buf_addb(b, 32);
+    }
+    buf_add(b, s_sub(lx->src, lx->toks[k].spos, lx->toks[k].epos));
+    k = k + 1;
+  }
+  return buf_take(b);
+}
+
+fn scx_new_export(l: ExportList*) -> ExportItem* {
+  if (l->n % 16 == 0) {
+    l->items = (ExportItem*)realloc(l->items, (l->n + 16) * sizeof(ExportItem));
+  }
+  var it: ExportItem* = &l->items[l->n];
+  it->kind = s_empty();
+  it->name = s_empty();
+  it->sig = s_empty();
+  it->line = 0;
+  l->n = l->n + 1;
+  return it;
+}
+
+// From token k: the first token that ends a declaration head: `{` or `;`
+// (outside parentheses), a `}`, or with stop_words a declaration keyword.
+fn scx_head_end(lx: ScxLex*, k: int64, stop_words: bool) -> int64 {
+  var j: int64 = k;
+  var parens: int64 = 0;
+  while (j < lx->n) {
+    var t: ScxTok* = &lx->toks[j];
+    if (t->kind == 4) {
+      var c: int32 = s_byte(t->text, 0);
+      if (c == 40 || c == 91) {
+        parens = parens + 1;
+      } else if (c == 41 || c == 93) {
+        parens = parens - 1;
+      } else if (c == 125) {
+        return j;
+      } else if (parens <= 0 && (c == 123 || c == 59)) {
+        return j;
+      } else if (stop_words && parens <= 0 && c == 64) {
+        return j;
+      }
+    } else if (stop_words && t->kind == 1 && parens <= 0 && scx_stop_word(t->text)) {
+      return j;
+    }
+    j = j + 1;
+  }
+  return j;
+}
+
+// Struct fields or enum variants: the body after the `{` at token open,
+// split at sep (outside parentheses), each part as collapsed text.
+fn scx_body_parts(lx: ScxLex*, open: int64, sep: int32) -> StrList* {
+  var parts: StrList* = sl_new();
+  var depth: int64 = lx->toks[open].depth;
+  var j: int64 = open + 1;
+  var start: int64 = j;
+  var parens: int64 = 0;
+  while (j < lx->n) {
+    var t: ScxTok* = &lx->toks[j];
+    if (t->kind == 4 && t->depth == depth && s_byte(t->text, 0) == 125) {
+      break;
+    }
+    if (t->kind == 4 && t->depth == depth + 1) {
+      var c: int32 = s_byte(t->text, 0);
+      if (c == 40 || c == 91) {
+        parens = parens + 1;
+      } else if (c == 41 || c == 93) {
+        parens = parens - 1;
+      } else if (c == sep && parens <= 0) {
+        if (j > start) {
+          sl_push(parts, scx_text(lx, start, j));
+        }
+        start = j + 1;
+      }
+    }
+    j = j + 1;
+  }
+  if (j > start) {
+    sl_push(parts, scx_text(lx, start, j));
+  }
+  return parts;
+}
+
+// Token i is a top-level `export`; adds the declaration it introduces.
+fn scx_export(lx: ScxLex*, i: int64, l: ExportList*) {
+  var j: int64 = i + 1;
+  if (scx_kind(lx, j) != 1 || scx_kind(lx, j + 1) != 1) {
+    return;
+  }
+  var w: string = lx->toks[j].text;
+  var line: int64 = lx->toks[i].line;
+  if (s_eq(w, "fn") || s_eq(w, "function")) {
+    var fend: int64 = scx_head_end(lx, j + 2, false);
+    var f: ExportItem* = scx_new_export(l);
+    f->kind = "fn";
+    f->name = s_dup(lx->toks[j + 1].text);
+    f->sig = scx_text(lx, j + 2, fend);
+    f->line = line;
+    return;
+  }
+  if (s_eq(w, "extern")) {
+    var w2: string = lx->toks[j + 1].text;
+    if (!(s_eq(w2, "fn") || s_eq(w2, "function") || s_eq(w2, "var")) || scx_kind(lx, j + 2) != 1) {
+      return;
+    }
+    var xend: int64 = scx_head_end(lx, j + 3, true);
+    var x: ExportItem* = scx_new_export(l);
+    x->kind = "extern";
+    x->name = s_dup(lx->toks[j + 2].text);
+    x->sig = scx_text(lx, j + 3, xend);
+    x->line = line;
+    return;
+  }
+  if (s_eq(w, "struct") || s_eq(w, "enum")) {
+    var open: int64 = scx_head_end(lx, j + 2, false);
+    if (!scx_punct(lx, open, 123)) {
+      return;
+    }
+    var sep: int32 = 59;
+    if (s_eq(w, "enum")) {
+      sep = 44;
+    }
+    var parts: StrList* = scx_body_parts(lx, open, sep);
+    var body: string = s_empty();
+    if (sep == 59) {
+      body = sl_join(parts, "; ");
+    } else {
+      body = sl_join(parts, ", ");
+    }
+    free(parts->items);
+    free(parts);
+    var pre: string = scx_text(lx, j + 2, open);
+    if (slen(pre) > 0) {
+      body = pre + " " + body;
+    }
+    var s: ExportItem* = scx_new_export(l);
+    s->kind = s_dup(w);
+    s->name = s_dup(lx->toks[j + 1].text);
+    s->sig = body;
+    s->line = line;
+    return;
+  }
+  if (s_eq(w, "var") || s_eq(w, "const")) {
+    var ty: string = s_empty();
+    if (scx_punct(lx, j + 2, 58)) {
+      var k: int64 = j + 3;
+      var parens: int64 = 0;
+      while (k < lx->n) {
+        if (scx_punct(lx, k, 40) || scx_punct(lx, k, 91)) {
+          parens = parens + 1;
+        } else if (scx_punct(lx, k, 41) || scx_punct(lx, k, 93)) {
+          parens = parens - 1;
+        } else if (parens <= 0 && (scx_punct(lx, k, 61) || scx_punct(lx, k, 59) || scx_punct(lx, k, 123) || scx_punct(lx, k, 125))) {
+          break;
+        }
+        k = k + 1;
+      }
+      ty = scx_text(lx, j + 3, k);
+    }
+    var v: ExportItem* = scx_new_export(l);
+    v->kind = s_dup(w);
+    v->name = s_dup(lx->toks[j + 1].text);
+    v->sig = ty;
+    v->line = line;
+  }
+}
+
+// The top-level `export` declarations of a source text, in file order.
+export fn scan_exports(text: string) -> ExportList* {
+  var l: ExportList* = new ExportList;
+  l->items = (ExportItem*)0;
+  l->n = 0;
+  var lx: ScxLex* = scx_tokenize(text);
+  var i: int64 = 0;
+  while (i < lx->n) {
+    var t: ScxTok* = &lx->toks[i];
+    if (t->kind == 1 && t->depth == 0 && s_eq(t->text, "export")) {
+      scx_export(lx, i, l);
+    }
+    i = i + 1;
+  }
+  free(lx->toks);
+  free(lx);
+  return l;
+}
+
+export fn scan_export(l: ExportList*, i: int64) -> ExportItem* {
+  return &l->items[i];
+}
+
+// "name line" for every identifier equal to one of names, outside strings
+// and comments (each name and line once, in order). A name match, not a
+// type check.
+export fn scan_uses(text: string, names: StrList*) -> StrList* {
+  var found: StrList* = sl_new();
+  var lx: ScxLex* = scx_tokenize(text);
+  var i: int64 = 0;
+  while (i < lx->n) {
+    var t: ScxTok* = &lx->toks[i];
+    if (t->kind == 1 && sl_has(names, t->text)) {
+      sl_add_uniq(found, t->text + " " + s_int(t->line));
+    }
+    i = i + 1;
+  }
+  free(lx->toks);
+  free(lx);
+  return found;
+}

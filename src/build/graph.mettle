@@ -1,0 +1,431 @@
+// graph: the import graph of one entry file for one target OS.
+//
+// Mirrors the compiler's resolver (src/semantic/import_resolver.c,
+// resolve_import_path_uncached): absolute path; std/ under the stdlib (a
+// `.linux` variant first on Linux when the import has no extension);
+// `mettle.deps` files walking up from the importing file's directory, nearest
+// first, matched on the first path component; relative to the importing file;
+// each -I directory; relative to the working directory. A candidate is tried
+// as written, then with `.mettle` appended unless it already ends so.
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "scan";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+// One parsed mettle.deps file (cached per directory).
+struct GxDepsFile {
+  dir: string;
+  exists: bool;
+  names: StrList*;
+  roots: StrList*;     // absolute (or as written when absolute) dependency roots
+}
+
+export struct GraphCtx {
+  os: string;           // "linux" | "windows"
+  stdlib_dir: string;   // "" when unknown (std imports then stay unresolved)
+  includes: StrList*;   // -I directories, absolute
+  cwd: string;          // the compiler's working directory
+  dcache: GxDepsFile**;
+  ndcache: int64;
+}
+
+export struct Graph {
+  entry: string;            // canonical entry path ("" when it does not exist)
+  ok: bool;                 // the entry was found and read
+  files: StrList*;          // canonical paths, sorted
+  hashes: StrList*;         // content hash per file, parallel to files
+  embeds: StrList*;         // resolved import_str files, sorted, unique
+  missing: StrList*;        // imports / import_str paths that did not resolve
+  missing_from: StrList*;   // the file that names it (parallel)
+  missing_lines: StrList*;  // its line (parallel)
+  missing_kinds: StrList*;  // "import" | "embed" (parallel)
+  externs: StrList*;        // link names
+  extern_files: StrList*;   // parallel
+  extern_lines: StrList*;   // parallel
+  has_tests: bool;
+  root: string;             // the context's working directory: fingerprints hash paths relative to it
+  stdlib_dir: string;       // the context's stdlib (paths below it hash as "@std/...")
+}
+
+export fn graph_ctx_new(os: string, stdlib_dir: string) -> GraphCtx* {
+  var c: GraphCtx* = new GraphCtx;
+  c->os = os;
+  c->stdlib_dir = stdlib_dir;
+  c->includes = sl_new();
+  c->cwd = sys_cwd();
+  c->dcache = (GxDepsFile**)0;
+  c->ndcache = 0;
+  return c;
+}
+
+fn gx_slash(p: string) -> string {
+  return s_replace_byte(p, 92, 47);
+}
+
+fn gx_canon(p: string) -> string {
+  return gx_slash(sys_realpath(p));
+}
+
+// The last dot comes after the last separator.
+fn gx_has_ext(p: string) -> bool {
+  var dot: int64 = s_rfind_byte(p, 46);
+  if (dot < 0) {
+    return false;
+  }
+  var sl: int64 = s_rfind_byte(p, 47);
+  var bs: int64 = s_rfind_byte(p, 92);
+  if (bs > sl) {
+    sl = bs;
+  }
+  return dot > sl;
+}
+
+fn gx_candidate(base: string) -> string {
+  if (slen(base) == 0) {
+    return s_empty();
+  }
+  if (fs_is_file(base)) {
+    return gx_canon(base);
+  }
+  if (!s_ends(base, ".mettle")) {
+    var alt: string = base + ".mettle";
+    if (fs_is_file(alt)) {
+      return gx_canon(alt);
+    }
+  }
+  return s_empty();
+}
+
+fn gx_parse_deps(dir: string) -> GxDepsFile* {
+  var d: GxDepsFile* = new GxDepsFile;
+  d->dir = dir;
+  d->names = sl_new();
+  d->roots = sl_new();
+  var r: FsRead = fs_read(p_join(dir, "mettle.deps"));
+  d->exists = r.ok;
+  if (!r.ok) {
+    return d;
+  }
+  var lines: StrList* = s_lines(r.data);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var line: string = s_trim(sl_get(lines, i));
+    i = i + 1;
+    if (slen(line) == 0 || s_byte(line, 0) == 35) {
+      continue;
+    }
+    var eq: int64 = s_find_byte(line, 61);
+    if (eq < 0) {
+      continue;
+    }
+    var name: string = s_trim(s_sub(line, 0, eq));
+    var value: string = s_trim(s_from(line, eq + 1));
+    if (slen(name) == 0 || slen(value) == 0) {
+      continue;
+    }
+    var root: string = value;
+    if (!p_is_abs(value)) {
+      root = p_join(dir, value);
+    }
+    sl_push(d->names, name);
+    sl_push(d->roots, root);
+  }
+  free(lines->items);
+  free(lines);
+  return d;
+}
+
+fn gx_deps_for(c: GraphCtx*, dir: string) -> GxDepsFile* {
+  var i: int64 = 0;
+  while (i < c->ndcache) {
+    if (s_eq(c->dcache[i]->dir, dir)) {
+      return c->dcache[i];
+    }
+    i = i + 1;
+  }
+  var d: GxDepsFile* = gx_parse_deps(dir);
+  c->dcache = (GxDepsFile**)realloc(c->dcache, (c->ndcache + 1) * 8);
+  c->dcache[c->ndcache] = d;
+  c->ndcache = c->ndcache + 1;
+  return d;
+}
+
+// The compiler stops before the filesystem root ("/" or "C:/") itself.
+fn gx_is_root(d: string) -> bool {
+  if (s_eq(d, "/")) {
+    return true;
+  }
+  return slen(d) <= 3 && slen(d) >= 2 && s_byte(d, 1) == 58;
+}
+
+fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string) -> string {
+  var cut: int64 = 0;
+  while (cut < slen(imp) && s_byte(imp, cut) != 47 && s_byte(imp, cut) != 92) {
+    cut = cut + 1;
+  }
+  if (cut == 0) {
+    return s_empty();
+  }
+  var first: string = s_sub(imp, 0, cut);
+  var rest: string = s_from(imp, cut + 1);
+  var dir: string = p_dir(from_file);
+  while (true) {
+    var d: GxDepsFile* = gx_deps_for(c, dir);
+    if (d->exists) {
+      var i: int64 = 0;
+      while (i < d->names->len) {
+        if (s_eq(sl_get(d->names, i), first)) {
+          var cand: string = sl_get(d->roots, i);
+          if (slen(rest) > 0) {
+            cand = p_join(cand, rest);
+          }
+          var r: string = gx_candidate(cand);
+          if (slen(r) > 0) {
+            return r;
+          }
+        }
+        i = i + 1;
+      }
+    }
+    var up: string = p_dir(dir);
+    if (s_eq(up, dir) || gx_is_root(up) || s_eq(up, ".")) {
+      break;
+    }
+    dir = up;
+  }
+  return s_empty();
+}
+
+// Where the compiler finds `imp` named in from_file (canonical); "" when it does not.
+export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string {
+  if (slen(imp) == 0) {
+    return s_empty();
+  }
+  if (p_is_abs(imp)) {
+    return gx_candidate(imp);
+  }
+  if (slen(c->stdlib_dir) > 0 && (s_starts(imp, "std/") || s_starts(imp, "std\\"))) {
+    if (s_eq(c->os, "linux") && !gx_has_ext(imp)) {
+      var v: string = gx_candidate(p_join(c->stdlib_dir, imp + ".linux"));
+      if (slen(v) > 0) {
+        return v;
+      }
+    }
+    var sr: string = gx_candidate(p_join(c->stdlib_dir, imp));
+    if (slen(sr) > 0) {
+      return sr;
+    }
+  }
+  var dr: string = gx_resolve_deps(c, from_file, imp);
+  if (slen(dr) > 0) {
+    return dr;
+  }
+  var lr: string = gx_candidate(p_join(p_dir(from_file), imp));
+  if (slen(lr) > 0) {
+    return lr;
+  }
+  var i: int64 = 0;
+  while (i < c->includes->len) {
+    var inc: string = sl_get(c->includes, i);
+    if (slen(inc) > 0) {
+      var ir: string = gx_candidate(p_join(inc, imp));
+      if (slen(ir) > 0) {
+        return ir;
+      }
+    }
+    i = i + 1;
+  }
+  return gx_candidate(p_join(c->cwd, imp));
+}
+
+fn gx_missing(g: Graph*, what: string, from_file: string, line: string) {
+  sl_push(g->missing, what);
+  sl_push(g->missing_from, from_file);
+  sl_push(g->missing_lines, line);
+}
+
+// Walks every file the compiler would read for `entry` on ctx->os.
+export fn graph_build(c: GraphCtx*, entry: string) -> Graph* {
+  var g: Graph* = new Graph;
+  g->files = sl_new();
+  g->hashes = sl_new();
+  g->embeds = sl_new();
+  g->missing = sl_new();
+  g->missing_from = sl_new();
+  g->missing_lines = sl_new();
+  g->missing_kinds = sl_new();
+  g->externs = sl_new();
+  g->extern_files = sl_new();
+  g->extern_lines = sl_new();
+  g->has_tests = false;
+  g->root = c->cwd;
+  g->stdlib_dir = c->stdlib_dir;
+  g->entry = gx_canon(entry);
+  g->ok = slen(g->entry) > 0;
+  if (!g->ok) {
+    return g;
+  }
+  var todo: StrList* = sl_of(g->entry);
+  var seen: StrList* = sl_of(g->entry);
+  var at: int64 = 0;
+  while (at < todo->len) {
+    var file: string = sl_get(todo, at);
+    at = at + 1;
+    var r: FsRead = fs_read(file);
+    if (!r.ok) {
+      if (at == 1) {
+        g->ok = false;
+      }
+      continue;
+    }
+    sl_push(g->files, file);
+    var h: Hasher = h_new();
+    h_bytes(&h, r.data.chars, slen(r.data));
+    sl_push(g->hashes, h_hex(&h));
+    var sr: ScanResult* = scan_source(r.data);
+    if (sr->has_tests) {
+      g->has_tests = true;
+    }
+    var i: int64 = 0;
+    while (i < sr->nimports) {
+      var ir: ImportRef* = scan_import(sr, i);
+      i = i + 1;
+      if (!scan_guard_active(ir->guard, c->os)) {
+        continue;
+      }
+      var res: string = graph_resolve(c, file, ir->path);
+      if (slen(res) == 0) {
+        gx_missing(g, ir->path, file, s_int(ir->line));
+        sl_push(g->missing_kinds, "import");
+        continue;
+      }
+      if (!sl_has(seen, res)) {
+        sl_push(seen, res);
+        sl_push(todo, res);
+      }
+    }
+    i = 0;
+    while (i < sr->embeds->len) {
+      var e: string = sl_get(sr->embeds, i);
+      var er: string = graph_resolve(c, file, e);
+      if (slen(er) == 0) {
+        gx_missing(g, e, file, sl_get(sr->embed_lines, i));
+        sl_push(g->missing_kinds, "embed");
+      } else {
+        sl_add_uniq(g->embeds, er);
+      }
+      i = i + 1;
+    }
+    i = 0;
+    while (i < sr->externs->len) {
+      sl_push(g->externs, sl_get(sr->externs, i));
+      sl_push(g->extern_files, file);
+      sl_push(g->extern_lines, sl_get(sr->extern_lines, i));
+      i = i + 1;
+    }
+    free(sr);
+  }
+  // Sort files and their hashes together.
+  var keyed: StrList* = sl_new();
+  var k: int64 = 0;
+  while (k < g->files->len) {
+    sl_push(keyed, sl_get(g->files, k) + "\n" + sl_get(g->hashes, k));
+    k = k + 1;
+  }
+  sl_sort(keyed);
+  k = 0;
+  while (k < keyed->len) {
+    var kv: string = sl_get(keyed, k);
+    var nl: int64 = s_rfind_byte(kv, 10);
+    sl_set(g->files, k, s_sub(kv, 0, nl));
+    sl_set(g->hashes, k, s_from(kv, nl + 1));
+    k = k + 1;
+  }
+  sl_sort(g->embeds);
+  free(keyed->items);
+  free(keyed);
+  free(todo->items);
+  free(todo);
+  free(seen->items);
+  free(seen);
+  return g;
+}
+
+export fn graph_has_file(g: Graph*, p: string) -> bool {
+  return sl_has(g->files, p);
+}
+
+// "Z:/home/x" -> "/home/x": wine's drive Z: is the Linux root, so a path seen
+// from mbuild.exe under wine and from Linux mbuild compare equal.
+fn gx_unz(p: string) -> string {
+  var s: string = gx_slash(p);
+  if (slen(s) >= 3 && s_byte(s, 1) == 58 && s_byte(s, 2) == 47 && (s_byte(s, 0) == 90 || s_byte(s, 0) == 122)) {
+    return s_from(s, 2);
+  }
+  return s;
+}
+
+// The form of path p that goes into fingerprints: "@root/rel" inside root,
+// "@std/rel" inside the stdlib, else p without a wine Z: drive. The same file
+// gets the same key from Linux and from wine, wherever the project lives.
+export fn graph_path_key(root: string, stdlib_dir: string, p: string) -> string {
+  var cp: string = gx_unz(p);
+  if (slen(root) > 0) {
+    var cr: string = gx_unz(root);
+    if (p_has_prefix_dir(cp, cr)) {
+      return "@root/" + p_rel(cr, cp);
+    }
+  }
+  if (slen(stdlib_dir) > 0) {
+    var cs: string = gx_unz(stdlib_dir);
+    if (p_has_prefix_dir(cp, cs)) {
+      return "@std/" + p_rel(cs, cp);
+    }
+  }
+  return cp;
+}
+
+fn gx_key(g: Graph*, p: string) -> string {
+  return graph_path_key(g->root, g->stdlib_dir, p);
+}
+
+// Mixes everything the graph contributes to a build fingerprint.
+export fn graph_fingerprint(g: Graph*, h: Hasher*) {
+  h_str(h, "graph");
+  h_str(h, gx_key(g, g->entry));
+  // Sorted by key, so the order does not depend on how the host spells paths.
+  var keyed: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < g->files->len) {
+    sl_push(keyed, gx_key(g, sl_get(g->files, i)) + "\n" + sl_get(g->hashes, i));
+    i = i + 1;
+  }
+  sl_sort(keyed);
+  i = 0;
+  while (i < keyed->len) {
+    h_str(h, sl_get(keyed, i));
+    i = i + 1;
+  }
+  free(keyed->items);
+  free(keyed);
+  h_str(h, "embeds");
+  i = 0;
+  while (i < g->embeds->len) {
+    var e: string = sl_get(g->embeds, i);
+    h_str(h, gx_key(g, e));
+    h_str(h, fs_hash_file(e));
+    i = i + 1;
+  }
+  h_str(h, "missing");
+  i = 0;
+  while (i < g->missing->len) {
+    h_str(h, sl_get(g->missing_kinds, i));
+    h_str(h, gx_key(g, sl_get(g->missing_from, i)));
+    h_str(h, sl_get(g->missing, i));
+    i = i + 1;
+  }
+}

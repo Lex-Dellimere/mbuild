@@ -1,0 +1,4 @@
+// mbuild/init: stub, owned by group N (DESIGN.md 16.2).
+
+export fn mi_option(name: string, dflt: string, help: string) {
+}

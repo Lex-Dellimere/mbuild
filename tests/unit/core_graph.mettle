@@ -1,0 +1,179 @@
+// core_graph: import-graph resolution against a scratch tree, checked
+// against the compiler's rules (mettle.deps nearest first, std variants,
+// guards, relative, -I, working directory) and fingerprint sensitivity.
+//
+//   tools/mcheck.sh tests/core_graph.mettle --run
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/core/path";
+import "../../src/core/fs";
+import "../../src/build/graph";
+import "../../src/core/sys_linux" if linux;
+import "../../src/core/sys_windows" if windows;
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_ok(name: string, ok: bool) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+  }
+  flush_out();
+}
+
+fn t_eq(name: string, got: string, want: string) {
+  t_ok(name, s_eq(got, want));
+  if (!s_eq(got, want)) {
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+fn put_file(root: string, rel: string, text: string) {
+  fs_write(root + "/" + rel, text);
+}
+
+// The graph's files relative to root, joined with spaces.
+fn rel_files(g: Graph*, root: string) -> string {
+  var l: StrList* = sl_new();
+  defer free(l);
+  var i: int64 = 0;
+  while (i < g->files->len) {
+    sl_push(l, p_rel(root, sl_get(g->files, i)));
+    i = i + 1;
+  }
+  return sl_join(l, " ");
+}
+
+fn graph_fp_of(g: Graph*) -> string {
+  var h: Hasher = h_new();
+  graph_fingerprint(g, &h);
+  return h_hex(&h);
+}
+
+fn main() -> int32 {
+  var base: string = fs_temp_dir() + "/core-graph";
+  sys_remove_tree(base);
+  fs_mkdirs(base);
+  var root: string = s_replace_byte(sys_realpath(base), 92, 47);
+
+  put_file(root, "std/std/io.mettle", "export fn io_plain() {{ }\n");
+  put_file(root, "std/std/io.linux.mettle", "export fn io_linux() {{ }\n");
+  put_file(root, "mettle.deps", "# outer\ndep = ./vendor/dep\n\nbad line\n");
+  put_file(root, "vendor/dep/lib.mettle", "export fn lib() {{ }\n");
+  put_file(root, "app/mettle.deps", "dep=./mydep\n");
+  put_file(root, "app/mydep/x.mettle", "import \"std/io\";\nexport fn x() {{ }\n");
+  put_file(root, "app/sub/local.mettle", "import \"../shared\";\nexport fn local() {{ }\n");
+  put_file(root, "app/shared.mettle", "export fn shared() {{ }\n");
+  put_file(root, "inc/inc_mod.mettle", "@test fn t() -> int32 {{ return 0; }\n");
+  put_file(root, "app/plat_l.mettle", "export fn pl() {{ }\n");
+  put_file(root, "app/plat_w.mettle", "export fn pw() {{ }\n");
+  put_file(root, "app/data.txt", "data\n");
+  put_file(root, "cwdmod.mettle", "export fn cwdmod() {{ }\n");
+  put_file(root, "app/main.mettle",
+    "import \"std/io\";\n" +
+    "import \"dep/lib\";\n" +
+    "import \"dep/x\";\n" +
+    "import \"sub/local\";\n" +
+    "import \"inc_mod\";\n" +
+    "import \"plat_l\" if linux;\n" +
+    "import \"plat_w\" if windows;\n" +
+    "import \"cwdmod\";\n" +
+    "import \"github.com/someone/pkg/mod\";\n" +
+    "extern fn c_puts(s: cstring) -> int32 = \"puts\";\n" +
+    "fn main() -> int32 {{\n" +
+    "  var s: string = import_str \"data.txt\";\n" +
+    "  var t: string = import_str \"nothere.txt\";\n" +
+    "  return 0;\n" +
+    "}\n");
+
+  var lc: GraphCtx* = graph_ctx_new("linux", root + "/std");
+  sl_push(lc->includes, root + "/inc");
+  lc->cwd = root;
+  var lg: Graph* = graph_build(lc, root + "/app/main.mettle");
+  t_ok("linux graph ok", lg->ok);
+  t_eq("linux files", rel_files(lg, root),
+    "app/main.mettle app/mydep/x.mettle app/plat_l.mettle app/shared.mettle app/sub/local.mettle cwdmod.mettle inc/inc_mod.mettle std/std/io.linux.mettle vendor/dep/lib.mettle");
+  t_eq("linux missing", sl_join(lg->missing, " "), "github.com/someone/pkg/mod nothere.txt");
+  t_eq("missing kinds", sl_join(lg->missing_kinds, " "), "import embed");
+  t_eq("missing line", sl_get(lg->missing_lines, 0), "9");
+  t_eq("missing from", p_rel(root, sl_get(lg->missing_from, 0)), "app/main.mettle");
+  t_eq("embeds", p_rel(root, sl_join(lg->embeds, " ")), "app/data.txt");
+  t_eq("externs", sl_join(lg->externs, " "), "puts");
+  t_eq("extern line", sl_get(lg->extern_lines, 0), "10");
+  t_ok("has tests (inc_mod)", lg->has_tests);
+
+  var wc: GraphCtx* = graph_ctx_new("windows", root + "/std");
+  sl_push(wc->includes, root + "/inc");
+  wc->cwd = root;
+  var wg: Graph* = graph_build(wc, root + "/app/main.mettle");
+  t_eq("windows files", rel_files(wg, root),
+    "app/main.mettle app/mydep/x.mettle app/plat_w.mettle app/shared.mettle app/sub/local.mettle cwdmod.mettle inc/inc_mod.mettle std/std/io.mettle vendor/dep/lib.mettle");
+
+  t_eq("resolve relative", p_rel(root, graph_resolve(lc, root + "/app/main.mettle", "sub/local")), "app/sub/local.mettle");
+  t_eq("resolve with extension", p_rel(root, graph_resolve(lc, root + "/app/main.mettle", "shared.mettle")), "app/shared.mettle");
+  t_eq("resolve absent", graph_resolve(lc, root + "/app/main.mettle", "nope"), "");
+  t_eq("resolve absolute", p_rel(root, graph_resolve(lc, root + "/app/main.mettle", root + "/cwdmod")), "cwdmod.mettle");
+  t_ok("graph_has_file", graph_has_file(lg, root + "/app/shared.mettle"));
+
+  var absent: Graph* = graph_build(lc, root + "/app/absent.mettle");
+  t_ok("missing entry not ok", !absent->ok);
+
+  // Fingerprints: stable, and sensitive to content, embeds and new files.
+  var f1: string = graph_fp_of(lg);
+  var lc2: GraphCtx* = graph_ctx_new("linux", root + "/std");
+  sl_push(lc2->includes, root + "/inc");
+  lc2->cwd = root;
+  t_eq("fingerprint stable", graph_fp_of(graph_build(lc2, root + "/app/main.mettle")), f1);
+  put_file(root, "app/shared.mettle", "export fn shared() {{ var x: int32 = 1; }\n");
+  var f2: string = graph_fp_of(graph_build(lc2, root + "/app/main.mettle"));
+  t_ok("fingerprint follows content", !s_eq(f1, f2));
+  put_file(root, "app/data.txt", "data 2\n");
+  var f3: string = graph_fp_of(graph_build(lc2, root + "/app/main.mettle"));
+  t_ok("fingerprint follows embeds", !s_eq(f2, f3));
+  put_file(root, "app/nothere.txt", "now here\n");
+  var f4: string = graph_fp_of(graph_build(lc2, root + "/app/main.mettle"));
+  t_ok("fingerprint follows a missing file appearing", !s_eq(f3, f4));
+  t_ok("windows fingerprint differs", !s_eq(graph_fp_of(wg), f1));
+
+  // Path keys: root-relative, stdlib-relative, wine's Z: drive dropped.
+  t_eq("key in root", graph_path_key("/p/app", "/s", "/p/app/src/a.mettle"), "@root/src/a.mettle");
+  t_eq("key in root, wine form", graph_path_key("/p/app", "/s", "Z:/p/app/src/a.mettle"), "@root/src/a.mettle");
+  t_eq("key, wine root", graph_path_key("z:/p/app", "", "/p/app/a.mettle"), "@root/a.mettle");
+  t_eq("key in stdlib", graph_path_key("/p/app", "Z:\\s\\lib", "/s/lib/std/io.mettle"), "@std/std/io.mettle");
+  t_eq("key elsewhere", graph_path_key("/p/app", "/s", "Z:/other/b.mettle"), "/other/b.mettle");
+  t_eq("key on a real drive", graph_path_key("/p/app", "", "C:/x/b.mettle"), "C:/x/b.mettle");
+
+  // A moved project keeps its fingerprint (paths are hashed relative to the root).
+  var moved: string = root + "-moved";
+  sys_remove_tree(moved);
+  fs_mkdirs(moved);
+  put_file(moved, "std/std/io.linux.mettle", "export fn io_linux() {{ }\n");
+  put_file(moved, "main.mettle", "import \"std/io\";\nimport \"lib\";\n");
+  put_file(moved, "lib.mettle", "export fn lib() {{ }\n");
+  put_file(root, "proj/std/std/io.linux.mettle", "export fn io_linux() {{ }\n");
+  put_file(root, "proj/main.mettle", "import \"std/io\";\nimport \"lib\";\n");
+  put_file(root, "proj/lib.mettle", "export fn lib() {{ }\n");
+  var ma: GraphCtx* = graph_ctx_new("linux", moved + "/std");
+  ma->cwd = moved;
+  var mb: GraphCtx* = graph_ctx_new("linux", root + "/proj/std");
+  mb->cwd = root + "/proj";
+  var fa: string = graph_fp_of(graph_build(ma, moved + "/main.mettle"));
+  var fb: string = graph_fp_of(graph_build(mb, root + "/proj/main.mettle"));
+  t_eq("moved project, same fingerprint", fa, fb);
+  sys_remove_tree(moved);
+
+  sys_remove_tree(base);
+  say("core_graph: {g_pass} passed, {g_fail} failed");
+  flush_out();
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}
