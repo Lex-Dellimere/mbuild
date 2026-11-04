@@ -1,9 +1,24 @@
-// config: stub, owned by group C (DESIGN.md 13.2).
+// config: mbuild.mettle compiled into a driver program and run (DESIGN.md 13).
+//
+// The API file is written to .mbuild/api/mbuild/api.mettle; the driver to
+// .mbuild/config/driver.mettle, compiled with the host compiler only when its
+// stamp (compiler, mbuild, every file it imports) changed. `driver config`
+// writes the project's TOML (and mbuild.local.mettle's, when present), which
+// man_parse reads after its lines have been re-pointed at the mb_* calls.
 
+import "std/mem";
 import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/proc";
+import "../model/toml";
 import "../model/manifest";
 import "../model/project";
+import "../build/graph";
+import "../build/toolchain";
 import "mbfile";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
 
 export struct CfgHook {
   name: string;
@@ -14,42 +29,591 @@ export struct CfgHook {
   built: StrList*;
 }
 
+export struct CfgDriver {
+  source: string;
+  dir: string;
+  includes: StrList*;
+}
+
+var g_cfx_mettle: Mettle* = (Mettle*)0;
+
 export fn cfg_api_text() -> string {
   return import_str "../mbapi/api.mettle";
 }
 
+// A path as the user sees it from the working directory.
+fn cfx_show(p: Project*, file: string) -> string {
+  var cwd: string = p_clean(s_replace_byte(sys_cwd(), 92, 47));
+  if (p_has_prefix_dir(file, cwd)) {
+    return p_rel(cwd, file);
+  }
+  if (p_has_prefix_dir(cwd, p->root) && p_has_prefix_dir(file, p->root)) {
+    var parts: StrList* = s_split(p_rel(p->root, cwd), 47);
+    var up: string = s_repeat("../", parts->len);
+    free(parts);
+    return up + p_rel(p->root, file);
+  }
+  return file;
+}
+
+fn cfx_compiler(p: Project*) -> Mettle* {
+  if (g_cfx_mettle == (Mettle*)0) {
+    g_cfx_mettle = tc_select(p, sys_os());
+  }
+  return g_cfx_mettle;
+}
+
+fn cfx_self_id() -> string {
+  var exe: string = sys_self_exe();
+  var fi: FileInfo = sys_stat(exe);
+  return exe + "|" + s_int(fi.size) + "|" + s_int(fi.mtime);
+}
+
+export fn cfg_build_driver(p: Project*, d: CfgDriver*) -> string {
+  fs_mkdirs(d->dir);
+  var src: string = d->dir + "/driver.mettle";
+  var exe: string = d->dir + "/driver" + sys_exe_ext();
+  fs_write_if_changed(src, d->source);
+  var m: Mettle* = cfx_compiler(p);
+  var ctx: GraphCtx* = graph_ctx_new(sys_os(), m->stdlib_dir);
+  defer free(ctx);
+  ctx->cwd = p->root;
+  sl_extend(ctx->includes, d->includes);
+  var g: Graph* = graph_build(ctx, src);
+  var h: Hasher = h_new();
+  h_str(&h, "mbuild-config-1");
+  h_str(&h, cfx_self_id());
+  h_str(&h, m->id);
+  h_str(&h, sl_join(d->includes, "\n"));
+  graph_fingerprint(g, &h);
+  var stamp: string = h_hex(&h);
+  var sfile: string = d->dir + "/stamp";
+  var old: FsRead = fs_read(sfile);
+  if (old.ok && s_eq(old.data, stamp) && fs_is_file(exe) && !p->opts->force) {
+    return exe;
+  }
+  var c: Cmd* = tc_cmd(m);
+  defer free(c);
+  cmd_arg(c, "--build");
+  cmd_arg(c, "-s");
+  var i: int64 = 0;
+  while (i < d->includes->len) {
+    cmd_arg(c, "-I");
+    cmd_path(c, sl_get(d->includes, i));
+    i = i + 1;
+  }
+  cmd_path(c, src);
+  cmd_arg(c, "-o");
+  cmd_path(c, exe);
+  c->cwd = p->root;
+  var r: Captured = proc_capture_all(c);
+  if (r.code != 0 || !fs_is_file(exe)) {
+    fs_write(sfile, "");
+    flush_out();
+    print_err(r.out);
+    if (slen(r.out) > 0 && !s_ends(r.out, "\n")) {
+      print_err("\n");
+    }
+    return s_empty();
+  }
+  if (g_verbose && s_contains(r.out, "warning")) {
+    print_err(r.out);
+  }
+  fs_write(sfile, stamp);
+  return exe;
+}
+
+fn cfx_driver_cmd(p: Project*, exe: string) -> Cmd* {
+  var t: Tool = tool_none();
+  t.path = exe;
+  var c: Cmd* = cmd_new(t);
+  c->cwd = p->root;
+  cmd_env(c, "MBUILD_EXE", sys_self_exe());
+  cmd_env(c, "MBUILD_ROOT", p->root);
+  cmd_env(c, "MBUILD_NAME", p->man->name);
+  cmd_env(c, "MBUILD_VERSION", p->man->version);
+  cmd_env(c, "MBUILD_VERBOSE", s_int((int64)g_verbose));
+  cmd_env(c, "MBUILD_QUIET", s_int((int64)g_quiet));
+  return c;
+}
+
+fn cfx_mbfile(p: Project*) -> string {
+  if (slen(p->mbfile) > 0) {
+    return p->mbfile;
+  }
+  return p->root + "/mbuild.mettle";
+}
+
+fn cfx_read(p: Project*, file: string) -> string {
+  var r: FsRead = fs_read(file);
+  if (!r.ok) {
+    fail("cannot read " + cfx_show(p, file));
+  }
+  return r.data;
+}
+
+// "mbuild.mettle:12: ..." from the scanner, named the way the user sees the file.
+fn cfx_relabel(msg: string, label: string, shown: string) -> string {
+  if (s_starts(msg, label)) {
+    return shown + s_from(msg, slen(label));
+  }
+  return msg;
+}
+
+// The line of the mb_* call that wrote [section] key, 0 when unknown.
+fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
+  var c: StrList* = sl_new();
+  defer free(c);
+  // "call|first_arg|section" candidates, tried in order.
+  if (s_eq(section, "package")) {
+    if (s_eq(key, "name") || s_eq(key, "version")) { sl_push(c, "mb_package||"); }
+    if (s_eq(key, "include")) { sl_push(c, "mb_publish_include||"); }
+    sl_push(c, "mb_meta|" + key + "|");
+  } else if (s_eq(section, "build")) {
+    if (s_eq(key, "targets")) { sl_push(c, "mb_targets||"); }
+    if (s_eq(key, "flags")) { sl_push(c, "mb_flags||"); }
+    if (s_eq(key, "prelude")) { sl_push(c, "mb_prelude||"); }
+    if (s_eq(key, "agents")) { sl_push(c, "mb_agents||"); }
+  } else if (s_eq(section, "dependencies")) {
+    sl_push(c, "mb_dep|" + key + "|");
+    sl_push(c, "mb_dep_from|" + key + "|");
+    sl_push(c, "mb_dep_path|" + key + "|");
+  } else if (s_eq(section, "replace")) {
+    sl_push(c, "mb_replace_path|" + key + "|");
+    sl_push(c, "mb_replace_version|" + key + "|");
+  } else if (s_eq(section, "rules")) {
+    sl_push(c, "mb_rule||");
+  } else if (s_eq(section, "tools")) {
+    sl_push(c, "mb_tool|" + key + "|");
+  } else if (s_eq(section, "components")) {
+    sl_push(c, "mb_use|" + key + "|");
+  } else if (s_starts(section, "registry.")) {
+    sl_push(c, "mb_registry||" + section);
+  } else if (s_starts(section, "component.")) {
+    if (s_eq(key, "linux") || s_eq(key, "windows")) {
+      sl_push(c, "mb_component_on|" + key + "|" + section);
+    }
+    sl_push(c, "mb_component||" + section);
+  } else if (s_eq(section, "c") || s_starts(section, "c.")) {
+    if (s_eq(key, "sources")) { sl_push(c, "mb_c_sources||" + section); }
+    if (s_eq(key, "include")) { sl_push(c, "mb_c_include||" + section); }
+    if (s_eq(key, "cflags")) { sl_push(c, "mb_c_flags||" + section); }
+    if (s_eq(key, "libs")) { sl_push(c, "mb_c_libs||" + section); }
+  } else if (s_eq(section, "link") || s_starts(section, "link.")) {
+    if (s_eq(key, "libs")) { sl_push(c, "mb_link_libs||" + section); }
+    if (s_eq(key, "paths")) { sl_push(c, "mb_link_paths||" + section); }
+    if (s_eq(key, "pkgconfig")) { sl_push(c, "mb_pkgconfig||" + section); }
+  } else if (s_starts(section, "bin.") || s_starts(section, "profile.")) {
+    if (s_eq(key, "main")) { sl_push(c, "mb_bin||" + section); }
+    if (s_eq(key, "kind") || s_eq(key, "triple")) { sl_push(c, "mb_bin_kind||" + section); }
+    if (s_eq(key, "inherits")) { sl_push(c, "mb_inherits||" + section); }
+    if (s_eq(key, "components")) { sl_push(c, "mb_use||" + section); }
+    sl_push(c, "mb_set|" + key + "|" + section);
+    sl_push(c, "mb_set_list|" + key + "|" + section);
+  }
+  sl_push(c, "mb_raw|" + key + "|" + section);
+  var i: int64 = 0;
+  while (i < c->len) {
+    var parts: StrList* = s_split(sl_get(c, i), 124);
+    var line: int64 = mbf_locate(text, sl_get(parts, 0), sl_get(parts, 1), sl_get(parts, 2));
+    free(parts);
+    if (line > 0) {
+      return line;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// Points every entry and header of the emitted TOML at the mbuild.mettle
+// line that produced it (0 when unknown), so man_parse's messages and the
+// settings' origins name the user's file.
+fn cfx_repoint(doc: Toml*, text: string) {
+  var i: int64 = 0;
+  while (i < doc->n) {
+    var e: TomlEntry* = doc->entries[i];
+    var line: int64 = cfx_entry_line(text, e->section, e->key);
+    e->line = line;
+    e->end_line = line;
+    e->value->line = line;
+    if (e->value->field_vals != (TomlValue**)0) {
+      var f: int64 = 0;
+      while (f < e->value->fields->len) {
+        if (e->value->field_vals[f] != (TomlValue*)0) {
+          e->value->field_vals[f]->line = line;
+        }
+        f = f + 1;
+      }
+    }
+    i = i + 1;
+  }
+  var k: int64 = 0;
+  while (k < doc->nheaders) {
+    var hd: TomlHeader* = doc->headers[k];
+    hd->line = 0;
+    var j: int64 = 0;
+    while (j < doc->n && hd->line == 0) {
+      if (s_eq(doc->entries[j]->section, hd->name)) {
+        hd->line = doc->entries[j]->line;
+      }
+      j = j + 1;
+    }
+    if (hd->line == 0) {
+      hd->line = mbf_locate(text, "mb_bin", "", hd->name);
+    }
+    if (hd->line == 0) {
+      hd->line = mbf_locate(text, "mb_profile", "", hd->name);
+    }
+    if (hd->line == 0) {
+      hd->line = mbf_locate(text, "mb_for_bin", "", hd->name);
+    }
+    k = k + 1;
+  }
+}
+
+// man_parse labels its messages "<dir>/<legacy name>:LINE: ".
+fn cfx_manifest_msg(msg: string, legacy: string, shown: string) -> string {
+  if (s_starts(msg, legacy + ": ")) {
+    return shown + " (in " + cfx_fn_of(shown) + "): " + s_from(msg, slen(legacy) + 2);
+  }
+  if (s_starts(msg, legacy + ":")) {
+    return shown + s_from(msg, slen(legacy));
+  }
+  return msg;
+}
+
+fn cfx_fn_of(shown: string) -> string {
+  if (s_ends(shown, "mbuild.local.mettle")) {
+    return "fn local()";
+  }
+  return "fn project()";
+}
+
+fn cfx_relabel_all(m: Manifest*, legacy: string, shown: string) {
+  m->error = cfx_manifest_msg(m->error, legacy, shown);
+  var i: int64 = 0;
+  while (i < m->warnings->len) {
+    sl_set(m->warnings, i, cfx_manifest_msg(sl_get(m->warnings, i), legacy, shown));
+    i = i + 1;
+  }
+}
+
+fn cfx_doc(p: Project*, toml_file: string, text: string, shown: string) -> Toml* {
+  var data: string = cfx_read(p, toml_file);
+  var doc: Toml* = toml_parse(data, toml_file);
+  if (slen(doc->error) > 0) {
+    fail(shown + " (in " + cfx_fn_of(shown) + "): " + cfx_relabel(doc->error, toml_file, "the declarations"));
+  }
+  cfx_repoint(doc, text);
+  return doc;
+}
+
+fn cfx_api_dir(p: Project*) -> string {
+  var dir: string = p->state_dir + "/api";
+  fs_write_if_changed(dir + "/mbuild/api.mettle", cfg_api_text());
+  return dir;
+}
+
+// Compiles and runs the driver for file (and local_file, "" = none) with its
+// state in state_dir; parses what it declares. fail() / exit on any error.
+fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, config_only: bool) -> Manifest* {
+  var shown: string = cfx_show(p, file);
+  var text: string = cfx_read(p, file);
+  var info: MbfInfo* = mbf_scan(text);
+  defer free(info);
+  if (!info->ok) {
+    fail(cfx_relabel(info->err, "mbuild.mettle", shown));
+  }
+  var ltext: string = s_empty();
+  var lshown: string = s_empty();
+  if (slen(local_file) > 0) {
+    lshown = cfx_show(p, local_file);
+    ltext = cfx_read(p, local_file);
+    var problem: string = mbf_check_local(ltext);
+    if (slen(problem) > 0) {
+      fail(cfx_relabel(problem, "mbuild.local.mettle", lshown));
+    }
+  }
+  var d: CfgDriver* = new CfgDriver;
+  defer free(d);
+  d->source = mbf_driver_local(info, file, local_file, config_only);
+  d->dir = state_dir;
+  d->includes = sl_of(cfx_api_dir(p));
+  var exe: string = cfg_build_driver(p, d);
+  if (slen(exe) == 0) {
+    error_msg(shown + " does not compile");
+    exit_with(1);
+  }
+  var out: string = state_dir + "/manifest.toml";
+  var lout: string = state_dir + "/local.toml";
+  var stamp: FsRead = fs_read(state_dir + "/stamp");
+  var done: FsRead = fs_read(state_dir + "/manifest.stamp");
+  var fresh: bool = done.ok && stamp.ok && s_eq(done.data, stamp.data) && fs_is_file(out);
+  if (fresh && slen(local_file) > 0) {
+    fresh = fs_is_file(lout);
+  }
+  if (!fresh) {
+    sys_remove_file(out);
+    sys_remove_file(lout);
+    var c: Cmd* = cfx_driver_cmd(p, exe);
+    defer free(c);
+    cmd_arg(c, "config");
+    cmd_path(c, out);
+    if (slen(local_file) > 0) {
+      cmd_path(c, lout);
+    }
+    var code: int32 = proc_run(c);
+    if (code != 0) {
+      exit_with(code);
+    }
+    fs_write(state_dir + "/manifest.stamp", stamp.data);
+  }
+  var dir: string = p_dir(file);
+  var m: Manifest* = man_parse(cfx_doc(p, out, text, shown), dir);
+  cfx_relabel_all(m, dir + "/mbuild.toml", shown);
+  if (slen(m->error) > 0) {
+    fail_hint(m->error, "see docs/manifest.md for the mbuild.mettle API");
+  }
+  m->file = file;
+  if (slen(local_file) > 0) {
+    var lm: Manifest* = man_parse_local(cfx_doc(p, lout, ltext, lshown), dir);
+    cfx_relabel_all(lm, dir + "/mbuild.local.toml", lshown);
+    if (slen(lm->error) > 0) {
+      fail(lm->error);
+    }
+    lm->file = local_file;
+    man_merge_local(m, lm);
+  }
+  return m;
+}
+
+// A directory that still holds only the files mbuild no longer reads.
+fn cfx_refuse_legacy(p: Project*, dir: string) {
+  if (fs_is_file(dir + "/mbuild.toml") && !fs_is_file(dir + "/mbuild.mettle")) {
+    fail(cfx_show(p, dir + "/mbuild.toml") + " is no longer read; write mbuild.mettle (mbuild init)");
+  }
+  if (fs_is_file(dir + "/mbuild.local.toml")) {
+    fail(cfx_show(p, dir + "/mbuild.local.toml") + " is no longer read; write mbuild.local.mettle (fn local() with the same mb_ calls)");
+  }
+}
+
 export fn cfg_load(p: Project*) -> Manifest* {
-  return (Manifest*)0;
+  cfx_refuse_legacy(p, p->root);
+  var file: string = cfx_mbfile(p);
+  if (!fs_is_file(file)) {
+    return man_empty(p->root, p_base(p->root));
+  }
+  var local_file: string = p->root + "/mbuild.local.mettle";
+  if (!fs_is_file(local_file)) {
+    local_file = s_empty();
+  }
+  return cfx_load(p, file, local_file, p->state_dir + "/config", false);
 }
 
 export fn cfg_load_dir(p: Project*, dir: string, key: string) -> Manifest* {
-  return (Manifest*)0;
+  if (fs_is_file(dir + "/mbuild.toml") && !fs_is_file(dir + "/mbuild.mettle")) {
+    fail(cfx_show(p, dir) + " still has only mbuild.toml, which is no longer read; it needs an mbuild.mettle");
+  }
+  var file: string = dir + "/mbuild.mettle";
+  if (!fs_is_file(file)) {
+    return (Manifest*)0;
+  }
+  return cfx_load(p, file, s_empty(), p->state_dir + "/config/path/" + key, true);
 }
 
 export fn cfg_info(p: Project*) -> MbfInfo* {
-  return mbf_scan(s_empty());
+  var r: FsRead = fs_read(cfx_mbfile(p));
+  if (!r.ok) {
+    return mbf_scan(s_empty());
+  }
+  return mbf_scan(r.data);
+}
+
+// The root's driver with its command and hook branches.
+fn cfx_root_driver(p: Project*) -> string {
+  var file: string = cfx_mbfile(p);
+  var info: MbfInfo* = cfg_info(p);
+  defer free(info);
+  if (!info->ok) {
+    fail(cfx_relabel(info->err, "mbuild.mettle", cfx_show(p, file)));
+  }
+  var local_file: string = p->root + "/mbuild.local.mettle";
+  if (!fs_is_file(local_file)) {
+    local_file = s_empty();
+  }
+  var d: CfgDriver* = new CfgDriver;
+  defer free(d);
+  d->source = mbf_driver_local(info, file, local_file, false);
+  d->dir = p->state_dir + "/config";
+  d->includes = sl_of(cfx_api_dir(p));
+  var exe: string = cfg_build_driver(p, d);
+  if (slen(exe) == 0) {
+    error_msg(cfx_show(p, file) + " does not compile");
+    exit_with(1);
+  }
+  return exe;
+}
+
+// MBUILD_DEPTH / MBUILD_CHAIN for a nested run of fn_name; "" when it may not run.
+fn cfx_nest(c: Cmd*, fn_name: string) -> bool {
+  var depth: int64 = s_to_int(s_trim(env_get("MBUILD_DEPTH")));
+  if (depth < 0) {
+    depth = 0;
+  }
+  var chain: string = env_get("MBUILD_CHAIN");
+  if (slen(chain) > 0) {
+    chain = chain + " -> ";
+  }
+  chain = chain + fn_name;
+  if (depth >= 8) {
+    error_msg("mbuild commands nest more than 8 deep (" + chain + ")");
+    return false;
+  }
+  cmd_env(c, "MBUILD_DEPTH", s_int(depth + 1));
+  cmd_env(c, "MBUILD_CHAIN", chain);
+  return true;
 }
 
 export fn cfg_run_command(p: Project*, name: string, args: StrList*) -> int32 {
+  var info: MbfInfo* = cfg_info(p);
+  defer free(info);
+  var want: string = s_replace_byte(name, 95, 45);
+  var i: int64 = 0;
+  while (i < info->ncommands) {
+    var cmd: MbfCommand = info->commands[i];
+    if (s_eq(cmd.name, want)) {
+      var exe: string = cfx_root_driver(p);
+      var c: Cmd* = cfx_driver_cmd(p, exe);
+      defer free(c);
+      if (!cfx_nest(c, cmd.fn_name)) {
+        return 1;
+      }
+      cmd_arg(c, "cmd");
+      cmd_arg(c, cmd.name);
+      cmd_args(c, args);
+      return proc_run(c);
+    }
+    i = i + 1;
+  }
+  error_msg("no command '" + name + "' in " + cfx_show(p, cfx_mbfile(p)));
   return 1;
 }
 
 export fn cfg_run_hook(p: Project*, h: CfgHook*) -> int32 {
-  return 1;
+  var name: string = h->name;
+  if (s_starts(name, "hook_")) {
+    name = s_from(name, 5);
+  }
+  var info: MbfInfo* = cfg_info(p);
+  defer free(info);
+  if (!sl_has(info->hooks, name)) {
+    return 0;
+  }
+  var pair: string = h->target + ", " + h->profile;
+  if (g_verbose) {
+    status("Running", "hook_" + name + " (" + pair + ")");
+  }
+  var exe: string = cfx_root_driver(p);
+  var c: Cmd* = cfx_driver_cmd(p, exe);
+  defer free(c);
+  if (!cfx_nest(c, "hook_" + name)) {
+    return 1;
+  }
+  cmd_env(c, "MBUILD_TARGET", h->target);
+  cmd_env(c, "MBUILD_PROFILE", h->profile);
+  cmd_env(c, "MBUILD_OUT_DIR", h->out_dir);
+  cmd_env(c, "MBUILD_BINS", sl_join(h->bins, " "));
+  cmd_env(c, "MBUILD_BUILT", sl_join(h->built, " "));
+  cmd_arg(c, "hook");
+  cmd_arg(c, name);
+  var code: int32 = proc_run(c);
+  if (code != 0) {
+    error_msg("hook_" + name + " failed (exit " + s_int((int64)code) + ") for " + h->target + " " + h->profile);
+  }
+  return code;
+}
+
+// The call on an edited line, for the status line: mb_dep("x", "v1").
+fn cfx_call_shown(text: string, line: int64) -> string {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  if (line < 1 || line > lines->len) {
+    return s_empty();
+  }
+  var l: string = s_trim(sl_get(lines, line - 1));
+  var cut: int64 = s_find(l, "//");
+  if (cut >= 0) {
+    l = s_trim(s_sub(l, 0, cut));
+  }
+  if (s_ends(l, ";")) {
+    l = s_sub(l, 0, slen(l) - 1);
+  }
+  return l;
+}
+
+fn cfx_edit_refused(p: Project*, e: MbfEdit, name: string, fix: string) {
+  var shown: string = cfx_show(p, cfx_mbfile(p));
+  if (e.line > 0) {
+    error_msg(shown + ":" + s_int(e.line) + " declares " + name + " in a way mbuild cannot edit (" + e.why + ")");
+  } else {
+    error_msg(shown + ": cannot edit " + name + " (" + e.why + ")");
+  }
+  err_line("  " + cyan("help") + ": change it to: " + fix);
+  flush_out();
+}
+
+fn cfx_locked(p: Project*, what: string) {
+  if (p->opts->locked) {
+    fail_hint(what + " would change mbuild.mettle, and --locked forbids it", "run it without --locked");
+  }
 }
 
 export fn cfg_set_dep(p: Project*, name: string, version: string) -> bool {
-  return false;
+  var file: string = cfx_mbfile(p);
+  var text: string = cfx_read(p, file);
+  var e: MbfEdit = mbf_set_dep(text, name, version);
+  if (!e.ok) {
+    cfx_edit_refused(p, e, name, "mb_dep(\"" + name + "\", \"" + version + "\");");
+    return false;
+  }
+  if (s_eq(e.text, text)) {
+    return true;
+  }
+  var verb: string = "Updating";
+  if (slen(e.text) > slen(text) && s_lines(e.text)->len > s_lines(text)->len) {
+    verb = "Adding";
+  }
+  cfx_locked(p, verb + " " + name);
+  if (!fs_write(file, e.text)) {
+    fail("cannot write " + cfx_show(p, file));
+  }
+  status(verb, "mbuild.mettle: " + cfx_call_shown(e.text, e.line));
+  p->man = cfg_load(p);
+  return true;
 }
 
 export fn cfg_remove_dep(p: Project*, name: string) -> bool {
-  return false;
+  var file: string = cfx_mbfile(p);
+  var text: string = cfx_read(p, file);
+  var e: MbfEdit = mbf_remove_dep(text, name);
+  if (!e.ok) {
+    cfx_edit_refused(p, e, name, "one mb_dep(\"" + name + "\", ...); line in fn project()");
+    return false;
+  }
+  cfx_locked(p, "Removing " + name);
+  if (!fs_write(file, e.text)) {
+    fail("cannot write " + cfx_show(p, file));
+  }
+  status("Removing", "mbuild.mettle: " + cfx_call_shown(text, e.line));
+  p->man = cfg_load(p);
+  return true;
 }
 
 export fn cfg_manifest_text(p: Project*) -> string {
-  return s_empty();
-}
-
-export fn cfg_cmd_migrate(p: Project*) -> int32 {
-  return 1;
+  if (!fs_is_file(cfx_mbfile(p))) {
+    return s_empty();
+  }
+  cfg_load(p);
+  var r: FsRead = fs_read(p->state_dir + "/config/manifest.toml");
+  return r.data;
 }

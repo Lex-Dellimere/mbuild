@@ -1,0 +1,251 @@
+// mbfile_test: scanning and editing mbuild.mettle (DESIGN.md 13, 17.4 Group C).
+//
+//   mettle test tests/unit/mbfile_test.mettle     (leak warnings are expected)
+//   mettle --build tests/unit/mbfile_test.mettle -o t && ./t
+//
+// Run both: `mettle test` reports a failing run as skipped (reports issue 10).
+
+import "std/io";
+import "../../src/core/base";
+import "../../src/config/mbfile";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_ok(name: string, ok: bool) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+  }
+}
+
+fn t_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+fn t_has(name: string, got: string, part: string) {
+  if (s_contains(got, part)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: ...[" + part + "]...");
+  }
+}
+
+// `$` stands for `{` and a backtick for `"`, so test sources read as Mettle.
+fn src(s: string) -> string {
+  return s_replace_byte(s_replace_byte(s, 36, 123), 96, 34);
+}
+
+fn viewer() -> string {
+  return import_str "mbfile_viewer.txt";
+}
+
+// The lines between a's and b's common head and tail: "-old|+new".
+fn changed_lines(a: string, b: string) -> string {
+  var la: StrList* = s_lines(a);
+  defer free(la);
+  var lb: StrList* = s_lines(b);
+  defer free(lb);
+  var head: int64 = 0;
+  while (head < la->len && head < lb->len && s_eq(sl_get(la, head), sl_get(lb, head))) {
+    head = head + 1;
+  }
+  var tail: int64 = 0;
+  while (tail < la->len - head && tail < lb->len - head && s_eq(sl_get(la, la->len - 1 - tail), sl_get(lb, lb->len - 1 - tail))) {
+    tail = tail + 1;
+  }
+  var out: StrList* = sl_new();
+  defer free(out);
+  var i: int64 = head;
+  while (i < la->len - tail) {
+    sl_push(out, "-" + sl_get(la, i));
+    i = i + 1;
+  }
+  i = head;
+  while (i < lb->len - tail) {
+    sl_push(out, "+" + sl_get(lb, i));
+    i = i + 1;
+  }
+  return sl_join(out, "|");
+}
+
+fn test_scan() {
+  var info: MbfInfo* = mbf_scan(viewer());
+  defer free(info);
+  t_ok("scan: ok", info->ok);
+  t_ok("scan: has project", info->has_project);
+  t_ok("scan: no exports", !info->has_exports);
+  t_eq("scan: one command", s_int(info->ncommands), "1");
+  t_eq("scan: command name", info->commands[0].name, "install");
+  t_eq("scan: command summary", info->commands[0].summary, "build a release and copy it into a bin directory (default ~/.local/bin)");
+  t_eq("scan: command line", s_int(info->commands[0].line), "29");
+  t_eq("scan: hooks", sl_join(info->hooks, ","), "pre_build");
+  t_eq("scan: dep calls", s_int(info->ndep_calls), "3");
+  t_eq("scan: dep call 2", info->dep_calls[1].fn_name + " " + sl_join(info->dep_calls[1].args, ",") + " " + s_int(info->dep_calls[1].line), "mb_dep_from corp,auth,v2.0.0 8");
+
+  var ex: MbfInfo* = mbf_scan(src("import `mbuild/api`;\n\nfn project() $\n  mb_package(`x`, `0.1.0`);\n}\n\nexport fn cmd_x(a: MbArgs*) -> int32 $\n  return 0;\n}\n"));
+  defer free(ex);
+  t_ok("scan: exported cmd, plain project -> not ok", !ex->ok);
+  t_eq("scan: unexported", sl_join(ex->unexported, ","), "project");
+  t_eq("scan: unexported message", ex->err, "mbuild.mettle:3: fn project must be exported, because this file exports other names");
+
+  var mn: MbfInfo* = mbf_scan(src("fn project() $\n}\n\nfn main() -> int32 $\n  return 0;\n}\n"));
+  defer free(mn);
+  t_ok("scan: fn main -> error", !mn->ok && mn->has_main);
+  t_has("scan: fn main names the line", mn->err, "mbuild.mettle:4:");
+
+  var np: MbfInfo* = mbf_scan("import \"mbuild/api\";\n");
+  defer free(np);
+  t_eq("scan: no project", np->err, "mbuild.mettle has no fn project() (it declares the package: mb_package(\"name\", \"0.1.0\"))");
+
+  var gd: MbfInfo* = mbf_scan(src("fn project() $\n}\n\n// gen-docs: write the docs\n// to docs/\nfn cmd_gen_docs(a: MbArgs*) -> int32 $\n  var s: string = `$x}`;\n  return 0;\n}\nfn cmd_plain(a: MbArgs*) -> int32 $ return 0; }\n"));
+  defer free(gd);
+  t_eq("scan: cmd_gen_docs -> gen-docs", gd->commands[0].name, "gen-docs");
+  t_eq("scan: summary drops NAME:", gd->commands[0].summary, "write the docs");
+  t_eq("scan: help is the whole block", gd->commands[0].help, "gen-docs: write the docs\nto docs/");
+  t_eq("scan: no comment", gd->commands[1].name + "[" + gd->commands[1].summary + "]", "plain[]");
+}
+
+fn test_edits() {
+  var text: string = viewer();
+  var e: MbfEdit = mbf_set_dep(text, "strutil", "v1.2.0");
+  t_ok("set: ok", e.ok);
+  t_eq("set: only the literal changed", changed_lines(text, e.text), "-  mb_dep(\"strutil\", \"v1.1.0\");|+  mb_dep(\"strutil\", \"v1.2.0\");");
+  t_eq("set: same length otherwise", s_int(slen(e.text)), s_int(slen(text)));
+  t_eq("set: line", s_int(e.line), "7");
+
+  var j: MbfEdit = mbf_set_dep(text, "json", "v1.0.0");
+  t_ok("add: ok", j.ok);
+  t_eq("add: after the last mb_dep*", changed_lines(text, j.text), "+  mb_dep(\"json\", \"v1.0.0\");");
+  t_has("add: placed after mb_dep_path", j.text, "mb_dep_path(\"widgets\", \"../widgets\");\n  mb_dep(\"json\", \"v1.0.0\");\n");
+  t_eq("add: line", s_int(j.line), "10");
+
+  var a2: MbfEdit = mbf_set_dep(text, "auth", "v2.1.0");
+  t_has("set: mb_dep_from version", a2.text, "mb_dep_from(\"corp\", \"auth\", \"v2.1.0\");");
+
+  var only_pkg: string = src("fn project() $\n    mb_package(`p`, `1.0.0`);\n}\n");
+  t_eq("add: after mb_package with its indent", mbf_set_dep(only_pkg, "x", "v1").text, src("fn project() $\n    mb_package(`p`, `1.0.0`);\n    mb_dep(`x`, `v1`);\n}\n"));
+  t_eq("add: after the brace", mbf_set_dep(src("fn project() $\n}\n"), "x", "v1").text, src("fn project() $\n  mb_dep(`x`, `v1`);\n}\n"));
+
+  var commented: string = src("fn project() $\n  mb_package(`p`, `1.0.0`);\n  /* mb_dep(`strutil`, `v1.0.0`); */\n  // mb_dep(`strutil`, `v1.0.0`);\n}\n");
+  var c: MbfEdit = mbf_set_dep(commented, "strutil", "v1.1.0");
+  t_eq("comment: not matched, a new line is added", changed_lines(commented, c.text), "+  mb_dep(\"strutil\", \"v1.1.0\");");
+
+  var r: MbfEdit = mbf_remove_dep(text, "widgets");
+  t_ok("remove: ok", r.ok);
+  t_eq("remove: that line only", changed_lines(text, r.text), "-  mb_dep_path(\"widgets\", \"../widgets\");");
+
+  var computed: string = src("fn project() $\n  var name_var: string = `strutil`;\n  mb_dep(name_var, `v1`);\n}\n");
+  var bad: MbfEdit = mbf_set_dep(computed, "strutil", "v1.2.0");
+  t_ok("computed name -> not ok", !bad.ok);
+  t_eq("computed name: line", s_int(bad.line), "3");
+  var helper: string = src("fn deps() $\n  mb_dep(`strutil`, `v1`);\n}\n\nfn project() $\n  deps();\n}\n");
+  t_ok("helper call -> not ok", !mbf_set_dep(helper, "strutil", "v2").ok);
+  var twice: string = src("fn project() $\n  mb_dep(`strutil`, `v1`);\n  mb_dep(`strutil`, `v2`);\n}\n");
+  t_ok("two calls -> not ok", !mbf_set_dep(twice, "strutil", "v3").ok);
+  var shared: string = src("fn project() $\n  mb_dep(`a`, `v1`); mb_dep(`b`, `v1`);\n}\n");
+  t_ok("remove: shared line -> not ok", !mbf_remove_dep(shared, "b").ok);
+
+  var lines: StrList* = sl_new();
+  defer free(lines);
+  sl_push(lines, "mb_profile(\"release\");");
+  sl_push(lines, "mb_set(\"optimize\", \"full\");");
+  var al: MbfEdit = mbf_add_lines(mbf_init_text("hello"), lines);
+  t_has("add_lines: inside fn project()", al.text, "  mb_package(\"hello\", \"0.1.0\");\n  mb_profile(\"release\");\n  mb_set(\"optimize\", \"full\");\n}\n");
+  var ac: MbfEdit = mbf_add_command(al.text, "serve", "run the dev server", "return mb_mbuild(\"run\");");
+  t_ok("add_command: ok", ac.ok);
+  t_has("add_command: text", ac.text, src("\n// serve: run the dev server\nfn cmd_serve(a: MbArgs*) -> int32 $\n  return mb_mbuild(`run`);\n}\n"));
+  t_ok("add_command: existing -> not ok", !mbf_add_command(ac.text, "serve", "again", "return 0;").ok);
+  t_eq("add_command: scanned", mbf_scan(ac.text)->commands[1].summary, "run the dev server");
+}
+
+fn test_locate() {
+  var text: string = viewer();
+  t_eq("locate: mb_set optimize in release", s_int(mbf_locate(text, "mb_set", "optimize", "profile.release")), "17");
+  t_eq("locate: mb_set safe in debug", s_int(mbf_locate(text, "mb_set", "safe", "profile.debug")), "25");
+  t_eq("locate: os profile", s_int(mbf_locate(text, "mb_set", "subsystem", "profile.release.windows")), "21");
+  t_eq("locate: mb_dep_from by name", s_int(mbf_locate(text, "mb_dep_from", "auth", "dependencies")), "8");
+  t_eq("locate: wrong section", s_int(mbf_locate(text, "mb_set", "safe", "profile.release")), "0");
+  t_eq("locate: any", s_int(mbf_locate(text, "mb_package", "", "")), "4");
+}
+
+fn test_driver() {
+  var want: string = src("// generated by mbuild from mbuild.mettle; do not edit\nimport `mbuild/api`;\nimport `/home/me/app/mbuild.mettle`;\n\nfn main(argc: int32, argv: cstring*) -> int32 $\n  mbi_start(argc, argv);\n  if (mbi_mode(`config`)) $ project(); return mbi_finish_config(); }\n  if (mbi_mode(`cmd`)) $\n    var a: MbArgs* = mbi_args();\n    if (mbi_name(`install`)) $ return cmd_install(a); }\n  }\n  if (mbi_mode(`hook`)) $\n    if (mbi_name(`pre_build`)) $ return hook_pre_build(); }\n  }\n  return mbi_unknown();\n}\n");
+  var info: MbfInfo* = mbf_scan(viewer());
+  defer free(info);
+  t_eq("driver: 13.2 shape", mbf_driver(info, "/home/me/app/mbuild.mettle", false), want);
+  var cfg: string = mbf_driver(info, "/home/me/app/mbuild.mettle", true);
+  t_ok("driver: config only has no cmd branch", !s_contains(cfg, "\"cmd\"") && !s_contains(cfg, "\"hook\"") && s_contains(cfg, "\"config\""));
+  var it: MbfInfo* = mbf_scan(mbf_init_text("hello"));
+  defer free(it);
+  t_ok("init text: scans", it->ok && it->ncommands == 1);
+  t_eq("init text: command", it->commands[0].name + ": " + it->commands[0].summary, "hello: an example project command (`mbuild hello NAME`)");
+}
+
+fn test_local() {
+  var l: string = mbf_local_text();
+  t_eq("local: minimal file", l, src("import `mbuild/api`;\n\nfn local() $\n}\n"));
+  t_eq("local: minimal file checks", mbf_check_local(l), "");
+  t_has("local: project refused", mbf_check_local(src("fn local() $\n}\nfn project() $\n}\n")), "mbuild.local.mettle:3: fn project belongs in mbuild.mettle");
+  t_has("local: no fn local()", mbf_check_local(""), "mbuild.local.mettle has no fn local()");
+  var args: StrList* = sl_new();
+  defer free(args);
+  sl_push(args, "logger");
+  sl_push(args, "quiet");
+  var e: MbfEdit = mbf_set_call("", "mb_use", "logger", args);
+  t_eq("set_call: creates", e.text, src("import `mbuild/api`;\n\nfn local() $\n  mb_use(`logger`, `quiet`);\n}\n"));
+  sl_set(args, 1, "file");
+  var e2: MbfEdit = mbf_set_call(e.text, "mb_use", "logger", args);
+  t_eq("set_call: rewrites", changed_lines(e.text, e2.text), "-  mb_use(\"logger\", \"quiet\");|+  mb_use(\"logger\", \"file\");");
+  var prof: string = src("fn local() $\n  mb_profile(`release`);\n  mb_set(`safe`, `true`);\n}\n");
+  t_eq("set_call: new calls go ahead of the cursor", mbf_set_call(prof, "mb_use", "logger", args).text, src("fn local() $\n  mb_use(`logger`, `file`);\n  mb_profile(`release`);\n  mb_set(`safe`, `true`);\n}\n"));
+  var r: MbfEdit = mbf_remove_call(e2.text, "mb_use", "logger");
+  t_eq("remove_call", r.text, l);
+  t_ok("remove_call: absent is ok", mbf_remove_call(l, "mb_use", "x").ok);
+  t_eq("locate: in fn local()", s_int(mbf_locate(prof, "mb_set", "safe", "profile.release")), "3");
+  var info: MbfInfo* = mbf_scan(viewer());
+  defer free(info);
+  t_has("driver with local: imports it", mbf_driver_local(info, "/a/mbuild.mettle", "/a/mbuild.local.mettle", true), src("import `/a/mbuild.local.mettle`;\n"));
+  t_has("driver with local: runs it", mbf_driver_local(info, "/a/mbuild.mettle", "/a/mbuild.local.mettle", true), src("$ project(); mbi_local(); local(); return mbi_finish_config(); }"));
+}
+
+fn run_all() -> int64 {
+  test_scan();
+  test_edits();
+  test_locate();
+  test_driver();
+  test_local();
+  say("");
+  say("mbfile_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  flush_out();
+  return g_fail;
+}
+
+@test fn mbfile_all() -> int32 {
+  if (run_all() > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  if (run_all() > 0) {
+    return 1;
+  }
+  return 0;
+}

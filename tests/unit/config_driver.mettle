@@ -1,0 +1,255 @@
+// config_driver: cfg_* on the project in the working directory, for
+// tests/e2e/r3_config.sh (DESIGN.md 13, 17.4 Group C).
+//
+//   config_driver [-v] [--locked] load              cfg_load, then the manifest as lines
+//   config_driver dumptoml FILE                     man_parse of a TOML file, the same lines
+//   config_driver loaddir DIR KEY                   cfg_load_dir
+//   config_driver text                              cfg_manifest_text
+//   config_driver info                              cfg_info: commands and hooks
+//   config_driver inittext NAME                     writes mbf_init_text(NAME) to mbuild.mettle
+//   config_driver hook NAME CODE...                 cfg_run_hook (linux, debug)
+//   config_driver setdep NAME VERSION / removedep NAME
+//   config_driver setcall FILE CALL ARG...          mbf_set_call on FILE (first_arg = the first ARG), written back
+//   config_driver removecall FILE CALL FIRST         mbf_remove_call
+//   config_driver build-driver DIR                  cfg_build_driver of a tiny program
+//   config_driver version                           what mb_mbuild("version") reaches
+//   config_driver NAME ARGS...                      cfg_run_command
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/core/path";
+import "../../src/core/fs";
+import "../../src/model/toml";
+import "../../src/model/manifest";
+import "../../src/model/project";
+import "../../src/config/mbfile";
+import "../../src/config/config";
+import "../../src/core/sys_linux" if linux;
+import "../../src/core/sys_windows" if windows;
+
+fn drv_project(opts: Options*) -> Project* {
+  var p: Project* = new Project;
+  p->opts = opts;
+  p->root = p_clean(s_replace_byte(sys_cwd(), 92, 47));
+  p->state_dir = p->root + "/.mbuild";
+  p->mbfile = s_empty();
+  if (fs_is_file(p->root + "/mbuild.mettle")) {
+    p->mbfile = p->root + "/mbuild.mettle";
+  }
+  p->man = man_empty(p->root, p_base(p->root));
+  return p;
+}
+
+fn drv_rel(root: string, p: string) -> string {
+  return p_rel(root, p);
+}
+
+fn drv_settings(m: Manifest*, profile: string, target: string) {
+  var q: SettingsQuery* = new SettingsQuery;
+  defer free(q);
+  q->profile = profile;
+  q->bin = s_empty();
+  q->target = target;
+  q->sets = sl_new();
+  var st: Settings* = man_settings(m, q);
+  defer free(st);
+  say("settings " + profile + " " + target + ": " + sl_join(man_settings_flags(st, target), " ") + " | components " + sl_join(st->components, ",") + st->error);
+}
+
+fn drv_dump(m: Manifest*) {
+  say("package " + m->name + " " + m->version);
+  say("meta " + sl_join(m->meta, ","));
+  say("targets " + sl_join(m->targets, ","));
+  var i: int64 = 0;
+  while (i < m->ndeps) {
+    var d: DepSpec* = man_dep(m, i);
+    say("dep " + d->key + " version=" + d->version + " path=" + d->path + " registry=" + d->registry);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < m->nregs) {
+    say("registry " + m->regs[i].name + " " + m->regs[i].url);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < m->ncomps) {
+    var c: CompSpec = m->comps[i];
+    say("component " + c.name + " " + drv_rel(m->dir, c.dir) + " " + c.mode + " " + sl_join(c.impls, ",") + " " + sl_join(c.os_defaults, ","));
+    i = i + 1;
+  }
+  var rules: StrList* = sl_new();
+  defer free(rules);
+  i = 0;
+  while (i < m->rules->len) {
+    sl_push(rules, drv_rel(m->dir, sl_get(m->rules, i)));
+    i = i + 1;
+  }
+  say("rules " + sl_join(rules, ","));
+  i = 0;
+  while (i < m->nbins) {
+    var b: BinSpec* = man_bin(m, i);
+    say("bin " + b->name + " " + b->main + " " + b->kind);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < m->nreplaces) {
+    say("replace " + m->replaces[i].module + " path=" + m->replaces[i].path + " version=" + m->replaces[i].version);
+    i = i + 1;
+  }
+  say("local components " + sl_join(m->local_components, ","));
+  drv_settings(m, "release", "windows");
+  drv_settings(m, "release", "linux");
+  drv_settings(m, "debug", "linux");
+  i = 0;
+  while (i < m->warnings->len) {
+    say("warning " + sl_get(m->warnings, i));
+    i = i + 1;
+  }
+}
+
+fn drv_rest(argc: int32, argv: cstring*, from: int32) -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int32 = from;
+  while (i < argc) {
+    sl_push(l, s_from_c(argv[i]));
+    i = i + 1;
+  }
+  return l;
+}
+
+fn drv_edit(file: string, e: MbfEdit) -> int32 {
+  if (!e.ok) {
+    say("refused line " + s_int(e.line) + ": " + e.why);
+    return 1;
+  }
+  fs_write(file, e.text);
+  say("edited line " + s_int(e.line));
+  return 0;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  var opts: Options* = options_new();
+  var at: int32 = 1;
+  while (at < argc) {
+    var flag: string = s_from_c(argv[at]);
+    if (s_eq(flag, "-v")) {
+      g_verbose = true;
+      opts->verbose = true;
+    } else if (s_eq(flag, "--locked")) {
+      opts->locked = true;
+    } else {
+      break;
+    }
+    at = at + 1;
+  }
+  if (at >= argc) {
+    err_line("usage: config_driver [-v] [--locked] COMMAND ...");
+    return 2;
+  }
+  var cmd: string = s_from_c(argv[at]);
+  var args: StrList* = drv_rest(argc, argv, at + 1);
+  var p: Project* = drv_project(opts);
+  if (s_eq(cmd, "version")) {
+    say("config_driver as mbuild: version");
+    return 0;
+  }
+  if (s_eq(cmd, "dumptoml")) {
+    var r: FsRead = fs_read(sl_get(args, 0));
+    var m: Manifest* = man_parse(toml_parse(r.data, sl_get(args, 0)), p->root);
+    if (slen(m->error) > 0) {
+      say("error " + m->error);
+      return 1;
+    }
+    drv_dump(m);
+    return 0;
+  }
+  if (s_eq(cmd, "inittext")) {
+    fs_write(p->root + "/mbuild.mettle", mbf_init_text(sl_get(args, 0)));
+    return 0;
+  }
+  if (s_eq(cmd, "setcall")) {
+    var file: string = sl_get(args, 0);
+    var old: FsRead = fs_read(file);
+    var cargs: StrList* = sl_new();
+    var k: int64 = 2;
+    while (k < args->len) {
+      sl_push(cargs, sl_get(args, k));
+      k = k + 1;
+    }
+    return drv_edit(file, mbf_set_call(old.data, sl_get(args, 1), sl_get(args, 2), cargs));
+  }
+  if (s_eq(cmd, "removecall")) {
+    var rfile: string = sl_get(args, 0);
+    var rold: FsRead = fs_read(rfile);
+    return drv_edit(rfile, mbf_remove_call(rold.data, sl_get(args, 1), sl_get(args, 2)));
+  }
+  if (s_eq(cmd, "build-driver")) {
+    var d: CfgDriver* = new CfgDriver;
+    defer free(d);
+    d->source = "import \"std/io\";\n\nfn main() -> int32 {{\n  print(\"built by cfg_build_driver\\n\");\n  return 0;\n}\n";
+    d->dir = sl_get(args, 0);
+    d->includes = sl_new();
+    var exe: string = cfg_build_driver(p, d);
+    say("exe " + p_base(exe));
+    return 0;
+  }
+  if (s_eq(cmd, "loaddir")) {
+    var dm: Manifest* = cfg_load_dir(p, sl_get(args, 0), sl_get(args, 1));
+    if (dm == (Manifest*)0) {
+      say("no manifest");
+      return 0;
+    }
+    drv_dump(dm);
+    return 0;
+  }
+  p->man = cfg_load(p);
+  if (s_eq(cmd, "load")) {
+    drv_dump(p->man);
+    return 0;
+  }
+  if (s_eq(cmd, "text")) {
+    print(cfg_manifest_text(p));
+    return 0;
+  }
+  if (s_eq(cmd, "info")) {
+    var info: MbfInfo* = cfg_info(p);
+    var i: int64 = 0;
+    while (i < info->ncommands) {
+      say("command " + info->commands[i].name + ": " + info->commands[i].summary);
+      i = i + 1;
+    }
+    say("hooks " + sl_join(info->hooks, ","));
+    return 0;
+  }
+  if (s_eq(cmd, "hook")) {
+    var h: CfgHook* = new CfgHook;
+    defer free(h);
+    h->name = sl_get(args, 0);
+    h->target = "linux";
+    h->profile = "debug";
+    h->out_dir = p->root + "/build/linux/debug";
+    h->bins = sl_of("app");
+    h->built = sl_new();
+    var code: int32 = cfg_run_hook(p, h);
+    say("hook exit " + s_int((int64)code));
+    return code;
+  }
+  if (s_eq(cmd, "setdep")) {
+    var ok: bool = cfg_set_dep(p, sl_get(args, 0), sl_get(args, 1));
+    if (!ok) {
+      return 1;
+    }
+    drv_dump(p->man);
+    return 0;
+  }
+  if (s_eq(cmd, "removedep")) {
+    if (!cfg_remove_dep(p, sl_get(args, 0))) {
+      return 1;
+    }
+    drv_dump(p->man);
+    return 0;
+  }
+  return cfg_run_command(p, cmd, args);
+}
