@@ -1,0 +1,44 @@
+// svc_app PORT CODE [SLEEP_MS]: the app of the services tests (Linux, raw
+// syscalls): prints the greeting of the server on PORT, sleeps, exits with CODE.
+
+fn num(s: cstring) -> int64 {
+  var p: uint8* = (uint8*)s;
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (p[i] >= (uint8)48 && p[i] <= (uint8)57) {
+    n = n * 10 + (int64)(p[i] - (uint8)48);
+    i = i + 1;
+  }
+  return n;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var port: int64 = num(argv[1]);
+  var fd: int64 = syscall(41, 2, 1, 0);
+  var a: int64[2];
+  a[0] = 0;
+  a[1] = 0;
+  var b: uint8* = (uint8*)&a[0];
+  b[0] = (uint8)2;
+  b[2] = (uint8)((port >> 8) & 255);
+  b[3] = (uint8)(port & 255);
+  b[4] = (uint8)127;
+  b[7] = (uint8)1;
+  if (syscall(42, fd, b, 16) != 0) {
+    var no: string = "app: no server\n";
+    syscall(1, 1, no.chars, 15);
+    return 9;
+  }
+  var buf: int64[4];
+  var n: int64 = syscall(0, fd, &buf[0], 32);
+  var got: string = "app got: ";
+  syscall(1, 1, got.chars, 9);
+  syscall(1, 1, &buf[0], n);
+  if (argc > 3) {
+    var ts: int64[2];
+    ts[0] = num(argv[3]) / 1000;
+    ts[1] = (num(argv[3]) % 1000) * 1000000;
+    syscall(35, &ts[0], 0);
+  }
+  return (int32)num(argv[2]);
+}

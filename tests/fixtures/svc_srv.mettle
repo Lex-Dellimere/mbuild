@@ -1,0 +1,77 @@
+// svc_srv: a tiny TCP server for the services tests (Linux, raw syscalls).
+//   srv PORT PIDFILE [DELAY_MS]  writes its pid to PIDFILE, waits DELAY_MS, listens
+//                                on 127.0.0.1:PORT and answers "hi" to each connection
+//   srv PORT PIDFILE DELAY_MS quiet  never listens (for the port timeout)
+
+import "std/io";
+
+fn num(s: cstring) -> int64 {
+  var p: uint8* = (uint8*)s;
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (p[i] >= (uint8)48 && p[i] <= (uint8)57) {
+    n = n * 10 + (int64)(p[i] - (uint8)48);
+    i = i + 1;
+  }
+  return n;
+}
+
+fn nap(ms: int64) {
+  var ts: int64[2];
+  ts[0] = ms / 1000;
+  ts[1] = (ms % 1000) * 1000000;
+  syscall(35, &ts[0], 0);
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  if (argc < 3) {
+    print("usage: srv PORT PIDFILE [DELAY_MS [quiet]]\n");
+    return 2;
+  }
+  var port: int64 = num(argv[1]);
+  var delay: int64 = 0;
+  if (argc > 3) {
+    delay = num(argv[3]);
+  }
+  var pid: int64 = syscall(39);
+  var f: cstring = fopen(argv[2], "w");
+  if (f != 0) {
+    var text: string = "{pid}\n";
+    fwrite((cstring)text.chars, 1, (int64)text.length, f);
+    fclose(f);
+  }
+  print("srv {port}: starting\n");
+  nap(delay);
+  if (argc > 4) {
+    print("srv {port}: not listening\n");
+    while (true) {
+      nap(1000);
+    }
+  }
+  var fd: int64 = syscall(41, 2, 1, 0);
+  var one: int32 = 1;
+  syscall(54, fd, 1, 2, &one, 4);
+  var a: int64[2];
+  a[0] = 0;
+  a[1] = 0;
+  var b: uint8* = (uint8*)&a[0];
+  b[0] = (uint8)2;
+  b[2] = (uint8)((port >> 8) & 255);
+  b[3] = (uint8)(port & 255);
+  b[4] = (uint8)127;
+  b[7] = (uint8)1;
+  if (syscall(49, fd, b, 16) != 0 || syscall(50, fd, 16) != 0) {
+    print("srv {port}: cannot listen\n");
+    return 1;
+  }
+  print("srv {port}: listening\n");
+  var hi: string = "hi\n";
+  while (true) {
+    var c: int64 = syscall(43, fd, 0, 0);
+    if (c >= 0) {
+      syscall(1, c, hi.chars, 3);
+      syscall(3, c);
+    }
+  }
+  return 0;
+}
