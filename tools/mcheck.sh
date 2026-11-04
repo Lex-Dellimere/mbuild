@@ -1,59 +1,87 @@
 #!/bin/sh
-# mcheck.sh: compile one Mettle entry file with every compiler mbuild must
-# support, and optionally run each result.
+# mcheck.sh: build a Mettle entry file with the dev compiler, debug and
+# --release, and fail on any warning.
 #
-#   tools/mcheck.sh <entry.mettle> [--run] [-- program args...]
+#   tools/mcheck.sh ENTRY [--run] [-- ARGS...]   --run: run both builds; stdout and exit codes must agree, exit 0
+#   tools/mcheck.sh --all-drivers                every tests/unit/*_test.mettle
 #
-# Compilers (override with the environment variables):
-#   METTLE_HEAD   the compiler built from ../Mettle      (Linux, current source)
-#   METTLE_L017   the v0.17.0 Linux release             (~/.mbuild/toolchains/v0.17.0/linux)
-#   METTLE_W017   the v0.17.0 Windows release, via wine (~/.mbuild/toolchains/v0.17.0/windows)
-#
-# Outputs go to /tmp/opencode/mcheck/<stem>.{head,headrel,l017,exe}; headrel is a
-# head --release build (compiled, not run), kept because head's optimizer has
-# crashed on mbuild before. Exit status is
-# non-zero when any compile fails (or any run fails, with --run).
+# METTLE: the dev compiler (default ../Mettle/bin/mettle). METTLE_WIN: a Windows
+# dev compiler (mettle.exe) for a third build under wine; skipped when unset.
+# Outputs: ${TMPDIR:-/tmp}/mbuild-mcheck/<stem>.{debug,release,exe} and their .log.
 
 set -u
 here="$(cd "$(dirname "$0")/.." && pwd)"
-HEAD="${METTLE_HEAD:-$here/../Mettle/bin/mettle}"
-L017="${METTLE_L017:-$HOME/.mbuild/toolchains/v0.17.0/linux/bin/mettle}"
-W017="${METTLE_W017:-$HOME/.mbuild/toolchains/v0.17.0/windows/mettle.exe}"
+METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
+out="${TMPDIR:-/tmp}/mbuild-mcheck"
 export WINEDEBUG=-all
+mkdir -p "$out"
 
-[ $# -ge 1 ] || { echo "usage: $0 <entry.mettle> [--run] [-- args...]" >&2; exit 2; }
+usage() { echo "usage: $0 ENTRY [--run] [-- ARGS...] | --all-drivers" >&2; exit 2; }
+[ $# -ge 1 ] || usage
+
+# build LABEL OUTPUT COMPILER-ARGV...: one compile, its warnings counted.
+build() {
+  label="$1"; o="$2"; shift 2
+  if ! "$@" -o "$o" >"$o.log" 2>&1; then
+    echo "[$label] FAILED"
+    sed 's/^/    /' "$o.log" | head -60
+    return 1
+  fi
+  n=$(grep -c '^warning' "$o.log")
+  if [ "$n" != 0 ]; then
+    echo "[$label] $n warnings"
+    sed 's/^/    /' "$o.log" | head -60
+    return 1
+  fi
+  echo "[$label] ok"
+}
+
+# check ENTRY RUN [ARGS...]
+check() {
+  entry="$1"; run="$2"; shift 2
+  stem="$(basename "$entry" .mettle)"
+  echo "== $stem"
+  st=0
+  build debug "$out/$stem.debug" "$METTLE" --build "$entry" || st=1
+  build release "$out/$stem.release" "$METTLE" --build --release "$entry" || st=1
+  if [ -n "${METTLE_WIN:-}" ]; then
+    build windows "$out/$stem.exe" wine "$METTLE_WIN" --build "$entry" || st=1
+  else
+    echo "[windows] skipped: METTLE_WIN names no Windows dev compiler"
+  fi
+  [ $run = 1 ] && [ $st = 0 ] || return $st
+  "$out/$stem.debug" "$@" >"$out/$stem.debug.out" 2>"$out/$stem.debug.err"; dc=$?
+  "$out/$stem.release" "$@" >"$out/$stem.release.out" 2>"$out/$stem.release.err"; rc=$?
+  if [ $dc != 0 ]; then
+    echo "[run] debug exit $dc"
+    cat "$out/$stem.debug.out" "$out/$stem.debug.err" | grep -v '^PASS' | sed 's/^/    /' | head -60
+    st=1
+  fi
+  if [ $dc != $rc ]; then
+    echo "[run] exit codes differ: debug $dc, release $rc"
+    st=1
+  elif ! cmp -s "$out/$stem.debug.out" "$out/$stem.release.out"; then
+    echo "[run] stdout differs between debug and release"
+    diff "$out/$stem.debug.out" "$out/$stem.release.out" | sed 's/^/    /' | head -40
+    st=1
+  fi
+  if [ -n "${METTLE_WIN:-}" ]; then
+    wine "$out/$stem.exe" "$@" >"$out/$stem.exe.out" 2>&1; wc=$?
+    [ $wc = $dc ] || { echo "[run] windows exit $wc, linux $dc"; st=1; }
+  fi
+  [ $st = 0 ] && echo "[run] ok ($(tail -1 "$out/$stem.debug.out"))"
+  return $st
+}
+
+if [ "$1" = "--all-drivers" ]; then
+  status=0
+  for f in "$here"/tests/unit/*_test.mettle; do
+    check "$f" 0 || status=1
+  done
+  exit $status
+fi
 entry="$1"; shift
 run=0
 if [ "${1:-}" = "--run" ]; then run=1; shift; fi
 if [ "${1:-}" = "--" ]; then shift; fi
-
-stem="$(basename "$entry" .mettle)"
-outdir=/tmp/opencode/mcheck
-mkdir -p "$outdir"
-status=0
-
-compile() {
-  label="$1"; shift
-  if "$@" >"$outdir/$stem.$label.log" 2>&1; then
-    warnings=$(grep -c "^warning\|warning\[" "$outdir/$stem.$label.log" || true)
-    echo "[$label] ok ($warnings warnings)"
-  else
-    echo "[$label] FAILED:"
-    sed 's/^/    /' "$outdir/$stem.$label.log" | head -60
-    status=1
-    return 1
-  fi
-  return 0
-}
-
-compile head "$HEAD" --build "$entry" -o "$outdir/$stem.head" && [ $run = 1 ] && {
-  echo "--- run head"; "$outdir/$stem.head" "$@" || { echo "[head] exit $?"; status=1; }
-}
-compile headrel "$HEAD" --build --release "$entry" -o "$outdir/$stem.headrel" || true
-compile l017 "$L017" --build "$entry" -o "$outdir/$stem.l017" && [ $run = 1 ] && {
-  echo "--- run l017"; "$outdir/$stem.l017" "$@" || { echo "[l017] exit $?"; status=1; }
-}
-compile w017 wine "$W017" --build "$entry" -o "$outdir/$stem.exe" && [ $run = 1 ] && {
-  echo "--- run w017 (wine)"; wine "$outdir/$stem.exe" "$@" || { echo "[w017] exit $?"; status=1; }
-}
-exit $status
+check "$entry" $run "$@"
