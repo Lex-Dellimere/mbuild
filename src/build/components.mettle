@@ -1224,14 +1224,16 @@ export fn cmp_bin_problem(p: Project*, b: BinSpec*, st: Settings*) -> string {
   return s_empty();
 }
 
-// flags without the ones the compiler refuses on *-none triples.
+// flags without the ones that need a runtime: the compiler refuses --safe
+// and --check-effects on *-none triples, and -s makes a flat image reference
+// mettle_crash_install (issue 12).
 export fn cmp_freestanding_flags(flags: StrList*) -> StrList* {
   var out: StrList* = sl_new();
   var i: int64 = 0;
   while (i < flags->len) {
     var f: string = sl_get(flags, i);
-    if (s_eq(f, "--safe") || s_eq(f, "--check-effects")) {
-      verbose("dropping " + f + " for a freestanding bin (the compiler refuses it on *-none)");
+    if (s_eq(f, "--safe") || s_eq(f, "--check-effects") || s_eq(f, "-s") || s_eq(f, "--stack-trace")) {
+      verbose("dropping " + f + " for a freestanding bin (it needs a runtime)");
     } else {
       sl_push(out, f);
     }

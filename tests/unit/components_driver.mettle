@@ -363,8 +363,9 @@ fn drv_kinds() {
   var fl: StrList* = sl_of("--safe");
   sl_push(fl, "-s");
   sl_push(fl, "--check-effects");
+  sl_push(fl, "--image-base");
   var kept: StrList* = cmp_freestanding_flags(fl);
-  drv_check("freestanding flags", kept->len == 1 && s_eq(sl_get(kept, 0), "-s"), sl_join(kept, " "));
+  drv_check("freestanding flags", kept->len == 1 && s_eq(sl_get(kept, 0), "--image-base"), sl_join(kept, " "));
   free(fl);
   free(kept);
   free(st);
