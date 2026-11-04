@@ -1,9 +1,5 @@
-// sys_smoke: exercises path, sys, fs and proc against a scratch directory.
-// Run with: tools/mcheck.sh tests/sys_smoke.mettle --run
-//
-// The program also starts itself as a child (`--child ...`) to test native
-// processes on every platform; under wine the host programs (sh, git) go
-// through the sh-script runner.
+// sys_test: path, sys, fs, proc and links against a scratch directory; it starts itself
+// as a child (`--child ...`) to test processes.  tools/mcheck.sh tests/unit/sys_test.mettle --run
 
 import "std/io";
 import "std/mem";
@@ -26,6 +22,14 @@ fn check(name: string, ok: bool) {
     say("FAIL " + name);
   }
   flush_out();
+}
+
+// " (detail)" for a failed check's name, "" when it passed.
+fn why(ok: bool, detail: string) -> string {
+  if (ok) {
+    return "";
+  }
+  return " (" + detail + ")";
 }
 
 fn check_eq(name: string, got: string, want: string) {
@@ -262,44 +266,41 @@ fn self_cmd(mode: string) -> Cmd* {
 }
 
 fn test_tools(dir: string) {
-  var git: Tool = sys_find_tool("git");
-  check("sys_find_tool git (" + git.path + ")", tool_found(git));
-  check("sys_find_tool git unix flag", git.unix == sys_is_wine());
+  var tar: Tool = sys_find_tool("tar");
+  check("sys_find_tool tar (" + tar.path + ")", tool_found(tar));
+  check("sys_find_tool tar unix flag", tar.unix == sys_is_wine());
   check("sys_find_tool missing", !tool_found(sys_find_tool("mbuild-no-such-tool-xyz")));
   var sh: Tool = sys_find_tool("sh");
   check("sys_find_tool sh (" + sh.path + ")", tool_found(sh));
   check("sys_find_tool self by path", tool_found(sys_find_tool(sys_self_exe())));
-  var gp: Tool = sys_find_tool(git.path);
-  check("sys_find_tool by found path (" + gp.path + ")", tool_found(gp) && gp.unix == git.unix && s_eq(gp.path, git.path));
-
+  var tp: Tool = sys_find_tool(tar.path);
+  check("sys_find_tool by found path (" + tp.path + ")", tool_found(tp) && tp.unix == tar.unix && s_eq(tp.path, tar.path));
 }
 
 fn test_proc_tool() {
-  var git: Tool = sys_find_tool("git");
-  sys_setenv("MBUILD_SMOKE_GIT", git.path);
-  var t1: Tool = proc_tool("mbuild-no-such-tool-xyz", "MBUILD_SMOKE_GIT");
+  var tar: Tool = sys_find_tool("tar");
+  sys_setenv("MBUILD_SYS_TEST_TAR", tar.path);
+  var t1: Tool = proc_tool("mbuild-no-such-tool-xyz", "MBUILD_SYS_TEST_TAR");
   check("proc_tool override", tool_found(t1));
-  var t2: Tool = proc_tool("git", "MBUILD_SMOKE_UNSET_VAR");
+  var t2: Tool = proc_tool("tar", "MBUILD_SYS_TEST_UNSET_VAR");
   check("proc_tool fallback", tool_found(t2));
-  var req: Tool = *proc_require("git", "MBUILD_SMOKE_UNSET_VAR", "for the smoke test");
+  var req: Tool = *proc_require("tar", "MBUILD_SYS_TEST_UNSET_VAR", "for sys_test");
   check("proc_require", tool_found(req));
-
 }
 
 fn test_capture() {
-  var git: Tool = sys_find_tool("git");
-  var gv: Cmd* = cmd_new(git);
-  defer t_cmd_free(gv);
-  cmd_arg(gv, "--version");
-  var r: Captured = proc_capture(gv);
-  check("capture git --version (" + s_trim(r.out) + ")", r.code == 0 && s_starts(r.out, "git version "));
+  var tar: Tool = sys_find_tool("tar");
+  var tv: Cmd* = cmd_new(tar);
+  defer t_cmd_free(tv);
+  cmd_arg(tv, "--version");
+  var r: Captured = proc_capture(tv);
+  check("capture tar --version", r.code == 0 && s_contains(r.out, "tar"));
 
-  var gf: Cmd* = cmd_new(git);
-  defer t_cmd_free(gf);
-  cmd_arg(gf, "no-such-subcommand-xyz");
-  var rf: Captured = proc_capture_all(gf);
-  check("capture failing git (code {rf.code})", rf.code != 0 && slen(rf.out) > 0);
-
+  var tf: Cmd* = cmd_new(tar);
+  defer t_cmd_free(tf);
+  cmd_arg(tf, "--no-such-option-xyz");
+  var rf: Captured = proc_capture_all(tf);
+  check("capture failing tar (code {rf.code})", rf.code != 0 && slen(rf.out) > 0);
 }
 
 fn test_exit_codes() {
@@ -323,20 +324,21 @@ fn test_exit_codes() {
 }
 
 fn test_tools2(dir: string) {
-  sys_setenv("MBUILD_SMOKE_VAR", "set by sys_setenv");
-  check_eq("sys_setenv in-process", env_get("MBUILD_SMOKE_VAR"), "set by sys_setenv");
-  check_eq("sys_setenv seen by sh", s_trim(sys_capture(sh_cmd("echo \"$MBUILD_SMOKE_VAR\""), false).out), "set by sys_setenv");
-  var ce: Cmd* = sh_cmd("echo \"$MBUILD_SMOKE_CMD\"");
+  sys_setenv("MBUILD_SYS_TEST_VAR", "set by sys_setenv");
+  check_eq("sys_setenv in-process", env_get("MBUILD_SYS_TEST_VAR"), "set by sys_setenv");
+  check_eq("sys_setenv seen by sh", s_trim(sys_capture(sh_cmd("echo \"$MBUILD_SYS_TEST_VAR\""), false).out), "set by sys_setenv");
+  var ce: Cmd* = sh_cmd("echo \"$MBUILD_SYS_TEST_CMD\"");
   defer t_cmd_free(ce);
-  cmd_env(ce, "MBUILD_SMOKE_CMD", "it's per command");
+  cmd_env(ce, "MBUILD_SYS_TEST_CMD", "it's per command");
   check_eq("Cmd.env seen by sh", s_trim(sys_capture(ce, false).out), "it's per command");
-  check("Cmd.env not leaked", slen(env_get("MBUILD_SMOKE_CMD")) == 0);
+  check("Cmd.env not leaked", slen(env_get("MBUILD_SYS_TEST_CMD")) == 0);
 
   var cw: Cmd* = sh_cmd("pwd");
   defer t_cmd_free(cw);
   cw->cwd = dir + "/a";
   var pw: string = s_trim(sys_capture(cw, false).out);
-  check("Cmd.cwd for sh (" + pw + ")", s_ends(pw, "/a") && s_contains(pw, p_base(dir)));
+  var shok: bool = s_ends(pw, "/a") && s_contains(pw, p_base(dir));
+  check("Cmd.cwd for sh" + why(shok, pw), shok);
 
   fs_write(dir + "/cat-me.txt", "cat content");
   var cc: Cmd* = sh_cmd("cat \"$1\"");
@@ -409,7 +411,8 @@ fn test_lock(dir: string) {
   var t0: int64 = sys_now_ms();
   var got: bool = fs_lock_acquire(lk, 150);
   var dt: int64 = sys_now_ms() - t0;
-  check("fs_lock_acquire held, times out ({dt} ms)", !got && dt >= 140 && dt < 2000);
+  var tok: bool = !got && dt >= 140 && dt < 2000;
+  check("fs_lock_acquire held, times out" + why(tok, "{dt} ms"), tok);
   fs_lock_release(lk);
   check("fs_lock_release removes the lock", !fs_exists(lk));
   check("fs_lock_acquire after release", fs_lock_acquire(lk, 0));
@@ -446,19 +449,20 @@ fn test_self(dir: string) {
   check("capture self merged", s_contains(sm.out, "child-out") && s_contains(sm.out, "child-err"));
   var sv: Cmd* = self_cmd("env");
   defer t_cmd_free(sv);
-  cmd_arg(sv, "MBUILD_SMOKE_VAR");
+  cmd_arg(sv, "MBUILD_SYS_TEST_VAR");
   check_eq("sys_setenv seen by self", sys_capture(sv, false).out, "set by sys_setenv");
   var sv2: Cmd* = self_cmd("env");
   defer t_cmd_free(sv2);
-  cmd_arg(sv2, "MBUILD_SMOKE_CMD2");
-  cmd_env(sv2, "MBUILD_SMOKE_CMD2", "per command");
+  cmd_arg(sv2, "MBUILD_SYS_TEST_CMD2");
+  cmd_env(sv2, "MBUILD_SYS_TEST_CMD2", "per command");
   check_eq("Cmd.env seen by self", sys_capture(sv2, false).out, "per command");
-  check("Cmd.env restored", slen(env_get("MBUILD_SMOKE_CMD2")) == 0);
+  check("Cmd.env restored", slen(env_get("MBUILD_SYS_TEST_CMD2")) == 0);
   var sd: Cmd* = self_cmd("cwd");
   defer t_cmd_free(sd);
   sd->cwd = dir + "/a";
   var sdo: string = sys_capture(sd, false).out;
-  check("Cmd.cwd for self (" + sdo + ")", s_ends(sdo, "/a") && s_contains(sdo, p_base(dir)));
+  var selfok: bool = s_ends(sdo, "/a") && s_contains(sdo, p_base(dir));
+  check("Cmd.cwd for self" + why(selfok, sdo), selfok);
   var sa: Cmd* = self_cmd("args");
   defer t_cmd_free(sa);
   cmd_arg(sa, "a b");
@@ -475,7 +479,7 @@ fn test_jobs(dir: string) {
   cmds[0] = sh_cmd("echo job0; exit 0");
   cmds[1] = sh_cmd("echo job1 >&2; sleep 0.2; exit 1");
   cmds[2] = sh_cmd("echo job2; exit 2");
-  cmds[3] = sh_cmd("sleep 0.1; echo job3 \"$MBUILD_SMOKE_VAR\"");
+  cmds[3] = sh_cmd("sleep 0.1; echo job3 \"$MBUILD_SYS_TEST_VAR\"");
   var e5: Cmd* = self_cmd("exit");
   defer t_cmd_free(e5);
   cmd_arg(e5, "7");
@@ -516,14 +520,61 @@ fn test_jobs(dir: string) {
   free(codes2);
 }
 
+// Links (sys_make_link, sys_is_link, sys_remove_link) and sys_remove_tree over them.
+fn test_links(dir: string) {
+  check("links: mkdirs", fs_mkdirs(dir));
+  var tgt: string = dir + "/target";
+  var tgt2: string = dir + "/target2";
+  var lnk: string = dir + "/link";
+  check("links: setup", fs_write(tgt + "/keep.txt", "keep\n") && fs_write(tgt2 + "/other.txt", "other\n"));
+  var abs1: string = sys_realpath(tgt);
+  var abs2: string = sys_realpath(tgt2);
+  check("links: realpath", slen(abs1) > 0 && slen(abs2) > 0);
+
+  check("links: no link yet", !sys_is_link(lnk));
+  check("links: real dir is not a link", !sys_is_link(tgt));
+  check("links: file is not a link", !sys_is_link(tgt + "/keep.txt"));
+  check("links: missing is not a link", !sys_is_link(dir + "/missing"));
+
+  check("links: make_link", sys_make_link(abs1, lnk));
+  check("links: is_link", sys_is_link(lnk));
+  check("links: is_link with trailing slash", sys_is_link(lnk + "/"));
+  check("links: file through link", fs_is_file(lnk + "/keep.txt"));
+  check("links: link is a dir", fs_is_dir(lnk));
+
+  check("links: make_link replaces a link", sys_make_link(abs2, lnk));
+  check("links: replaced link points at target2", fs_is_file(lnk + "/other.txt") && !fs_exists(lnk + "/keep.txt"));
+  check("links: target untouched by replace", fs_is_file(tgt + "/keep.txt"));
+
+  check("links: remove_link on a real dir is false", !sys_remove_link(tgt));
+  check("links: real dir remains", fs_is_file(tgt + "/keep.txt"));
+  check("links: remove_link on a missing path is false", !sys_remove_link(dir + "/missing"));
+
+  check("links: make_link over a real dir is false", !sys_make_link(abs2, tgt));
+  check("links: real dir intact", fs_is_file(tgt + "/keep.txt") && !sys_is_link(tgt));
+
+  check("links: remove_link", sys_remove_link(lnk));
+  check("links: link gone", !fs_exists(lnk) && !sys_is_link(lnk));
+  check("links: target2 kept", fs_is_file(tgt2 + "/other.txt"));
+
+  check("links: make_link again", sys_make_link(abs1, lnk));
+  check("links: remove_tree on link", sys_remove_tree(lnk));
+  check("links: link gone after remove_tree", !fs_exists(lnk) && !sys_is_link(lnk));
+  check("links: target kept after remove_tree", fs_is_file(tgt + "/keep.txt"));
+
+  var outer: string = dir + "/outer";
+  check("links: nested setup", fs_mkdirs(outer + "/deps") && fs_write(outer + "/deps/f.txt", "x"));
+  check("links: nested make_link", sys_make_link(abs1, outer + "/deps/mod"));
+  check("links: nested is_link", sys_is_link(outer + "/deps/mod") && fs_is_file(outer + "/deps/mod/keep.txt"));
+  check("links: remove_tree over a link", sys_remove_tree(outer) && !fs_exists(outer));
+  check("links: target kept after nested remove_tree", fs_is_file(tgt + "/keep.txt"));
+}
+
 fn main(argc: int32, argv: cstring*) -> int32 {
   if (argc >= 3 && s_eq(s_from_c(argv[1]), "--child")) {
     return child(argc, argv);
   }
-  var dir: string = "/tmp/opencode/sys_smoke-" + sys_os() + "-{sys_now_ms()}";
-  if (s_eq(sys_os(), "windows") && !sys_is_wine()) {
-    dir = fs_temp_dir() + "/sys_smoke-{sys_now_ms()}";
-  }
+  var dir: string = fs_temp_dir() + "/mbuild-sys_test-" + sys_os() + "-{sys_now_ms()}";
   sys_remove_tree(dir);
   test_path();
   test_basics();
@@ -538,9 +589,10 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   test_lock(dir);
   test_self(dir);
   test_jobs(dir);
+  test_links(dir + "/links");
   check("cleanup", sys_remove_tree(dir) && !fs_exists(dir));
   say("");
-  say("sys_smoke: {g_pass} passed, {g_fail} failed");
+  say("sys_test: {g_pass} passed, {g_fail} failed");
   flush_out();
   if (g_fail > 0) {
     return 1;

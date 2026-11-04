@@ -1,63 +1,26 @@
 #!/bin/sh
-# r2_platform.sh: round-2 platform acceptance (DESIGN.md 12.21 P): links made,
-# detected and removed by sys_make_link / sys_is_link / sys_remove_link, and
-# sys_remove_tree removing a link without touching its target, on Linux (head
-# and v0.17.0) and under wine (v0.17.0 Windows, Linux-form paths through Z:).
-#
-#   sh tests/r2_platform.sh
+# platform.sh: path, sys, fs, proc and links (tests/unit/sys_test.mettle), also under wine with METTLE_WIN.
+#   METTLE=dev-compiler sh tests/e2e/platform.sh   (scratch: $MBTEST_TMP; SKIP_WINE=1 skips wine)
+
 set -u
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$here" || exit 1
-export WINEDEBUG=-all
-out=/tmp/opencode/mcheck
-fails=0
+export METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
+T="${MBTEST_TMP:-/tmp/mbuild-test-${USER:-me}/platform}"
+rm -rf "$T"
+mkdir -p "$T"
+export MBUILD_HOME="$T/home" TMPDIR="$T"
+[ "${SKIP_WINE:-0}" = 1 ] && unset METTLE_WIN
 
-echo "== build"
-tools/mcheck.sh tests/platform_driver.mettle >/tmp/opencode/r2_platform.build.log 2>&1
-cat /tmp/opencode/r2_platform.build.log
-if grep -q "FAILED" /tmp/opencode/r2_platform.build.log; then
-  echo "r2_platform: build failed"
-  exit 1
-fi
-if grep "ok (" /tmp/opencode/r2_platform.build.log | grep -qv "(0 warnings)"; then
-  echo "r2_platform: warnings"
-  fails=$((fails + 1))
-fi
+pass=0
+failed=0
+ok() { pass=$((pass + 1)); echo "PASS $1"; }
+bad() { failed=$((failed + 1)); echo "FAIL $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/     | /' | head -60; }
+# unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
+unit() { if out=$(sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
 
-base=/tmp/opencode/r2_platform.$$
-rm -rf "$base"
-mkdir -p "$base"
+unit sys_test
+[ -n "${METTLE_WIN:-}" ] || echo "note: wine skipped (METTLE_WIN names no Windows dev compiler)"
 
-run_case() {
-  label="$1"; shift
-  dir="$1"; shift
-  host_dir="$1"; shift
-  echo "== $label"
-  if "$@" "$dir" >"$base/$label.log" 2>&1 && grep -q " 0 failed" "$base/$label.log"; then
-    tail -1 "$base/$label.log"
-  else
-    cat "$base/$label.log"
-    echo "FAIL $label"
-    fails=$((fails + 1))
-  fi
-  if [ -e "$host_dir" ] || [ -L "$host_dir" ]; then
-    echo "FAIL $label: $host_dir left behind"
-    fails=$((fails + 1))
-  fi
-}
-
-run_case head "$base/head" "$base/head" "$out/platform_driver.head"
-run_case l017 "$base/l017" "$base/l017" "$out/platform_driver.l017"
-run_case w017 "Z:$base/w017" "$base/w017" wine "$out/platform_driver.exe"
-# A relative directory under wine (the runner cds to the Linux form of cwd).
-cd "$base" || exit 1
-run_case l017rel "lrel" "$base/lrel" "$out/platform_driver.l017"
-run_case w017rel "rel" "$base/rel" wine "$out/platform_driver.exe"
-cd "$here" || exit 1
-
-rm -rf "$base"
-if [ $fails -ne 0 ]; then
-  echo "r2_platform: $fails failure(s)"
-  exit 1
-fi
-echo "r2_platform: all passed"
+echo
+echo "platform: $pass passed, $failed failed"
+[ $failed = 0 ]
