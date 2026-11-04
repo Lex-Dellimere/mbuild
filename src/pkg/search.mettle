@@ -1,0 +1,245 @@
+// search: mbuild search [TEXT]: the packages of every registry in the search
+// order, matched (case-insensitively) by name, description or exported function.
+//
+// Functions come from each package's newest non-yanked archive, fetched and
+// unpacked like a dependency's (checksum checked, kept in the download cache),
+// read by the API scanner, and the unpacked copy removed again.
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../model/semver";
+import "../model/manifest";
+import "../model/project";
+import "registry";
+import "api";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+struct SrHit {
+  name: string;
+  version: string;   // as the registry spells it
+  registry: string;
+  desc: string;
+  fns: StrList*;
+  why: string;       // why fns is unknown, else ""
+}
+
+fn sr_has(hay: string, needle: string) -> bool {
+  return s_contains(s_lower(hay), needle);
+}
+
+// The newest version that is not yanked; 0 when there is none.
+fn sr_newest(ix: RegIndex*) -> RegVersion* {
+  var best: RegVersion* = (RegVersion*)0;
+  var i: int64 = 0;
+  while (i < ix->n) {
+    var v: RegVersion* = &ix->versions[i];
+    if (!v->yanked && (best == (RegVersion*)0 || sv_cmp(v->version, best->version) > 0)) {
+      best = v;
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+fn sr_meta(m: Manifest*, key: string) -> string {
+  var i: int64 = 0;
+  while (i < m->meta->len) {
+    var kv: string = sl_get(m->meta, i);
+    if (s_starts(kv, key + "=")) {
+      return s_from(kv, slen(key) + 1);
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+fn sr_first_line(msg: string) -> string {
+  var nl: int64 = s_find_byte(msg, 10);
+  if (nl >= 0) {
+    return s_dup(s_sub(msg, 0, nl));
+  }
+  return s_dup(msg);
+}
+
+// Pushes the `export fn` names of rv's archive into out; "" or why it can't.
+fn sr_fns(p: Project*, ix: RegIndex*, rv: RegVersion*, m: Manifest*, out: StrList*) -> string {
+  var archive: string = reg_fetch(p, ix, rv->version);
+  if (slen(archive) == 0) {
+    return sr_first_line(reg_error());
+  }
+  var dest: string = fs_mbuild_home() + "/search/" + ix->name + "@" + rv->version;
+  var marker: string = ix->name + " " + rv->version + " " + ix->registry;
+  var e: string = reg_extract(archive, rv->sha, dest, marker);
+  if (slen(e) > 0) {
+    sys_remove_tree(dest);
+    return sr_first_line(e);
+  }
+  var surf: ApiSurface* = api_surface_dir(man_import_dir(m, dest));
+  defer free(surf);
+  var i: int64 = 0;
+  while (i < surf->names->len) {
+    if (s_eq(sl_get(surf->kinds, i), "fn")) {
+      sl_push(out, sl_get(surf->names, i));
+    }
+    i = i + 1;
+  }
+  sys_remove_tree(dest);
+  return s_empty();
+}
+
+fn sr_positional(l: StrList*) -> StrList* {
+  var r: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < l->len) {
+    if (!s_starts(sl_get(l, i), "-")) {
+      sl_push(r, sl_get(l, i));
+    }
+    i = i + 1;
+  }
+  return r;
+}
+
+fn sr_print(h: SrHit*, dup: bool) {
+  var head: string = h->name + " " + h->version;
+  if (dup) {
+    head = head + " (registry " + h->registry + ")";
+  }
+  if (slen(h->desc) > 0) {
+    head = head + "  " + h->desc;
+  }
+  say(head);
+  if (slen(h->why) > 0) {
+    say("  fns: unknown (" + h->why + ")");
+  } else if (h->fns->len == 0) {
+    say("  fns: (none)");
+  } else {
+    say("  fns: " + sl_join(h->fns, ", "));
+  }
+}
+
+// mbuild search [TEXT]
+export fn search_cmd(p: Project*) -> int32 {
+  var args: StrList* = sr_positional(p->opts->rest);
+  defer free(args);
+  if (args->len > 1) {
+    fail_hint("mbuild search takes one TEXT", "quote it: mbuild search \"http client\"");
+  }
+  var raw: string = s_empty();
+  if (args->len == 1) {
+    raw = sl_get(args, 0);
+  }
+  var text: string = s_lower(raw);
+  var names_only: bool = g_quiet;
+  var regs: RegList* = reg_list(p);
+  defer free(regs);
+  var hits: SrHit** = (SrHit**)0;
+  var nhits: int64 = 0;
+  var failed: bool = false;
+  // fetching must not write status lines among the results
+  g_quiet = true;
+  var r: int64 = 0;
+  while (r < regs->names->len) {
+    var rname: string = sl_get(regs->names, r);
+    r = r + 1;
+    var all: RegAll* = reg_all(p, rname, true);
+    if (!all->ok) {
+      var msg: string = all->err;
+      var tag: string = "registry " + rname;
+      if (!s_contains(msg, tag)) {
+        msg = tag + ": " + msg;
+      }
+      error_msg(msg);
+      failed = true;
+      continue;
+    }
+    if (all->partial) {
+      warn("registry " + rname + " has no list of its packages; searching the ones in the download cache");
+    }
+    var k: int64 = 0;
+    while (k < all->n) {
+      var ix: RegIndex* = all->ixs[k];
+      k = k + 1;
+      var rv: RegVersion* = sr_newest(ix);
+      if (rv == (RegVersion*)0) {
+        continue;
+      }
+      var h: SrHit* = new SrHit;
+      h->name = ix->name;
+      h->version = rv->version;
+      if (s_eq(ix->kind, "json")) {
+        h->version = s_from(rv->version, 1);
+      }
+      h->registry = rname;
+      h->desc = ix->desc;
+      h->fns = sl_new();
+      h->why = s_empty();
+      var matched: bool = slen(text) == 0 || sr_has(ix->name, text);
+      var m: Manifest* = (Manifest*)0;
+      if (!(matched && names_only)) {
+        if (s_eq(ix->kind, "mbuild")) {
+          m = reg_manifest(p, ix, rv->version);
+          if (m != (Manifest*)0) {
+            h->desc = sr_meta(m, "description");
+          } else {
+            h->why = sr_first_line(reg_error());
+          }
+        }
+        h->desc = s_replace_byte(h->desc, 10, 32);
+        matched = matched || sr_has(h->desc, text);
+      }
+      if (!(matched && names_only) && slen(h->why) == 0) {
+        h->why = sr_fns(p, ix, rv, m, h->fns);
+        var f: int64 = 0;
+        while (!matched && f < h->fns->len) {
+          matched = sr_has(sl_get(h->fns, f), text);
+          f = f + 1;
+        }
+      }
+      if (!matched) {
+        free(h->fns->items);
+        free(h->fns);
+        free(h);
+        continue;
+      }
+      // insert by name, after equal names (registry order)
+      hits = (SrHit**)realloc(hits, (nhits + 1) * 8);
+      var at: int64 = nhits;
+      while (at > 0 && s_cmp(hits[at - 1]->name, h->name) > 0) {
+        hits[at] = hits[at - 1];
+        at = at - 1;
+      }
+      hits[at] = h;
+      nhits = nhits + 1;
+    }
+  }
+  g_quiet = names_only;
+  sys_remove_tree(fs_mbuild_home() + "/search");
+  var i: int64 = 0;
+  while (i < nhits) {
+    var h2: SrHit* = hits[i];
+    var dup: bool = (i > 0 && s_eq(hits[i - 1]->name, h2->name)) || (i + 1 < nhits && s_eq(hits[i + 1]->name, h2->name));
+    if (names_only) {
+      if (i == 0 || !s_eq(hits[i - 1]->name, h2->name)) {
+        say(h2->name);
+      }
+    } else {
+      if (i > 0) {
+        say("");
+      }
+      sr_print(h2, dup);
+    }
+    i = i + 1;
+  }
+  if (nhits == 0 && slen(raw) > 0) {
+    error_msg("no package matches " + raw);
+  } else if (nhits == 0 && !failed) {
+    error_msg("no registry has a package");
+  }
+  if (nhits == 0 || failed) {
+    return 1;
+  }
+  return 0;
+}

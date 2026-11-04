@@ -174,6 +174,7 @@ this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_W
 | `mbuild test` | run `@test` functions, cached |
 | `mbuild check` | type check without linking |
 | `mbuild clean` | remove build output |
+| `mbuild search [TEXT]` | find packages in the registries by name, description or function |
 | `mbuild get` / `remove` / `update` / `tidy` | manage deps |
 | `mbuild deps` / `why` / `outdated` | show the deps, why one is there, what's newer |
 | `mbuild fetch` / `vendor` | download everything so builds work offline / copy deps into `vendor/` |

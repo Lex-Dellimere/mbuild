@@ -144,6 +144,83 @@ rm -rf "$S/home-broken"
 mb build
 check "another format is an error" eval 'code_is 1 && has "is not a format 1 index"'
 
+echo "== mbuild search"
+"$METTLE" --build --release "$here/src/main.mettle" -o "$S/mbuild-release" >"$S/build-release.log" 2>&1 || { cat "$S/build-release.log"; exit 1; }
+search_suite() { # MODE
+  mode="$1"
+  if [ $mode = debug ]; then MB="$S/mbuild"; else MB="$S/mbuild-release"; fi
+  export MBUILD_HOME="$S/home-search-$mode" MBUILD_REGISTRY="$REG"
+  W="$S/search-$mode"
+  rm -rf "$W" "$MBUILD_HOME"; mkdir -p "$W/plain"
+  cd "$W/plain" || exit 1
+  mb search
+  check "search lists every package, outside a project ($mode)" eval 'code_is 0 && has "greet 1.0.0  the \"greet\" package" && has "  fns: gr_hello" && has "textkit 1.1.0  " && has "  fns: tk_twice, tk_shout, tk_version"'
+  check "search sorts by name, a blank line between blocks ($mode)" sh -c '[ "$(grep -v "^ \|^$\|Created" "$0" | cut -d" " -f1 | tr "\n" " ")" = "badsha evil greet textkit " ] && [ "$(grep -c "^$" "$0")" = 3 ]' "$S/last.out"
+  check "search skips a package with only yanked versions ($mode)" hasnt "old 1.0.0"
+  check "search says why a package has no functions ($mode)" eval 'has "badsha 1.0.0" && has "fns: unknown (badsha v1.0.0 from registry default does not match its index)" && has "fns: unknown (evil-1.0.0.tar: member \`passwd\` is not a regular file"'
+  check "search leaves no unpacked archive ($mode)" sh -c '[ ! -e "$MBUILD_HOME/search" ]'
+  mb search greet
+  check "search by name ($mode)" eval 'code_is 0 && has "greet 1.0.0" && hasnt "textkit"'
+  mb search GREET
+  check "search ignores case ($mode)" eval 'code_is 0 && has "greet 1.0.0" && hasnt "textkit"'
+  mb search '"textkit" package'
+  check "search by description ($mode)" eval 'code_is 0 && has "textkit 1.1.0" && hasnt "greet"'
+  mb search tk_shout
+  check "search by function name ($mode)" eval 'code_is 0 && has "textkit 1.1.0" && hasnt "greet"'
+  mb search GR_HEL
+  check "search by part of a function name, any case ($mode)" eval 'code_is 0 && has "greet 1.0.0" && has "  fns: gr_hello" && hasnt "textkit"'
+  mb search zzz
+  check "search with no match exits 1 ($mode)" eval 'code_is 1 && [ "$(cat "$S/last.out")" = "error: no package matches zzz" ]'
+  mb search -q
+  check "search -q prints names only ($mode)" eval 'code_is 0 && grep -v Created "$S/last.out" | grep -qx "badsha" && [ "$(grep -v Created "$S/last.out" | tr "\n" " ")" = "badsha evil greet textkit " ]'
+  mb search -q tk_
+  check "search -q matches functions too ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = "textkit" ]'
+  mb search a b
+  check "search takes one TEXT ($mode)" eval 'code_is 1 && has "mbuild search takes one TEXT"'
+
+  echo "== mbuild search --offline ($mode)"
+  MBUILD_HOME="$W/cold" mb --offline search
+  check "offline with no cached index ($mode)" eval 'code_is 1 && has "the index of registry default is not in the download cache and --offline forbids fetching it" && has "help: run mbuild search once while online"'
+  mb search textkit
+  cp "$S/last.out" "$W/online.out"
+  mb --offline search textkit
+  check "offline from the cache gives the same answer ($mode)" cmp -s "$S/last.out" "$W/online.out"
+  mb --offline search
+  check "offline lists the packages whose archive is gone ($mode)" eval 'code_is 0 && has "fns: unknown (badsha v1.0.0 is not in the download cache and --offline forbids fetching it)" && has "  fns: tk_twice, tk_shout, tk_version"'
+  rm -f "$MBUILD_HOME"/registry/default@*/v1/archives/greet-1.0.0.tar
+  mb --offline search greet
+  check "offline with an uncached archive says so ($mode)" eval 'code_is 0 && has "greet 1.0.0" && has "fns: unknown (greet v1.0.0 is not in the download cache and --offline forbids fetching it)"'
+  mb --offline search -q greet
+  check "offline -q needs no archive ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = "greet" ]'
+
+  echo "== mbuild search, two registries ($mode)"
+  rm -rf "$W/copy" "$W/two"; cp -r "$REG" "$W/copy"
+  rm -rf "$W/copy/v1/archives/evil-1.0.0.tar" "$W/copy/v1/archives/badsha-1.0.0.tar"
+  mkdir -p "$W/two"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("two", "0.1.0");\n  mb_registry("copy", "%s");\n}\n' "$W/copy" >"$W/two/mbuild.mettle"
+  cd "$W/two" || exit 1
+  mb search greet
+  check "search asks every registry, the same name is tagged ($mode)" eval 'code_is 0 && has "greet 1.0.0 (registry copy)  " && has "greet 1.0.0 (registry default)  "'
+  check "the project's registries come first ($mode)" sh -c '[ "$(grep -c "^greet" "$0")" = 2 ] && [ "$(grep "^greet" "$0" | head -1 | grep -c copy)" = 1 ]' "$S/last.out"
+  mb search -q greet
+  check "search -q names a package once ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = "greet" ]'
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("two", "0.1.0");\n  mb_registry("gone", "%s");\n}\n' "$W/nowhere" >"$W/two/mbuild.mettle"
+  mb search textkit
+  check "a registry that fails is an error, the others still answer ($mode)" eval 'code_is 1 && has "error: registry gone" && has "textkit 1.1.0"'
+  cd "$S" || exit 1
+}
+search_suite debug
+search_suite release
+if [ -n "$H" ]; then
+  MB="$S/mbuild"
+  export MBUILD_HOME="$S/home-search-http" MBUILD_REGISTRY="$H"
+  rm -rf "$MBUILD_HOME"; mkdir -p "$S/search-http"; cd "$S/search-http" || exit 1
+  mb search tk_twice
+  check "search through http" eval 'code_is 0 && has "textkit 1.1.0" && has "  fns: tk_twice, tk_shout, tk_version"'
+  cd "$S" || exit 1
+fi
+MB="$S/mbuild"
+
 echo "== bare package imports (import \"greet\";)"
 mkdir -p "$S/probe/p/greetp" && printf 'export fn gp() -> int32 {\n  return 0;\n}\n' >"$S/probe/p/greetp/greetp.mettle"
 printf 'import "greetp";\nfn main() -> int32 {\n  return gp();\n}\n' >"$S/probe/main.mettle"

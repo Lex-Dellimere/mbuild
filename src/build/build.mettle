@@ -4589,6 +4589,9 @@ fn bx_init_cmds() {
   bx_ex("mbuild clean", "build/ and .mbuild/{{cache,stamps,tmp}");
   bx_ex("mbuild clean --all", "all of .mbuild/ too");
   bx_group("dependencies");
+  bx_def("search", "find packages in the registries", "mbuild search [TEXT]", "dependencies.md");
+  bx_ex("mbuild search", "every package");
+  bx_ex("mbuild search json", "by name, description or exported function");
   bx_def("get", "add or upgrade a dependency", "mbuild get NAME[@VERSION]... [--test] [--no-verify]", "dependencies.md");
   bx_ex("mbuild get strutil", "the newest version");
   bx_ex("mbuild get strutil@v1.2.0", "");

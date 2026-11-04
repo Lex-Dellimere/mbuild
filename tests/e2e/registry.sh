@@ -27,18 +27,22 @@ count_is() { [ "$(grep -cF -- "$1" "$S/last.out")" = "$2" ]; }
 # run ARGS...: the driver with stdout+stderr in last.out, exit code in last.code
 run() { "$DRV" "$@" >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
 sum() { sha256sum | cut -c1-64; }
+# mbs ARGS...: mbuild (MBS) in the empty directory SW, outside any project (tar's note on the ../ fixture dropped)
+mbs() { ( cd "$SW" && "$MBS" "$@" ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"; sed -i '/Removing leading/d' "$S/last.out"; }
 
 echo "== building the driver"
 for mode in debug release; do
   flag=""; [ $mode = release ] && flag="--release"
   "$METTLE" --build $flag "$here/tests/unit/registry_test.mettle" -o "$S/drv-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
   if grep -q 'warning' "$S/build-$mode.log"; then bad "driver builds without warnings ($mode)" "$(cat "$S/build-$mode.log")"; fi
+  "$METTLE" --build $flag "$here/src/main.mettle" -o "$S/mbuild-$mode" >"$S/build-mbuild-$mode.log" 2>&1 || { cat "$S/build-mbuild-$mode.log"; exit 1; }
 done
 
 echo "== fixtures"
 F="$S/fx"
 sh "$here/tests/fixtures/make-registry.sh" "$F" >/dev/null 2>&1 || { echo "make-registry.sh failed"; exit 1; }
 REG="$F/registry"
+sh "$here/tests/fixtures/make-mettle-registry.sh" "$S/fxm" >/dev/null || { echo "make-mettle-registry.sh failed"; exit 1; }
 head -c 16777216 /dev/urandom >"$S/big.bin"
 pids=""
 trap 'kill $pids 2>/dev/null' EXIT
@@ -207,6 +211,69 @@ suite() { # MODE
   run index "$T/app" default pk --refresh; check "yank --undo ($mode)" hasnt "yanked"
   run yank "$P" pk v3.0.0; check "yank of an absent version ($mode)" eval 'code_is 1 && has "has no pk v3.0.0"'
   export MBUILD_REGISTRY="$REG"
+
+  echo "== search ($mode)"
+  MBS="$S/mbuild-$mode"
+  SW="$T/search-cwd"
+  mkdir -p "$SW"
+  export MBUILD_HOME="$T/home-search" NO_COLOR=1
+  names_of() { grep -E '^[a-z0-9]+ v[0-9]' "$S/last.out" | cut -d' ' -f1; }
+  mbs search
+  check "search lists every package ($mode)" eval 'code_is 0 && has "textfmt v0.1.0  text formatting" && has "  fns: tf_banner" && has "strutil v2.0.0-rc.1" && has "  fns: su_shout, su_version, su_twice"'
+  check "search sorts by name ($mode)" eval '[ "$(names_of | tr "\n" " ")" = "$(names_of | LC_ALL=C sort | tr "\n" " ")" ] && [ "$(names_of | wc -l)" -gt 10 ]'
+  check "search shows the newest version that is not yanked ($mode)" eval 'has "yanky v1.0.0" && hasnt "yanky v1.0.1"'
+  check "search leaves no unpacked archive ($mode)" sh -c '[ ! -e "$MBUILD_HOME/search" ]'
+  mbs search vecm
+  check "search by name ($mode)" eval 'code_is 0 && has "vecmath v0.3.0" && has "  fns: vm_banner, vm_one" && hasnt "strutil"'
+  mbs search FORMATTING
+  check "search by description, any case ($mode)" eval 'code_is 0 && has "textfmt v0.1.0  text formatting" && hasnt "strutil"'
+  mbs search su_twice
+  check "search by function name ($mode)" eval 'code_is 0 && has "strutil v2.0.0-rc.1" && hasnt "textfmt"'
+  mbs search TF_BAN
+  check "search by part of a function name, any case ($mode)" eval 'code_is 0 && has "textfmt v0.1.0" && hasnt "strutil"'
+  mbs search zzz
+  check "search with no match exits 1 ($mode)" eval 'code_is 1 && [ "$(cat "$S/last.out")" = "error: no package matches zzz" ]'
+  mbs search -q vecm
+  check "search -q prints names only ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = "vecmath" ]'
+  mbs search -q
+  check "search -q lists every name ($mode)" eval 'code_is 0 && has "strutil" && hasnt " v" && hasnt "fns"'
+  mbs search dotdot
+  check "search says why a package has no functions ($mode)" eval 'code_is 0 && has "dotdot v1.0.0" && has "fns: unknown (dotdot-v1.0.0.tar.gz: member \`../x\` leaves the package directory"'
+
+  echo "== search --offline ($mode)"
+  MBUILD_HOME="$T/home-search-cold" mbs --offline search
+  check "offline with no cached index ($mode)" eval 'code_is 1 && has "the index of registry default is not in the download cache and --offline forbids fetching it" && has "help: run mbuild search once while online"'
+  mbs search textfmt
+  cp "$S/last.out" "$T/search-online.out"
+  mbs --offline search textfmt
+  check "offline from the cache gives the same answer ($mode)" cmp -s "$S/last.out" "$T/search-online.out"
+  rm -f "$MBUILD_HOME"/registry/default@*/pkg/textfmt/textfmt-v0.1.0.tar.gz
+  mbs --offline search textfmt
+  check "offline with an uncached archive says so ($mode)" eval 'code_is 0 && has "textfmt v0.1.0  text formatting" && has "fns: unknown (textfmt v0.1.0 is not in the download cache and --offline forbids fetching it)"'
+  mbs --offline search -q textfmt
+  check "offline -q needs no archive ($mode)" eval 'code_is 0 && [ "$(cat "$S/last.out")" = "textfmt" ]'
+
+  echo "== search, two registries ($mode)"
+  rm -rf "$T/regcopy" "$T/two"; cp -r "$REG" "$T/regcopy"
+  mkdir -p "$T/two"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("two", "0.1.0");\n  mb_registry("copy", "%s");\n  mb_registry("mettle", "%s");\n}\n' "$T/regcopy" "$S/fxm/mreg" >"$T/two/mbuild.mettle"
+  SW="$T/two"
+  mbs search -q
+  check "search -q names each package once ($mode)" eval 'code_is 0 && count_is strutil 1 && has "greet" && has "textkit" && has "vecmath"'
+  mbs search strutil
+  check "search asks every registry, the same name is tagged ($mode)" eval 'code_is 0 && has "strutil v2.0.0-rc.1 (registry copy)" && has "strutil v2.0.0-rc.1 (registry default)"'
+  mbs search textkit
+  check "search reads both registry kinds ($mode)" eval 'code_is 0 && has "textkit 1.1.0  " && has "  fns: tk_twice, tk_shout, tk_version" && hasnt "registry"'
+  SW="$T/search-cwd"
+  if [ -n "$port" ]; then
+    export MBUILD_HOME="$T/home-search-http"
+    MBUILD_REGISTRY="http://127.0.0.1:$port" mbs search
+    check "an http mbuild registry has no package list ($mode)" eval 'code_is 1 && has "registry default has no list of its packages"'
+    MBUILD_REGISTRY="http://127.0.0.1:$port" run index "$T/app" default strutil
+    MBUILD_REGISTRY="http://127.0.0.1:$port" mbs search
+    check "...so only the cached ones are searched ($mode)" eval 'code_is 0 && has "strutil v2.0.0-rc.1" && has "su_twice" && hasnt "textfmt"'
+  fi
+  export MBUILD_HOME="$T/home"
 }
 
 suite debug

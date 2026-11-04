@@ -156,6 +156,29 @@ A lock from the git era is ignored with a note and resolved again.
 
 ## Commands
 
+### mbuild search [TEXT]
+
+Lists the packages of every registry (the order `get` asks them, from any
+directory): name, newest version that isn't yanked, description and the
+`export fn` names of that version's archive, which it fetches and checks like
+a dependency's. `TEXT` keeps the packages with it, in any case, in the name,
+description or a function name. `-q` prints names only, `--offline` uses the
+cached indexes and archives and says which one is missing. A name found in two
+registries is shown for each, with `(registry NAME)`. A registry in mbuild's own
+format has no list of its packages, so over http only those already in the
+download cache are searched.
+
+```text
+$ mbuild search banner
+textfmt v0.1.0  text formatting
+  fns: tf_banner
+
+vecmath v0.3.0
+  fns: vm_banner, vm_one
+$ mbuild search nothing
+error: no package matches nothing
+```
+
 ### mbuild get NAME[@VERSION]...
 
 Adds or changes a dependency (default: the newest version), then checks

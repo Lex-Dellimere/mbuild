@@ -39,6 +39,7 @@ export struct RegIndex {
   registry: string;
   url: string;
   kind: string;     // "mbuild" | "json"
+  desc: string;     // json kind: the package's description
   found: bool;
   ok: bool;
   err: string;
@@ -49,6 +50,17 @@ export struct RegIndex {
 export struct RegList {
   names: StrList*;
   urls: StrList*;
+}
+
+// Every package of one registry (reg_all); partial: an mbuild registry with
+// no list of its packages, so only the ones in the download cache.
+export struct RegAll {
+  registry: string;
+  ok: bool;
+  err: string;
+  partial: bool;
+  ixs: RegIndex**;
+  n: int64;
 }
 
 export struct RegPublish {
@@ -387,6 +399,7 @@ fn rgx_index_new(name: string, registry: string, url: string) -> RegIndex* {
   ix->registry = registry;
   ix->url = url;
   ix->kind = "mbuild";
+  ix->desc = s_empty();
   ix->found = false;
   ix->ok = false;
   ix->err = s_empty();
@@ -563,6 +576,135 @@ export fn reg_version(ix: RegIndex*, version: string) -> RegVersion* {
     i = i + 1;
   }
   return (RegVersion*)0;
+}
+
+fn rgx_offline_list(registry: string) -> string {
+  return "the index of registry " + registry + " is not in the download cache and --offline forbids fetching it\n  help: run mbuild search once while online";
+}
+
+fn rgx_all_fail(all: RegAll*) -> RegAll* {
+  all->ok = false;
+  all->err = g_rgx_err;
+  return all;
+}
+
+fn rgx_all_push(all: RegAll*, ix: RegIndex*) {
+  all->ixs = (RegIndex**)realloc(all->ixs, (all->n + 1) * 8);
+  all->ixs[all->n] = ix;
+  all->n = all->n + 1;
+}
+
+// The package names of an mbuild registry: its index/ directory, or the
+// cached one when the registry is remote (it has no list) or --offline.
+fn rgx_all_names(p: Project*, all: RegAll*, url: string) -> StrList* {
+  var dir: string = s_empty();
+  if (!rgx_is_remote(url) && !p->opts->offline) {
+    dir = rgx_local_dir(p, url) + "/index";
+  } else {
+    dir = rgx_cache_dir(all->registry, url) + "/index";
+    all->partial = !p->opts->offline;
+  }
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  if (!sys_list_dir(dir, files, dirs)) {
+    if (p->opts->offline) {
+      rgx_set("missing", rgx_offline_list(all->registry));
+    } else if (!all->partial) {
+      rgx_set("other", "cannot read " + dir);
+    }
+  }
+  var names: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < files->len) {
+    if (man_is_package_name(sl_get(files, i))) {
+      sl_push(names, sl_get(files, i));
+    }
+    i = i + 1;
+  }
+  sl_sort(names);
+  rgx_sl_free(files);
+  rgx_sl_free(dirs);
+  return names;
+}
+
+// Every package of registry, with its versions (and description, json kind);
+// refresh fetches the index again (once per command).
+export fn reg_all(p: Project*, registry: string, refresh: bool) -> RegAll* {
+  rgx_clear();
+  var all: RegAll* = new RegAll;
+  all->registry = registry;
+  all->ok = true;
+  all->err = s_empty();
+  all->partial = false;
+  all->ixs = (RegIndex**)0;
+  all->n = 0;
+  var url: string = rgx_lookup(p, registry);
+  if (slen(url) == 0) {
+    return rgx_all_fail(all);
+  }
+  if (g_rgx_fetched == (StrList*)0) {
+    g_rgx_fetched = sl_new();
+  }
+  var kind: string = rgx_kind(p, registry, url);
+  if (slen(kind) == 0) {
+    return rgx_all_fail(all);
+  }
+  if (s_eq(kind, "json")) {
+    var head: RegIndex* = rgx_index_new(s_empty(), registry, url);
+    defer free(head);
+    head->kind = kind;
+    if (p->opts->offline && !fs_is_file(rgx_cache_dir(registry, url) + "/v1/index.json")) {
+      rgx_set("missing", rgx_offline_list(registry));
+      return rgx_all_fail(all);
+    }
+    var cached: string = rgx_json_path(p, head, refresh);
+    if (slen(cached) == 0) {
+      return rgx_all_fail(all);
+    }
+    var r: FsRead = fs_read(cached);
+    if (!r.ok) {
+      rgx_set("other", "cannot read " + cached);
+      return rgx_all_fail(all);
+    }
+    var pkgs: RgjVal* = rgx_json_packages(head, r.data);
+    if (pkgs == (RgjVal*)0) {
+      return rgx_all_fail(all);
+    }
+    var i: int64 = 0;
+    while (i < pkgs->n) {
+      var name: string = rgj_str(pkgs->vals[i], "name");
+      i = i + 1;
+      if (slen(name) == 0) {
+        continue;
+      }
+      var ix: RegIndex* = rgx_index_new(name, registry, url);
+      ix->kind = kind;
+      rgx_json_fill(ix, pkgs->vals[i - 1]);
+      ix->ok = true;
+      rgx_all_push(all, ix);
+    }
+    return all;
+  }
+  rgx_clear();
+  var names: StrList* = rgx_all_names(p, all, url);
+  if (slen(g_rgx_err) > 0) {
+    rgx_sl_free(names);
+    return rgx_all_fail(all);
+  }
+  var k: int64 = 0;
+  while (k < names->len) {
+    var ix2: RegIndex* = rgx_index(p, registry, url, sl_get(names, k), refresh);
+    k = k + 1;
+    if (!ix2->ok) {
+      rgx_sl_free(names);
+      return rgx_all_fail(all);
+    }
+    if (ix2->found) {
+      rgx_all_push(all, ix2);
+    }
+  }
+  rgx_sl_free(names);
+  return all;
 }
 
 // ---------------------------------------------------------------------------
@@ -917,8 +1059,8 @@ fn rgj_str(v: RgjVal*, key: string) -> string {
   return g->text;
 }
 
-// Fills ix from index.json text; false with the error set.
-fn rgx_parse_json_index(ix: RegIndex*, text: string) -> bool {
+// The packages array of index.json text; 0 with the error set.
+fn rgx_json_packages(ix: RegIndex*, text: string) -> RgjVal* {
   var q: RgjP* = new RgjP;
   defer free(q);
   q->s = text;
@@ -933,61 +1075,70 @@ fn rgx_parse_json_index(ix: RegIndex*, text: string) -> bool {
   var where_at: string = "registry " + ix->registry + ": " + ix->url + "/v1/index.json";
   if (slen(q->err) > 0) {
     rgx_set("other", where_at + " is not valid JSON (" + q->err + ")");
-    return false;
+    return (RgjVal*)0;
   }
   var fmt: RgjVal* = rgj_get(root, "format");
   var pkgs: RgjVal* = rgj_get(root, "packages");
   if (fmt == (RgjVal*)0 || !s_eq(fmt->text, "1") || pkgs == (RgjVal*)0 || pkgs->kind != 4) {
     rgx_set("other", where_at + " is not a format 1 index\n  help: a newer mbuild may read it");
+    return (RgjVal*)0;
+  }
+  return pkgs;
+}
+
+// The description and versions of package entry pk into ix.
+fn rgx_json_fill(ix: RegIndex*, pk: RgjVal*) {
+  ix->found = true;
+  ix->desc = rgj_str(pk, "description");
+  var vers: RgjVal* = rgj_get(pk, "versions");
+  if (vers == (RgjVal*)0 || vers->kind != 4) {
+    return;
+  }
+  var k: int64 = 0;
+  while (k < vers->n) {
+    var e: RgjVal* = vers->vals[k];
+    k = k + 1;
+    var vs: string = "v" + rgj_str(e, "version");
+    if (!sv_is(vs)) {
+      continue;
+    }
+    var v: RegVersion;
+    v.version = vs;
+    v.sha = s_lower(rgj_str(e, "sha256"));
+    v.manifest_sha = s_empty();
+    var y: RgjVal* = rgj_get(e, "yanked");
+    v.yanked = y != (RgjVal*)0 && s_eq(y->text, "true");
+    v.archive = rgj_str(e, "archive");
+    ix->versions = (RegVersion*)realloc(ix->versions, (ix->n + 1) * sizeof(RegVersion));
+    ix->versions[ix->n] = v;
+    ix->n = ix->n + 1;
+  }
+}
+
+// Fills ix from index.json text; false with the error set.
+fn rgx_parse_json_index(ix: RegIndex*, text: string) -> bool {
+  var pkgs: RgjVal* = rgx_json_packages(ix, text);
+  if (pkgs == (RgjVal*)0) {
     return false;
   }
   var i: int64 = 0;
   while (i < pkgs->n) {
     var pk: RgjVal* = pkgs->vals[i];
     i = i + 1;
-    if (!s_eq(rgj_str(pk, "name"), ix->name)) {
-      continue;
-    }
-    ix->found = true;
-    var vers: RgjVal* = rgj_get(pk, "versions");
-    if (vers == (RgjVal*)0 || vers->kind != 4) {
-      continue;
-    }
-    var k: int64 = 0;
-    while (k < vers->n) {
-      var e: RgjVal* = vers->vals[k];
-      k = k + 1;
-      var vs: string = "v" + rgj_str(e, "version");
-      if (!sv_is(vs)) {
-        continue;
-      }
-      var v: RegVersion;
-      v.version = vs;
-      v.sha = s_lower(rgj_str(e, "sha256"));
-      v.manifest_sha = s_empty();
-      var y: RgjVal* = rgj_get(e, "yanked");
-      v.yanked = y != (RgjVal*)0 && s_eq(y->text, "true");
-      v.archive = rgj_str(e, "archive");
-      ix->versions = (RegVersion*)realloc(ix->versions, (ix->n + 1) * sizeof(RegVersion));
-      ix->versions[ix->n] = v;
-      ix->n = ix->n + 1;
+    if (s_eq(rgj_str(pk, "name"), ix->name)) {
+      rgx_json_fill(ix, pk);
     }
   }
   return true;
 }
 
-// Like rgx_index for a json registry: one v1/index.json for every package.
-fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
+// The cached v1/index.json of a json registry, fetched when missing or
+// refreshed (once per command); "" with the error set.
+fn rgx_json_path(p: Project*, ix: RegIndex*, refresh: bool) -> string {
   var cached: string = rgx_cache_dir(ix->registry, ix->url) + "/v1/index.json";
   var have: bool = fs_is_file(cached);
   var fetch: bool = (refresh || !have) && !sl_has(g_rgx_fetched, cached);
   if (fetch && p->opts->offline) {
-    if (!have) {
-      ix->ok = true;
-      rgx_set("missing", rgx_offline_msg("the index of registry " + ix->registry));
-      ix->err = g_rgx_err;
-      return ix;
-    }
     fetch = false;
   }
   if (fetch) {
@@ -996,7 +1147,7 @@ fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
     }
     if (!rgx_get(p, ix->registry, ix->url, "v1/index.json", cached)) {
       if (!have) {
-        return rgx_index_fail(ix);
+        return s_empty();
       }
       if (rgx_once("unreachable " + ix->registry)) {
         warn("registry " + ix->registry + " is unreachable (" + g_rgx_err + "); using the cached index");
@@ -1004,6 +1155,21 @@ fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
       rgx_clear();
     }
     sl_push(g_rgx_fetched, cached);
+  }
+  return cached;
+}
+
+// Like rgx_index for a json registry: one v1/index.json for every package.
+fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
+  if (p->opts->offline && !fs_is_file(rgx_cache_dir(ix->registry, ix->url) + "/v1/index.json")) {
+    ix->ok = true;
+    rgx_set("missing", rgx_offline_msg("the index of registry " + ix->registry));
+    ix->err = g_rgx_err;
+    return ix;
+  }
+  var cached: string = rgx_json_path(p, ix, refresh);
+  if (slen(cached) == 0) {
+    return rgx_index_fail(ix);
   }
   var r: FsRead = fs_read(cached);
   if (!r.ok) {

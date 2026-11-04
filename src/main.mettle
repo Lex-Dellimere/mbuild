@@ -11,6 +11,7 @@ import "model/manifest";
 import "model/project";
 import "build/build";
 import "pkg/deps";
+import "pkg/search";
 import "build/toolchain";
 import "config/init";
 import "config/config";
@@ -275,6 +276,7 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "tidy")) { return build_cmd_tidy(p); }
   if (s_eq(command, "deps")) { return deps_cmd_list(p); }
   if (s_eq(command, "outdated")) { return deps_cmd_outdated(p); }
+  if (s_eq(command, "search")) { return search_cmd(p); }
   if (s_eq(command, "vendor")) { return deps_cmd_vendor(p); }
   if (s_eq(command, "profiles")) { return build_cmd_profiles(p); }
   if (s_eq(command, "services")) { return build_cmd_services(p); }
