@@ -215,6 +215,8 @@ sh tests/run.sh                            # mcheck plus every tests/e2e suite
 sh tests/run.sh deps native                # just those suites
 ```
 
+on linux, child processes run on [alph](https://github.com/Lex-Dellimere/Alph), vendored in `third_party/alph` (apache-2.0; `mbuild vendor-alph --from ../alph` refreshes it).
+
 both use `METTLE` (default `../Mettle/bin/mettle`). set `METTLE_WIN` to a windows build of the compiler to add wine builds and tests, or `SKIP_WINE=1` to skip them.
 
 `DESIGN.md` explains how it all fits together, including every compiler and wine quirk we hit.
