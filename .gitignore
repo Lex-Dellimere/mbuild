@@ -50,3 +50,6 @@ scratch/
 # Mettle compiler bug reports: local only, never pushed
 reports/
 /mettle.deps
+
+# internal design notes stay local (reports/design/)
+/DESIGN.md
