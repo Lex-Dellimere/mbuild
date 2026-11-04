@@ -8,8 +8,8 @@ that imports it.
 
 How `extern` declarations, `cstring`, `rawptr` and structs cross the boundary
 is Mettle's business: see
-[C interoperability](https://github.com/suidvandiewereld/Mettle/blob/main/docs/c-interop.md)
-and [Shared libraries](https://github.com/suidvandiewereld/Mettle/blob/main/docs/shared-libraries.md).
+[C interoperability](https://github.com/The-Mettle-Project/Mettle/blob/main/docs/c-interop.md)
+and [Shared libraries](https://github.com/The-Mettle-Project/Mettle/blob/main/docs/shared-libraries.md).
 
 ## Two kinds of native code
 
@@ -264,7 +264,7 @@ it: give the C library a `free` function of its own and call that.
 **Structs by value follow the platform ABI** (Microsoft x64 on Windows,
 System V on Linux), as in C. Define each struct with the same fields, order
 and types as the C header. See
-[Structs by value](https://github.com/suidvandiewereld/Mettle/blob/main/docs/c-interop.md#structs-by-value).
+[Structs by value](https://github.com/The-Mettle-Project/Mettle/blob/main/docs/c-interop.md#structs-by-value).
 
 **Double-precision libm is not in the runtime.** `sqrt`, `sin`, `cos`, `pow`
 and friends need `-lm`. Use `std/math` instead.

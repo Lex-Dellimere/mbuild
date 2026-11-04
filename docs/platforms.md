@@ -47,40 +47,89 @@ error: building for windows on Linux needs wine to run the Windows Mettle compil
 
 C code has the same split: see [native code](native.md#c-compilers).
 
-## Which compiler builds a target
+## Toolchains
 
-mbuild needs a Mettle compiler built from the Mettle source; the v0.17.0
-release and older can't build current projects. For each target it uses the
-first of:
-
-1. `MBUILD_METTLE_LINUX` / `MBUILD_METTLE_WINDOWS` (a path, or a name on PATH);
-2. `mb_tool("mettle-linux", PATH)` / `mb_tool("mettle-windows", PATH)` in
-   `mbuild.local.mettle`;
-3. `--mettle PATH`, for the host target;
-4. for the host target, `$METTLE`, then `mettle` on PATH.
-
-Nothing is downloaded on its own. `mbuild toolchain` shows what was picked
-and why:
+mbuild keeps Mettle compilers side by side in `~/.mbuild/toolchains/<id>/`:
+a release (`v0.17.0`) or a build of a source checkout
+(`dev-<git describe>`). Releases up to v0.17.0 can't build current
+projects, so for now install from source:
 
 ```text
+$ mbuild toolchain install --from ~/Mettle
+    Building Mettle v0.17.0-466-g5907c5e5 in ~/Mettle (make -j 8)
+   Installed Mettle dev-v0.17.0-466-g5907c5e5 in ~/.mbuild/toolchains/dev-v0.17.0-466-g5907c5e5
+$ mbuild toolchain default dev-v0.17.0-466-g5907c5e5
+     Default Mettle dev-v0.17.0-466-g5907c5e5
+$ mbuild toolchain use dev-v0.17.0-466-g5907c5e5
+    Updating mbuild.mettle: mb_toolchain("dev-v0.17.0-466-g5907c5e5")
 $ mbuild toolchain
-Installed toolchains (/home/you/.mbuild/toolchains):
-  (none)
+Installed toolchains (~/.mbuild/toolchains):
+  * dev-v0.17.0-466-g5907c5e5  mettle v0.17.0   from ~/Mettle, 2026-11-04  [default, pinned]
 
 Selected compilers:
-  linux    /home/you/Mettle/bin/mettle  ($METTLE)
+  linux    ~/.mbuild/toolchains/dev-v0.17.0-466-g5907c5e5/bin/mettle  (mb_toolchain("dev-v0.17.0-466-g5907c5e5") in mbuild.mettle)
   windows  none: no Mettle compiler for windows
-           set MBUILD_METTLE_WINDOWS, or mb_tool("mettle-windows", PATH) in mbuild.local.mettle, to a windows build of ../Mettle
+           set MBUILD_METTLE_WINDOWS, or mb_tool("mettle-windows", PATH) in mbuild.local.mettle, to a windows build of Mettle
 ```
 
-`mbuild doctor` shows the same with each compiler's version (every
-development build reports v0.17.0), and `mbuild mettle -- ARGS` runs the
-host's.
+| Command | Does |
+|---|---|
+| `mbuild toolchain install VERSION` / `latest` | downloads that release for this OS, checks its sha256, unpacks it |
+| `mbuild toolchain install --from DIR` | runs `make` in a Mettle checkout and copies its compiler in |
+| `mbuild toolchain use V` | pins the project: `mb_toolchain("V")` in `fn project()` |
+| `mbuild toolchain use V --local` | writes `mb_tool("mettle-<os>", PATH)` into `mbuild.local.mettle` instead |
+| `mbuild toolchain default V` | this machine's default |
+| `mbuild toolchain remove V` | deletes it |
+| `mbuild toolchain update` | rebuilds `--from` toolchains whose checkout moved on; names a newer release |
 
-`mbuild toolchain install VERSION` downloads a release into
-`$MBUILD_HOME/toolchains/`, and `mbuild toolchain use VERSION` writes it into
-`mbuild.local.mettle` as `mb_tool("mettle-<os>", PATH)`, for programs that
-still build with an old release.
+`V` is an id or a version. The host compiler is the first of:
+
+1. `--mettle PATH`, then `MBUILD_METTLE_LINUX` / `MBUILD_METTLE_WINDOWS`,
+   then `$METTLE`;
+2. `mb_tool("mettle-<os>", PATH)` in `mbuild.local.mettle`;
+3. the project's `mb_toolchain` pin. Not installed is an error:
+
+   ```text
+   error: this project pins Mettle v0.18.0 (mb_toolchain in mbuild.mettle), which is not installed
+     help: mbuild toolchain install v0.18.0
+   ```
+4. the default toolchain;
+5. `mettle` on PATH.
+
+The Windows target has only steps 1 and 2 (its variable and `mb_tool`).
+`mbuild toolchain` and `-v` say which step won, `mbuild doctor` adds each
+compiler's version, and `mbuild mettle -- ARGS` runs the host's.
+
+## Setup
+
+`mbuild setup` creates `~/.mbuild` (`%LOCALAPPDATA%\mbuild` on Windows),
+installs the latest release as the default compiler (`--from DIR` for a
+source checkout, `--yes` for the one `$METTLE` or PATH came from,
+`--no-compiler` for none), checks the tools and whether mbuild is on PATH.
+It never edits shell files:
+
+```text
+$ mbuild setup --from ~/Mettle
+home  ~/.mbuild (the default, created)
+compilers
+    Building Mettle v0.17.0-466-g5907c5e5 in ~/Mettle (make -j 8)
+   Installed Mettle dev-v0.17.0-466-g5907c5e5 in ~/.mbuild/toolchains/dev-v0.17.0-466-g5907c5e5
+     Default Mettle dev-v0.17.0-466-g5907c5e5
+tools
+  curl      found    /usr/bin/curl
+  tar       found    /usr/bin/tar
+  gcc       found    /usr/bin/gcc
+  make      found    /usr/bin/make
+  git       found    /usr/bin/git
+  wine      found    /usr/bin/wine
+PATH  /home/you/.local/bin is not on PATH; add this line to ~/.bashrc (or your shell's rc file):
+  export PATH="/home/you/.local/bin:$PATH"
+```
+
+`--home DIR` puts the home elsewhere and remembers it in `mbuild.home`
+beside the mbuild binary; `MBUILD_HOME` still wins over it. Offline, setup
+says so in one line and leaves the compiler for later. Any other command run
+before setup creates the home and says `Created ~/.mbuild` once.
 
 ## Wine
 
@@ -117,7 +166,7 @@ script.
 
 | Variable | Meaning |
 |---|---|
-| `MBUILD_HOME` | the download cache and scratch files. Default `~/.mbuild`; on Windows `%LOCALAPPDATA%\mbuild`; under wine the host's `~/.mbuild` |
+| `MBUILD_HOME` | toolchains, the download cache and scratch files. Default: the `mbuild.home` file beside mbuild, else `~/.mbuild`; on Windows `%LOCALAPPDATA%\mbuild`; under wine the host's `~/.mbuild` |
 | `HOME`, `LOCALAPPDATA`, `USERPROFILE`, `WINEHOMEDIR` | where the default home is |
 | `TEMP`, `TMP` | Windows: where mbuild writes the scripts that run host programs |
 
@@ -128,7 +177,8 @@ script.
 | `MBUILD_METTLE_LINUX` | the compiler for the Linux target |
 | `MBUILD_METTLE_WINDOWS` | the compiler for the Windows target |
 | `METTLE` | the compiler for the host target |
-| `MBUILD_METTLE_REPO`, `MBUILD_METTLE_BASE_URL`, `MBUILD_METTLE_LATEST` | where `mbuild toolchain install` downloads releases from |
+| `MBUILD_METTLE_API` | the release API `mbuild toolchain install` asks (default `https://api.github.com/repos/The-Mettle-Project/Mettle`) |
+| `MBUILD_MAKE`, `MBUILD_GIT` | `make` and `git` for `toolchain install --from` |
 
 ### Registries
 

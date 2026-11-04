@@ -84,6 +84,7 @@ Per-OS settings go through `mb_on(os)`.
 | `mb_publish_include(csv)` | The files `mbuild publish` packs ([dependencies](dependencies.md#publishing)). |
 | `mb_import_root(dir)` | Imports of `name/...` start in `dir` instead of the package root ([dependencies](dependencies.md#import-roots)). |
 | `mb_registry(name, url)` | A registry, searched in call order before `default`. |
+| `mb_toolchain(v)` | The Mettle toolchain this project builds with, an id or version (`mbuild toolchain use`, [platforms](platforms.md#toolchains)). |
 | `mb_raw(section, key, toml)` | Escape hatch: a raw key in the generated manifest. |
 
 ### fn deps()
@@ -433,7 +434,9 @@ Like `fn project()`, `fn local()` can't read the environment or files.
 `mb_tool` names: `cc`, `cc-windows`, `mettle-linux`, `mettle-windows`,
 `pkg-config`. A tool applies only when its environment variable (`CC`,
 `CC_WINDOWS`, `MBUILD_METTLE_LINUX`, `MBUILD_METTLE_WINDOWS`, `PKG_CONFIG`) is
-unset. `mbuild doctor` and `mbuild toolchain` show where each came from.
+unset, and `mettle-<os>` also only without `--mettle` and `$METTLE`; it beats
+the project's `mb_toolchain`. `mbuild doctor` and `mbuild toolchain` show
+where each came from.
 
 Replacements here never touch `mbuild.lock`; the resolved versions go to
 `.mbuild/local.lock` instead, and every command says so:
