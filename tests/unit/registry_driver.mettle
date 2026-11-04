@@ -1,0 +1,260 @@
+// registry_driver: a small CLI over sha256.mettle and registry.mettle for
+// tests/e2e/r3_registry.sh. ROOT is a project directory (its mbuild.toml and
+// mbuild.local.toml are read when present).
+//
+//   registry_driver sha-string TEXT             sha_string
+//   registry_driver sha-repeat CHAR N           sha_hex of N copies of CHAR
+//   registry_driver sha-file PATH               sha_file ("<none>" when unreadable)
+//   registry_driver list ROOT                   reg_list: "NAME URL" per registry
+//   registry_driver dir ROOT REG                reg_dir_of ("<none>" for "")
+//   registry_driver index ROOT REG NAME [--refresh] [--twice]
+//                                               reg_index (twice: the same call again)
+//   registry_driver find ROOT NAME [PINNED]     reg_find
+//   registry_driver manifest ROOT REG NAME V    reg_manifest: "dep KEY VERSION" lines
+//   registry_driver fetch ROOT REG NAME V       reg_fetch: the cached archive
+//   registry_driver get ROOT REG NAME V DEST    reg_fetch, reg_extract, reg_marker
+//   registry_driver extract ARCHIVE SHA DEST MARKER
+//   registry_driver init DIR NAME               reg_init_dir
+//   registry_driver publish DIR NAME V ROOT MANIFEST [--dry-run]
+//                                               reg_publish of every file under ROOT
+//   registry_driver yank DIR NAME V [--undo]    reg_yank
+// Flags anywhere: -v (verbose), --offline. Errors print "ERR", the kind and
+// the message, exit 1.
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/core/fs";
+import "../../src/core/sha256";
+import "../../src/model/toml";
+import "../../src/model/manifest";
+import "../../src/model/project";
+import "../../src/pkg/registry";
+
+fn drv_bool(b: bool) -> string {
+  if (b) {
+    return "1";
+  }
+  return "0";
+}
+
+fn drv_none(s: string) -> string {
+  if (slen(s) == 0) {
+    return "<none>";
+  }
+  return s;
+}
+
+fn drv_err(msg: string) -> int32 {
+  say("ERR " + drv_none(reg_failure_kind()));
+  say(msg);
+  return 1;
+}
+
+fn drv_project(root: string, offline: bool) -> Project* {
+  var opts: Options* = options_new();
+  opts->offline = offline;
+  opts->verbose = g_verbose;
+  var p: Project* = new Project;
+  p->root = root;
+  p->opts = opts;
+  p->state_dir = root + "/.mbuild";
+  p->mbfile = s_empty();
+  var r: FsRead = fs_read(root + "/mbuild.toml");
+  if (r.ok) {
+    p->man = man_parse(toml_parse(r.data, root + "/mbuild.toml"), root);
+    p->has_manifest = true;
+    if (slen(p->man->error) > 0) {
+      fail(p->man->error);
+    }
+  } else {
+    p->man = man_empty(root, "app");
+  }
+  var lr: FsRead = fs_read(root + "/mbuild.local.toml");
+  if (lr.ok) {
+    man_merge_local(p->man, man_parse_local(toml_parse(lr.data, root + "/mbuild.local.toml"), root));
+  }
+  return p;
+}
+
+fn drv_print_index(ix: RegIndex*) {
+  say("registry=" + drv_none(ix->registry) + " ok=" + drv_bool(ix->ok) + " found=" + drv_bool(ix->found) + " n=" + s_int(ix->n));
+  var i: int64 = 0;
+  while (i < ix->n) {
+    var v: RegVersion* = &ix->versions[i];
+    var line: string = v->version + " " + v->sha + " " + v->manifest_sha;
+    if (v->yanked) {
+      line = line + " yanked";
+    }
+    say(line);
+    i = i + 1;
+  }
+  if (slen(ix->err) > 0) {
+    say("kind " + drv_none(reg_failure_kind()));
+    say(ix->err);
+  }
+}
+
+// The index of NAME in REG, or 0 after printing the error.
+fn drv_index(p: Project*, reg: string, name: string) -> RegIndex* {
+  var ix: RegIndex* = reg_index(p, reg, name, false);
+  if (!ix->ok || !ix->found) {
+    drv_err(ix->err);
+    return (RegIndex*)0;
+  }
+  return ix;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  var args: StrList* = sl_new();
+  var offline: bool = false;
+  var flags: StrList* = sl_new();
+  var i: int32 = 1;
+  while (i < argc) {
+    var a: string = s_from_c(argv[i]);
+    if (s_eq(a, "-v")) {
+      g_verbose = true;
+    } else if (s_eq(a, "--offline")) {
+      offline = true;
+    } else if (s_starts(a, "--")) {
+      sl_push(flags, a);
+    } else {
+      sl_push(args, a);
+    }
+    i = i + 1;
+  }
+  var cmd: string = sl_get(args, 0);
+  if (s_eq(cmd, "sha-string")) {
+    say(sha_string(sl_get(args, 1)));
+    return 0;
+  }
+  if (s_eq(cmd, "sha-repeat")) {
+    var rep: string = s_repeat(sl_get(args, 1), s_to_int(sl_get(args, 2)));
+    say(sha_hex(rep.chars, slen(rep)));
+    return 0;
+  }
+  if (s_eq(cmd, "sha-file")) {
+    say(drv_none(sha_file(sl_get(args, 1))));
+    return 0;
+  }
+  if (s_eq(cmd, "extract")) {
+    var e: string = reg_extract(sl_get(args, 1), sl_get(args, 2), sl_get(args, 3), sl_get(args, 4));
+    if (slen(e) > 0) {
+      return drv_err(e);
+    }
+    say("marker " + reg_marker(sl_get(args, 3)));
+    return 0;
+  }
+  if (s_eq(cmd, "init")) {
+    var ie: string = reg_init_dir(sl_get(args, 1), sl_get(args, 2));
+    if (slen(ie) > 0) {
+      return drv_err(ie);
+    }
+    say("ok");
+    return 0;
+  }
+  if (s_eq(cmd, "publish")) {
+    var mr: FsRead = fs_read(sl_get(args, 5));
+    if (!mr.ok) {
+      return drv_err("cannot read " + sl_get(args, 5));
+    }
+    var r: RegPublish* = new RegPublish;
+    r->dir = sl_get(args, 1);
+    r->name = sl_get(args, 2);
+    r->version = sl_get(args, 3);
+    r->root = sl_get(args, 4);
+    r->files = fs_walk(r->root, "", (StrList*)0);
+    r->manifest_text = mr.data;
+    r->dry_run = sl_has(flags, "--dry-run");
+    var pe: string = reg_publish(r);
+    if (slen(pe) > 0) {
+      return drv_err(pe);
+    }
+    say("ok");
+    return 0;
+  }
+  if (s_eq(cmd, "yank")) {
+    var ye: string = reg_yank(sl_get(args, 1), sl_get(args, 2), sl_get(args, 3), sl_has(flags, "--undo"));
+    if (slen(ye) > 0) {
+      return drv_err(ye);
+    }
+    say("ok");
+    return 0;
+  }
+  var p: Project* = drv_project(sl_get(args, 1), offline);
+  if (s_eq(cmd, "list")) {
+    var l: RegList* = reg_list(p);
+    var k: int64 = 0;
+    while (k < l->names->len) {
+      say(sl_get(l->names, k) + " " + drv_none(sl_get(l->urls, k)));
+      k = k + 1;
+    }
+    return 0;
+  }
+  if (s_eq(cmd, "dir")) {
+    say(drv_none(reg_dir_of(p, sl_get(args, 2))));
+    return 0;
+  }
+  if (s_eq(cmd, "index")) {
+    var refresh: bool = sl_has(flags, "--refresh");
+    var ix: RegIndex* = reg_index(p, sl_get(args, 2), sl_get(args, 3), refresh);
+    if (sl_has(flags, "--twice")) {
+      ix = reg_index(p, sl_get(args, 2), sl_get(args, 3), refresh);
+    }
+    drv_print_index(ix);
+    if (!ix->ok) {
+      return 1;
+    }
+    return 0;
+  }
+  if (s_eq(cmd, "find")) {
+    var fx: RegIndex* = reg_find(p, sl_get(args, 2), sl_get(args, 3), false);
+    drv_print_index(fx);
+    if (!fx->ok) {
+      return 1;
+    }
+    return 0;
+  }
+  var ix2: RegIndex* = drv_index(p, sl_get(args, 2), sl_get(args, 3));
+  if (ix2 == (RegIndex*)0) {
+    return 1;
+  }
+  var version: string = sl_get(args, 4);
+  if (reg_version(ix2, version) == (RegVersion*)0) {
+    say("no version " + version);
+  }
+  if (s_eq(cmd, "manifest")) {
+    var m: Manifest* = reg_manifest(p, ix2, version);
+    if (m == (Manifest*)0) {
+      return drv_err(reg_error());
+    }
+    say("package " + m->name + " " + m->version);
+    var d: int64 = 0;
+    while (d < m->ndeps) {
+      say("dep " + m->deps[d].key + " " + m->deps[d].version);
+      d = d + 1;
+    }
+    return 0;
+  }
+  if (s_eq(cmd, "fetch") || s_eq(cmd, "get")) {
+    var archive: string = reg_fetch(p, ix2, version);
+    if (slen(archive) == 0) {
+      return drv_err(reg_error());
+    }
+    say("archive " + archive);
+    if (s_eq(cmd, "fetch")) {
+      return 0;
+    }
+    var v: RegVersion* = reg_version(ix2, version);
+    var dest: string = sl_get(args, 5);
+    var marker: string = ix2->name + " " + v->version + " sha256:" + v->sha + " " + ix2->registry;
+    var ge: string = reg_extract(archive, "sha256:" + v->sha, dest, marker);
+    if (slen(ge) > 0) {
+      return drv_err(ge);
+    }
+    say("marker " + reg_marker(dest));
+    return 0;
+  }
+  return drv_err("unknown command " + cmd);
+}

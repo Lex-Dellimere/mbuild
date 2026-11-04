@@ -1,15 +1,135 @@
-// sha256: stub, owned by group R (DESIGN.md 14.4).
+// sha256: SHA-256 (FIPS 180-4), for registry archives and manifests.
 
+import "std/io";
+import "std/mem";
 import "base";
+import "fs";
+
+const SHA_K: uint32[64] = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+fn shx_rotr(x: uint32, n: uint32) -> uint32 {
+  return (x >> n) | (x << ((uint32)32 - n));
+}
+
+// One 64-byte block into h[0..8].
+fn shx_block(h: uint32*, p: uint8*) {
+  var w: uint32[64];
+  var i: int64 = 0;
+  while (i < 16) {
+    w[i] = ((uint32)p[i * 4] << (uint32)24) | ((uint32)p[i * 4 + 1] << (uint32)16) | ((uint32)p[i * 4 + 2] << (uint32)8) | (uint32)p[i * 4 + 3];
+    i = i + 1;
+  }
+  while (i < 64) {
+    var x: uint32 = w[i - 15];
+    var y: uint32 = w[i - 2];
+    var s0: uint32 = shx_rotr(x, 7) ^ shx_rotr(x, 18) ^ (x >> (uint32)3);
+    var s1: uint32 = shx_rotr(y, 17) ^ shx_rotr(y, 19) ^ (y >> (uint32)10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    i = i + 1;
+  }
+  var a: uint32 = h[0];
+  var b: uint32 = h[1];
+  var c: uint32 = h[2];
+  var d: uint32 = h[3];
+  var e: uint32 = h[4];
+  var f: uint32 = h[5];
+  var g: uint32 = h[6];
+  var hh: uint32 = h[7];
+  i = 0;
+  while (i < 64) {
+    var t1: uint32 = hh + (shx_rotr(e, 6) ^ shx_rotr(e, 11) ^ shx_rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA_K[i] + w[i];
+    var t2: uint32 = (shx_rotr(a, 2) ^ shx_rotr(a, 13) ^ shx_rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+    hh = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+    i = i + 1;
+  }
+  h[0] = h[0] + a;
+  h[1] = h[1] + b;
+  h[2] = h[2] + c;
+  h[3] = h[3] + d;
+  h[4] = h[4] + e;
+  h[5] = h[5] + f;
+  h[6] = h[6] + g;
+  h[7] = h[7] + hh;
+}
 
 export fn sha_hex(p: uint8*, n: int64) -> string {
-  return s_empty();
+  var h: uint32[8];
+  h[0] = 0x6a09e667;
+  h[1] = 0xbb67ae85;
+  h[2] = 0x3c6ef372;
+  h[3] = 0xa54ff53a;
+  h[4] = 0x510e527f;
+  h[5] = 0x9b05688c;
+  h[6] = 0x1f83d9ab;
+  h[7] = 0x5be0cd19;
+  var done: int64 = 0;
+  while (n - done >= 64) {
+    shx_block(&h[0], &p[done]);
+    done = done + 64;
+  }
+  // The tail, 0x80, zeros, and the bit length: one or two blocks.
+  var tail: uint8[128];
+  memset(&tail[0], 0, 128);
+  var rest: int64 = n - done;
+  var i: int64 = 0;
+  while (i < rest) {
+    tail[i] = p[done + i];
+    i = i + 1;
+  }
+  tail[rest] = (uint8)128;
+  var total: int64 = 64;
+  if (rest >= 56) {
+    total = 128;
+  }
+  var bits: uint64 = (uint64)n * (uint64)8;
+  i = 0;
+  while (i < 8) {
+    tail[total - 1 - i] = (uint8)((bits >> (uint64)(i * 8)) & (uint64)255);
+    i = i + 1;
+  }
+  shx_block(&h[0], &tail[0]);
+  if (total == 128) {
+    shx_block(&h[0], &tail[64]);
+  }
+  var b: Buf* = buf_new();
+  i = 0;
+  while (i < 8) {
+    var k: int64 = 28;
+    while (k >= 0) {
+      buf_addb(b, hex_digit((int32)((h[i] >> (uint32)k) & (uint32)15)));
+      k = k - 4;
+    }
+    i = i + 1;
+  }
+  return buf_take(b);
 }
 
 export fn sha_string(s: string) -> string {
-  return s_empty();
+  return sha_hex(s.chars, slen(s));
 }
 
 export fn sha_file(path: string) -> string {
-  return s_empty();
+  var r: FsRead = fs_read(path);
+  if (!r.ok) {
+    return s_empty();
+  }
+  var hex: string = sha_hex(r.data.chars, slen(r.data));
+  free(r.data.chars);
+  return hex;
 }

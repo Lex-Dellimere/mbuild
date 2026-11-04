@@ -1,8 +1,29 @@
-// registry: stub, owned by group R (DESIGN.md 14).
+// registry: package registries (DESIGN.md 14): the search order, the index,
+// manifests and archives in the download cache, extraction, publishing.
+//
+// A registry is a static tree: index/<name>, pkg/<name>/<name>-<v>.toml and
+// .tar.gz. Remote ones (http, https) are read with curl, local ones (a path
+// or file://) with fs_*; either way every file goes through the cache at
+// $MBUILD_HOME/registry/<name>@<hash12(url)>/, so --offline behaves the same
+// for both. Everything but an index is immutable once published.
 
+import "std/io";
+import "std/mem";
 import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/proc";
+import "../core/sha256";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+import "../model/toml";
+import "../model/semver";
 import "../model/manifest";
 import "../model/project";
+
+// The registry named `default` when neither MBUILD_REGISTRY nor the project
+// names one. To be decided (DESIGN.md 17.5).
+const REG_DEFAULT_URL: string = "";
 
 export struct RegVersion {
   version: string;
@@ -37,71 +58,891 @@ export struct RegPublish {
   dry_run: bool;
 }
 
-fn rgx_failed(name: string, registry: string) -> RegIndex* {
-  var ix: RegIndex* = new RegIndex;
-  ix->name = name;
-  ix->registry = registry;
-  ix->url = s_empty();
-  ix->err = "not implemented";
-  ix->versions = (RegVersion*)0;
-  return ix;
+var g_rgx_err: string;
+var g_rgx_kind: string;
+// Per command: "registry/name" of every index fetched, registries warned about.
+var g_rgx_fetched: StrList* = (StrList*)0;
+var g_rgx_warned: StrList* = (StrList*)0;
+var g_rgx_seq: int64 = 0;
+
+fn rgx_set(kind: string, msg: string) {
+  g_rgx_kind = kind;
+  g_rgx_err = msg;
+}
+
+fn rgx_clear() {
+  g_rgx_kind = s_empty();
+  g_rgx_err = s_empty();
+}
+
+// True the first time key is seen in this command.
+fn rgx_once(key: string) -> bool {
+  if (g_rgx_warned == (StrList*)0) {
+    g_rgx_warned = sl_new();
+  }
+  if (sl_has(g_rgx_warned, key)) {
+    return false;
+  }
+  sl_push(g_rgx_warned, key);
+  return true;
+}
+
+fn rgx_sl_free(l: StrList*) {
+  free(l->items);
+  free(l);
+}
+
+fn rgx_cmd_free(c: Cmd*) {
+  rgx_sl_free(c->args);
+  rgx_sl_free(c->kinds);
+  rgx_sl_free(c->env);
+  free(c);
+}
+
+fn rgx_short(hex: string) -> string {
+  return "sha256:" + s_sub(hex, 0, 16) + "...";
+}
+
+fn rgx_bare_sha(s: string) -> string {
+  if (s_starts(s, "sha256:")) {
+    return s_from(s, 7);
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// Registries and their URLs
+// ---------------------------------------------------------------------------
+
+fn rgx_env_name(name: string) -> string {
+  var b: Buf* = buf_new();
+  buf_add(b, "MBUILD_REGISTRY_");
+  var i: int64 = 0;
+  while (i < slen(name)) {
+    var c: int32 = s_byte(name, i);
+    if (c >= 97 && c <= 122) {
+      c = c - 32;
+    } else if (c == 45) {
+      c = 95;
+    }
+    buf_addb(b, c);
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+// $MBUILD_REGISTRY_<NAME>, then mbuild.local.toml, then mbuild.mettle
+// (`declared`), then for default $MBUILD_REGISTRY and REG_DEFAULT_URL.
+fn rgx_url_of(p: Project*, name: string, declared: string) -> string {
+  var ev: string = env_get(rgx_env_name(name));
+  if (slen(ev) > 0) {
+    return ev;
+  }
+  if (p->man->local != (Manifest*)0) {
+    var lr: RegSpec* = man_reg_find(p->man->local, name);
+    if (lr != (RegSpec*)0 && slen(lr->url) > 0) {
+      return lr->url;
+    }
+  }
+  if (slen(declared) > 0) {
+    return declared;
+  }
+  if (s_eq(name, "default")) {
+    var dv: string = env_get("MBUILD_REGISTRY");
+    if (slen(dv) > 0) {
+      return dv;
+    }
+    return REG_DEFAULT_URL;
+  }
+  return s_empty();
 }
 
 export fn reg_list(p: Project*) -> RegList* {
   var l: RegList* = new RegList;
   l->names = sl_new();
   l->urls = sl_new();
+  var i: int64 = 0;
+  while (i < p->man->nregs) {
+    var r: RegSpec* = &p->man->regs[i];
+    if (!sl_has(l->names, r->name)) {
+      sl_push(l->names, r->name);
+      sl_push(l->urls, rgx_url_of(p, r->name, r->url));
+    }
+    i = i + 1;
+  }
+  if (!sl_has(l->names, "default")) {
+    sl_push(l->names, "default");
+    sl_push(l->urls, rgx_url_of(p, "default", s_empty()));
+  }
   return l;
 }
 
+fn rgx_is_remote(url: string) -> bool {
+  return s_starts(url, "https://") || s_starts(url, "http://");
+}
+
+// The directory of a path or file:// URL (relative paths against the root).
+fn rgx_local_dir(p: Project*, url: string) -> string {
+  var d: string = url;
+  if (s_starts(d, "file://")) {
+    d = s_from(d, 7);
+    // file:///C:/x
+    if (slen(d) >= 3 && s_byte(d, 0) == 47 && s_byte(d, 2) == 58) {
+      d = s_from(d, 1);
+    }
+  }
+  d = s_replace_byte(d, 92, 47);
+  if (!p_is_abs(d)) {
+    d = p_join(p->root, d);
+  }
+  return p_clean(d);
+}
+
+fn rgx_trim_slash(url: string) -> string {
+  var u: string = url;
+  while (slen(u) > 1 && s_byte(u, slen(u) - 1) == 47) {
+    u = s_sub(u, 0, slen(u) - 1);
+  }
+  return u;
+}
+
+// The URL of registry `name`, "" (with the error set) when it has none.
+fn rgx_lookup(p: Project*, name: string) -> string {
+  var l: RegList* = reg_list(p);
+  var at: int64 = sl_index(l->names, name);
+  var url: string = s_empty();
+  if (at >= 0) {
+    url = sl_get(l->urls, at);
+  }
+  rgx_sl_free(l->names);
+  rgx_sl_free(l->urls);
+  free(l);
+  if (at < 0) {
+    rgx_set("other", "unknown registry " + name + "\n  help: declare it in mbuild.mettle: mb_registry(\"" + name + "\", \"https://...\")");
+    return s_empty();
+  }
+  if (slen(url) == 0) {
+    if (s_eq(name, "default")) {
+      rgx_set("other", "no default registry is configured\n  help: set MBUILD_REGISTRY, or declare one in mbuild.mettle: mb_registry(\"name\", \"https://...\")");
+    } else {
+      rgx_set("other", "registry " + name + " has no url");
+    }
+    return s_empty();
+  }
+  return rgx_trim_slash(url);
+}
+
+export fn reg_dir_of(p: Project*, registry: string) -> string {
+  var url: string = rgx_lookup(p, registry);
+  if (slen(url) == 0 || rgx_is_remote(url)) {
+    return s_empty();
+  }
+  return rgx_local_dir(p, url);
+}
+
+fn rgx_cache_dir(registry: string, url: string) -> string {
+  var h: string = sha_string(url);
+  return fs_mbuild_home() + "/registry/" + registry + "@" + s_sub(h, 0, 12);
+}
+
+// ---------------------------------------------------------------------------
+// Getting one file into the cache
+// ---------------------------------------------------------------------------
+
+fn rgx_host_tool(name: string, env_override: string) -> Tool {
+  var ev: string = env_get(env_override);
+  if (slen(ev) > 0) {
+    return sys_find_tool(ev);
+  }
+  if (!sys_is_wine()) {
+    return sys_find_tool(name);
+  }
+  var unix_path: string = env_get("MBUILD_UNIX_PATH");
+  if (slen(unix_path) == 0) {
+    unix_path = sys_unix_path_default();
+  }
+  var dirs: StrList* = s_split(unix_path, 58);
+  var i: int64 = 0;
+  while (i < dirs->len) {
+    var d: string = sl_get(dirs, i);
+    if (slen(d) > 0) {
+      var t: Tool = sys_find_tool(p_join(d, name));
+      if (tool_found(t) && t.unix) {
+        rgx_sl_free(dirs);
+        return t;
+      }
+    }
+    i = i + 1;
+  }
+  rgx_sl_free(dirs);
+  return tool_none();
+}
+
+// "Could not resolve host: x" from curl's "curl: (6) Could not resolve host: x".
+fn rgx_curl_message(out: string) -> string {
+  var lines: StrList* = s_lines(out);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var ln: string = s_trim(sl_get(lines, i));
+    if (s_starts(ln, "curl: (")) {
+      var close: int64 = s_find(ln, ") ");
+      if (close > 0) {
+        rgx_sl_free(lines);
+        return s_from(ln, close + 2);
+      }
+    }
+    i = i + 1;
+  }
+  rgx_sl_free(lines);
+  return s_trim(out);
+}
+
+fn rgx_curl_kind(code: int32) -> string {
+  if (code == 22 || code == 37) {
+    return "missing";
+  }
+  if (code == 6 || code == 7 || code == 28 || code == 35 || code == 52 || code == 56) {
+    return "network";
+  }
+  return "other";
+}
+
+fn rgx_tmp_name(dest: string) -> string {
+  g_rgx_seq = g_rgx_seq + 1;
+  var tag: string = hash_string(dest + "{sys_now_ms()}-{g_rgx_seq}");
+  return dest + ".tmp-" + s_sub(tag, 0, 8);
+}
+
+// Copies or downloads `rel` of the registry at url to dest (temp + rename).
+// False with the error and kind set; the message names the source.
+fn rgx_get(p: Project*, registry: string, url: string, rel: string, dest: string) -> bool {
+  rgx_clear();
+  if (!fs_mkdirs(p_dir(dest))) {
+    rgx_set("other", "cannot create " + p_dir(dest));
+    return false;
+  }
+  var tmp: string = rgx_tmp_name(dest);
+  if (!rgx_is_remote(url)) {
+    var dir: string = rgx_local_dir(p, url);
+    var src: string = dir + "/" + rel;
+    if (!fs_is_dir(dir)) {
+      rgx_set("other", "registry " + registry + " is not reachable: " + dir + " is not a directory");
+      return false;
+    }
+    if (!fs_is_file(src)) {
+      rgx_set("missing", src + " does not exist");
+      return false;
+    }
+    verbose("copy " + src);
+    if (!fs_copy(src, tmp)) {
+      rgx_set("other", "cannot copy " + src + " to " + tmp);
+      return false;
+    }
+  } else {
+    if (s_starts(url, "http://") && rgx_once("http " + registry)) {
+      warn("registry " + registry + " uses http://; locked builds are still checked against mbuild.lock, new versions are not");
+    }
+    var curl: Tool = rgx_host_tool("curl", "MBUILD_CURL");
+    if (!tool_found(curl)) {
+      rgx_set("other", "cannot find `curl` (needed to download from registry " + registry + ")\n  help: install curl and put it on PATH, or set MBUILD_CURL to its path");
+      return false;
+    }
+    var c: Cmd* = cmd_new(curl);
+    cmd_arg(c, "-fsSL");
+    cmd_arg(c, "--retry");
+    cmd_arg(c, "2");
+    cmd_arg(c, "--netrc-optional");
+    cmd_arg(c, "-o");
+    cmd_path(c, tmp);
+    cmd_arg(c, url + "/" + rel);
+    var r: Captured = proc_capture_all(c);
+    rgx_cmd_free(c);
+    if (r.code != 0) {
+      sys_remove_file(tmp);
+      rgx_set(rgx_curl_kind(r.code), "curl: " + rgx_curl_message(r.out) + " (" + url + "/" + rel + ")");
+      return false;
+    }
+  }
+  if (!sys_rename(tmp, dest)) {
+    sys_remove_file(tmp);
+    rgx_set("other", "cannot write " + dest);
+    return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// The index
+// ---------------------------------------------------------------------------
+
+fn rgx_index_new(name: string, registry: string, url: string) -> RegIndex* {
+  var ix: RegIndex* = new RegIndex;
+  ix->name = name;
+  ix->registry = registry;
+  ix->url = url;
+  ix->found = false;
+  ix->ok = false;
+  ix->err = s_empty();
+  ix->versions = (RegVersion*)0;
+  ix->n = 0;
+  return ix;
+}
+
+fn rgx_index_fail(ix: RegIndex*) -> RegIndex* {
+  ix->ok = false;
+  ix->err = g_rgx_err;
+  return ix;
+}
+
+fn rgx_parse_index(ix: RegIndex*, text: string) {
+  var lines: StrList* = s_lines(text);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var f: StrList* = s_fields(sl_get(lines, i));
+    if (f->len > 0 && !s_starts(sl_get(f, 0), "#") && sv_is(sl_get(f, 0))) {
+      var v: RegVersion;
+      v.version = sl_get(f, 0);
+      v.sha = s_empty();
+      v.manifest_sha = s_empty();
+      v.yanked = false;
+      var k: int64 = 1;
+      while (k < f->len) {
+        var w: string = sl_get(f, k);
+        if (s_starts(w, "sha256=")) {
+          v.sha = s_from(w, 7);
+        } else if (s_starts(w, "manifest=")) {
+          v.manifest_sha = s_from(w, 9);
+        } else if (s_eq(w, "yanked")) {
+          v.yanked = true;
+        }
+        k = k + 1;
+      }
+      ix->versions = (RegVersion*)realloc(ix->versions, (ix->n + 1) * sizeof(RegVersion));
+      ix->versions[ix->n] = v;
+      ix->n = ix->n + 1;
+    }
+    rgx_sl_free(f);
+    i = i + 1;
+  }
+  rgx_sl_free(lines);
+}
+
+fn rgx_offline_msg(what: string) -> string {
+  return what + " is not in the download cache and --offline forbids fetching it\n  help: run mbuild fetch once while online";
+}
+
 export fn reg_index(p: Project*, registry: string, name: string, refresh: bool) -> RegIndex* {
-  return rgx_failed(name, registry);
+  rgx_clear();
+  var url: string = rgx_lookup(p, registry);
+  var ix: RegIndex* = rgx_index_new(name, registry, url);
+  if (slen(url) == 0) {
+    return rgx_index_fail(ix);
+  }
+  var cached: string = rgx_cache_dir(registry, url) + "/index/" + name;
+  var have: bool = fs_is_file(cached);
+  if (g_rgx_fetched == (StrList*)0) {
+    g_rgx_fetched = sl_new();
+  }
+  var key: string = registry + "/" + name;
+  var fetch: bool = (refresh || !have) && !sl_has(g_rgx_fetched, key);
+  if (fetch && p->opts->offline) {
+    if (!have) {
+      ix->ok = true;
+      rgx_set("missing", rgx_offline_msg("the index of " + name + " from registry " + registry));
+      ix->err = g_rgx_err;
+      return ix;
+    }
+    fetch = false;
+  }
+  if (fetch) {
+    sl_push(g_rgx_fetched, key);
+    if (g_verbose) {
+      status("Updating", "index of " + name + " (" + registry + ")");
+    }
+    if (!rgx_get(p, registry, url, "index/" + name, cached)) {
+      if (s_eq(g_rgx_kind, "missing")) {
+        ix->ok = true;
+        ix->err = g_rgx_err;
+        return ix;
+      }
+      if (!have) {
+        return rgx_index_fail(ix);
+      }
+      if (rgx_once("unreachable " + registry)) {
+        warn("registry " + registry + " is unreachable (" + g_rgx_err + "); using the cached index");
+      }
+      rgx_clear();
+    }
+  }
+  var r: FsRead = fs_read(cached);
+  if (!r.ok) {
+    rgx_set("other", "cannot read " + cached);
+    return rgx_index_fail(ix);
+  }
+  rgx_parse_index(ix, r.data);
+  ix->found = true;
+  ix->ok = true;
+  return ix;
 }
 
 export fn reg_find(p: Project*, name: string, pinned: string, refresh: bool) -> RegIndex* {
-  return rgx_failed(name, pinned);
+  if (slen(pinned) > 0) {
+    return reg_index(p, pinned, name, refresh);
+  }
+  var l: RegList* = reg_list(p);
+  var offline_miss: string = s_empty();
+  var i: int64 = 0;
+  while (i < l->names->len) {
+    var ix: RegIndex* = reg_index(p, sl_get(l->names, i), name, refresh);
+    if (!ix->ok || ix->found) {
+      rgx_sl_free(l->names);
+      rgx_sl_free(l->urls);
+      free(l);
+      return ix;
+    }
+    if (s_contains(ix->err, "--offline") && slen(offline_miss) == 0) {
+      offline_miss = ix->err;
+    }
+    i = i + 1;
+  }
+  var none: RegIndex* = rgx_index_new(name, s_empty(), s_empty());
+  none->ok = true;
+  if (slen(offline_miss) > 0) {
+    rgx_set("missing", offline_miss);
+  } else {
+    rgx_set("missing", "no registry has a package named " + name + " (searched " + sl_join(l->names, ", ") + ")");
+  }
+  rgx_sl_free(l->names);
+  rgx_sl_free(l->urls);
+  free(l);
+  none->err = g_rgx_err;
+  return none;
 }
 
 export fn reg_version(ix: RegIndex*, version: string) -> RegVersion* {
+  var i: int64 = 0;
+  while (i < ix->n) {
+    var v: string = ix->versions[i].version;
+    if (s_eq(v, version) || (sv_is(version) && sv_cmp(v, version) == 0)) {
+      return &ix->versions[i];
+    }
+    i = i + 1;
+  }
   return (RegVersion*)0;
 }
 
+// ---------------------------------------------------------------------------
+// Manifests and archives
+// ---------------------------------------------------------------------------
+
+fn rgx_label(ix: RegIndex*, version: string) -> string {
+  return ix->name + " " + version;
+}
+
+fn rgx_mismatch(ix: RegIndex*, version: string, want: string, got: string, src: string) -> string {
+  return rgx_label(ix, version) + " from registry " + ix->registry + " does not match its index\n    " + s_pad_right("index", 14) + rgx_short(want) + "\n    " + s_pad_right("registry", 14) + rgx_short(got) + " (" + src + ")\n  a published version never changes; the registry or the download was tampered with";
+}
+
+fn rgx_source(p: Project*, ix: RegIndex*, rel: string) -> string {
+  if (rgx_is_remote(ix->url)) {
+    return ix->url + "/" + rel;
+  }
+  return rgx_local_dir(p, ix->url) + "/" + rel;
+}
+
+// The cached file `rel` of version v, fetched when missing, checked against
+// want (hex); a cached copy that does not match is fetched again.
+fn rgx_cached(p: Project*, ix: RegIndex*, v: RegVersion*, rel: string, want: string, announce: bool) -> string {
+  rgx_clear();
+  var path: string = rgx_cache_dir(ix->registry, ix->url) + "/" + rel;
+  if (fs_is_file(path)) {
+    var have: string = sha_file(path);
+    if (s_eq(have, want)) {
+      return path;
+    }
+    if (p->opts->offline) {
+      rgx_set("other", rgx_mismatch(ix, v->version, want, have, path));
+      return s_empty();
+    }
+    sys_remove_file(path);
+  }
+  if (p->opts->offline) {
+    rgx_set("other", rgx_offline_msg(rgx_label(ix, v->version)));
+    return s_empty();
+  }
+  if (announce) {
+    status("Fetching", rgx_label(ix, v->version) + " (" + ix->registry + ")");
+  }
+  if (!rgx_get(p, ix->registry, ix->url, rel, path)) {
+    g_rgx_err = "cannot fetch " + rgx_label(ix, v->version) + " from registry " + ix->registry + ": " + g_rgx_err;
+    return s_empty();
+  }
+  var got: string = sha_file(path);
+  if (!s_eq(got, want)) {
+    sys_remove_file(path);
+    rgx_set("other", rgx_mismatch(ix, v->version, want, got, rgx_source(p, ix, rel)));
+    return s_empty();
+  }
+  return path;
+}
+
+fn rgx_version_of(ix: RegIndex*, version: string) -> RegVersion* {
+  var v: RegVersion* = reg_version(ix, version);
+  if (v == (RegVersion*)0) {
+    rgx_set("missing", "registry " + ix->registry + " has no " + rgx_label(ix, version));
+  }
+  return v;
+}
+
 export fn reg_manifest(p: Project*, ix: RegIndex*, version: string) -> Manifest* {
-  return (Manifest*)0;
+  rgx_clear();
+  var v: RegVersion* = rgx_version_of(ix, version);
+  if (v == (RegVersion*)0) {
+    return (Manifest*)0;
+  }
+  var rel: string = "pkg/" + ix->name + "/" + ix->name + "-" + v->version + ".toml";
+  var path: string = rgx_cached(p, ix, v, rel, v->manifest_sha, false);
+  if (slen(path) == 0) {
+    return (Manifest*)0;
+  }
+  var r: FsRead = fs_read(path);
+  if (!r.ok) {
+    rgx_set("other", "cannot read " + path);
+    return (Manifest*)0;
+  }
+  var doc: Toml* = toml_parse(r.data, rgx_label(ix, v->version) + " (registry " + ix->registry + ")");
+  var m: Manifest* = man_parse(doc, p->state_dir + "/deps/" + ix->name);
+  if (slen(m->error) > 0) {
+    rgx_set("other", m->error);
+    return (Manifest*)0;
+  }
+  return m;
 }
 
 export fn reg_fetch(p: Project*, ix: RegIndex*, version: string) -> string {
+  rgx_clear();
+  var v: RegVersion* = rgx_version_of(ix, version);
+  if (v == (RegVersion*)0) {
+    return s_empty();
+  }
+  var rel: string = "pkg/" + ix->name + "/" + ix->name + "-" + v->version + ".tar.gz";
+  return rgx_cached(p, ix, v, rel, v->sha, true);
+}
+
+// ---------------------------------------------------------------------------
+// Extraction
+// ---------------------------------------------------------------------------
+
+fn rgx_tar() -> Tool {
+  if (s_eq(sys_os(), "windows") && !sys_is_wine() && slen(env_get("MBUILD_TAR")) == 0) {
+    return sys_find_tool("tar");
+  }
+  return rgx_host_tool("tar", "MBUILD_TAR");
+}
+
+fn rgx_tar_list(tar: Tool, archive: string, flags: string) -> Captured {
+  var c: Cmd* = cmd_new(tar);
+  cmd_arg(c, flags);
+  cmd_path(c, archive);
+  var r: Captured = proc_capture(c);
+  rgx_cmd_free(c);
+  return r;
+}
+
+fn rgx_nonblank(text: string) -> StrList* {
+  var out: StrList* = sl_new();
+  var lines: StrList* = s_lines(text);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var ln: string = sl_get(lines, i);
+    if (slen(s_trim(ln)) > 0) {
+      sl_push(out, ln);
+    }
+    i = i + 1;
+  }
+  rgx_sl_free(lines);
+  return out;
+}
+
+// "" when the member name stays inside the package directory.
+fn rgx_bad_name(name: string) -> string {
+  if (s_starts(name, "/") || (slen(name) >= 2 && s_byte(name, 1) == 58)) {
+    return "is an absolute path";
+  }
+  if (s_find_byte(name, 92) >= 0 || s_find_byte(name, 58) >= 0) {
+    return "contains a backslash or a colon";
+  }
+  var parts: StrList* = s_split(name, 47);
+  defer rgx_sl_free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    if (s_eq(sl_get(parts, i), "..")) {
+      return "leaves the package directory";
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// "" when every member is a plain file or directory with a safe name.
+fn rgx_check_members(tar: Tool, archive: string) -> string {
+  var lv: Captured = rgx_tar_list(tar, archive, "-tzvf");
+  var ln: Captured = rgx_tar_list(tar, archive, "-tzf");
+  if (lv.code != 0 || ln.code != 0) {
+    return "cannot list " + archive + " (tar exit " + s_int((int64)ln.code) + ")";
+  }
+  var long_lines: StrList* = rgx_nonblank(lv.out);
+  var names: StrList* = rgx_nonblank(ln.out);
+  defer rgx_sl_free(long_lines);
+  defer rgx_sl_free(names);
+  if (long_lines->len != names->len) {
+    return p_base(archive) + ": the two listings of the archive disagree; refusing to extract it";
+  }
+  var i: int64 = 0;
+  while (i < names->len) {
+    var name: string = sl_get(names, i);
+    var kind: int32 = s_byte(sl_get(long_lines, i), 0);
+    if (kind != 45 && kind != 100) {
+      return p_base(archive) + ": member `" + name + "` is not a regular file or directory; refusing to extract it";
+    }
+    var why: string = rgx_bad_name(name);
+    if (slen(why) > 0) {
+      return p_base(archive) + ": member `" + name + "` " + why + "; refusing to extract it";
+    }
+    i = i + 1;
+  }
   return s_empty();
 }
 
 export fn reg_extract(archive: string, sha: string, dest: string, marker: string) -> string {
-  return "not implemented";
-}
-
-export fn reg_marker(dest: string) -> string {
+  var want: string = rgx_bare_sha(sha);
+  if (slen(want) > 0) {
+    var got: string = sha_file(archive);
+    if (!s_eq(got, want)) {
+      return archive + " does not match its checksum\n    expected      " + rgx_short(want) + "\n    found         " + rgx_short(got) + "\n  a published version never changes; the download cache was changed";
+    }
+  }
+  var tar: Tool = rgx_tar();
+  if (!tool_found(tar)) {
+    return "cannot find `tar` (needed to unpack " + p_base(archive) + ")\n  help: install tar and put it on PATH, or set MBUILD_TAR to its path";
+  }
+  var bad: string = rgx_check_members(tar, archive);
+  if (slen(bad) > 0) {
+    return bad;
+  }
+  var tmp: string = p_clean(p_dir(dest) + "/../tmp/x-" + p_base(dest));
+  sys_remove_tree(tmp);
+  if (!fs_mkdirs(tmp)) {
+    return "cannot create " + tmp;
+  }
+  var c: Cmd* = cmd_new(tar);
+  cmd_arg(c, "-xzf");
+  cmd_path(c, archive);
+  cmd_arg(c, "-C");
+  cmd_path(c, tmp);
+  var r: Captured = proc_capture_all(c);
+  rgx_cmd_free(c);
+  if (r.code != 0) {
+    sys_remove_tree(tmp);
+    return "cannot unpack " + archive + ": " + s_trim(r.out);
+  }
+  if (!fs_write(tmp + "/.mbuild-pkg", marker + "\n")) {
+    sys_remove_tree(tmp);
+    return "cannot write " + tmp + "/.mbuild-pkg";
+  }
+  if (fs_exists(dest)) {
+    sys_remove_tree(dest);
+  }
+  if (!fs_mkdirs(p_dir(dest)) || !sys_rename(tmp, dest)) {
+    sys_remove_tree(tmp);
+    return "cannot move " + tmp + " to " + dest;
+  }
   return s_empty();
 }
 
+export fn reg_marker(dest: string) -> string {
+  var r: FsRead = fs_read(dest + "/.mbuild-pkg");
+  if (!r.ok) {
+    return s_empty();
+  }
+  var lines: StrList* = s_lines(r.data);
+  var first: string = s_empty();
+  if (lines->len > 0) {
+    first = s_trim(sl_get(lines, 0));
+  }
+  rgx_sl_free(lines);
+  return first;
+}
+
 export fn reg_error() -> string {
-  return "not implemented";
+  return g_rgx_err;
 }
 
 export fn reg_failure_kind() -> string {
-  return "other";
+  return g_rgx_kind;
 }
 
-export fn reg_publish(r: RegPublish*) -> string {
-  return "not implemented";
+// ---------------------------------------------------------------------------
+// Writing a local registry
+// ---------------------------------------------------------------------------
+
+fn rgx_is_registry(dir: string) -> bool {
+  return fs_is_file(dir + "/registry.toml");
 }
 
-export fn reg_yank(dir: string, name: string, version: string, undo: bool) -> string {
-  return "not implemented";
+fn rgx_not_registry(dir: string) -> string {
+  return dir + " is not a registry (it has no registry.toml)\n  help: create one with mbuild registry init " + dir;
 }
 
 export fn reg_init_dir(dir: string, name: string) -> string {
-  return "not implemented";
+  if (rgx_is_registry(dir)) {
+    return dir + " is already a registry";
+  }
+  var n: string = name;
+  if (slen(n) == 0) {
+    n = p_base(p_clean(dir));
+  }
+  if (!fs_mkdirs(dir + "/index") || !fs_mkdirs(dir + "/pkg")) {
+    return "cannot create " + dir;
+  }
+  if (!fs_write(dir + "/registry.toml", "[registry]\nformat = 1\nname = " + toml_quote(n) + "\n")) {
+    return "cannot write " + dir + "/registry.toml";
+  }
+  return s_empty();
 }
 
-export fn reg_dir_of(p: Project*, registry: string) -> string {
+// The index line of version, -1 when absent.
+fn rgx_find_line(lines: StrList*, version: string) -> int64 {
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var f: StrList* = s_fields(sl_get(lines, i));
+    var hit: bool = f->len > 0 && (s_eq(sl_get(f, 0), version) || (sv_is(sl_get(f, 0)) && sv_cmp(sl_get(f, 0), version) == 0));
+    rgx_sl_free(f);
+    if (hit) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn rgx_join_lines(lines: StrList*) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < lines->len) {
+    buf_line(b, sl_get(lines, i));
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+fn rgx_index_lines(dir: string, name: string) -> StrList* {
+  var r: FsRead = fs_read(dir + "/index/" + name);
+  if (!r.ok) {
+    return sl_of("# mbuild index " + name);
+  }
+  return s_lines(r.data);
+}
+
+export fn reg_publish(r: RegPublish*) -> string {
+  if (!sv_is(r->version)) {
+    return r->name + ": '" + r->version + "' is not a semantic version";
+  }
+  if (!rgx_is_registry(r->dir)) {
+    return rgx_not_registry(r->dir);
+  }
+  var lines: StrList* = rgx_index_lines(r->dir, r->name);
+  defer rgx_sl_free(lines);
+  if (rgx_find_line(lines, r->version) >= 0) {
+    return r->name + " " + r->version + " is already published in " + r->dir + "\n  help: a published version never changes; publish a new version";
+  }
+  var files: StrList* = sl_copy(r->files);
+  defer rgx_sl_free(files);
+  sl_sort(files);
+  if (files->len == 0) {
+    return r->name + " " + r->version + ": no files to publish";
+  }
+  if (r->dry_run) {
+    var i: int64 = 0;
+    while (i < files->len) {
+      say(sl_get(files, i));
+      i = i + 1;
+    }
+    say("");
+    print(r->manifest_text);
+    flush_out();
+    return s_empty();
+  }
+  var tar: Tool = rgx_tar();
+  if (!tool_found(tar)) {
+    return "cannot find `tar` (needed to pack " + r->name + ")\n  help: install tar and put it on PATH, or set MBUILD_TAR to its path";
+  }
+  var list: string = r->root + ".list";
+  var archive: string = r->root + ".tar.gz";
+  if (!fs_write(list, rgx_join_lines(files))) {
+    return "cannot write " + list;
+  }
+  var c: Cmd* = cmd_new(tar);
+  cmd_arg(c, "-czf");
+  cmd_path(c, archive);
+  cmd_arg(c, "-C");
+  cmd_path(c, r->root);
+  cmd_arg(c, "-T");
+  cmd_path(c, list);
+  var tr: Captured = proc_capture_all(c);
+  rgx_cmd_free(c);
+  if (tr.code != 0) {
+    return "cannot pack " + r->name + " " + r->version + ": " + s_trim(tr.out);
+  }
+  var a_sha: string = sha_file(archive);
+  var m_sha: string = sha_string(r->manifest_text);
+  var base: string = r->dir + "/pkg/" + r->name + "/" + r->name + "-" + r->version;
+  if (!fs_copy(archive, base + ".tar.gz")) {
+    return "cannot write " + base + ".tar.gz";
+  }
+  if (!fs_write(base + ".toml", r->manifest_text)) {
+    return "cannot write " + base + ".toml";
+  }
+  sl_push(lines, r->version + " sha256=" + a_sha + " manifest=" + m_sha);
+  if (!fs_write(r->dir + "/index/" + r->name, rgx_join_lines(lines))) {
+    return "cannot write " + r->dir + "/index/" + r->name;
+  }
+  sys_remove_file(archive);
+  sys_remove_file(list);
+  return s_empty();
+}
+
+export fn reg_yank(dir: string, name: string, version: string, undo: bool) -> string {
+  if (!rgx_is_registry(dir)) {
+    return rgx_not_registry(dir);
+  }
+  var r: FsRead = fs_read(dir + "/index/" + name);
+  if (!r.ok) {
+    return dir + " has no package named " + name;
+  }
+  var lines: StrList* = s_lines(r.data);
+  defer rgx_sl_free(lines);
+  var at: int64 = rgx_find_line(lines, version);
+  if (at < 0) {
+    return dir + " has no " + name + " " + version;
+  }
+  var f: StrList* = s_fields(sl_get(lines, at));
+  defer rgx_sl_free(f);
+  var kept: StrList* = sl_new();
+  defer rgx_sl_free(kept);
+  var i: int64 = 0;
+  while (i < f->len) {
+    if (!s_eq(sl_get(f, i), "yanked")) {
+      sl_push(kept, sl_get(f, i));
+    }
+    i = i + 1;
+  }
+  if (!undo) {
+    sl_push(kept, "yanked");
+  }
+  sl_set(lines, at, sl_join(kept, " "));
+  if (!fs_write(dir + "/index/" + name, rgx_join_lines(lines))) {
+    return "cannot write " + dir + "/index/" + name;
+  }
   return s_empty();
 }
