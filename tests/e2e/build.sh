@@ -373,6 +373,14 @@ tr -s ' ' <"$S/last.out" >"$S/prof.txt"; cp "$S/prof.txt" "$S/last.out"
 check "profiles: debug row" has "debug stack-trace -> -s"
 check "profiles: release row" has "release optimize=full -> --release"
 check "profiles: fast row" has "fast inherits release; check-overflow (mbuild.mettle:7) -> --release --check-overflow"
+proj "$W/prof2" <<'EOF'
+mb_profile("release");
+mb_set("optimize", "full");
+EOF
+cd "$W/prof2" && printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
+mb profiles
+tr -s ' ' <"$S/last.out" >"$S/prof.txt"; cp "$S/prof.txt" "$S/last.out"
+check "profiles: a key set like the built-in shows once" has "release optimize=full (mbuild.mettle:6) -> --release"
 proj "$W/rawflag" <<'EOF'
 mb_flags("--bogus-flag");
 EOF

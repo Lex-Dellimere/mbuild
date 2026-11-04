@@ -3944,12 +3944,21 @@ export fn build_cmd_profiles(p: Project*) -> int32 {
     var sec: string = "profile." + name;
     var parts: StrList* = sl_new();
     var head: string = "";
+    // The built-in setting, unless the project sets that key itself.
+    var bkey: string = "";
     if (s_eq(name, "debug")) {
-      sl_push(parts, "stack-trace");
+      bkey = "stack-trace";
     } else if (s_eq(name, "release")) {
-      sl_push(parts, "optimize=full");
+      bkey = "optimize";
     } else {
       head = "inherits " + bx_inherits(m, name);
+    }
+    if (slen(bkey) > 0 && !toml_has(m->doc, sec, bkey) && (m->local == (Manifest*)0 || !toml_has(m->local->doc, sec, bkey))) {
+      if (s_eq(bkey, "optimize")) {
+        sl_push(parts, "optimize=full");
+      } else {
+        sl_push(parts, bkey);
+      }
     }
     bx_section_keys(p, m->doc, sec, "mbuild.mettle", parts);
     if (m->local != (Manifest*)0) {
