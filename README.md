@@ -11,7 +11,7 @@ mbuild run
 
 ## what it does
 
-- builds linux binaries and windows `.exe` files. on linux the `.exe` is built by running the windows mettle compiler through wine
+- builds linux binaries and windows `.exe` files (on linux through wine)
 - deps from a registry, pinned by version and sha256 in `mbuild.lock`. `mbuild publish` puts your package in one
 - spots imports you didn't declare and adds them for you
 - `cmd_*` functions in `mbuild.mettle` become `mbuild NAME` commands, `hook_pre_build` / `hook_post_build` run around builds
@@ -37,7 +37,7 @@ same on windows with `mettle.exe` and `mbuild0.exe`. `./mbuild0 install` copies 
 
 mbuild keeps its download cache in `~/.mbuild` (`%LOCALAPPDATA%\mbuild` on windows). set `MBUILD_HOME` to put it somewhere else.
 
-there's no public registry yet. point mbuild at one with `MBUILD_REGISTRY` (a URL or a directory) or declare it in `mbuild.mettle`. the transcripts below use the fixture registry from `sh tests/fixtures/make-registry.sh DIR`.
+there's no public registry yet. point mbuild at one with `MBUILD_REGISTRY` (a URL or a directory) or declare it in `mbuild.mettle`. the transcripts here and in docs/ use the fixture registry from `sh tests/fixtures/make-registry.sh DIR`.
 
 ## a quick tour
 
@@ -58,15 +58,7 @@ $ mbuild run
 Hello from hello!
 ```
 
-run it again without changing anything and nothing gets compiled:
-
-```text
-$ mbuild run
-       Fresh hello (linux, debug)
-    Finished in 0.0s
-     Running build/linux/debug/hello
-Hello from hello!
-```
+run it again without changing anything and it prints `Fresh hello (linux, debug)` instead of compiling.
 
 ### adding a dependency
 
@@ -132,10 +124,6 @@ fn cmd_install(a: MbArgs*) -> int32 {
 ```
 
 ```text
-$ mbuild help
-...
-project commands (mbuild.mettle):
-  install     build a release and copy it into a bin directory (default ~/.local/bin)
 $ mbuild install --to ~/bin
    Compiling viewer (linux, release)
     Finished in 0.0s
@@ -158,7 +146,7 @@ $ mbuild new site --from greet --opt who=world --yes
   next: mbuild run, then mbuild hi
 ```
 
-without `--yes` it asks for each option. `mbuild init --from greet` does the same in the project you're in.
+without `--yes` it asks for each option. `mbuild init --from greet` does the same in the project you're in. see [docs/packages.md](docs/packages.md).
 
 ### windows from linux
 
@@ -166,14 +154,6 @@ without `--yes` it asks for each option. `mbuild init --from greet` does the sam
 mbuild build -t windows
 mbuild run -t windows      # runs the .exe through wine
 mbuild build -t all        # both
-```
-
-```text
-$ mbuild run -t windows
-   Compiling hw (windows, debug)
-    Finished in 2.5s
-     Running build/windows/debug/hw.exe
-Hello from hw!
 ```
 
 this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_WINDOWS`, or put `mb_tool("mettle-windows", PATH)` in `mbuild.local.mettle`. see [docs/platforms.md](docs/platforms.md).
@@ -222,9 +202,14 @@ flags that work everywhere: `-v` (show every command), `-q`, `--offline`, `--loc
 
 ## building and testing mbuild itself
 
+bootstrap as in [install](#install), then:
+
 ```bash
-sh tools/mcheck.sh src/main.mettle         # builds in debug and --release, zero warnings
-sh tests/run.sh                            # every test
+sh tools/mcheck.sh src/main.mettle         # debug and --release builds, zero warnings
+sh tests/run.sh                            # mcheck plus every tests/e2e suite
+sh tests/run.sh deps native                # just those suites
 ```
+
+both use `METTLE` (default `../Mettle/bin/mettle`). set `METTLE_WIN` to a windows build of the compiler to add wine builds and tests, or `SKIP_WINE=1` to skip them.
 
 `DESIGN.md` explains how it all fits together, including every compiler and wine quirk we hit.
