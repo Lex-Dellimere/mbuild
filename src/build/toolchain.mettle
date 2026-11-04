@@ -1335,7 +1335,7 @@ fn tcx_install_source(given: string) -> string {
     return s_empty();
   }
   var jobs: string = s_int(proc_jobs());
-  status("Building", "Mettle " + desc + " in " + dir + " (make -j " + jobs + ")");
+  status("Building", "Mettle " + desc + " in " + tcx_show_home(dir) + " (make -j " + jobs + ")");
   var c: Cmd* = cmd_new(make);
   cmd_arg(c, "-j");
   cmd_arg(c, jobs);
@@ -1448,7 +1448,7 @@ fn tcx_install(p: Project*, given: string, from: string, soft: bool*) -> string 
       tcx_err_last();
       return s_empty();
     }
-    status("Installed", "Mettle " + id + " in " + tcx_dir(id));
+    status("Installed", "Mettle " + id + " in " + tcx_show_home(tcx_dir(id)));
     return id;
   }
   var v: string = tcx_norm(given);
@@ -1488,7 +1488,7 @@ fn tcx_install(p: Project*, given: string, from: string, soft: bool*) -> string 
     tcx_err_last();
     return s_empty();
   }
-  status("Installed", "Mettle " + rel.tag + " in " + tcx_dir(rel.tag));
+  status("Installed", "Mettle " + rel.tag + " in " + tcx_show_home(tcx_dir(rel.tag)));
   if (sv_cmp(rel.tag, "v0.17.0") <= 0) {
     warn("releases up to v0.17.0 cannot build current projects; install a source build with `mbuild toolchain install --from DIR`");
   }
@@ -1499,7 +1499,7 @@ fn tcx_source_text(t: TcxInfo) -> string {
   if (s_eq(t.source, "release")) {
     return "release";
   }
-  return "from " + t.source;
+  return "from " + tcx_show_home(t.source);
 }
 
 fn tcx_cmd_list(p: Project*) -> int32 {
@@ -1516,7 +1516,7 @@ fn tcx_cmd_list(p: Project*) -> int32 {
   if (hm != (Mettle*)0) {
     sel = hm->installed;
   }
-  say(bold("Installed toolchains") + " (" + tcx_root() + "):");
+  say(bold("Installed toolchains") + " (" + tcx_show_home(tcx_root()) + "):");
   if (ids->len == 0) {
     say("  (none)");
   }
@@ -1564,7 +1564,7 @@ fn tcx_cmd_list(p: Project*) -> int32 {
     }
     if (m != (Mettle*)0) {
       var how: string = s_empty();
-      if (slen(m->installed) > 0) {
+      if (slen(m->installed) > 0 && !s_contains(m->source, m->installed)) {
         how = ": " + m->installed;
       }
       if (m->via_wine) {
@@ -1572,7 +1572,7 @@ fn tcx_cmd_list(p: Project*) -> int32 {
       } else if (m->tool.unix) {
         how = how + ", as a host program";
       }
-      say("  " + s_pad_right(tg, 8) + " " + m->path + "  (" + m->source + how + ")");
+      say("  " + s_pad_right(tg, 8) + " " + tcx_show_home(m->path) + "  (" + m->source + how + ")");
     } else {
       say("  " + s_pad_right(tg, 8) + " none: " + g_tcx_err);
       if (slen(g_tcx_hint) > 0) {
@@ -1741,7 +1741,7 @@ fn tcx_cmd_update(p: Project*) -> int32 {
       rc = 1;
       continue;
     }
-    status("Installed", "Mettle " + nid + " in " + tcx_dir(nid));
+    status("Installed", "Mettle " + nid + " in " + tcx_show_home(tcx_dir(nid)));
     if (s_eq(def, t.id)) {
       tcx_set_default(nid);
       def = nid;
