@@ -1,5 +1,6 @@
 #!/bin/sh
-# make-registry.sh ROOT: a file registry at ROOT/registry built with tar + sha256sum only.
+# make-registry.sh ROOT: a file registry at ROOT/registry (tar + sha256sum only), the
+# package sources in ROOT/src and the app project in ROOT/app.
 set -eu
 ROOT=$(mkdir -p "$1" && cd "$1" && pwd); REG="$ROOT/registry"; SRC="$ROOT/src"
 rm -rf "$REG" "$SRC"; mkdir -p "$REG/index" "$REG/pkg" "$SRC"
@@ -200,3 +201,79 @@ mk badsum v1.0.0 </dev/null
 printf 'export fn bs() -> int32 {\n  return 1;\n}\n' > "$SRC/badsum-v1.0.0/badsum.mettle"
 pkg badsum v1.0.0
 sed -i 's/sha256=[0-9a-f]*/sha256=9f8e7d6c5b4a39210f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a6978/' "$REG/index/badsum"
+
+# --- webfw: init.rules (options db, port), two templates, AGENT.rules; sqlite -
+mk sqlite v1.2.0 </dev/null
+printf 'export fn sqlite_open() -> int32 {\n  return 0;\n}\n' > "$SRC/sqlite-v1.2.0/sqlite.mettle"
+pkg sqlite v1.2.0
+mk webfw v1.0.0 </dev/null
+d="$SRC/webfw-v1.0.0"; mkdir -p "$d/templates"
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("webfw", "v1.0.0");\n}\n' > "$d/mbuild.mettle"
+printf 'export fn webfw_name() -> string {\n  return "webfw";\n}\n' > "$d/webfw.mettle"
+cat > "$d/init.rules" <<'EOF'
+import "mbuild/init";
+
+fn options() {
+  mi_option("db", "sqlite", "database backend");
+  mi_choice("db", "sqlite, memory");
+  mi_option("port", "8080", "port of the dev server");
+}
+
+fn plan() {
+  mi_dir("static");
+  mi_template("templates/main.mettle.tmpl", "src/main.mettle");
+  mi_template("templates/routes.mettle.tmpl", "src/routes.mettle");
+  if (mi_opt("db") == "sqlite") { mi_dep("sqlite", "v1.2.0"); }
+  mi_set("release", "optimize", "full");
+  mi_command("serve", "run the dev server on port @@port@@", "return mb_mbuild(\"run -- --port @@port@@\");");
+  mi_next("mbuild serve, then open http://localhost:@@port@@");
+}
+EOF
+cat > "$d/templates/main.mettle.tmpl" <<'EOF'
+import "std/io";
+import "routes";
+
+// @@project@@, started from @@package@@ @@package_version@@ (mbuild @@mbuild_version@@); @@@@ stays
+fn main() -> int32 {
+  print("@@project@@ serves on port " + routes_port() + "\n");
+  return 0;
+}
+EOF
+cat > "$d/templates/routes.mettle.tmpl" <<'EOF'
+export fn routes_port() -> string {
+  return "@@port@@";
+}
+EOF
+printf '# webfw\n\n## What it is for\nsmall web apps.\n' > "$d/AGENT.rules"
+pkg webfw v1.0.0
+
+# --- comps: a library declaring a static component kv (mem, file) ------------
+mk comps v1.0.0 <<'EOF'
+
+[component.kv]
+dir = "src/kv"
+mode = "static"
+impls = ["mem", "file"]
+EOF
+mkdir -p "$SRC/comps-v1.0.0/src/kv"
+for i in mem file; do
+  printf 'export fn kv_get(k: string) -> string {\n  return "%s:" + k;\n}\n' $i > "$SRC/comps-v1.0.0/src/kv/$i.mettle"
+done
+printf 'import "kv";\n\nexport fn comps_get(k: string) -> string {\n  return kv_get(k);\n}\n' > "$SRC/comps-v1.0.0/comps.mettle"
+pkg comps v1.0.0
+
+# --- app: imports strutil and vecmath, declares only vecmath -----------------
+A="$ROOT/app"; rm -rf "$A"; mkdir -p "$A/src"
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("app", "0.1.0");\n  mb_dep("vecmath", "v0.1.0");\n}\n' > "$A/mbuild.mettle"
+cat > "$A/src/main.mettle" <<'EOF'
+import "std/io";
+import "vecmath/vecmath";
+import "strutil/strutil";
+
+fn main() -> int32 {
+  var a: Vec2 = { x: 3.0, y: 4.0 };
+  var b: Vec2 = vm_scale(a, (float32)2.0);
+  println("{vm_banner()} {su_version()} dot={vm_dot(a, b)} len={vm_len(a)}");
+  return 0;
+}
+EOF

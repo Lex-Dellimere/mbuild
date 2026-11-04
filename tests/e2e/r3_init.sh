@@ -41,84 +41,13 @@ file_lacks() {
 
 # --- fixtures ------------------------------------------------------------------
 
-W="$T/webfw-src"
-mkdir -p "$W/templates"
-cat > "$W/mbuild.mettle" <<'EOF'
-import "mbuild/api";
-
-fn project() {
-  mb_package("webfw", "v1.0.0");
-}
-EOF
-printf 'export fn webfw_name() -> string {\n  return "webfw";\n}\n' > "$W/webfw.mettle"
-cat > "$W/init.rules" <<'EOF'
-import "mbuild/init";
-
-fn options() {
-  mi_option("db", "sqlite", "database backend");
-  mi_choice("db", "sqlite, memory");
-  mi_option("port", "8080", "port of the dev server");
-}
-
-fn plan() {
-  mi_dir("static");
-  mi_template("templates/main.mettle.tmpl", "src/main.mettle");
-  mi_template("templates/routes.mettle.tmpl", "src/routes.mettle");
-  if (mi_opt("db") == "sqlite") { mi_dep("sqlite", "v1.2.0"); }
-  mi_set("release", "optimize", "full");
-  mi_command("serve", "run the dev server on port @@port@@", "return mb_mbuild(\"run -- --port @@port@@\");");
-  mi_next("mbuild serve, then open http://localhost:@@port@@");
-}
-EOF
-cat > "$W/templates/main.mettle.tmpl" <<'EOF'
-import "std/io";
-import "routes";
-
-// @@project@@, started from @@package@@ @@package_version@@ (mbuild @@mbuild_version@@); @@@@ stays
-fn main() -> int32 {
-  print("@@project@@ serves on port " + routes_port() + "\n");
-  return 0;
-}
-EOF
-cat > "$W/templates/routes.mettle.tmpl" <<'EOF'
-export fn routes_port() -> string {
-  return "@@port@@";
-}
-EOF
-printf '# webfw\n\n## What it is for\nsmall web apps.\n' > "$W/AGENT.rules"
-
-# A file registry (DESIGN.md 14.1, 17.3) with webfw, sqlite, strutil, textfmt;
-# each package's registry manifest is regsrc/NAME-VERSION/manifest.toml.
+# The registry fixtures (17.3); W is webfw as a path package.
+sh "$here/tests/fixtures/make-registry.sh" "$T" >/dev/null || exit 1
 REG="$T/registry"
-SRC="$T/regsrc"
-mkdir -p "$REG/index" "$REG/pkg" "$SRC"
-printf '[registry]\nformat = 1\nname = "fixtures"\n' > "$REG/registry.toml"
-pkg() {
-  d="$SRC/$1-$2"; out="$REG/pkg/$1"; mkdir -p "$out"
-  ( cd "$d" && find . -type f ! -name manifest.toml | sed 's|^\./||' | LC_ALL=C sort > "$SRC/.list" && tar -czf "$out/$1-$2.tar.gz" -T "$SRC/.list" )
-  cp "$d/manifest.toml" "$out/$1-$2.toml"
-  a=$(sha256sum "$out/$1-$2.tar.gz" | cut -c1-64); m=$(sha256sum "$out/$1-$2.toml" | cut -c1-64)
-  [ -f "$REG/index/$1" ] || printf '# mbuild index %s\n' "$1" > "$REG/index/$1"
-  printf '%s sha256=%s manifest=%s\n' "$2" "$a" "$m" >> "$REG/index/$1"
-}
-mk() {
-  d="$SRC/$1-$2"; mkdir -p "$d"
-  { printf '[package]\nname = "%s"\nversion = "%s"\n' "$1" "$2"; cat; } > "$d/manifest.toml"
-}
-mk webfw v1.0.0 < /dev/null
-cp -r "$W/." "$SRC/webfw-v1.0.0/"
-pkg webfw v1.0.0
-mk sqlite v1.2.0 < /dev/null
-printf 'export fn sqlite_open() -> int32 {\n  return 0;\n}\n' > "$SRC/sqlite-v1.2.0/sqlite.mettle"
-pkg sqlite v1.2.0
-mk strutil v1.1.0 < /dev/null
-printf 'export fn su_upper(s: string) -> string {\n  return s;\n}\n' > "$SRC/strutil-v1.1.0/strutil.mettle"
-printf '# strutil\n\n## Main API\nsu_upper.\n' > "$SRC/strutil-v1.1.0/AGENT.rules"
-pkg strutil v1.1.0
-printf '[dependencies]\nstrutil = "v1.1.0"\n' | mk textfmt v0.1.0
-printf 'import "strutil/strutil";\nexport fn tf_title(s: string) -> string {\n  return su_upper(s);\n}\n' > "$SRC/textfmt-v0.1.0/textfmt.mettle"
-printf '# textfmt\n\n## Traps\nnone yet.\n' > "$SRC/textfmt-v0.1.0/AGENT.rules"
-pkg textfmt v0.1.0
+SRC="$T/src"
+W="$T/webfw-src"
+cp -r "$SRC/webfw-v1.0.0" "$W"
+rm "$W/manifest.toml"
 
 # --- part 1: the driver --------------------------------------------------------
 
@@ -303,7 +232,7 @@ expect_line "agents: textfmt" "$out" "== textfmt v0.1.0 (deps/textfmt/AGENT.rule
 expect_no "agents: not strutil" "$out" "== strutil"
 out=$("$D" "$A" agents --all $MODS 2>&1)
 expect_line "agents --all: strutil" "$out" "== strutil v1.1.0 (deps/strutil/AGENT.rules)"
-expect_has "agents --all: its text" "$out" "su_upper."
+expect_has "agents --all: its text" "$out" "Every function is pure."
 out=$("$D" "$A" agents strutil $MODS 2>&1)
 expect_line "agents NAME" "$out" "== strutil v1.1.0 (deps/strutil/AGENT.rules)"
 A2="$T/agents-off-$v"
@@ -370,7 +299,7 @@ fn project() {
   mb_dep("textfmt", "v0.1.0");
 }
 EOF
-    printf 'import "std/io";\nimport "textfmt/textfmt";\n\nfn main() -> int32 {\n  print(tf_title("x"));\n  return 0;\n}\n' > tapp/src/main.mettle
+    printf 'import "std/io";\nimport "textfmt/textfmt";\n\nfn main() -> int32 {\n  print(tf_banner("x"));\n  return 0;\n}\n' > tapp/src/main.mettle
     printf '# tapp\n' > tapp/AGENT.rules
     cd tapp || exit 1
     out=$("$MB" agents 2>&1)
