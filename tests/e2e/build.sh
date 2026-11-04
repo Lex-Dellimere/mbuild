@@ -269,6 +269,12 @@ check "-q publish publishes" [ -f "$S/reg-$mode/pkg/strx/strx-v1.1.1.tar.gz" ]
 check "-q publish: no status or next line" sh -c '! grep -q "Published\|next:" "$0/last.out"' "$S"
 mb yank strx@v1.1.0 --to "$S/reg-$mode"
 check "yank" grep -q "v1.1.0 .*yanked" "$S/reg-$mode/index/strx"
+mb yank strx@v1.1.1 --to "$S/reg-$mode"
+sed -i 's/1.1.1/1.1.2/' mbuild.mettle
+printf 'export fn strx_a() -> int32 { return 1; }\n' > strx.mettle
+mb publish --to "$S/reg-$mode" --dry-run
+check "a break against a yanked version is reported" has "strx v1.1.2 breaks the API of v1.1.1, yanked (inside line"
+mb yank strx@v1.1.1 --to "$S/reg-$mode" --undo
 mkdir -p "$W/user/src" && cd "$W/user"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("user", "0.1.0");\n}\n\nfn deps() {\n  mb_dep("strx", "v1.0.0");\n}\n' > mbuild.mettle
 printf 'import "std/io";\nimport "strx/strx";\nfn main() -> int32 { print("a={strx_a()}\\n"); return 0; }\n' > src/main.mettle

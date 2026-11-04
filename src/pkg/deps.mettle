@@ -4171,7 +4171,8 @@ fn dx_api_breaks(p: Project*, name: string, version: string, dir: string) -> str
   if (!ix->ok || !ix->found) {
     return s_empty();
   }
-  var vs: StrList* = dx_versions(ix, false);
+  // Yanked versions count: people may still depend on them.
+  var vs: StrList* = dx_versions(ix, true);
   var prev: string = "";
   var i: int64 = 0;
   while (i < vs->len) {
@@ -4205,7 +4206,12 @@ fn dx_api_breaks(p: Project*, name: string, version: string, dir: string) -> str
     return s_empty();
   }
   free(all);
-  return name + " " + version + " breaks the API of " + prev + " (inside line " + sv_line(version) + ", which should not break):\n" + listed + "\n  help: a breaking change needs a new line: publish " + dx_next_line(version) + " (or pass --allow-breaking)";
+  var shown: string = prev;
+  var rv: RegVersion* = dx_find_version(ix, prev);
+  if (rv != (RegVersion*)0 && rv->yanked) {
+    shown = prev + ", yanked";
+  }
+  return name + " " + version + " breaks the API of " + shown + " (inside line " + sv_line(version) + ", which should not break):\n" + listed + "\n  help: a breaking change needs a new line: publish " + dx_next_line(version) + " (or pass --allow-breaking)";
 }
 
 // ---------------------------------------------------------------------------
