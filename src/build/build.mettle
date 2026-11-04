@@ -4169,23 +4169,26 @@ fn bx_project_cmd(info: MbfInfo*, name: string) -> MbfCommand* {
   return (MbfCommand*)0;
 }
 
-// error: no command 'x' + a suggestion over built-ins and project commands.
+// error: no command 'x' + a suggestion over built-ins and project commands;
+// on a tie the project's command wins (helo: hello, not help).
 fn bx_unknown_cmd(info: MbfInfo*, name: string) {
   bx_init_cmds();
   var cands: StrList* = sl_new();
   var i: int64 = 0;
+  while (info != (MbfInfo*)0 && i < info->ncommands) {
+    if (!build_is_builtin(info->commands[i].name)) {
+      sl_add_uniq(cands, info->commands[i].name);
+    }
+    i = i + 1;
+  }
+  var nproj: int64 = cands->len;
+  i = 0;
   while (i < g_bx_ncmds) {
     sl_push(cands, g_bx_cmds[i].name);
     i = i + 1;
   }
-  var nbuiltin: int64 = cands->len;
-  i = 0;
-  while (info != (MbfInfo*)0 && i < info->ncommands) {
-    sl_add_uniq(cands, info->commands[i].name);
-    i = i + 1;
-  }
   var sug: string = man_suggest(name, cands);
-  var is_proj: bool = sl_index(cands, sug) >= nbuiltin;
+  var is_proj: bool = sl_index(cands, sug) < nproj;
   free(cands);
   var msg: string = "no command '" + name + "'";
   if (slen(sug) == 0) {
