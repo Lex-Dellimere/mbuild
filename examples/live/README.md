@@ -54,63 +54,44 @@ $ mbuild shell
 tick 0  pop 11  food 94  (steady)
 tick 1  pop 12  food 87  (steady)
 tick 2  pop 13  food 80  (steady)
+mettle> ls rules
+src/rules.mettle
+  fn rule_name() -> string                   the name shown on each tick
+  fn harvest(pop: int32) -> int32            food gathered this tick
+  fn grow(pop: int32, food: int32) -> int32  population next tick
+mettle> apropos food
+src/rules.mettle
+  fn harvest(pop: int32) -> int32  food gathered this tick
 tick 3  pop 14  food 72  (steady)
+mettle> explain world
+var world: World  src/main.mettle:16
+  the one world, a global so `mbuild shell` can reach it
 tick 4  pop 15  food 64  (steady)
-mettle> world.pop
-tick 5  pop 16  food 55  (steady)
-15
-tick 6  pop 17  food 46  (steady)
-tick 7  pop 18  food 36  (steady)
-tick 8  pop 19  food 26  (steady)
-mettle> world
-tick 9  pop 19  food 16  (steady)
-World { tick: 9, pop: 19, food: 26 }
-tick 10  pop 19  food 6  (steady)
-tick 11  pop 19  food 0  (steady)
+  = World { tick: 4, pop: 14, food: 72 }
 mettle> world.food = 1000;
-tick 12  pop 19  food 0  (steady)
-tick 13  pop 20  food 989  (steady)
+tick 5  pop 16  food 991  (steady)
 ok
-tick 14  pop 21  food 978  (steady)
-tick 15  pop 22  food 966  (steady)
 mettle> fn harvest(pop: int32) -> int32 { return pop * 3; }
 redefined harvest
-tick 16  pop 23  food 954  (steady)
-tick 17  pop 24  food 941  (steady)
-tick 18  pop 25  food 928  (steady)
-tick 19  pop 26  food 914  (steady)
-tick 20  pop 27  food 965  (steady)
-tick 21  pop 28  food 1018  (steady)
-tick 22  pop 29  food 1073  (steady)
+mettle> :mute
+muted: the program's output is held; :log shows it, :unmute shows it again
 mettle> harvest(world.pop)
-tick 23  pop 30  food 1130  (steady)
-tick 24  pop 31  food 1189  (steady)
-90
-tick 25  pop 32  food 1250  (steady)
-tick 26  pop 33  food 1313  (steady)
-tick 27  pop 34  food 1378  (steady)
+48
 mettle> undo
 undone
-tick 28  pop 35  food 1360  (steady)
-tick 29  pop 36  food 1341  (steady)
-mettle> harvest(world.pop)
-tick 30  pop 37  food 1322  (steady)
-tick 31  pop 38  food 1302  (steady)
-18
-tick 32  pop 39  food 1282  (steady)
-tick 33  pop 40  food 1261  (steady)
-mettle> h grow
-fn grow(pop: int32, food: int32) -> int32  src/rules.mettle:14
-  population next tick
-tick 34  pop 41  food 1240  (steady)
-tick 35  pop 42  food 1218  (steady)
+mettle> :log 2
+tick 5  pop 16  food 991  (steady)
+tick 6  pop 17  food 1022  (steady)
 mettle> :q
 ```
 
+on a terminal the program's lines scroll by above the prompt and what you are typing stays put (here the input was piped in, so they interleave).
+
 - an expression prints its value, a struct field by field. a statement runs and prints `ok`.
 - `fn NAME(...) { ... }` replaces `NAME` in the running program; `undo` puts the old one back, `r` patches in the files on disk. `src/` is never touched.
-- `h NAME` shows a signature and its comment, `i EXPR` a type and its fields. tab completes names, up and down walk the history.
-- `:q` or Ctrl-D quits and stops the program. without `mbuild shell`, `shell_point()` is an empty function.
+- `ls [FILE]` lists functions, globals and structs by file with the first line of their comment, `apropos TEXT` searches names and comments, `explain NAME` (or `h`) shows a function's signature and comment, a global's value or a struct's fields. `i EXPR` gives a type.
+- `:mute` holds the program's output, `:log [N]` shows its last lines, `:unmute` lets it through again. tab completes names and commands, up and down walk the history, Ctrl-C clears the line.
+- `help` lists it all. `:q` or Ctrl-D quits and stops the program. without `mbuild shell`, `shell_point()` is an empty function.
 
 ## how it works
 

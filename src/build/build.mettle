@@ -2444,6 +2444,8 @@ export struct ShellBuild {
   files: StrList*;     // its sources inside the project, absolute
   label: string;       // "app (linux, debug)"
   deps: StrList*;      // directories of the resolved packages
+  dep_names: StrList*; // their package names
+  graph: StrList*;     // every file of its import graph, absolute
   includes: StrList*;  // the -I directories, absolute
 }
 
@@ -2483,10 +2485,13 @@ export fn build_shell_open(p: Project*) -> ShellBuild* {
     }
     i = i + 1;
   }
+  sb->graph = sl_copy(u->g->files);
   sb->deps = sl_new();
+  sb->dep_names = sl_new();
   i = 0;
   while (i < s->ds->n) {
     sl_push(sb->deps, s->ds->mods[i].dir);
+    sl_push(sb->dep_names, s->ds->mods[i].module);
     i = i + 1;
   }
   sb->includes = sl_new();

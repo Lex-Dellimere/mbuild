@@ -1,6 +1,7 @@
 // Edit these while `mbuild live` runs: the next tick uses the new code,
 // and the world (tick, pop, food) carries on where it was.
 
+// the name shown on each tick
 export fn rule_name() -> string {
   return "steady";
 }

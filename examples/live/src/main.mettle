@@ -5,12 +5,14 @@ import "std/thread";
 import "mbuild/shell";
 import "rules";
 
+// the simulation's state
 struct World {
-  tick: int32;
-  pop: int32;
-  food: int32;
+  tick: int32;   // ticks so far
+  pop: int32;    // people
+  food: int32;   // food in store
 }
 
+// the one world, a global so `mbuild shell` can reach it
 var world: World;
 
 fn main() -> int32 {

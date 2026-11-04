@@ -22,6 +22,7 @@ import "scan";
 import "graph";
 import "toolchain";
 import "build";
+import "shell_term";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -40,8 +41,11 @@ struct ShxSess {
   tsigs: StrList*;
   tfiles: StrList*;
   tlines: StrList*;
-  dnames: StrList*;    // every declaration for h and completion
+  dnames: StrList*;    // every declaration for ls, explain and completion
+  dkinds: StrList*;
+  draws: StrList*;     // the scanner's sig
   dsigs: StrList*;
+  ddocs: StrList*;
   dfiles: StrList*;
   dlines: StrList*;
   ufiles: StrList*;    // undo: tree files' text before each kept patch,
@@ -53,8 +57,14 @@ struct ShxSess {
   fields: StrList*;    // field names of the struct types, for completion
   hist: StrList*;
   tty: bool;
-  output: string;      // on a terminal: the program's output, shown above the prompt
-  outpos: int64;
+  fifo: string;        // the program's stdout and stderr come through it
+  fd: int32;           // -1: no program (--local)
+  pend: Buf*;          // output after its last whole line
+  pend_ms: int64;
+  log: StrList*;       // its last lines, for :log
+  muted: bool;
+  held: int64;         // lines since :mute
+  lead: string;        // in front of an answer
 }
 
 // ---------------------------------------------------------------------------
@@ -84,12 +94,18 @@ fn shx_add_decls(ss: ShxSess*, file: string, text: string, all: bool, types: boo
   } else {
     l = scan_exports(text);
   }
+  var lines: StrList* = s_lines(text);
   var i: int64 = 0;
   while (i < l->n) {
     var it: ExportItem* = scan_export(l, i);
     i = i + 1;
+    var doc: StrList* = shx_doc(lines, it->line);
     sl_push(ss->dnames, it->name);
+    sl_push(ss->dkinds, it->kind);
+    sl_push(ss->draws, it->sig);
     sl_push(ss->dsigs, shx_display(it));
+    sl_push(ss->ddocs, sl_join(doc, "\n"));
+    free(doc);
     sl_push(ss->dfiles, file);
     sl_push(ss->dlines, s_int(it->line));
     if (types && s_eq(it->kind, "struct") && !s_starts(it->sig, "<") && !sl_has(ss->tnames, it->name)) {
@@ -102,19 +118,24 @@ fn shx_add_decls(ss: ShxSess*, file: string, text: string, all: bool, types: boo
       sl_push(ss->tlines, s_int(it->line));
     }
   }
+  free(lines);
   free(l->items);
   free(l);
 }
 
 // The project's files (struct printers come from these; --local skips the
-// entry, which the snippet does not import), then the packages' exports.
+// entry, which the snippet does not import), then the exports of the
+// packages' files in the bin's import graph.
 fn shx_scan(ss: ShxSess*) {
   ss->tnames = sl_new();
   ss->tsigs = sl_new();
   ss->tfiles = sl_new();
   ss->tlines = sl_new();
   ss->dnames = sl_new();
+  ss->dkinds = sl_new();
+  ss->draws = sl_new();
   ss->dsigs = sl_new();
+  ss->ddocs = sl_new();
   ss->dfiles = sl_new();
   ss->dlines = sl_new();
   ss->fields = sl_new();
@@ -129,25 +150,47 @@ fn shx_scan(ss: ShxSess*) {
     }
   }
   i = 0;
+  while (i < sb->graph->len) {
+    var f: string = sl_get(sb->graph, i);
+    i = i + 1;
+    if (sl_has(sb->files, f) || slen(shx_dep_of(ss, f)) == 0) {
+      continue;
+    }
+    var r: FsRead = fs_read(f);
+    if (r.ok) {
+      shx_add_decls(ss, f, r.data, false, false);
+    }
+  }
+}
+
+// The package directory holding f, "" when none does (the project's own
+// package, whose directory is the root, does not count).
+fn shx_dep_of(ss: ShxSess*, f: string) -> string {
+  var sb: ShellBuild* = ss->sb;
+  var i: int64 = 0;
   while (i < sb->deps->len) {
     var dir: string = sl_get(sb->deps, i);
-    i = i + 1;
-    var files: StrList* = fs_walk(dir, ".mettle", (StrList*)0);
-    var k: int64 = 0;
-    while (k < files->len) {
-      var rel: string = sl_get(files, k);
-      k = k + 1;
-      if (s_ends(rel, "_test.mettle") || s_starts(rel, "tests/") || s_starts(rel, "examples/")) {
-        continue;
-      }
-      var f: string = dir + "/" + rel;
-      var r: FsRead = fs_read(f);
-      if (r.ok) {
-        shx_add_decls(ss, f, r.data, false, false);
-      }
+    if (!s_eq(dir, sb->p->root) && p_has_prefix_dir(f, dir)) {
+      return dir;
     }
-    free(files);
+    i = i + 1;
   }
+  return s_empty();
+}
+
+// A file as shown: PACKAGE/REL for a package's, else relative to the root.
+fn shx_shown(ss: ShxSess*, file: string) -> string {
+  var sb: ShellBuild* = ss->sb;
+  var dir: string = shx_dep_of(ss, file);
+  if (slen(dir) > 0) {
+    var name: string = sl_get(sb->dep_names, sl_index(sb->deps, dir));
+    var rel: string = p_rel(dir, file);
+    return name + "/" + rel;
+  }
+  if (p_has_prefix_dir(file, sb->p->root)) {
+    return p_rel(sb->p->root, file);
+  }
+  return file;
 }
 
 fn shx_is_scalar(t: string) -> bool {
@@ -479,7 +522,7 @@ fn shx_run(ss: ShxSess*, code: string, result: string) -> bool {
     print(shown);
     var rd: FsRead = fs_read(path);
     if (rd.ok) {
-      say(rd.data);
+      say(ss->lead + rd.data);
       return true;
     }
     error_msg("the snippet stopped with code " + s_int(o.code) + " before its answer");
@@ -497,7 +540,7 @@ fn shx_wait(ss: ShxSess*, path: string) -> bool {
     var rd: FsRead = fs_read(path);
     if (rd.ok) {
       shx_relay(ss);
-      say(rd.data);
+      say(ss->lead + rd.data);
       return true;
     }
     if (!sys_pid_alive(ss->pid)) {
@@ -740,14 +783,9 @@ fn shx_reload(ss: ShxSess*) {
   }
 }
 
-// The comment lines directly above line `at` of file.
-fn shx_doc(file: string, at: int64) -> StrList* {
+// The comment lines directly above line `at` (from 1) of lines.
+fn shx_doc(lines: StrList*, at: int64) -> StrList* {
   var doc: StrList* = sl_new();
-  var r: FsRead = fs_read(file);
-  if (!r.ok) {
-    return doc;
-  }
-  var lines: StrList* = s_lines(r.data);
   var k: int64 = at - 2;
   while (k >= 0 && k < lines->len && s_starts(s_trim(sl_get(lines, k)), "@")) {
     k = k - 1;
@@ -765,32 +803,231 @@ fn shx_doc(file: string, at: int64) -> StrList* {
     sl_push(doc, d);
     k = k + 1;
   }
-  free(lines);
   return doc;
 }
 
 fn shx_where(ss: ShxSess*, file: string, line: string) -> string {
-  var shown: string = file;
-  if (p_has_prefix_dir(file, ss->sb->p->root)) {
-    shown = p_rel(ss->sb->p->root, file);
-  }
+  var shown: string = shx_shown(ss, file);
   return shown + ":" + line;
 }
 
-fn shx_help_name(ss: ShxSess*, name: string) {
+// The first line of declaration i's doc comment.
+fn shx_doc1(ss: ShxSess*, i: int64) -> string {
+  var doc: string = sl_get(ss->ddocs, i);
+  var nl: int64 = s_find_byte(doc, 10);
+  if (nl >= 0) {
+    return s_sub(doc, 0, nl);
+  }
+  return doc;
+}
+
+// Declaration i on one line; a long struct or enum body cut short.
+fn shx_brief(ss: ShxSess*, i: int64) -> string {
+  var d: string = sl_get(ss->dsigs, i);
+  var k: string = sl_get(ss->dkinds, i);
+  if ((s_eq(k, "struct") || s_eq(k, "enum")) && slen(d) > 64) {
+    var cut: string = s_sub(d, 0, 60);
+    return cut + " ...}";
+  }
+  return d;
+}
+
+// The declarations at idx grouped by file: a line each, its signature and
+// the first line of its doc comment.
+fn shx_list(ss: ShxSess*, idx: StrList*) {
+  var k: int64 = 0;
+  while (k < idx->len) {
+    var file: string = sl_get(ss->dfiles, s_to_int(sl_get(idx, k)));
+    var w: int64 = 0;
+    var e: int64 = k;
+    while (e < idx->len && s_eq(sl_get(ss->dfiles, s_to_int(sl_get(idx, e))), file)) {
+      var n: int64 = slen(shx_brief(ss, s_to_int(sl_get(idx, e))));
+      if (n > w && n <= 48) {
+        w = n;
+      }
+      e = e + 1;
+    }
+    say(bold(shx_shown(ss, file)));
+    while (k < e) {
+      var i: int64 = s_to_int(sl_get(idx, k));
+      k = k + 1;
+      var doc: string = shx_doc1(ss, i);
+      if (slen(doc) == 0) {
+        say("  " + shx_brief(ss, i));
+      } else {
+        say("  " + s_pad_right(shx_brief(ss, i), w) + "  " + dim(doc));
+      }
+    }
+  }
+}
+
+fn shx_file_is(shown: string, arg: string) -> bool {
+  var slash: string = "/" + arg;
+  var ext: string = arg + ".mettle";
+  var slash_ext: string = slash + ".mettle";
+  var dir: string = arg + "/";
+  return s_eq(shown, arg) || s_eq(shown, ext) || s_ends(shown, slash) || s_ends(shown, slash_ext) || s_starts(shown, dir);
+}
+
+// ls [FILE]: what the program declares, by file.
+fn shx_ls(ss: ShxSess*, arg: string) {
+  var idx: StrList* = sl_new();
+  defer free(idx);
+  var i: int64 = 0;
+  while (i < ss->dnames->len) {
+    if (slen(arg) == 0 || shx_file_is(shx_shown(ss, sl_get(ss->dfiles, i)), arg)) {
+      sl_push(idx, s_int(i));
+    }
+    i = i + 1;
+  }
+  if (idx->len == 0) {
+    if (slen(arg) == 0) {
+      say("no declarations");
+    } else if (sl_has(ss->dnames, arg)) {
+      shx_explain(ss, arg);
+    } else {
+      error_msg("no file " + arg + " in this program; ls lists them all");
+    }
+    return;
+  }
+  shx_list(ss, idx);
+}
+
+// apropos TEXT: the declarations whose name or doc comment has TEXT, any case.
+fn shx_apropos(ss: ShxSess*, text: string) {
+  if (slen(text) == 0) {
+    error_msg("apropos needs a word: apropos food");
+    return;
+  }
+  var want: string = s_lower(text);
+  var idx: StrList* = sl_new();
+  defer free(idx);
+  var i: int64 = 0;
+  while (i < ss->dnames->len) {
+    if (s_contains(s_lower(sl_get(ss->dnames, i)), want) || s_contains(s_lower(sl_get(ss->ddocs, i)), want)) {
+      sl_push(idx, s_int(i));
+    }
+    i = i + 1;
+  }
+  if (idx->len == 0) {
+    say("nothing matches " + text);
+    return;
+  }
+  shx_list(ss, idx);
+}
+
+// The comment on field f of the struct declared at line `at`: after the
+// field on its line, else the comment lines just above it.
+fn shx_field_doc(lines: StrList*, at: int64, f: string) -> string {
+  var k: int64 = at;
+  while (k < lines->len) {
+    var l: string = s_trim(sl_get(lines, k));
+    if (s_starts(l, "}")) {
+      break;
+    }
+    if (s_starts(l, f) && s_starts(s_trim(s_from(l, slen(f))), ":")) {
+      var c: int64 = s_find(l, "//");
+      if (c >= 0) {
+        return s_trim(s_from(l, c + 2));
+      }
+      var above: StrList* = shx_doc(lines, k + 1);
+      var d: string = sl_join(above, " ");
+      free(above);
+      return d;
+    }
+    k = k + 1;
+  }
+  return s_empty();
+}
+
+fn shx_say_doc(ss: ShxSess*, i: int64) {
+  var doc: string = sl_get(ss->ddocs, i);
+  if (slen(doc) == 0) {
+    return;
+  }
+  var lines: StrList* = s_lines(doc + "\n");
+  var k: int64 = 0;
+  while (k < lines->len) {
+    say("  " + sl_get(lines, k));
+    k = k + 1;
+  }
+  free(lines);
+}
+
+// A struct's fields (with their comments) or an enum's variants.
+fn shx_say_body(ss: ShxSess*, i: int64) {
+  if (s_eq(sl_get(ss->dkinds, i), "enum")) {
+    var vs: StrList* = s_split(sl_get(ss->draws, i), 44);
+    var k: int64 = 0;
+    while (k < vs->len) {
+      say("  " + s_trim(sl_get(vs, k)));
+      k = k + 1;
+    }
+    free(vs);
+    return;
+  }
+  var names: StrList* = sl_new();
+  var types: StrList* = sl_new();
+  shx_fields(sl_get(ss->draws, i), names, types);
+  var r: FsRead = fs_read(sl_get(ss->dfiles, i));
+  var lines: StrList* = sl_new();
+  if (r.ok) {
+    free(lines);
+    lines = s_lines(r.data);
+  }
+  var w: int64 = 0;
+  var k: int64 = 0;
+  while (k < names->len) {
+    var n: int64 = slen(sl_get(names, k)) + 2 + slen(sl_get(types, k));
+    if (n > w) {
+      w = n;
+    }
+    k = k + 1;
+  }
+  k = 0;
+  while (k < names->len) {
+    var f: string = sl_get(names, k);
+    var ft: string = f + ": " + sl_get(types, k);
+    var doc: string = shx_field_doc(lines, s_to_int(sl_get(ss->dlines, i)), f);
+    if (slen(doc) == 0) {
+      say("  " + ft);
+    } else {
+      say("  " + s_pad_right(ft, w) + "  " + dim(doc));
+    }
+    k = k + 1;
+  }
+  free(lines);
+  free(names);
+  free(types);
+}
+
+// explain NAME (h NAME): a fn's signature and doc; a global's type, doc and
+// value in the program; a struct's fields.
+fn shx_explain(ss: ShxSess*, name: string) {
+  if (slen(name) == 0) {
+    error_msg("explain needs a name: explain harvest");
+    return;
+  }
   var found: bool = false;
   var i: int64 = 0;
   while (i < ss->dnames->len) {
-    if (s_eq(sl_get(ss->dnames, i), name)) {
-      found = true;
-      say(sl_get(ss->dsigs, i) + "  " + dim(shx_where(ss, sl_get(ss->dfiles, i), sl_get(ss->dlines, i))));
-      var doc: StrList* = shx_doc(sl_get(ss->dfiles, i), s_to_int(sl_get(ss->dlines, i)));
-      var k: int64 = 0;
-      while (k < doc->len) {
-        say("  " + sl_get(doc, k));
-        k = k + 1;
-      }
-      free(doc);
+    if (!s_eq(sl_get(ss->dnames, i), name)) {
+      i = i + 1;
+      continue;
+    }
+    found = true;
+    var kind: string = sl_get(ss->dkinds, i);
+    var at: string = shx_where(ss, sl_get(ss->dfiles, i), sl_get(ss->dlines, i));
+    if (s_eq(kind, "struct") || s_eq(kind, "enum")) {
+      say(kind + " " + name + "  " + dim(at));
+    } else {
+      say(sl_get(ss->dsigs, i) + "  " + dim(at));
+    }
+    shx_say_doc(ss, i);
+    if (s_eq(kind, "struct") || s_eq(kind, "enum")) {
+      shx_say_body(ss, i);
+    } else if (s_eq(kind, "var") || s_eq(kind, "const")) {
+      shx_value(ss, name);
     }
     i = i + 1;
   }
@@ -802,6 +1039,17 @@ fn shx_help_name(ss: ShxSess*, name: string) {
       error_msg("no " + name + " in this project or its packages");
     }
   }
+}
+
+// A global's value, from the program.
+fn shx_value(ss: ShxSess*, name: string) {
+  if (!ss->local && !sys_pid_alive(ss->pid)) {
+    say("  = ?  " + dim("(the program has exited)"));
+    return;
+  }
+  ss->lead = "  = ";
+  shx_eval(ss, name);
+  ss->lead = s_empty();
 }
 
 fn shx_inspect(ss: ShxSess*, expr: string) {
@@ -838,18 +1086,80 @@ fn shx_inspect(ss: ShxSess*, expr: string) {
 }
 
 fn shx_help(ss: ShxSess*) {
-  say("  EXPR              its value: world.pop + 1");
-  say("  STATEMENT;        runs it: world.food = 1000;");
-  say("  fn NAME(...) {{}  redefines NAME in the running program, kept until undo");
-  say("  undo              takes back the last redefinition (or r)");
-  say("  r                 patches in the files on disk");
-  say("  h NAME            signature and doc comment");
-  say("  i EXPR            type, and the fields of a struct");
-  say("  :q, Ctrl-D        quit (and stop the program)");
+  say(bold("evaluate"));
+  say("  EXPR                its value: world.pop + 1");
+  say("  STATEMENT;          runs it: world.food = 1000;");
+  say(bold("change code"));
+  say("  fn NAME(...) {{}     redefines NAME, kept until undo: fn harvest(pop: int32) -> int32 {{ return pop * 3; }");
+  say("  undo                takes back the last redefinition or r");
+  say("  r                   patches in the files on disk");
+  say(bold("discover"));
+  say("  ls [FILE]           functions, globals and structs by file: ls rules");
+  say("  apropos TEXT        names and doc comments with TEXT: apropos food");
+  say("  explain NAME, h     signature and doc; a global's value, a struct's fields: explain world");
+  say("  i EXPR              type, and the fields of a struct: i &world");
+  say(bold("output"));
+  say("  :mute, :unmute      hold the program's output, show it again");
+  say("  :log [N]            its last N lines (20): :log 5");
+  say(bold("session"));
+  say("  help                this");
+  say("  :q, Ctrl-D          quit (and stop the program); Ctrl-C clears the line, tab completes");
   if (ss->local) {
     say("--local: each input runs in a new program that imports what the entry imports; var statements are replayed before each input.");
   } else {
     say("inputs run at the program's next shell_point(). globals and functions are in scope, locals of running functions are not.");
+  }
+}
+
+// :log [N]: the program's last N lines, shown or held.
+fn shx_log(ss: ShxSess*, arg: string) {
+  var n: int64 = 20;
+  if (slen(arg) > 0) {
+    if (!s_is_int(arg) || s_to_int(arg) <= 0) {
+      error_msg(":log takes a number of lines: :log 50");
+      return;
+    }
+    n = s_to_int(arg);
+  }
+  if (ss->fd < 0) {
+    say("no program output here");
+    return;
+  }
+  shx_relay(ss);
+  if (ss->log->len == 0) {
+    say("no output yet");
+    return;
+  }
+  var i: int64 = ss->log->len - n;
+  if (i < 0) {
+    i = 0;
+  }
+  while (i < ss->log->len) {
+    say(sl_get(ss->log, i));
+    i = i + 1;
+  }
+}
+
+fn shx_mute(ss: ShxSess*, on: bool) {
+  if (on) {
+    shx_relay(ss);
+    ss->muted = true;
+    ss->held = 0;
+    say("muted: the program's output is held; :log shows it, :unmute shows it again");
+    return;
+  }
+  if (!ss->muted) {
+    say("not muted");
+    return;
+  }
+  shx_take(ss);
+  ss->muted = false;
+  if (ss->held == 0) {
+    say("unmuted; nothing was held");
+  } else if (ss->held == 1) {
+    say("unmuted; 1 line held, :log 1 shows it");
+  } else {
+    say("unmuted; " + s_int(ss->held) + " lines held, :log " + s_int(ss->held) + " shows them");
   }
 }
 
@@ -868,8 +1178,20 @@ fn shx_input(ss: ShxSess*, line: string) -> bool {
     shx_reload(ss);
   } else if (s_eq(t, "undo")) {
     shx_undo(ss);
+  } else if (s_eq(t, "ls") || s_starts(t, "ls ")) {
+    shx_ls(ss, s_trim(s_from(t, 2)));
+  } else if (s_eq(t, "apropos") || s_starts(t, "apropos ")) {
+    shx_apropos(ss, s_trim(s_from(t, 7)));
+  } else if (s_eq(t, "explain") || s_starts(t, "explain ")) {
+    shx_explain(ss, s_trim(s_from(t, 7)));
   } else if (s_starts(t, "h ")) {
-    shx_help_name(ss, s_trim(s_from(t, 2)));
+    shx_explain(ss, s_trim(s_from(t, 2)));
+  } else if (s_eq(t, ":mute")) {
+    shx_mute(ss, true);
+  } else if (s_eq(t, ":unmute")) {
+    shx_mute(ss, false);
+  } else if (s_eq(t, ":log") || s_starts(t, ":log ")) {
+    shx_log(ss, s_trim(s_from(t, 4)));
   } else if (s_starts(t, "i ")) {
     shx_inspect(ss, s_trim(s_from(t, 2)));
   } else if (s_starts(t, "fn ") || s_starts(t, "export fn ")) {
@@ -893,36 +1215,87 @@ fn shx_word_start(line: string, at: int64) -> int64 {
   return k;
 }
 
-// New program output above the prompt line; true when there was some.
+// The program's new output: its whole lines into the log, and the text to
+// show (none while muted). A line it leaves unended shows after 300 ms.
+fn shx_take(ss: ShxSess*) -> string {
+  if (ss->fd < 0) {
+    return s_empty();
+  }
+  if (sys_fd_drain(ss->fd, ss->pend) > 0) {
+    ss->pend_ms = sys_now_ms();
+  }
+  if (ss->pend->len == 0) {
+    return s_empty();
+  }
+  var data: string = buf_str(ss->pend);
+  var end: int64 = slen(data);
+  while (end > 0 && s_byte(data, end - 1) != 10) {
+    end = end - 1;
+  }
+  if (end == 0) {
+    if (sys_now_ms() - ss->pend_ms < 300) {
+      return s_empty();
+    }
+    end = slen(data);
+  }
+  var text: string = s_dup(s_sub(data, 0, end));
+  var rest: string = s_dup(s_from(data, end));
+  ss->pend->len = 0;
+  buf_add(ss->pend, rest);
+  var lines: StrList* = s_lines(text);
+  sl_extend(ss->log, lines);
+  if (ss->log->len > 2000) {
+    var kept: StrList* = sl_new();
+    var i: int64 = ss->log->len - 1000;
+    while (i < ss->log->len) {
+      sl_push(kept, sl_get(ss->log, i));
+      i = i + 1;
+    }
+    ss->log = kept;
+  }
+  var n: int64 = lines->len;
+  free(lines);
+  if (ss->muted) {
+    ss->held = ss->held + n;
+    return s_empty();
+  }
+  return text;
+}
+
+// New program output, shown; true when there was some.
 fn shx_relay(ss: ShxSess*) -> bool {
-  if (slen(ss->output) == 0) {
+  var text: string = shx_take(ss);
+  if (slen(text) == 0) {
     return false;
   }
-  var r: FsRead = fs_read(ss->output);
-  if (!r.ok || slen(r.data) <= ss->outpos) {
-    return false;
-  }
-  var text: string = s_from(r.data, ss->outpos);
-  ss->outpos = slen(r.data);
   if (!s_ends(text, "\n")) {
     text = text + "\n";
   }
-  print("\r" + g_esc + "[K" + text);
+  if (ss->tty) {
+    print("\r" + g_esc + "[K" + text);
+  } else {
+    print(text);
+  }
   flush_out();
   return true;
 }
 
 fn shx_redraw(prompt: string, line: string, at: int64) {
-  print("\r" + prompt + line + g_esc + "[K");
-  if (at < slen(line)) {
-    print(g_esc + "[" + s_int(slen(line) - at) + "D");
-  }
+  print(shx_term_line(prompt, line, at));
   flush_out();
+}
+
+// The commands, for tab on the first word.
+fn shx_commands() -> StrList* {
+  return s_split("help ls apropos explain undo :mute :unmute :log :q", 32);
 }
 
 // Names for tab: completes the word before the cursor, or lists the choices.
 fn shx_complete(ss: ShxSess*, line: string, at: int64*) -> string {
   var from: int64 = shx_word_start(line, *at);
+  if (from == 1 && s_byte(line, 0) == 58) {
+    from = 0;
+  }
   var word: string = s_sub(line, from, *at);
   if (slen(word) == 0) {
     return line;
@@ -930,6 +1303,9 @@ fn shx_complete(ss: ShxSess*, line: string, at: int64*) -> string {
   var pool: StrList* = ss->dnames;
   if (from > 0 && s_byte(line, from - 1) == 46) {
     pool = ss->fields;
+  } else if (from == 0) {
+    pool = shx_commands();
+    sl_extend(pool, ss->dnames);
   }
   var cands: StrList* = sl_new();
   defer free(cands);
@@ -957,6 +1333,9 @@ fn shx_complete(ss: ShxSess*, line: string, at: int64*) -> string {
   }
   if (slen(common) > slen(word)) {
     var added: string = s_from(common, slen(word));
+    if (from == 0 && cands->len == 1 && sl_has(shx_commands(), common)) {
+      added = added + " ";
+    }
     var next: string = s_sub(line, 0, *at) + added + s_from(line, *at);
     *at = *at + slen(added);
     return next;
@@ -978,9 +1357,15 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   print(prompt);
   flush_out();
   while (true) {
-    while (!sys_stdin_ready(50)) {
-      if (shx_relay(ss)) {
-        shx_redraw(prompt, line, at);
+    while (true) {
+      var w: int32 = sys_wait_input(ss->fd, 100);
+      var text: string = shx_take(ss);
+      if (slen(text) > 0) {
+        print(shx_term_above(prompt, line, at, text));
+        flush_out();
+      }
+      if ((w & 1) != 0) {
+        break;
       }
     }
     var c: int32 = sys_read_byte();
@@ -1062,21 +1447,26 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   return line;
 }
 
-fn shx_read_plain(eof: bool*) -> string {
+// A line from a pipe; the program's output relayed while none comes, the
+// prompt shown once one does.
+fn shx_read_plain(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   var b: Buf* = buf_new();
   *eof = false;
-  while (true) {
-    var c: int32 = getchar();
-    if (c < 0) {
-      *eof = b->len == 0;
-      break;
-    }
-    if (c == 10) {
-      break;
-    }
+  while ((sys_wait_input(ss->fd, 100) & 1) == 0) {
+    shx_relay(ss);
+  }
+  shx_relay(ss);
+  var c: int32 = sys_read_byte();
+  if (c < 0) {
+    *eof = true;
+    return buf_take(b);
+  }
+  print(prompt);
+  while (c >= 0 && c != 10) {
     if (c != 13) {
       buf_addb(b, c);
     }
+    c = sys_read_byte();
   }
   return buf_take(b);
 }
@@ -1121,9 +1511,7 @@ fn shx_read(ss: ShxSess*, eof: bool*) -> string {
       line = shx_edit(ss, prompt, eof);
       sys_term_cooked();
     } else {
-      print(prompt);
-      flush_out();
-      line = shx_read_plain(eof);
+      line = shx_read_plain(ss, prompt, eof);
       if (!*eof) {
         say(line);
       }
@@ -1155,8 +1543,9 @@ fn shx_read(ss: ShxSess*, eof: bool*) -> string {
 // The command
 // ---------------------------------------------------------------------------
 
-// The program in the background, stdout as ours; its stderr through a grep
-// that drops the live runtime's "[live] patch N: ..." lines (two per input).
+// The program in the background, its stdout and stderr into the FIFO, stderr
+// through a grep that drops the live runtime's "[live] patch N: ..." lines
+// (two per input).
 // A watcher stops it if mbuild dies first (Ctrl-C while waiting).
 fn shx_start(ss: ShxSess*) -> bool {
   var sb: ShellBuild* = ss->sb;
@@ -1171,8 +1560,8 @@ fn shx_start(ss: ShxSess*) -> bool {
   var drop: string = sh_quote("^\\[live\\] patch [0-9]+(: [0-9]+ functions?| undoes patch [0-9]+)$");
   var watch: string = "(while kill -0 $mb 2>/dev/null; do sleep 1; done; kill $p 2>/dev/null) >/dev/null 2>&1 &";
   var to: string = "3>&1";
-  if (slen(ss->output) > 0) {
-    to = ">" + sh_quote(ss->output) + " 2>&1 3>&1";
+  if (ss->fd >= 0) {
+    to = ">" + sh_quote(ss->fifo) + " 2>&1 3>&1";
   }
   var line: string = "mb=$PPID; ( ( " + prog + " </dev/null 2>&1 1>&3 3>&- & p=$!; echo $p > " + sh_quote(pidf) + "; " + watch + " wait $p 2>/dev/null ) | grep --line-buffered -Ev " + drop + " >&2 ) " + to + " &";
   var c: Cmd* = cmd_new(shx_tool("/bin/sh"));
@@ -1248,13 +1637,19 @@ export fn shell_cmd(p: Project*) -> int32 {
   ss->defs = sl_new();
   ss->hist = sl_new();
   ss->tty = sys_isatty(0) && sys_isatty(1);
-  ss->output = s_empty();
-  ss->outpos = 0;
-  if (ss->tty && !ss->local) {
-    ss->output = ss->dir + "/output";
-  }
+  ss->fifo = ss->dir + "/output";
+  ss->fd = -1;
+  ss->pend = buf_new();
+  ss->pend_ms = 0;
+  ss->log = sl_new();
+  ss->muted = false;
+  ss->held = 0;
+  ss->lead = s_empty();
   sys_remove_tree(ss->out);
   fs_mkdirs(ss->out);
+  if (!ss->local) {
+    ss->fd = sys_fifo_open(ss->fifo);
+  }
   if (ss->tty) {
     var hr: FsRead = fs_read(ss->dir + "/history");
     if (hr.ok) {
@@ -1288,11 +1683,13 @@ export fn shell_cmd(p: Project*) -> int32 {
     if (r.code != 0) {
       shx_show_errors(r.out);
       error_msg("could not build " + ss->sb->label);
+      sys_fd_close(ss->fd);
       return 1;
     }
     status("Running", p_rel(sys_cwd(), ss->sb->exe) + "; help for help, :q to leave");
     if (!shx_start(ss)) {
       error_msg("could not start " + ss->sb->exe);
+      sys_fd_close(ss->fd);
       return 1;
     }
   }
@@ -1310,6 +1707,10 @@ export fn shell_cmd(p: Project*) -> int32 {
     }
   }
   shx_stop(ss);
+  sys_sleep_ms(20);
+  ss->pend_ms = 0;
   shx_relay(ss);
+  sys_fd_close(ss->fd);
+  sys_remove_file(ss->fifo);
   return 0;
 }

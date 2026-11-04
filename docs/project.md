@@ -427,11 +427,18 @@ builds everywhere. Each input runs once at the next `shell_point()`:
 | `world.food = 1000;` | runs the statement, prints `ok` |
 | `fn harvest(pop: int32) -> int32 { ... }` | redefines `harvest` in the running program; `undo` takes it back |
 | `r` | patches in the files on disk (redefinitions dropped) |
-| `h NAME` / `i EXPR` | signature and doc comment / type and fields |
+| `ls [FILE]` | functions, globals and structs of the bin's import graph by file, each with the first line of its doc comment |
+| `apropos TEXT` | the same lines for names and doc comments containing TEXT, any case |
+| `explain NAME` (`h NAME`) | a function's signature, doc and file:line; a global's type, doc and current value; a struct's fields with their comments |
+| `i EXPR` | type, and the fields of a struct |
+| `:mute` / `:unmute` / `:log [N]` | hold the program's output / let it through / its last N lines (20) |
+| `help` | every command, grouped, with an example each |
 | `:q`, Ctrl-D | quit; the program stops too |
 
-Globals and functions of every module are in scope; locals of running
-functions are not. Redefinitions go to a copy of the sources in
+The program's stdout and stderr come through the shell: on a terminal they
+print above the prompt and the line being typed is drawn again under them;
+tab completes names and commands, Ctrl-C clears the line. Globals and
+functions of every module are in scope; locals of running functions are not. Redefinitions go to a copy of the sources in
 `.mbuild/shell/tree`, never to `src/`. An input that doesn't answer within
 5 seconds (`MBUILD_SHELL_TIMEOUT`, ms) means the program never reached
 `shell_point()`. `mbuild shell --local` runs no program: each input is built

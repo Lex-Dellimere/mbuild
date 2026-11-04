@@ -24,6 +24,8 @@ after() {
   got=$(awk -v want="mettle> $3" 'f && !/^tick / { print; exit } $0 == want { f = 1 }' "$2")
   if printf '%s\n' "$got" | grep -qE -- "$4"; then ok "$1"; else bad "$1 (after \`$3\` wanted: $4, got: $got)" "$(cat "$2")"; fi
 }
+# block FILE INPUT: the answer lines after "mettle> INPUT", up to the next prompt (program ticks skipped)
+block() { awk -v want="mettle> $2" 'f && /^mettle> / { exit } f && !/^tick / { print } $0 == want { f = 1 }' "$1"; }
 # gone NAME EXE: no process runs EXE
 gone() {
   i=0
@@ -40,6 +42,10 @@ gone() {
 echo "== mbuild"
 "$METTLE" --build "$here/src/main.mettle" -o "$T/mbuild" >"$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 MB="$T/mbuild"
+
+echo "== the prompt redrawn above program output (a fake terminal)"
+"$METTLE" --build "$here/tests/unit/shell_term_test.mettle" -o "$T/shell_term_test" >"$T/term.log" 2>&1 && "$T/shell_term_test" >"$T/term.out" 2>&1
+has "redraw unit test" "$T/term.out" '^shell_term_test: [0-9]+ passed, 0 failed$'
 
 # The live example, ticking faster and longer.
 W="$T/live"
@@ -110,6 +116,52 @@ after "int after an error" "$T/s1.out" "world.pop" '^[0-9]+$'
 if grep -q '^\[live\] patch [0-9]*: ' "$T/s1.out"; then bad "live runtime lines hidden" "$(cat "$T/s1.out")"; else ok "live runtime lines hidden"; fi
 gone "the program stops with the shell" "$EXE"
 cmp -s "$here/examples/live/src/rules.mettle" "$W/src/rules.mettle" && ok "redefinitions leave src/ alone" || bad "redefinitions leave src/ alone"
+
+echo "== discovery and output"
+cat >"$T/in5" <<'EOF'
+ls
+ls rules
+apropos FOOD
+apropos zzzq
+explain harvest
+explain world
+explain World
+help
+:mute
+world.pop
+:log 2
+:unmute
+:q
+EOF
+timeout 60 "$MB" shell <"$T/in5" >"$T/s5.out" 2>&1
+# lines BLOCK ERE: a line of BLOCK matches ERE
+lines() { printf '%s\n' "$1" | grep -qE -- "$2"; }
+blk=$(block "$T/s5.out" ls)
+lines "$blk" '^src/main\.mettle$' && lines "$blk" '^src/rules\.mettle$' && ok "ls: grouped by file" || bad "ls: grouped by file" "$blk"
+lines "$blk" '^  fn harvest\(pop: int32\) -> int32 +food gathered this tick$' && ok "ls: signature and doc" || bad "ls: signature and doc" "$blk"
+lines "$blk" '^  var world: World +the one world' && lines "$blk" '^  struct World \{ tick: int32; pop: int32; food: int32 \} +the simulation' && ok "ls: globals and structs" || bad "ls: globals and structs" "$blk"
+blk=$(block "$T/s5.out" "ls rules")
+lines "$blk" '^  fn grow' && ! lines "$blk" 'world|src/main' && ok "ls FILE: that file only" || bad "ls FILE: that file only" "$blk"
+blk=$(block "$T/s5.out" "apropos FOOD")
+[ "$blk" = "$(printf 'src/rules.mettle\n  fn harvest(pop: int32) -> int32  food gathered this tick')" ] && ok "apropos: a hit, any case" || bad "apropos: a hit, any case" "$blk"
+after "apropos: a miss" "$T/s5.out" "apropos zzzq" '^nothing matches zzzq$'
+blk=$(block "$T/s5.out" "explain harvest")
+lines "$blk" '^fn harvest\(pop: int32\) -> int32  src/rules\.mettle:[0-9]+$' && lines "$blk" '^  food gathered this tick$' && ok "explain fn" || bad "explain fn" "$blk"
+blk=$(block "$T/s5.out" "explain world")
+lines "$blk" '^var world: World  src/main\.mettle:[0-9]+$' && lines "$blk" '^  the one world' && ok "explain global: type and doc" || bad "explain global: type and doc" "$blk"
+lines "$blk" '^  = World \{ tick: [0-9]+, pop: [0-9]+, food: [0-9]+ \}$' && ok "explain global: its value" || bad "explain global: its value" "$blk"
+blk=$(block "$T/s5.out" "explain World")
+lines "$blk" '^struct World  src/main\.mettle:[0-9]+$' && lines "$blk" '^  food: int32 +food in store$' && ok "explain struct: fields and their docs" || bad "explain struct: fields and their docs" "$blk"
+blk=$(block "$T/s5.out" help)
+n=$(printf '%s\n' "$blk" | grep -cxE 'evaluate|change code|discover|output|session')
+[ "$n" = 5 ] && lines "$blk" '^  apropos TEXT +.*: apropos food$' && ok "help: grouped, with examples" || bad "help: grouped, with examples" "$blk"
+after ":mute" "$T/s5.out" ":mute" '^muted'
+held=$(awk '$0 == "mettle> :mute" { f = 1; next } $0 == "mettle> :log 2" { exit } f && /^tick / { print }' "$T/s5.out")
+[ -z "$held" ] && ok ":mute holds the output" || bad ":mute holds the output" "$held"
+n=$(awk '$0 == "mettle> :log 2" { f = 1; next } f && /^mettle> / { exit } f' "$T/s5.out" | grep -c '^tick ')
+[ "$n" = 2 ] && ok ":log N: the last N lines" || bad ":log N: the last N lines (got $n)" "$(cat "$T/s5.out")"
+after ":unmute" "$T/s5.out" ":unmute" '^unmuted; ([0-9]+ lines? held, :log [0-9]+ shows (it|them)|nothing was held)$'
+gone "the program stops (discovery session)" "$EXE"
 
 echo "== r: the files on disk"
 rm -f "$T/fifo"
