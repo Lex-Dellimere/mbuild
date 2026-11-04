@@ -292,25 +292,25 @@ printf '%s\n' "$dbg" | grep -E '^(ok|FAIL) ' | sed 's/^ok /PASS /'
 [ "$dbg" = "$rel" ] && ok "debug and release agree" || bad "debug and release agree" "$(printf '%s\n' "$dbg" > "$T/d.txt"; printf '%s\n' "$rel" > "$T/r.txt"; diff "$T/d.txt" "$T/r.txt")"
 
 echo "== mbuild components"
-"$D-debug" "$W" use logger=quiet > /dev/null 2>&1
+"$D-debug" "$W" use logger quiet > /dev/null 2>&1
 tab=$("$D-debug" "$W" components 2>&1)
 expect_line "components header" "$tab" "COMPONENT  MODE    IMPLS              SELECTED (linux, debug)  FROM"
-expect_line "components row" "$tab" "logger     static  stdout quiet file  quiet                    mbuild.local.toml"
+expect_line "components row" "$tab" "logger     static  stdout quiet file  quiet                    mbuild.local.mettle"
 "$D-debug" "$W" use logger > /dev/null 2>&1
 tab=$("$D-debug" "$W" components 2>&1)
 expect_line "components row after use NAME" "$tab" "logger     static  stdout quiet file  stdout                   default"
-use_out=$("$D-debug" "$W" use logger=quiet 2>&1)
-expect_line "use prints the choice" "$use_out" "       Using logger = quiet (mbuild.local.toml)"
+use_out=$("$D-debug" "$W" use logger quiet 2>&1)
+expect_line "use prints the choice" "$use_out" "       Using logger = quiet (mbuild.local.mettle)"
 "$D-debug" "$W" use logger > /dev/null 2>&1
 
-echo "== mettle live, then use logger=quiet"
+echo "== mettle live, then use logger quiet"
 prep=$("$D-debug" "$W" prepare 2>&1) || { bad "prepare live" "$prep"; }
 gen=$(printf '%s\n' "$prep" | sed -n 1p)
 entry=$(printf '%s\n' "$prep" | sed -n 2p)
 ( cd "$W/static" && timeout 8 "$METTLE" live "$entry" -I "$gen" -o "$T/live-prog" > "$T/live.out" 2>&1 ) &
 lp=$!
 sleep 1.5
-"$D-debug" "$W" use logger=quiet > "$T/use.out" 2>&1
+"$D-debug" "$W" use logger quiet > "$T/use.out" 2>&1
 wait $lp
 live=$(cat "$T/live.out")
 if printf '%s\n' "$live" | grep -q '^stdout: tick'; then ok "live runs the stdout impl"; else bad "live runs the stdout impl" "$live"; fi

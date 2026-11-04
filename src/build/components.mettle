@@ -13,6 +13,7 @@ import "../core/path";
 import "../core/fs";
 import "../core/proc";
 import "../model/toml";
+import "../config/mbfile";
 import "../model/manifest";
 import "../model/project";
 import "../pkg/api";
@@ -393,7 +394,7 @@ fn cmx_select(p: Project*, cs: CmxComps*, b: CmpBuild*, picks: CmxPick*) -> stri
   var lc: StrList* = p->man->local_components;
   i = 0;
   while (i < lc->len && slen(err) == 0) {
-    err = cmx_apply(cs, picks, sl_get(lc, i), "mbuild.local.toml");
+    err = cmx_apply(cs, picks, sl_get(lc, i), "mbuild.local.mettle");
     i = i + 1;
   }
   i = 0;
@@ -1518,7 +1519,7 @@ export fn cmp_check(p: Project*, ds: DepState*) -> int32 {
 }
 
 // ---------------------------------------------------------------------------
-// mbuild use NAME=IMPL | NAME
+// mbuild use NAME IMPL | NAME
 // ---------------------------------------------------------------------------
 
 struct CmxInfo {
@@ -1655,14 +1656,14 @@ fn cmx_set_local(p: Project*, name: string, iname: string) {
   }
 }
 
-// Writes or removes [components] NAME in mbuild.local.toml, then
-// regenerates every existing gen dir.
+// Writes or removes mb_use(NAME, ...) in mbuild.local.mettle, then
+// regenerates every existing gen dir. Takes NAME IMPL, NAME=IMPL or NAME.
 export fn cmp_cmd_use(p: Project*) -> int32 {
-  if (p->opts == (Options*)0 || p->opts->rest->len != 1) {
-    error_msg("usage: mbuild use NAME=IMPL (or mbuild use NAME to drop the local choice)");
+  if (p->opts == (Options*)0 || p->opts->rest->len == 0 || p->opts->rest->len > 2) {
+    error_msg("usage: mbuild use NAME IMPL (or mbuild use NAME to drop the local choice)");
     return 2;
   }
-  var arg: string = sl_get(p->opts->rest, 0);
+  var arg: string = sl_join(p->opts->rest, "=");
   var eq: int64 = s_find_byte(arg, 61);
   var name: string = arg;
   var iname: string = s_empty();
@@ -1670,7 +1671,7 @@ export fn cmp_cmd_use(p: Project*) -> int32 {
     name = s_trim(s_sub(arg, 0, eq));
     iname = s_trim(s_from(arg, eq + 1));
     if (slen(iname) == 0) {
-      error_msg("mbuild use " + arg + ": name an impl (NAME=IMPL), or drop the local choice with mbuild use " + name);
+      error_msg("mbuild use " + arg + ": name an impl (NAME IMPL), or drop the local choice with mbuild use " + name);
       return 2;
     }
   }
@@ -1695,15 +1696,25 @@ export fn cmp_cmd_use(p: Project*) -> int32 {
       return 1;
     }
   }
-  var file: string = p->root + "/mbuild.local.toml";
+  var file: string = p->root + "/mbuild.local.mettle";
   var text: string = cmx_read(file);
-  var edited: string = s_empty();
-  if (slen(iname) > 0) {
-    edited = toml_set_in_text(text, "components", name, toml_quote(iname));
-  } else {
-    edited = toml_remove_in_text(text, "components", name);
+  if (slen(text) == 0) {
+    text = "import \"mbuild/api\";\n\nfn local() {{\n}\n";
   }
-  if (!s_eq(edited, text) && !fs_write(file, edited)) {
+  var e: MbfEdit;
+  if (slen(iname) > 0) {
+    var args: StrList* = sl_of(name);
+    sl_push(args, iname);
+    e = mbf_set_call(text, "mb_use", name, args);
+    cmx_free(args);
+  } else {
+    e = mbf_remove_call(text, "mb_use", name);
+  }
+  if (!e.ok) {
+    error_msg("could not edit " + cmx_show(p, file) + ": " + e.why);
+    return 1;
+  }
+  if (!s_eq(e.text, text) && !fs_write(file, e.text)) {
     error_msg("could not write " + file);
     return 1;
   }

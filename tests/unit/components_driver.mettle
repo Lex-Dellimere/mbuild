@@ -3,7 +3,7 @@
 //
 //   components_driver WORK all            every check, "ok NAME" / "FAIL NAME: why"; exit 1 on a failure
 //   components_driver WORK prepare        the static project's gen dir; prints gen dir and entry
-//   components_driver WORK use ARG        cmp_cmd_use on the static project
+//   components_driver WORK use NAME [IMPL] cmp_cmd_use on the static project
 //   components_driver WORK components     cmp_cmd_components on the static project
 //
 // Projects and dependency states are built by hand; programs are compiled
@@ -46,6 +46,24 @@ fn drv_manifest(file: string, dir: string) -> Manifest* {
   return m;
 }
 
+// What evaluating mbuild.local.mettle gives (group C's job): its mb_use("NAME", "IMPL") lines.
+fn drv_local(m: Manifest*, text: string) {
+  var lines: StrList* = s_lines(text);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var t: string = s_trim(sl_get(lines, i));
+    if (s_starts(t, "mb_use(")) {
+      var parts: StrList* = s_split(t, 34);
+      if (parts->len >= 5) {
+        sl_push(m->local_components, sl_get(parts, 1) + "=" + sl_get(parts, 3));
+      }
+      free(parts);
+    }
+    i = i + 1;
+  }
+  free(lines);
+}
+
 fn drv_project(name: string) -> Project* {
   var root: string = g_work + "/" + name;
   var p: Project* = new Project;
@@ -56,18 +74,14 @@ fn drv_project(name: string) -> Project* {
   p->opts = options_new();
   p->opts->mettle = env_get("METTLE");
   p->man = drv_manifest(root + "/mbuild.toml", root);
-  var lrd: FsRead = fs_read(root + "/mbuild.local.toml");
-  if (lrd.ok) {
-    var lm: Manifest* = man_parse_local(toml_parse(lrd.data, root + "/mbuild.local.toml"), root);
-    man_merge_local(p->man, lm);
-  }
+  drv_local(p->man, drv_read(root + "/mbuild.local.mettle"));
   return p;
 }
 
 fn drv_fresh(name: string) -> Project* {
   var root: string = g_work + "/" + name;
   sys_remove_tree(root + "/.mbuild");
-  sys_remove_file(root + "/mbuild.local.toml");
+  sys_remove_file(root + "/mbuild.local.mettle");
   return drv_project(name);
 }
 
@@ -216,21 +230,24 @@ fn drv_static() {
 
   p->opts->rest = sl_of("logger=quiet");
   var rc: int32 = cmp_cmd_use(p);
-  var local: string = drv_read(p->root + "/mbuild.local.toml");
-  drv_check("use writes mbuild.local.toml", rc == 0 && s_contains(local, "[components]\nlogger = \"quiet\""), "[" + local + "]");
+  var local: string = drv_read(p->root + "/mbuild.local.mettle");
+  drv_check("use writes mbuild.local.mettle", rc == 0 && s_contains(local, "fn local() {{\n  mb_use(\"logger\", \"quiet\");\n}"), "[" + local + "]");
   var sel: string = drv_read(p->state_dir + "/gen/linux-debug-app/logger.mettle");
   drv_check("use rewrites the selector", s_contains(sel, "/src/logger/quiet.mettle\";") && s_contains(sel, "component logger = quiet"), sel);
   var after: CmpOut* = drv_prepare(p, ds, "linux", "debug");
-  drv_check("origin mbuild.local.toml", sl_has(after->origins, "logger=mbuild.local.toml"), sl_join(after->origins, ","));
+  drv_check("origin mbuild.local.mettle", sl_has(after->origins, "logger=mbuild.local.mettle"), sl_join(after->origins, ","));
   var reread: Project* = drv_project("static");
   var again: CmpOut* = drv_prepare(reread, ds, "linux", "debug");
-  drv_check("origin mbuild.local.toml (reloaded)", sl_has(again->origins, "logger=mbuild.local.toml"), sl_join(again->origins, ","));
+  drv_check("origin mbuild.local.mettle (reloaded)", sl_has(again->origins, "logger=mbuild.local.mettle"), sl_join(again->origins, ","));
   p->opts->rest = sl_of("logger=quite");
   drv_check("use unknown impl", cmp_cmd_use(p) != 0, "accepted logger=quite");
   p->opts->rest = sl_of("logger");
+  sl_push(p->opts->rest, "quiet");
+  drv_check("use NAME IMPL", cmp_cmd_use(p) == 0 && sl_has(p->man->local_components, "logger=quiet"), sl_join(p->man->local_components, ","));
+  p->opts->rest = sl_of("logger");
   rc = cmp_cmd_use(p);
   var dropped: string = drv_read(p->state_dir + "/gen/linux-debug-app/logger.mettle");
-  drv_check("use NAME drops the choice", rc == 0 && !s_contains(drv_read(p->root + "/mbuild.local.toml"), "logger") && s_contains(dropped, "stdout.mettle"), dropped);
+  drv_check("use NAME drops the choice", rc == 0 && !s_contains(drv_read(p->root + "/mbuild.local.mettle"), "logger") && s_contains(dropped, "stdout.mettle"), dropped);
   free(miss);
   free(reread);
   free(ds);
@@ -301,7 +318,11 @@ fn drv_deps_comps() {
   var kv2: string = drv_read(o->gen_dir + "/kv.mettle");
   drv_check("use on a dependency component", rc == 0 && s_contains(kv2, "/comps/src/kv/file.mettle\";"), kv2);
   drv_fails("clash", drv_prepare(p, drv_deps(p, sl_of("clash")), "linux", "debug"), sl_of("component logger is declared by both this project (mbuild.toml:3) and clash"));
-  drv_fails("package name", drv_prepare(p, drv_deps(p, sl_of("kv")), "linux", "debug"), sl_of("has the name of the package kv"));
+  p->man->local_components = sl_new();
+  var kvs: StrList* = sl_of("comps");
+  sl_push(kvs, "kv");
+  drv_fails("package name", drv_prepare(p, drv_deps(p, kvs), "linux", "debug"), sl_of("has the name of the package kv"));
+  free(kvs);
   free(ds);
   free(p);
 }
@@ -353,7 +374,7 @@ fn drv_kinds() {
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
   if (argc < 3) {
-    fail("usage: components_driver WORK all|prepare|use ARG|components");
+    fail("usage: components_driver WORK all|prepare|use NAME [IMPL]|components");
   }
   var work: string = p_clean(s_from_c(argv[1]));
   g_work = work;
@@ -371,6 +392,9 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   if (s_eq(what, "use") && argc > 3) {
     var up: Project* = drv_project("static");
     up->opts->rest = sl_of(s_from_c(argv[3]));
+    if (argc > 4) {
+      sl_push(up->opts->rest, s_from_c(argv[4]));
+    }
     return cmp_cmd_use(up);
   }
   if (s_eq(what, "components")) {
