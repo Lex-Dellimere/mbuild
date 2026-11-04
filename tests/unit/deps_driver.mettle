@@ -1,23 +1,24 @@
-// deps_driver: a small CLI over deps.mettle for tests/deps_test.sh.
+// deps_driver: a small CLI over deps.mettle for tests/e2e/r3_deps.sh.
 //
 //   deps_driver <project-dir> <command> [args] [--offline] [--locked] [--force] [--verbose] [--quiet]
 //
-// Commands: ensure | add-missing MODULE... | auto MODULE... | get SPEC... | remove NAME... |
-// update [NAME... | --all] | tidy USED... | deps [--tree] | fetch
-// Round 2: why NAME | outdated [MODULE] | adopt | plan [--all] [--major] [MODULE...] |
-// apply MODULE VERSION... | restore-after MODULE VERSION... | api MODULE FROM TO [--added] |
-// mettle | vendor
-// `ensure` prints one line per selected module:
-//   MOD <module> <version> <commit> alias=<alias> path=<0|1> man=<0|1> replaced=<kind> subs=<a,b>
+// Commands: ensure | add-missing NAME... | auto NAME... | get SPEC... | remove NAME... |
+// update [NAME... | --all] | tidy USED... | deps [--tree] | fetch | why NAME |
+// outdated [NAME] | adopt | plan [--all] [--major] [NAME...] | apply NAME VERSION... |
+// restore-after NAME VERSION... | api NAME FROM TO [--added] | breaks NAME VERSION |
+// mettle | vendor [--remove]
+// The project's mbuild.mettle is loaded with cfg_load. `ensure` prints one
+// line per selected package:
+//   MOD <name> <version> <checksum> registry=<r> path=<0|1> man=<0|1> replaced=<kind> dir=<dir>
 // followed by `INCLUDE <include_dir>`.
 
 import "std/io";
 import "std/mem";
 import "../../src/core/base";
-import "../../src/model/toml";
 import "../../src/model/manifest";
 import "../../src/model/project";
 import "../../src/pkg/deps";
+import "../../src/config/config";
 import "../../src/core/fs";
 import "../../src/build/toolchain";
 import "../../src/core/sys_linux" if linux;
@@ -69,16 +70,17 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   p->root = root;
   p->opts = opts;
   p->state_dir = root + "/.mbuild";
-  var r: FsRead = fs_read(root + "/mbuild.toml");
-  if (r.ok) {
-    p->man = man_parse(toml_parse(r.data, root + "/mbuild.toml"), root);
-    p->has_manifest = true;
-    if (slen(p->man->error) > 0) {
-      fail(p->man->error);
+  p->mbfile = s_empty();
+  p->man = man_empty(root, "app");
+  p->has_manifest = false;
+  if (fs_is_file(root + "/mbuild.mettle")) {
+    p->mbfile = root + "/mbuild.mettle";
+    var m: Manifest* = cfg_load(p);
+    if (m == (Manifest*)0) {
+      fail("cfg_load gave no manifest for " + p->mbfile);
     }
-  } else {
-    p->man = man_empty(root, "app");
-    p->has_manifest = false;
+    p->man = m;
+    p->has_manifest = true;
   }
   var code: int32 = 0;
   if (s_eq(command, "ensure")) {
@@ -86,11 +88,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     var k: int64 = 0;
     while (k < ds->n) {
       var dm: DepModule* = &ds->mods[k];
-      var subs: string = "";
-      if (dm->submodules != (StrList*)0) {
-        subs = sl_join(dm->submodules, ",");
-      }
-      say("MOD " + dm->module + " " + dm->version + " " + dm->commit + " alias=" + dm->alias + " path=" + drv_bool(dm->is_path) + " man=" + drv_bool(dm->man != (Manifest*)0) + " replaced=" + dm->replaced + " subs=" + subs + " dir=" + dm->dir);
+      say("MOD " + dm->module + " " + dm->version + " " + dm->checksum + " registry=" + dm->registry + " path=" + drv_bool(dm->is_path) + " man=" + drv_bool(dm->man != (Manifest*)0) + " replaced=" + dm->replaced + " dir=" + dm->dir);
       k = k + 1;
     }
     say("INCLUDE " + ds->include_dir);
@@ -177,6 +175,13 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     q->files = (StrList*)0;
     q->with_added = sl_has(opts->rest, "--added");
     say(deps_api_report(p, q));
+  } else if (s_eq(command, "breaks")) {
+    var rep: string = deps_api_breaks(p, sl_get(opts->rest, 0), sl_get(opts->rest, 1));
+    if (slen(rep) == 0) {
+      say("NO BREAKS");
+    } else {
+      say(rep);
+    }
   } else if (s_eq(command, "mettle")) {
     var mds: DepState* = deps_ensure(p);
     var need: StrList* = deps_mettle_minimum(mds);

@@ -1,19 +1,19 @@
 // deps: the requirement graph, minimal version selection, mbuild.lock, the
-// checkouts under .mbuild/deps and the managed mettle.deps block
-// (DESIGN.md sections 6 and 9).
+// packages under .mbuild/deps and the managed mettle.deps blocks
+// (DESIGN.md 12 and 14).
 //
-// deps_ensure has a fast path that starts no git command: when
-// .mbuild/deps.stamp records the current lock (its hash) and the current
-// requirements (a hash over mbuild.toml's and the path packages'
-// [dependencies]), and every locked module's checkout holds its commit.
-// Otherwise it resolves: it walks every requirement reachable from the root,
-// reading each visited (module, version)'s mbuild.toml from the module's
-// mirror, and selects per module the highest semantic version seen. The lock
-// pins "latest", branches and tags to commits; only get/update move a pin.
+// deps_ensure has a fast path that asks no registry: when .mbuild/deps.stamp
+// records the current lock (its hash) and the current requirements (a hash
+// over the root's and the path packages' dependencies and the root's
+// [replace]), and every locked package's directory carries the marker of its
+// version and checksum. Otherwise it resolves: it walks every requirement
+// reachable from the root, reading each visited (package, version)'s
+// manifest from the registry, and selects per package the highest version
+// required inside one compatibility line. The lock pins "latest" and every
+// checksum; only get/update move a pin.
 //
 // Every package gets its own managed mettle.deps block (the root, each
-// checkout, each path package): the hosts plus that package's own aliases,
-// so an alias is visible only to the package that declares it.
+// package directory, each path package) naming the packages it declares.
 
 import "std/mem";
 import "../core/base";
@@ -23,7 +23,9 @@ import "../model/toml";
 import "../model/semver";
 import "../model/manifest";
 import "../model/project";
-import "git";
+import "registry";
+import "../config/config";
+import "../config/mbfile";
 import "../build/scan";
 import "api";
 import "../build/toolchain";
@@ -38,45 +40,40 @@ import "../core/sys_windows" if windows;
 struct DxReq {
   module: string;
   spec: string;
-  url: string;
-  from: string;      // "mbuild.toml", "github.com/a/b v1.0.0", "path package x"
+  from: string;      // "mbuild.mettle", "textfmt v0.1.0", "path package x"
   root: bool;        // stated by the root manifest itself
-  label: string;     // the version it resolved to (tag, branch, commit as written)
-  commit: string;    // the full commit
+  label: string;     // the version it resolved to
   fresh: bool;       // "latest" resolved now (not from the lock)
 }
 
-// One module of the graph and the versions of it that were visited.
+// One package of the graph and the versions of it that were visited.
 struct DxMod {
   module: string;
-  url: string;
   reqs: DxReqs*;
   labels: StrList*;     // visited versions
-  commits: StrList*;    // parallel
-  checked: StrList*;    // commits known to be in the mirror
   sel: int64;           // selected index into labels, -1 when nothing live requires it
   mans: DxMans*;        // the manifest of each visited version (parallel to labels)
-  rep: ReplaceSpec*;    // its [replace] entry (version / url), 0 when none
+  rep: ReplaceSpec*;    // its [replace] { version = ... } entry, 0 when none
   rep_req: DxReq*;      // the requirement the replacement stands for
+  ix: RegIndex*;        // its registry index, 0 until needed
 }
 
-// A [replace] { path = ... } module: a link to a local directory.
+// A [replace] { path = ... } package: a link to a local directory.
 struct DxRPath {
   module: string;
   rel: string;
   dir: string;          // absolute, cleaned
   man: Manifest*;
-  local: bool;          // from mbuild.local.toml
+  local: bool;          // from mbuild.local.mettle
   reqs: DxReqs*;        // what required it (shown by `why`)
 }
 
 // A local { path = ... } package.
 struct DxPath {
   key: string;
-  module: string;
   rel: string;          // the path as written
   dir: string;          // absolute
-  man: Manifest*;       // 0 when it has no mbuild.toml
+  man: Manifest*;       // 0 when it has no mbuild.mettle
 }
 
 struct DxLock {
@@ -84,22 +81,24 @@ struct DxLock {
   text: string;
   mods: StrList*;
   vers: StrList*;
-  commits: StrList*;
+  regs: StrList*;
+  shas: StrList*;
   reqs: string;
 }
 
 struct DxCx {
   p: Project*;
   lock: DxLock*;
-  unpin: StrList*;      // modules whose lock pins are ignored
+  unpin: StrList*;      // packages whose lock pins are ignored
   mods: DxMods*;
   paths: DxPaths*;
   queue: DxReqs*;
   reqs_hash: string;
   rpaths: DxRPaths*;
-  hints: StrList*;      // "module line": `latest` resolves inside that line
-  local_names: StrList*;  // modules replaced by mbuild.local.toml
+  hints: StrList*;      // "package line": `latest` resolves inside that line
+  local_names: StrList*;  // packages replaced by mbuild.local.mettle
   published: StrList*;  // names the root block of mettle.deps publishes
+  deps_root: string;    // where registry packages are: .mbuild/deps or vendor
 }
 
 struct DxRPaths {
@@ -228,37 +227,48 @@ fn dma_push(l: DxMans*, v: Manifest*) {
   l->len = l->len + 1;
 }
 
-// Messages already printed ("module version"), and modules fetched by this
-// process, as newline-framed sets.
+// Messages already printed, as a newline-framed set.
 var g_dx_said: string;
-var g_dx_fetched: string;
 var g_dx_forced: string;
 
-// mbuild update: refresh the mirror of every unpinned module.
+// mbuild update / fetch: refresh the index of every package resolved.
 var g_dx_refresh: bool = false;
+// Packages whose index was refreshed by this process (once per command).
+var g_dx_refreshed: StrList* = 0;
 // mbuild update --all: dx_ensure stops before changing anything when a
-// module the root does not require has a newer tag in its major version,
-// and lists those (module, version) here instead.
+// package the root does not require has a newer version in its line, and
+// lists those (package, version) here instead.
 var g_dx_raise_all: bool = false;
 var g_dx_raise_mods: StrList* = 0;
 var g_dx_raise_vers: StrList* = 0;
 
-// A snapshot of mbuild.toml / mbuild.lock / .mbuild/local.lock taken by the
-// commands that edit them: an error that stops the process writes it back.
+// A snapshot of mbuild.mettle, mbuild.local.mettle, mbuild.lock and
+// .mbuild/local.lock taken by the commands that edit them: an error that
+// stops the process writes it back.
 var g_dx_guard: DepSnap* = 0;
-// URLs of submodule mirrors fetched by this process (git_checkout_tree).
-var g_dx_sub_fetched: StrList* = 0;
-var g_dx_net_warned: bool = false;
-var g_dx_net_down: bool = false;
 var g_dx_local_noted: bool = false;
 var g_dx_md_checked: bool = false;
+// Auto-add lookups of this process, found or not.
+var g_dx_looked: StrList* = 0;
+// Resolve from the registry even when vendor/ exists (vendor, get, ...).
+var g_dx_no_vendor: bool = false;
+// Indexes are kept for the whole command (registry.mettle may cache them).
+var g_dx_last_ix: RegIndex* = 0;
+
+fn dx_mbfile_path(p: Project*) -> string {
+  if (slen(p->mbfile) > 0) {
+    return p->mbfile;
+  }
+  return p->root + "/mbuild.mettle";
+}
 
 fn dx_snap_take(p: Project*) -> DepSnap* {
   var s: DepSnap* = new DepSnap;
   s->files = sl_new();
   s->texts = sl_new();
   s->present = sl_new();
-  sl_push(s->files, p->root + "/mbuild.toml");
+  sl_push(s->files, dx_mbfile_path(p));
+  sl_push(s->files, p->root + "/mbuild.local.mettle");
   sl_push(s->files, p->root + "/mbuild.lock");
   sl_push(s->files, p->state_dir + "/local.lock");
   var i: int64 = 0;
@@ -314,8 +324,8 @@ fn dx_guard_restore() {
   var s: DepSnap* = g_dx_guard;
   g_dx_guard = (DepSnap*)0;
   if (dx_snap_write(s)) {
-    sys_remove_file(p_dir(sl_get(s->files, 2)) + "/deps.stamp");
-    err_line("  Restored mbuild.toml and mbuild.lock");
+    sys_remove_file(p_dir(sl_get(s->files, 3)) + "/deps.stamp");
+    err_line("  Restored mbuild.mettle and mbuild.lock");
   }
 }
 
@@ -340,12 +350,19 @@ fn dx_set_has(set: string, item: string) -> bool {
   return s_contains("\n" + set, "\n" + item + "\n");
 }
 
-fn dx_announce(verb: string, module: string, version_text: string, key: string) {
-  if (dx_set_has(g_dx_said, module + " " + key)) {
-    return;
+// True the first time key is seen by this process.
+fn dx_once(key: string) -> bool {
+  if (dx_set_has(g_dx_said, key)) {
+    return false;
   }
-  g_dx_said = g_dx_said + module + " " + key + "\n";
-  status(verb, module + " " + version_text);
+  g_dx_said = g_dx_said + key + "\n";
+  return true;
+}
+
+fn dx_announce(verb: string, module: string, version_text: string, key: string) {
+  if (dx_once(module + " " + key)) {
+    status(verb, module + " " + version_text);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -364,8 +381,8 @@ fn dx_stamp_path(p: Project*) -> string {
   return p->state_dir + "/deps.stamp";
 }
 
-fn dx_manifest_path(p: Project*) -> string {
-  return p->root + "/mbuild.toml";
+fn dx_vendor_dir(p: Project*) -> string {
+  return p->root + "/vendor";
 }
 
 // target relative to base ("./x", "../x"), or target when on another drive.
@@ -419,13 +436,16 @@ fn dx_parse_manifest(text: string, dir: string, label: string) -> Manifest* {
   return m;
 }
 
-// The mbuild.toml in dir, 0 when there is none.
-fn dx_read_manifest(dir: string) -> Manifest* {
-  var r: FsRead = fs_read(dir + "/mbuild.toml");
-  if (!r.ok) {
+// The configuration of a path package or path replacement (13.9); 0 when it
+// has no mbuild.mettle.
+fn dx_local_manifest(p: Project*, dir: string, key: string) -> Manifest* {
+  if (!fs_is_file(dir + "/mbuild.mettle")) {
+    if (fs_is_file(dir + "/mbuild.toml")) {
+      dx_fail(dx_rel(p->root, dir) + " has mbuild.toml, which is no longer read; it needs an mbuild.mettle");
+    }
     return (Manifest*)0;
   }
-  return dx_parse_manifest(r.data, dir, dir + "/mbuild.toml");
+  return cfg_load_dir(p, dir, key);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,18 +460,59 @@ fn dx_is_marker(t: string) -> bool {
   return s_starts(t, "<<<<<<<") || s_starts(t, "=======") || s_starts(t, ">>>>>>>") || s_starts(t, "|||||||");
 }
 
-// The lock this command reads: .mbuild/local.lock while mbuild.local.toml
-// replaces modules (when it exists), else mbuild.lock. A lock with merge
-// conflict markers is repaired: every module line of both sides, the higher
-// version of a module listed twice, and a stale requirements line.
-fn dx_lock_read_file(p: Project*, file: string) -> DxLock* {
+fn dx_is_commit(s: string) -> bool {
+  if (slen(s) != 40) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < 40) {
+    if (!is_hex_b(s_byte(s, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn dx_lock_new() -> DxLock* {
   var l: DxLock* = new DxLock;
   l->exists = false;
   l->text = s_empty();
   l->mods = sl_new();
   l->vers = sl_new();
-  l->commits = sl_new();
+  l->regs = sl_new();
+  l->shas = sl_new();
   l->reqs = s_empty();
+  return l;
+}
+
+// A lock of round 2 ("module version commit"): its pins are dropped.
+fn dx_git_era(lines: StrList*) -> bool {
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var t: string = s_trim(sl_get(lines, i));
+    i = i + 1;
+    if (s_eq(t, "# module version commit")) {
+      return true;
+    }
+    if (slen(t) > 0 && !s_starts(t, "#")) {
+      var f: StrList* = s_fields(t);
+      var old: bool = f->len == 3 && dx_is_commit(sl_get(f, 2));
+      free(f);
+      if (old) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The lock this command reads: .mbuild/local.lock while mbuild.local.mettle
+// replaces packages (when it exists), else mbuild.lock. A lock with merge
+// conflict markers is repaired: every package line of both sides, the
+// higher version of a package listed twice, and a stale requirements line.
+fn dx_lock_read_file(p: Project*, file: string) -> DxLock* {
+  var l: DxLock* = dx_lock_new();
   var r: FsRead = fs_read(file);
   if (!r.ok) {
     return l;
@@ -459,6 +520,16 @@ fn dx_lock_read_file(p: Project*, file: string) -> DxLock* {
   l->exists = true;
   l->text = r.data;
   var lines: StrList* = s_lines(r.data);
+  if (dx_git_era(lines)) {
+    free(lines);
+    if (p->opts->locked) {
+      dx_fail_hint(p_base(file) + " is from the git era and --locked forbids re-resolving it", "run mbuild once without --locked");
+    }
+    if (dx_once("git era " + file)) {
+      note(p_base(file) + " is from the git era and is re-resolved");
+    }
+    return l;
+  }
   var conflicted: bool = false;
   var i: int64 = 0;
   while (i < lines->len) {
@@ -471,8 +542,7 @@ fn dx_lock_read_file(p: Project*, file: string) -> DxLock* {
     if (p->opts->locked) {
       dx_fail_hint(p_base(file) + " has merge conflict markers", "run any mbuild command without --locked to repair it, then commit");
     }
-    if (!dx_set_has(g_dx_said, "repaired " + file)) {
-      g_dx_said = g_dx_said + "repaired " + file + "\n";
+    if (dx_once("repaired " + file)) {
       status("Repaired", "merge conflict in " + p_base(file));
     }
   }
@@ -498,15 +568,17 @@ fn dx_lock_read_file(p: Project*, file: string) -> DxLock* {
       }
     } else if (slen(t) > 0 && !s_starts(t, "#")) {
       var f: StrList* = s_fields(t);
-      if (f->len >= 3) {
+      if (f->len >= 4) {
         var at: int64 = sl_index(l->mods, sl_get(f, 0));
         if (at < 0) {
           sl_push(l->mods, sl_get(f, 0));
           sl_push(l->vers, sl_get(f, 1));
-          sl_push(l->commits, s_lower(sl_get(f, 2)));
+          sl_push(l->regs, sl_get(f, 2));
+          sl_push(l->shas, s_lower(sl_get(f, 3)));
         } else if (sv_is(sl_get(f, 1)) && sv_is(sl_get(l->vers, at)) && sv_cmp(sl_get(f, 1), sl_get(l->vers, at)) > 0) {
           sl_set(l->vers, at, sl_get(f, 1));
-          sl_set(l->commits, at, s_lower(sl_get(f, 2)));
+          sl_set(l->regs, at, sl_get(f, 2));
+          sl_set(l->shas, at, s_lower(sl_get(f, 3)));
         }
       }
       free(f);
@@ -523,26 +595,8 @@ fn dx_lock_read(p: Project*) -> DxLock* {
   return dx_lock_read_file(p, dx_lock_path(p));
 }
 
-// mbuild.local.toml, merged into p->man once (build may have done it).
-fn dx_load_local(p: Project*) {
-  if (p->man->local != (Manifest*)0) {
-    return;
-  }
-  var file: string = p->root + "/mbuild.local.toml";
-  var r: FsRead = fs_read(file);
-  if (!r.ok) {
-    return;
-  }
-  var lm: Manifest* = man_parse_local(toml_parse(r.data, file), p->root);
-  if (slen(lm->error) > 0) {
-    dx_fail(lm->error);
-  }
-  man_merge_local(p->man, lm);
-}
-
-// The modules mbuild.local.toml replaces.
+// The packages mbuild.local.mettle replaces.
 fn dx_local_replaced(p: Project*) -> StrList* {
-  dx_load_local(p);
   var names: StrList* = sl_new();
   var i: int64 = 0;
   while (i < p->man->nreplaces) {
@@ -557,8 +611,19 @@ fn dx_local_replaced(p: Project*) -> StrList* {
 struct DxLockArgs {
   mods: StrList*;
   vers: StrList*;
-  commits: StrList*;
+  regs: StrList*;
+  shas: StrList*;
   reqs: string;
+}
+
+fn dx_args_new(reqs: string) -> DxLockArgs* {
+  var a: DxLockArgs* = new DxLockArgs;
+  a->mods = sl_new();
+  a->vers = sl_new();
+  a->regs = sl_new();
+  a->shas = sl_new();
+  a->reqs = reqs;
+  return a;
 }
 
 fn dx_lock_render(a: DxLockArgs*) -> string {
@@ -566,20 +631,16 @@ fn dx_lock_render(a: DxLockArgs*) -> string {
   sl_sort(order);
   var b: Buf* = buf_new();
   buf_line(b, "# mbuild.lock: generated by mbuild. Commit it.");
+  buf_line(b, "# format 3");
   buf_line(b, "# requirements " + a->reqs);
-  buf_line(b, "# module version commit");
   var i: int64 = 0;
   while (i < order->len) {
     var at: int64 = sl_index(a->mods, sl_get(order, i));
-    buf_line(b, sl_get(a->mods, at) + " " + sl_get(a->vers, at) + " " + sl_get(a->commits, at));
+    buf_line(b, sl_get(a->mods, at) + " " + sl_get(a->vers, at) + " " + sl_get(a->regs, at) + " " + sl_get(a->shas, at));
     i = i + 1;
   }
   free(order);
   return buf_take(b);
-}
-
-fn dx_short(commit: string) -> string {
-  return s_sub(commit, 0, 7);
 }
 
 // Announces what changes between two locks.
@@ -588,18 +649,11 @@ fn dx_lock_diff(old: DxLock*, a: DxLockArgs*) {
   while (i < a->mods->len) {
     var m: string = sl_get(a->mods, i);
     var v: string = sl_get(a->vers, i);
-    var c: string = sl_get(a->commits, i);
     var at: int64 = sl_index(old->mods, m);
     if (at < 0) {
-      dx_announce("Adding", m, v, v);
+      dx_announce("Adding", m, v + " (registry " + sl_get(a->regs, i) + ")", v);
     } else if (!s_eq(sl_get(old->vers, at), v)) {
       dx_announce("Updating", m, sl_get(old->vers, at) + " -> " + v, v);
-    } else if (!s_eq(sl_get(old->commits, at), c)) {
-      var how: string = "";
-      if (sv_is(v)) {
-        how = "tag moved upstream: ";
-      }
-      dx_announce("Updating", m, v + " (" + how + dx_short(sl_get(old->commits, at)) + " -> " + dx_short(c) + ")", v + "@" + c);
     }
     i = i + 1;
   }
@@ -630,6 +684,7 @@ fn dx_cx_new(p: Project*) -> DxCx* {
   cx->paths = dpa_new();
   cx->queue = drq_new();
   cx->reqs_hash = s_empty();
+  cx->deps_root = dx_deps_dir(p);
   return cx;
 }
 
@@ -667,15 +722,14 @@ fn dx_collect_paths(cx: DxCx*) {
           k = k + 1;
         }
         if (!seen) {
+          if (!fs_is_dir(dir)) {
+            dx_fail_hint("path dependency '" + d->key + "' points at " + dir + ", which does not exist", "fix mb_dep_path(\"" + d->key + "\", ...) in " + m->dir + "/mbuild.mettle");
+          }
           var pp: DxPath* = new DxPath;
           pp->key = d->key;
-          pp->module = d->module;
           pp->rel = d->path;
           pp->dir = dir;
-          pp->man = dx_read_manifest(dir);
-          if (!fs_is_dir(dir)) {
-            dx_fail_hint("path dependency '" + d->key + "' points at " + dir + ", which does not exist", "fix `path` in " + m->dir + "/mbuild.toml");
-          }
+          pp->man = dx_local_manifest(cx->p, dir, d->key);
           dpa_push(cx->paths, pp);
           if (pp->man != (Manifest*)0) {
             dma_push(mans, pp->man);
@@ -691,7 +745,7 @@ fn dx_collect_paths(cx: DxCx*) {
   dx_collect_rpaths(cx);
 }
 
-// The root's [replace] { path = ... } entries (mbuild.local.toml's first).
+// The root's [replace] { path = ... } entries (mbuild.local.mettle's first).
 fn dx_collect_rpaths(cx: DxCx*) {
   var m: Manifest* = cx->p->man;
   var i: int64 = 0;
@@ -703,9 +757,9 @@ fn dx_collect_rpaths(cx: DxCx*) {
     }
     var dir: string = p_clean(p_join(cx->p->root, rs->path));
     if (!fs_is_dir(dir)) {
-      var src: string = "mbuild.toml";
+      var src: string = "mbuild.mettle";
       if (rs->local) {
-        src = "mbuild.local.toml";
+        src = "mbuild.local.mettle";
       }
       dx_fail_hint("[replace] " + rs->module + ": " + rs->path + " does not exist", "fix the path in " + src + ", or remove the replacement");
     }
@@ -713,7 +767,7 @@ fn dx_collect_rpaths(cx: DxCx*) {
     rp->module = rs->module;
     rp->rel = rs->path;
     rp->dir = dir;
-    rp->man = dx_read_manifest(dir);
+    rp->man = dx_local_manifest(cx->p, dir, rs->module);
     rp->local = rs->local;
     rp->reqs = drq_new();
     drp_push(cx->rpaths, rp);
@@ -732,32 +786,15 @@ fn dx_rpath_find(cx: DxCx*, module: string) -> DxRPath* {
 }
 
 fn dx_hash_manifest(h: Hasher*, m: Manifest*) {
-  h_str(h, m->module);
+  h_str(h, m->name);
   var i: int64 = 0;
   while (i < m->ndeps) {
     var d: DepSpec* = man_dep(m, i);
     h_str(h, d->key);
-    h_str(h, d->module);
     h_str(h, d->version);
     h_str(h, d->path);
-    h_str(h, d->url);
-    // Round-2 inputs join only when present, so existing hashes stay.
-    if (slen(d->subs_mode) > 0) {
-      h_str(h, "submodules " + d->subs_mode);
-      if (d->subs != (StrList*)0) {
-        h_str(h, sl_join(d->subs, ","));
-      }
-    }
+    h_str(h, d->registry);
     i = i + 1;
-  }
-}
-
-fn dx_hash_subs(h: Hasher*, m: Manifest*) {
-  if (slen(m->subs_mode) > 0 && !s_eq(m->subs_mode, "all")) {
-    h_str(h, "package submodules " + m->subs_mode);
-    if (m->subs != (StrList*)0) {
-      h_str(h, sl_join(m->subs, ","));
-    }
   }
 }
 
@@ -765,13 +802,12 @@ fn dx_hash_replace(h: Hasher*, rs: ReplaceSpec*) {
   h_str(h, "replace");
   h_str(h, rs->module);
   h_str(h, rs->path);
-  h_str(h, rs->url);
   h_str(h, rs->version);
 }
 
 fn dx_compute_reqs_hash(cx: DxCx*) -> string {
   var h: Hasher = h_new();
-  h_str(&h, "mbuild-requirements-1");
+  h_str(&h, "mbuild-requirements-3");
   dx_hash_manifest(&h, cx->p->man);
   var i: int64 = 0;
   while (i < cx->paths->len) {
@@ -781,7 +817,6 @@ fn dx_compute_reqs_hash(cx: DxCx*) -> string {
     h_str(&h, pp->rel);
     if (pp->man != (Manifest*)0) {
       dx_hash_manifest(&h, pp->man);
-      dx_hash_subs(&h, pp->man);
     }
     i = i + 1;
   }
@@ -796,7 +831,7 @@ fn dx_compute_reqs_hash(cx: DxCx*) -> string {
   return h_hex(&h);
 }
 
-// The stamp's view of mbuild.local.toml's replacements.
+// The stamp's view of mbuild.local.mettle's replacements.
 fn dx_local_hash(p: Project*) -> string {
   var h: Hasher = h_new();
   var any: bool = false;
@@ -814,9 +849,9 @@ fn dx_local_hash(p: Project*) -> string {
   return h_hex(&h);
 }
 
-// The root's own module, or a path package's: never fetched.
+// The root itself, a path package or a path replacement: never fetched.
 fn dx_is_local_module(cx: DxCx*, module: string) -> bool {
-  if (slen(cx->p->man->module) > 0 && s_eq(cx->p->man->module, module)) {
+  if (cx->p->has_manifest && s_eq(cx->p->man->name, module)) {
     return true;
   }
   if (dx_rpath_find(cx, module) != (DxRPath*)0) {
@@ -825,10 +860,10 @@ fn dx_is_local_module(cx: DxCx*, module: string) -> bool {
   var i: int64 = 0;
   while (i < cx->paths->len) {
     var pp: DxPath* = dx_path_at(cx, i);
-    if (s_eq(pp->module, module)) {
+    if (s_eq(pp->key, module)) {
       return true;
     }
-    if (pp->man != (Manifest*)0 && s_eq(pp->man->module, module)) {
+    if (pp->man != (Manifest*)0 && s_eq(pp->man->name, module)) {
       return true;
     }
     i = i + 1;
@@ -848,366 +883,189 @@ fn dx_mod_find(cx: DxCx*, module: string) -> DxMod* {
   return (DxMod*)0;
 }
 
-fn dx_mod_get(cx: DxCx*, module: string, req_url: string) -> DxMod* {
+fn dx_mod_get(cx: DxCx*, module: string) -> DxMod* {
   var m: DxMod* = dx_mod_find(cx, module);
   if (m == (DxMod*)0) {
     m = new DxMod;
     m->module = module;
-    m->url = req_url;
     m->reqs = drq_new();
     m->labels = sl_new();
-    m->commits = sl_new();
-    m->checked = sl_new();
     m->sel = -1;
     m->mans = dma_new();
     m->rep = (ReplaceSpec*)0;
     m->rep_req = (DxReq*)0;
+    m->ix = (RegIndex*)0;
     dmo_push(cx->mods, m);
   }
   return m;
-}
-
-// ---------------------------------------------------------------------------
-// Mirrors and versions
-// ---------------------------------------------------------------------------
-
-// The mirror this module is fetched into (keyed by its URL).
-fn dx_mdir(m: DxMod*) -> string {
-  return git_mirror_dir(m->module, m->url);
-}
-
-fn dx_offline(cx: DxCx*) -> bool {
-  return cx->p->opts->offline;
 }
 
 fn dx_first_from(m: DxMod*) -> string {
   if (m->reqs->len > 0) {
     return dx_req_at(m->reqs, 0)->from;
   }
-  return "mbuild.toml";
+  return "mbuild.mettle";
 }
 
-// What a failed git command ran into (git_failure_kind, plus git's words
-// for a local repository that is not there).
-fn dx_failure_kind(output: string) -> string {
-  var kind: string = git_failure_kind(output);
-  if (s_eq(kind, "other") && s_contains(output, "does not appear to be a git repository")) {
-    return "gone";
+// ---------------------------------------------------------------------------
+// Registries and versions
+// ---------------------------------------------------------------------------
+
+fn dx_reg_names(p: Project*) -> string {
+  var l: RegList* = reg_list(p);
+  var s: string = sl_join(l->names, ", ");
+  free(l);
+  return s;
+}
+
+fn dx_ix_err(ix: RegIndex*) -> string {
+  if (slen(ix->err) > 0) {
+    return ix->err;
   }
-  return kind;
+  return reg_error();
 }
 
-// The part of git's output that says what went wrong, for "(git: ...)".
-fn dx_git_reason(output: string) -> string {
-  var needles: StrList* = sl_of("Could not resolve host");
-  sl_push(needles, "Failed to connect");
-  sl_push(needles, "Connection timed out");
-  sl_push(needles, "Network is unreachable");
-  sl_push(needles, "Connection refused");
-  sl_push(needles, "Temporary failure in name resolution");
-  sl_push(needles, "Repository not found");
-  sl_push(needles, "Authentication failed");
-  sl_push(needles, "could not read Username");
-  sl_push(needles, "Permission denied (publickey)");
-  sl_push(needles, "terminal prompts disabled");
-  var reason: string = "";
-  var i: int64 = 0;
-  while (i < needles->len && slen(reason) == 0) {
-    var at: int64 = s_find(output, sl_get(needles, i));
-    if (at >= 0) {
-      var rest: string = s_from(output, at);
-      var nl: int64 = s_find_byte(rest, 10);
-      if (nl >= 0) {
-        rest = s_sub(rest, 0, nl);
-      }
-      reason = s_trim(rest);
-      while (s_ends(reason, ".")) {
-        reason = s_sub(reason, 0, slen(reason) - 1);
-      }
-    }
-    i = i + 1;
+// The registry a package is pinned to: the root's mb_dep_from, else the
+// lock's; "" for the search order.
+fn dx_pinned(cx: DxCx*, module: string) -> string {
+  var d: DepSpec* = man_dep_find(cx->p->man, module);
+  if (d != (DepSpec*)0 && slen(d->path) == 0 && slen(d->registry) > 0) {
+    return d->registry;
   }
-  free(needles);
-  if (slen(reason) == 0) {
-    var sum: string = git_summary(output);
-    var nl2: int64 = s_find_byte(sum, 10);
-    if (nl2 >= 0) {
-      sum = s_sub(sum, 0, nl2);
-    }
-    reason = s_trim(sum);
-    if (s_starts(reason, "fatal: ")) {
-      reason = s_from(reason, 7);
-    }
+  var li: int64 = sl_index(cx->lock->mods, module);
+  if (li >= 0) {
+    return sl_get(cx->lock->regs, li);
   }
-  return reason;
+  return s_empty();
 }
 
-fn dx_fork_help(module: string) -> string {
-  return "replace it with a fork ([replace] \"" + module + "\" = {{ url = \"...\" }) or vendor it (mbuild vendor)";
-}
-
-// Module paths mbuild knows: (module, where) pairs for typo suggestions.
-fn dx_known_modules(cx: DxCx*, mods: StrList*, wheres: StrList*) {
+// Package names mbuild knows, with where it knows them from (typo help).
+fn dx_known_names(cx: DxCx*, names: StrList*, wheres: StrList*) {
   var i: int64 = 0;
   while (i < cx->p->man->ndeps) {
     var d: DepSpec* = man_dep(cx->p->man, i);
-    if (slen(d->module) > 0 && !sl_has(mods, d->module)) {
-      sl_push(mods, d->module);
-      sl_push(wheres, "in mbuild.toml");
+    if (!sl_has(names, d->key)) {
+      sl_push(names, d->key);
+      sl_push(wheres, "in mbuild.mettle");
     }
     i = i + 1;
   }
   i = 0;
   while (i < cx->lock->mods->len) {
-    if (!sl_has(mods, sl_get(cx->lock->mods, i))) {
-      sl_push(mods, sl_get(cx->lock->mods, i));
+    if (!sl_has(names, sl_get(cx->lock->mods, i))) {
+      sl_push(names, sl_get(cx->lock->mods, i));
       sl_push(wheres, "in mbuild.lock");
     }
     i = i + 1;
   }
   i = 0;
   while (i < cx->mods->len) {
-    if (!sl_has(mods, dx_mod_at(cx, i)->module)) {
-      sl_push(mods, dx_mod_at(cx, i)->module);
+    if (!sl_has(names, dx_mod_at(cx, i)->module)) {
+      sl_push(names, dx_mod_at(cx, i)->module);
       sl_push(wheres, "in the dependency graph");
     }
     i = i + 1;
   }
-  // Mirrors: $MBUILD_HOME/git/<host>/<owner>/<repo>[@hash].git
-  var gdir: string = fs_mbuild_home() + "/git";
-  var hf: StrList* = sl_new();
-  var hosts: StrList* = sl_new();
-  if (sys_list_dir(gdir, hf, hosts)) {
+  // The cached indexes: $MBUILD_HOME/registry/<registry>@<hash>/index/<name>
+  var rdir: string = fs_mbuild_home() + "/registry";
+  var rf: StrList* = sl_new();
+  var regs: StrList* = sl_new();
+  if (sys_list_dir(rdir, rf, regs)) {
     var a: int64 = 0;
-    while (a < hosts->len) {
-      var host: string = sl_get(hosts, a);
-      a = a + 1;
-      if (s_eq(host, "sub") || s_eq(host, "tmp")) {
-        continue;
-      }
-      var of: StrList* = sl_new();
-      var owners: StrList* = sl_new();
-      if (sys_list_dir(gdir + "/" + host, of, owners)) {
+    while (a < regs->len) {
+      var files: StrList* = sl_new();
+      var dirs: StrList* = sl_new();
+      if (sys_list_dir(rdir + "/" + sl_get(regs, a) + "/index", files, dirs)) {
         var b: int64 = 0;
-        while (b < owners->len) {
-          var rf: StrList* = sl_new();
-          var repos: StrList* = sl_new();
-          if (sys_list_dir(gdir + "/" + host + "/" + sl_get(owners, b), rf, repos)) {
-            var c: int64 = 0;
-            while (c < repos->len) {
-              var repo: string = sl_get(repos, c);
-              c = c + 1;
-              if (!s_ends(repo, ".git")) {
-                continue;
-              }
-              repo = s_sub(repo, 0, slen(repo) - 4);
-              var at: int64 = s_find_byte(repo, 64);
-              if (at >= 0) {
-                repo = s_sub(repo, 0, at);
-              }
-              var mod: string = host + "/" + sl_get(owners, b) + "/" + repo;
-              if (!sl_has(mods, mod)) {
-                sl_push(mods, mod);
-                sl_push(wheres, "downloaded before");
-              }
-            }
+        while (b < files->len) {
+          var n: string = sl_get(files, b);
+          if (man_is_package_name(n) && !sl_has(names, n)) {
+            sl_push(names, n);
+            sl_push(wheres, "in a cached registry index");
           }
-          free(rf);
-          free(repos);
           b = b + 1;
         }
       }
-      free(of);
-      free(owners);
+      free(files);
+      free(dirs);
+      a = a + 1;
     }
   }
-  free(hf);
-  free(hosts);
+  free(rf);
+  free(regs);
 }
 
-fn dx_after_first_slash(s: string) -> string {
-  var at: int64 = s_find_byte(s, 47);
-  if (at < 0) {
-    return s;
-  }
-  return s_from(s, at + 1);
-}
-
-// "did you mean github.com/demo/strutil? (in mbuild.lock)", or "".
-fn dx_suggest_module(cx: DxCx*, module: string) -> string {
-  var mods: StrList* = sl_new();
+// "did you mean strutil? (in mbuild.lock)", or "".
+fn dx_suggest(cx: DxCx*, module: string) -> string {
+  var names: StrList* = sl_new();
   var wheres: StrList* = sl_new();
-  dx_known_modules(cx, mods, wheres);
+  dx_known_names(cx, names, wheres);
   var best: int64 = -1;
+  var best_d: int64 = 3;
   var i: int64 = 0;
-  while (i < mods->len && best < 0) {
-    var c: string = sl_get(mods, i);
-    if (!s_eq(c, module) && s_eq(s_lower(c), s_lower(module))) {
+  while (i < names->len) {
+    var d: int64 = man_edit_distance(module, sl_get(names, i));
+    if (d > 0 && d < best_d) {
+      best_d = d;
       best = i;
     }
     i = i + 1;
   }
-  if (best < 0) {
-    var best_d: int64 = 4;
-    i = 0;
-    while (i < mods->len) {
-      var c2: string = sl_get(mods, i);
-      var d: int64 = man_edit_distance(module, c2);
-      if (d > 0 && d < best_d) {
-        best_d = d;
-        best = i;
-      }
-      i = i + 1;
-    }
-  }
-  if (best < 0) {
-    var tail: string = dx_after_first_slash(module);
-    var leaf: string = p_base(module);
-    i = 0;
-    while (i < mods->len && best < 0) {
-      var c3: string = sl_get(mods, i);
-      if (!s_eq(c3, module) && (s_eq(dx_after_first_slash(c3), tail) || s_eq(p_base(c3), leaf))) {
-        best = i;
-      }
-      i = i + 1;
-    }
-  }
   var said: string = "";
   if (best >= 0) {
-    said = "did you mean " + sl_get(mods, best) + "? (" + sl_get(wheres, best) + ")";
+    said = "did you mean " + sl_get(names, best) + "? (" + sl_get(wheres, best) + ")";
   }
-  free(mods);
+  free(names);
   free(wheres);
   return said;
 }
 
-fn dx_fail_repo(cx: DxCx*, m: DxMod*, output: string) {
-  var u: string = git_url(m->module, m->url);
-  var kind: string = dx_failure_kind(output);
-  var gitlines: string = "\n  git: " + s_replace(git_summary(output), "\n", "\n  git: ");
-  if (s_eq(kind, "network")) {
-    dx_fail_hint("cannot download " + m->module + " (required by " + dx_first_from(m) + "): the network is unavailable\n  git: " + dx_git_reason(output), "connect and retry; builds of already-fetched dependencies work with --offline");
+fn dx_fail_missing(cx: DxCx*, module: string, from: string, pin: string) {
+  var msg: string = "no registry has a package named " + module + " (required by " + from + "; searched " + dx_reg_names(cx->p) + ")";
+  if (slen(pin) > 0) {
+    msg = "registry " + pin + " has no package named " + module + " (required by " + from + ")";
   }
-  var hint: string = "";
-  if (slen(m->url) > 0) {
-    hint = "the requirement sets url = " + toml_quote(m->url) + "; check that this repository exists and can be read without a password";
-  } else if (slen(env_get("MBUILD_GIT_BASE")) > 0) {
-    hint = "MBUILD_GIT_BASE=" + env_get("MBUILD_GIT_BASE") + " is set, so mbuild looked for the repository at " + u + "; unset it, or add the repository there";
-  } else {
-    hint = "check the module path; for a repository elsewhere write " + toml_quote(m->module) + " = {{ version = \"...\", url = \"https://host/repo.git\" } in [dependencies], or set MBUILD_GIT_BASE to a directory or URL holding <module> repositories";
-  }
-  error_msg("cannot download " + m->module + " (required by " + dx_first_from(m) + ") from " + u + gitlines);
-  if (s_eq(kind, "gone") || (s_eq(kind, "auth") && s_starts(m->module, "github.com/"))) {
-    var sug: string = dx_suggest_module(cx, m->module);
-    if (slen(sug) > 0) {
-      dx_help(sug);
-    }
-  }
-  dx_help(hint);
-  if (sl_has(cx->lock->mods, m->module)) {
-    dx_help(dx_fork_help(m->module));
+  error_msg(msg);
+  var sug: string = dx_suggest(cx, module);
+  if (slen(sug) > 0) {
+    dx_help(sug);
   }
   dx_guard_restore();
   exit_with(1);
 }
 
-fn dx_fetch(cx: DxCx*, m: DxMod*) {
-  status("Fetching", m->module);
-  var r: Captured = git_fetch(m->module, m->url);
-  g_dx_fetched = g_dx_fetched + dx_mdir(m) + "\n";
-  if (r.code == 0) {
-    return;
+// The index of m's package: from its pinned registry, else the first in
+// search order that has it. refresh asks the registry again, once per
+// command and package; a package not in any cached index is asked for too.
+fn dx_index(cx: DxCx*, m: DxMod*, refresh: bool) -> RegIndex* {
+  if (g_dx_refreshed == (StrList*)0) {
+    g_dx_refreshed = sl_new();
   }
-  var kind: string = dx_failure_kind(r.out);
-  var u: string = git_url(m->module, m->url);
-  if (s_eq(kind, "network")) {
-    g_dx_net_down = true;
-    var msg: string = "network unavailable (git: " + dx_git_reason(r.out) + "); using the cached mirror of " + m->module;
-    if (g_dx_net_warned) {
-      verbose(msg);
-    } else {
-      g_dx_net_warned = true;
-      warn(msg);
-    }
-  } else if (s_eq(kind, "gone") || s_eq(kind, "auth")) {
-    warn(m->module + " is no longer available from " + u + " (git: " + dx_git_reason(r.out) + "); building from the cached mirror");
-    dx_help(dx_fork_help(m->module));
-  } else {
-    warn("could not update the mirror of " + m->module + " from " + u + "; using what it has\n  git: " + git_summary(r.out));
+  var done: bool = sl_has(g_dx_refreshed, m->module);
+  var fresh: bool = (refresh || g_dx_refresh) && !done;
+  if (m->ix != (RegIndex*)0 && !fresh) {
+    return m->ix;
   }
+  var pin: string = dx_pinned(cx, m->module);
+  var ix: RegIndex* = reg_find(cx->p, m->module, pin, fresh);
+  if (ix->ok && !ix->found && !fresh && !done) {
+    fresh = true;
+    ix = reg_find(cx->p, m->module, pin, true);
+  }
+  if (fresh) {
+    sl_add_uniq(g_dx_refreshed, m->module);
+  }
+  if (!ix->ok) {
+    dx_fail(dx_ix_err(ix));
+  }
+  if (!ix->found) {
+    dx_fail_missing(cx, m->module, dx_first_from(m), pin);
+  }
+  m->ix = ix;
+  return ix;
 }
 
-fn dx_can_fetch(cx: DxCx*, m: DxMod*) -> bool {
-  return !dx_offline(cx) && !dx_set_has(g_dx_fetched, dx_mdir(m));
-}
-
-// Makes sure the mirror exists; with fresh, also brings it up to date once
-// per run (unless --offline).
-fn dx_mirror(cx: DxCx*, m: DxMod*, fresh: bool) {
-  if (!git_has_mirror(dx_mdir(m))) {
-    if (dx_offline(cx)) {
-      dx_fail_hint(m->module + " (required by " + dx_first_from(m) + ") is not downloaded and --offline forbids fetching it", "run `mbuild fetch` once while online, or drop --offline");
-    }
-    status("Fetching", m->module);
-    var r: Captured = git_clone_mirror(m->module, m->url);
-    if (r.code != 0) {
-      dx_fail_repo(cx, m, r.out);
-    }
-    g_dx_fetched = g_dx_fetched + dx_mdir(m) + "\n";
-    return;
-  }
-  if (fresh && dx_can_fetch(cx, m)) {
-    dx_fetch(cx, m);
-  }
-}
-
-fn dx_offline_hint(cx: DxCx*) -> string {
-  if (dx_offline(cx)) {
-    return " (--offline: the mirror was not updated; run `mbuild fetch` online first)";
-  }
-  if (g_dx_net_down) {
-    return " (the network is unavailable, so the cached mirror was used; run with --offline to skip network attempts)";
-  }
-  return "";
-}
-
-// Makes sure commit is in the mirror: a ref fetch, then a fetch of the commit
-// itself (a commit no ref reaches any more).
-fn dx_need_commit(cx: DxCx*, m: DxMod*, commit: string, label: string) {
-  dx_mirror(cx, m, false);
-  if (sl_has(m->checked, commit)) {
-    return;
-  }
-  if (slen(git_rev(dx_mdir(m), commit)) == 0) {
-    if (dx_can_fetch(cx, m)) {
-      dx_fetch(cx, m);
-    }
-    if (slen(git_rev(dx_mdir(m), commit)) == 0 && !dx_offline(cx)) {
-      var fc: Captured = git_fetch_commit(dx_mdir(m), commit);
-      if (fc.code != 0) {
-        verbose("git fetch origin " + commit + " failed: " + git_summary(fc.out));
-      }
-    }
-    if (slen(git_rev(dx_mdir(m), commit)) == 0) {
-      if (dx_offline(cx)) {
-        dx_fail_hint("commit " + commit + " of " + m->module + " (pinned in mbuild.lock) is not in the repository at " + git_url(m->module, m->url) + dx_offline_hint(cx), "run `mbuild update " + m->module + "` to pin a commit that exists");
-      }
-      dx_fail_hint("commit " + dx_short(commit) + " of " + m->module + " (pinned in mbuild.lock as " + label + ") is no longer in " + git_url(m->module, m->url) + "\n  the tag was moved or the history was rewritten upstream, and no mirror on this machine has it", "run `mbuild update " + m->module + "` to pin what the repository has now (review the change), or vendor dependencies (`mbuild vendor`) to keep exact copies");
-    }
-  }
-  sl_push(m->checked, commit);
-}
-
-// Tags that are semantic versions, sorted by precedence (lowest first).
-fn dx_semver_tags(tags: StrList*) -> StrList* {
-  var vs: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < tags->len) {
-    if (sv_is(sl_get(tags, i))) {
-      sl_push(vs, sl_get(tags, i));
-    }
-    i = i + 1;
-  }
+fn dx_sort_versions(vs: StrList*) {
   var a: int64 = 1;
   while (a < vs->len) {
     var cur: string = sl_get(vs, a);
@@ -1219,36 +1077,75 @@ fn dx_semver_tags(tags: StrList*) -> StrList* {
     sl_set(vs, j + 1, cur);
     a = a + 1;
   }
-  return vs;
 }
 
-// "available versions: v1.0.0, v1.1.0; branches: main" for error messages.
-fn dx_available(mirror: string) -> string {
-  var tags: StrList* = git_tags(mirror);
-  var vs: StrList* = dx_semver_tags(tags);
-  var branches: StrList* = git_branches(mirror);
-  var b: string = "";
-  if (vs->len > 0) {
-    b = "available versions: " + sl_join(vs, ", ");
-  } else {
-    b = "the repository has no version tags";
-  }
-  free(vs);
-  if (branches->len > 0) {
-    b = b + "; branches: " + sl_join(branches, ", ");
-  }
-  var other: StrList* = sl_new();
+// The versions in ix, lowest first; yanked ones only with yanked_too.
+fn dx_versions(ix: RegIndex*, yanked_too: bool) -> StrList* {
+  var vs: StrList* = sl_new();
   var i: int64 = 0;
-  while (i < tags->len) {
-    if (!sv_is(sl_get(tags, i))) {
-      sl_push(other, sl_get(tags, i));
+  while (i < ix->n) {
+    var rv: RegVersion* = &ix->versions[i];
+    if (sv_is(rv->version) && (yanked_too || !rv->yanked)) {
+      sl_push(vs, rv->version);
     }
     i = i + 1;
   }
-  if (other->len > 0) {
-    b = b + "; other tags: " + sl_join(other, ", ");
+  dx_sort_versions(vs);
+  return vs;
+}
+
+// The index entry of version ("v1.0" finds "v1.0.0"); 0 when absent.
+fn dx_find_version(ix: RegIndex*, version: string) -> RegVersion* {
+  var rv: RegVersion* = reg_version(ix, version);
+  if (rv != (RegVersion*)0) {
+    return rv;
   }
-  free(other);
+  var want: string = sv_canonical(version);
+  if (slen(want) == 0) {
+    return (RegVersion*)0;
+  }
+  var i: int64 = 0;
+  while (i < ix->n) {
+    if (s_eq(sv_canonical(ix->versions[i].version), want)) {
+      return &ix->versions[i];
+    }
+    i = i + 1;
+  }
+  return (RegVersion*)0;
+}
+
+// "sha256:<hex>" for an index entry.
+fn dx_sha(rv: RegVersion*) -> string {
+  var s: string = s_lower(rv->sha);
+  if (s_starts(s, "sha256:")) {
+    return s;
+  }
+  return "sha256:" + s;
+}
+
+fn dx_short_sha(s: string) -> string {
+  if (slen(s) <= 23) {
+    return s;
+  }
+  return s_sub(s, 0, 23) + "...";
+}
+
+fn dx_archive_url(ix: RegIndex*, name: string, version: string) -> string {
+  var base: string = ix->url;
+  while (s_ends(base, "/")) {
+    base = s_sub(base, 0, slen(base) - 1);
+  }
+  return base + "/pkg/" + name + "/" + name + "-" + version + ".tar.gz";
+}
+
+// "available versions: v1.0.0, v1.1.0" for error messages.
+fn dx_available(ix: RegIndex*) -> string {
+  var vs: StrList* = dx_versions(ix, false);
+  var b: string = "registry " + ix->registry + " has no versions of " + ix->name;
+  if (vs->len > 0) {
+    b = "available versions: " + sl_join(vs, ", ");
+  }
+  free(vs);
   return b;
 }
 
@@ -1276,235 +1173,241 @@ fn dx_is_partial(spec: string) -> bool {
   return sv_is(spec) && dx_version_parts(spec) < 3 && s_find_byte(spec, 45) < 0;
 }
 
-// The tag naming exactly this version ("v1.0.0" also matches tag "1.0.0").
-fn dx_find_tag(tags: StrList*, spec: string) -> string {
-  if (sl_has(tags, spec)) {
-    return spec;
-  }
-  var want: string = sv_canonical(spec);
-  if (slen(want) == 0) {
-    return s_empty();
-  }
-  var i: int64 = 0;
-  while (i < tags->len) {
-    if (s_eq(sv_canonical(sl_get(tags, i)), want)) {
-      return sl_get(tags, i);
-    }
-    i = i + 1;
-  }
-  return s_empty();
-}
-
-// Tags matching a partial version ("v1" -> v1.x.y, "v1.2" -> v1.2.y).
-fn dx_matching_tags(tags: StrList*, spec: string) -> StrList* {
+// Versions matching a partial version ("v1" -> v1.x.y, "v1.2" -> v1.2.y).
+fn dx_matching(vs: StrList*, spec: string) -> StrList* {
   var want: SemVer = sv_parse(spec);
   var parts: int64 = dx_version_parts(spec);
   var found: StrList* = sl_new();
   var i: int64 = 0;
-  while (i < tags->len) {
-    var v: SemVer = sv_parse(sl_get(tags, i));
+  while (i < vs->len) {
+    var v: SemVer = sv_parse(sl_get(vs, i));
     if (v.ok && v.major == want.major && (parts < 2 || v.minor == want.minor)) {
-      sl_push(found, sl_get(tags, i));
+      sl_push(found, sl_get(vs, i));
     }
     i = i + 1;
   }
   return found;
 }
 
-// For a minimum written as a partial version: the lowest matching tag.
-fn dx_lowest(tags: StrList*) -> string {
-  var vs: StrList* = dx_semver_tags(tags);
-  var found: string = s_empty();
+// Whether a locked version satisfies a spec as written.
+fn dx_spec_matches(spec: string, locked: string) -> bool {
+  if (dx_is_partial(spec)) {
+    var one: StrList* = sl_of(locked);
+    var hits: StrList* = dx_matching(one, spec);
+    var ok: bool = hits->len > 0;
+    free(one);
+    free(hits);
+    return ok;
+  }
+  return s_eq(sv_canonical(locked), sv_canonical(spec));
+}
+
+// The newest version in cur's compatibility line (pre-releases only when cur
+// is one), "" when none is newer.
+fn dx_newest_in_line(vs: StrList*, cur: string) -> string {
+  var cv: SemVer = sv_parse(cur);
+  var line: string = sv_line(cur);
+  var best: string = "";
   var i: int64 = 0;
-  while (i < vs->len && slen(found) == 0) {
-    if (slen(sv_parse(sl_get(vs, i)).pre) == 0) {
-      found = sl_get(vs, i);
+  while (i < vs->len) {
+    var t: string = sl_get(vs, i);
+    var v: SemVer = sv_parse(t);
+    if (v.ok && s_eq(sv_line(t), line) && (slen(v.pre) == 0 || slen(cv.pre) > 0)) {
+      if (slen(best) == 0 || sv_cmp(t, best) > 0) {
+        best = t;
+      }
     }
     i = i + 1;
   }
-  if (slen(found) == 0 && vs->len > 0) {
-    found = sl_get(vs, 0);
+  if (slen(best) > 0 && sv_cmp(best, cur) > 0) {
+    return best;
+  }
+  return s_empty();
+}
+
+// The newest stable version of any line, "" when there is none.
+fn dx_newest_stable(vs: StrList*) -> string {
+  var best: string = "";
+  var i: int64 = 0;
+  while (i < vs->len) {
+    var t: string = sl_get(vs, i);
+    var v: SemVer = sv_parse(t);
+    if (v.ok && slen(v.pre) == 0 && (slen(best) == 0 || sv_cmp(t, best) > 0)) {
+      best = t;
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+// Versions after `from` up to `to` (inclusive), newest first, space-separated;
+// pre-releases only when `from` is one; in from's line unless cross.
+fn dx_candidates(vs: StrList*, from: string, to: string, cross: bool) -> string {
+  var pre_ok: bool = slen(sv_parse(from).pre) > 0;
+  var picked: StrList* = sl_new();
+  var i: int64 = vs->len - 1;
+  while (i >= 0) {
+    var t: string = sl_get(vs, i);
+    i = i - 1;
+    if (sv_cmp(t, from) <= 0 || sv_cmp(t, to) > 0) {
+      continue;
+    }
+    if (slen(sv_parse(t).pre) > 0 && !pre_ok && !s_eq(t, to)) {
+      continue;
+    }
+    if (!cross && !s_eq(sv_line(t), sv_line(from))) {
+      continue;
+    }
+    sl_push(picked, t);
+  }
+  var joined: string = sl_join(picked, " ");
+  free(picked);
+  return joined;
+}
+
+// The error of 14.4 for an index entry that is not the locked checksum.
+fn dx_check_sha(module: string, version: string, locked: string, ix: RegIndex*, rv: RegVersion*) {
+  var have: string = dx_sha(rv);
+  if (s_eq(s_lower(locked), have)) {
+    return;
+  }
+  error_msg(module + " " + version + " from registry " + ix->registry + " does not match mbuild.lock\n    mbuild.lock   " + dx_short_sha(locked) + "\n    registry      " + dx_short_sha(have) + " (" + dx_archive_url(ix, module, version) + ")\n  a published version never changes; the registry or the download was tampered with");
+  dx_help("if you trust the new bytes, delete the " + module + " line from mbuild.lock and build again (review the change first)");
+  dx_guard_restore();
+  exit_with(1);
+}
+
+// Takes the locked version of m, checked against the index.
+fn dx_take_locked(cx: DxCx*, m: DxMod*, r: DxReq*, li: int64) {
+  var lv: string = sl_get(cx->lock->vers, li);
+  var ix: RegIndex* = dx_index(cx, m, false);
+  var rv: RegVersion* = dx_find_version(ix, lv);
+  if (rv == (RegVersion*)0) {
+    ix = dx_index(cx, m, true);
+    rv = dx_find_version(ix, lv);
+  }
+  if (rv == (RegVersion*)0) {
+    dx_fail_hint(m->module + " " + lv + " (pinned in mbuild.lock) is not in registry " + ix->registry, "run `mbuild update " + m->module + "` to select a version it has");
+  }
+  dx_check_sha(m->module, lv, sl_get(cx->lock->shas, li), ix, rv);
+  if (rv->yanked && dx_once("yanked " + m->module + " " + lv)) {
+    warn(m->module + " " + lv + " is yanked in registry " + ix->registry + "; mbuild update " + m->module + " moves off it");
+  }
+  r->label = lv;
+}
+
+// `latest`: the newest stable version (in the hint line when one is given),
+// else the newest pre-release; yanked versions never.
+fn dx_pick_latest(cx: DxCx*, m: DxMod*, hint: string) -> string {
+  var ix: RegIndex* = dx_index(cx, m, true);
+  var vs: StrList* = dx_versions(ix, false);
+  if (slen(hint) > 0) {
+    var in_line: StrList* = sl_new();
+    var k: int64 = 0;
+    while (k < vs->len) {
+      if (s_eq(sv_line(sl_get(vs, k)), hint)) {
+        sl_push(in_line, sl_get(vs, k));
+      }
+      k = k + 1;
+    }
+    if (in_line->len > 0) {
+      vs = in_line;
+    }
+  }
+  var best: string = sv_max(vs);
+  free(vs);
+  if (slen(best) == 0) {
+    dx_fail_hint(m->module + " has no version that can be selected in registry " + ix->registry + " (required by " + dx_first_from(m) + ")", dx_available(ix));
+  }
+  return best;
+}
+
+// The first version after a yanked one in its line, "" when none.
+fn dx_after_yanked(ix: RegIndex*, yanked: string) -> string {
+  var vs: StrList* = dx_versions(ix, false);
+  var found: string = "";
+  var i: int64 = 0;
+  while (i < vs->len && slen(found) == 0) {
+    var v: string = sl_get(vs, i);
+    if (sv_cmp(v, yanked) > 0 && s_eq(sv_line(v), sv_line(yanked))) {
+      found = v;
+    }
+    i = i + 1;
   }
   free(vs);
   return found;
 }
 
-fn dx_is_hex_id(s: string) -> bool {
-  if (slen(s) < 7 || slen(s) > 40) {
-    return false;
-  }
-  var i: int64 = 0;
-  while (i < slen(s)) {
-    if (!is_hex_b(s_byte(s, i))) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
-}
-
-// A branch, a non-version tag or a commit: its full commit, "" when unknown.
-fn dx_rev_named(mirror: string, spec: string) -> string {
-  var c: string = git_rev(mirror, "refs/heads/" + spec);
-  if (slen(c) == 0) {
-    c = git_rev(mirror, "refs/tags/" + spec);
-  }
-  if (slen(c) == 0 && dx_is_hex_id(spec)) {
-    c = git_rev(mirror, spec);
-  }
-  return c;
-}
-
-// Fills r->label / r->commit for "latest": the highest version tag (stable
-// first), else the head of the default branch.
-fn dx_pick_latest(cx: DxCx*, m: DxMod*, r: DxReq*) {
-  var tags: StrList* = git_tags(dx_mdir(m));
-  var hint: string = dx_hint_line(cx, m->module);
-  if (slen(hint) > 0) {
-    var in_line: StrList* = sl_new();
-    var k: int64 = 0;
-    while (k < tags->len) {
-      if (s_eq(sv_line(sl_get(tags, k)), hint)) {
-        sl_push(in_line, sl_get(tags, k));
-      }
-      k = k + 1;
-    }
-    if (in_line->len > 0) {
-      tags = in_line;
-    }
-  }
-  r->fresh = true;
-  var best: string = sv_max(tags);
-  if (slen(best) > 0) {
-    r->label = best;
-    r->commit = git_rev(dx_mdir(m), "refs/tags/" + best);
-  } else {
-    var branch: string = git_default_branch(dx_mdir(m));
-    if (slen(branch) == 0) {
-      dx_fail_hint(m->module + " has no version tags and no default branch", "require a branch or a commit explicitly");
-    }
-    r->label = branch;
-    r->commit = git_rev(dx_mdir(m), "refs/heads/" + branch);
-  }
-  if (slen(r->commit) == 0) {
-    dx_fail(m->module + ": cannot resolve " + r->label + " in its mirror " + dx_mdir(m));
-  }
-  sl_add_uniq(m->checked, r->commit);
-}
-
-// Resolves a version tag requirement; partial versions mean the lowest
-// matching tag (for a minimum) or the highest (for `get`).
-fn dx_pick_tag(cx: DxCx*, m: DxMod*, r: DxReq*, highest: bool) {
-  var spec: string = r->spec;
-  var tag: string = "";
+// A version requirement: the version itself (a minimum), the newest
+// matching a partial one; a yanked version moves to the next in its line.
+fn dx_pick_version(cx: DxCx*, m: DxMod*, spec: string, from: string) -> string {
+  var label: string = "";
+  var yanked: bool = false;
+  var ix: RegIndex* = (RegIndex*)0;
   var round: int64 = 0;
-  while (round < 2) {
-    var tags: StrList* = git_tags(dx_mdir(m));
+  while (round < 2 && slen(label) == 0) {
+    ix = dx_index(cx, m, round == 1);
     if (dx_is_partial(spec)) {
-      var hits: StrList* = dx_matching_tags(tags, spec);
-      if (highest) {
-        tag = sv_max(hits);
-      } else {
-        tag = dx_lowest(hits);
-      }
+      var vs: StrList* = dx_versions(ix, false);
+      var hits: StrList* = dx_matching(vs, spec);
+      label = sv_max(hits);
+      free(vs);
       free(hits);
     } else {
-      tag = dx_find_tag(tags, spec);
+      var rv: RegVersion* = dx_find_version(ix, spec);
+      if (rv != (RegVersion*)0 && !rv->yanked) {
+        label = rv->version;
+      } else if (rv != (RegVersion*)0) {
+        yanked = true;
+        label = dx_after_yanked(ix, rv->version);
+      }
     }
-    if (slen(tag) > 0 || round == 1 || !dx_can_fetch(cx, m)) {
-      break;
-    }
-    dx_fetch(cx, m);
     round = round + 1;
   }
-  if (slen(tag) == 0) {
-    dx_fail_hint(m->module + " has no version " + spec + " (required by " + r->from + ")" + dx_offline_hint(cx), dx_available(dx_mdir(m)));
+  if (slen(label) == 0) {
+    if (yanked) {
+      dx_fail_hint(m->module + " " + spec + " is yanked in registry " + ix->registry + " and no later version of line " + sv_line(spec) + " exists (required by " + from + ")", dx_available(ix));
+    }
+    dx_fail_hint(m->module + " has no version " + spec + " (required by " + from + ")", dx_available(ix));
   }
-  r->label = tag;
-  r->commit = git_rev(dx_mdir(m), "refs/tags/" + tag);
-  if (slen(r->commit) == 0) {
-    dx_fail(m->module + ": tag " + tag + " does not name a commit");
+  if (yanked && dx_once("yanked " + m->module + " " + spec)) {
+    warn(m->module + " " + spec + " is yanked in registry " + ix->registry + "; using " + label);
   }
-  sl_add_uniq(m->checked, r->commit);
+  return label;
 }
 
-fn dx_pick_named(cx: DxCx*, m: DxMod*, r: DxReq*) {
-  var c: string = dx_rev_named(dx_mdir(m), r->spec);
-  if (slen(c) == 0 && dx_can_fetch(cx, m)) {
-    dx_fetch(cx, m);
-    c = dx_rev_named(dx_mdir(m), r->spec);
-  }
-  if (slen(c) == 0) {
-    dx_fail_hint(m->module + " has no version, branch or commit '" + r->spec + "' (required by " + r->from + ")" + dx_offline_hint(cx), dx_available(dx_mdir(m)));
-  }
-  r->label = r->spec;
-  r->commit = c;
-  sl_add_uniq(m->checked, c);
-}
-
-// A locked version tag that now names another commit upstream: the lock
-// keeps its commit (only `mbuild update` takes the new one), with a warning.
-fn dx_check_moved(cx: DxCx*, m: DxMod*, tag: string, locked: string) {
-  var key: string = "moved " + m->module + " " + tag;
-  if (!sv_is(tag) || dx_set_has(g_dx_said, key)) {
-    return;
-  }
-  g_dx_said = g_dx_said + key + "\n";
-  var now: string = git_rev(dx_mdir(m), "refs/tags/" + tag);
-  if (slen(now) == 0 || s_eq(now, locked)) {
-    return;
-  }
-  warn("tag " + tag + " of " + m->module + " moved upstream (" + dx_short(locked) + " -> " + dx_short(now) + "); keeping " + dx_short(locked) + "; run `mbuild update " + m->module + "` to take " + dx_short(now));
-}
-
-// Resolves one requirement to (label, commit), the lock first.
+// Resolves one requirement to a version, the lock first.
 fn dx_resolve_req(cx: DxCx*, m: DxMod*, r: DxReq*) {
   var spec: string = r->spec;
+  if (!s_eq(spec, "latest") && !sv_is(spec)) {
+    var who: string = "";
+    if (!r->root) {
+      who = " (required by " + r->from + ")";
+    }
+    dx_fail(m->module + " = " + toml_quote(spec) + ": registry packages have versions only (v1.2.0, v1, latest)" + who);
+  }
   var li: int64 = -1;
   if (!sl_has(cx->unpin, m->module)) {
     li = sl_index(cx->lock->mods, m->module);
   }
-  var lv: string = "";
-  var lc: string = "";
-  if (li < 0 && g_dx_refresh) {
-    dx_mirror(cx, m, true);
-  }
-  if (li >= 0) {
-    lv = sl_get(cx->lock->vers, li);
-    lc = sl_get(cx->lock->commits, li);
+  var d: DepSpec* = man_dep_find(cx->p->man, m->module);
+  if (li >= 0 && d != (DepSpec*)0 && slen(d->registry) > 0 && !s_eq(d->registry, sl_get(cx->lock->regs, li))) {
+    li = -1;
   }
   if (s_eq(spec, "latest")) {
     if (li >= 0) {
-      r->label = lv;
-      r->commit = lc;
-      dx_need_commit(cx, m, lc, lv);
-      dx_check_moved(cx, m, lv, lc);
+      dx_take_locked(cx, m, r, li);
       return;
     }
-    dx_mirror(cx, m, true);
-    dx_pick_latest(cx, m, r);
+    r->fresh = true;
+    r->label = dx_pick_latest(cx, m, dx_hint_line(cx, m->module));
     return;
   }
-  if (sv_is(spec)) {
-    if (li >= 0 && sv_is(lv) && (s_eq(lv, spec) || (!dx_is_partial(spec) && s_eq(sv_canonical(lv), sv_canonical(spec))))) {
-      r->label = lv;
-      r->commit = lc;
-      dx_need_commit(cx, m, lc, lv);
-      dx_check_moved(cx, m, lv, lc);
-      return;
-    }
-    dx_mirror(cx, m, false);
-    dx_pick_tag(cx, m, r, false);
+  if (li >= 0 && sv_is(sl_get(cx->lock->vers, li)) && dx_spec_matches(spec, sl_get(cx->lock->vers, li))) {
+    dx_take_locked(cx, m, r, li);
     return;
   }
-  if (li >= 0 && s_eq(lv, spec)) {
-    r->label = lv;
-    r->commit = lc;
-    dx_need_commit(cx, m, lc, lv);
-    return;
-  }
-  dx_mirror(cx, m, true);
-  dx_pick_named(cx, m, r);
+  r->label = dx_pick_version(cx, m, spec, r->from);
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,6 +1426,17 @@ fn dx_hint_line(cx: DxCx*, module: string) -> string {
   return s_empty();
 }
 
+fn dx_req_new(module: string, spec: string, from: string, root: bool) -> DxReq* {
+  var r: DxReq* = new DxReq;
+  r->module = module;
+  r->spec = spec;
+  r->from = from;
+  r->root = root;
+  r->label = s_empty();
+  r->fresh = false;
+  return r;
+}
+
 fn dx_enqueue(cx: DxCx*, m: Manifest*, from: string, root: bool) {
   if (!root && m->nreplaces > 0) {
     verbose(from + ": ignoring [replace] (only the project's own replacements apply)");
@@ -1530,39 +1444,24 @@ fn dx_enqueue(cx: DxCx*, m: Manifest*, from: string, root: bool) {
   var i: int64 = 0;
   while (i < m->ndeps) {
     var d: DepSpec* = man_dep(m, i);
-    if (!root && slen(d->subs_mode) > 0) {
-      verbose(from + ": ignoring `submodules` of " + d->key + " (only the project's own mbuild.toml chooses submodules)");
-    }
     if (slen(d->path) > 0) {
       if (!root && !s_starts(from, "path package")) {
         verbose(from + ": ignoring path dependency '" + d->key + "' (path dependencies only apply to local packages)");
       }
-    } else if (slen(d->module) > 0) {
-      var r: DxReq* = new DxReq;
-      r->module = d->module;
-      r->spec = d->version;
-      r->url = d->url;
-      r->from = from;
-      r->root = root;
-      r->label = s_empty();
-      r->commit = s_empty();
-      r->fresh = false;
-      drq_push(cx->queue, r);
+    } else {
+      drq_push(cx->queue, dx_req_new(d->key, d->version, from, root));
     }
     i = i + 1;
   }
 }
 
-// The manifest of one visited version, read from the mirror; 0 when none.
-fn dx_node_manifest(cx: DxCx*, m: DxMod*, label: string, commit: string) -> Manifest* {
-  var g: GitShow* = git_show(dx_mdir(m), commit, "mbuild.toml");
-  if (!g->ok) {
-    dx_fail("cannot read mbuild.toml of " + m->module + " " + label + ":\n  git: " + git_summary(g->text));
+// The manifest of one visited version, from the registry.
+fn dx_node_manifest(cx: DxCx*, m: DxMod*, version: string) -> Manifest* {
+  var nm: Manifest* = reg_manifest(cx->p, dx_index(cx, m, false), version);
+  if (nm == (Manifest*)0) {
+    dx_fail(reg_error());
   }
-  if (!g->found) {
-    return (Manifest*)0;
-  }
-  return dx_parse_manifest(g->text, dx_deps_dir(cx->p) + "/" + m->module, m->module + "@" + label + "/mbuild.toml");
+  return nm;
 }
 
 // Records a resolved version of m (once) and queues its requirements.
@@ -1571,12 +1470,9 @@ fn dx_visit(cx: DxCx*, m: DxMod*, r: DxReq*) {
     return;
   }
   sl_push(m->labels, r->label);
-  sl_push(m->commits, r->commit);
-  var nm: Manifest* = dx_node_manifest(cx, m, r->label, r->commit);
+  var nm: Manifest* = dx_node_manifest(cx, m, r->label);
   dma_push(m->mans, nm);
-  if (nm != (Manifest*)0) {
-    dx_enqueue(cx, nm, m->module + " " + r->label, false);
-  }
+  dx_enqueue(cx, nm, m->module + " " + r->label, false);
 }
 
 fn dx_walk_once(cx: DxCx*) {
@@ -1587,7 +1483,7 @@ fn dx_walk_once(cx: DxCx*) {
     cx->rpaths->items[k]->reqs = drq_new();
     k = k + 1;
   }
-  dx_enqueue(cx, cx->p->man, "mbuild.toml", true);
+  dx_enqueue(cx, cx->p->man, "mbuild.mettle", true);
   var i: int64 = 0;
   while (i < cx->paths->len) {
     var pp: DxPath* = dx_path_at(cx, i);
@@ -1615,34 +1511,20 @@ fn dx_walk_once(cx: DxCx*) {
       }
       continue;
     }
-    var m: DxMod* = dx_mod_get(cx, r->module, r->url);
+    var m: DxMod* = dx_mod_get(cx, r->module);
     var rep: ReplaceSpec* = man_replace_find(cx->p->man, r->module);
     if (rep != (ReplaceSpec*)0 && slen(rep->path) == 0) {
       m->rep = rep;
-      if (slen(rep->url) > 0) {
-        m->url = rep->url;
-      }
-    }
-    var rep_url: bool = m->rep != (ReplaceSpec*)0 && slen(m->rep->url) > 0;
-    if (slen(r->url) > 0 && !rep_url && (r->root || slen(m->url) == 0)) {
-      m->url = r->url;
     }
     drq_push(m->reqs, r);
     if (m->rep != (ReplaceSpec*)0 && slen(m->rep->version) > 0) {
       // Selected exactly as replaced: the requirement itself is not resolved.
       if (m->rep_req == (DxReq*)0) {
-        var rr: DxReq* = new DxReq;
-        rr->module = m->module;
-        rr->spec = m->rep->version;
-        rr->url = m->url;
-        rr->from = "mbuild.toml";
+        var src: string = "mbuild.mettle";
         if (m->rep->local) {
-          rr->from = "mbuild.local.toml";
+          src = "mbuild.local.mettle";
         }
-        rr->root = true;
-        rr->label = s_empty();
-        rr->commit = s_empty();
-        rr->fresh = false;
+        var rr: DxReq* = dx_req_new(m->module, m->rep->version, src, true);
         m->rep_req = rr;
         dx_resolve_req(cx, m, rr);
         dx_visit(cx, m, rr);
@@ -1655,7 +1537,7 @@ fn dx_walk_once(cx: DxCx*) {
 }
 
 // A requirement counts when its requirer is in the build: the root, a path
-// package, a replacement, or the selected version of a module.
+// package, a replacement, or the selected version of a package.
 fn dx_live(cx: DxCx*, r: DxReq*) -> bool {
   if (r->root || s_starts(r->from, "path package ")) {
     return true;
@@ -1676,8 +1558,7 @@ fn dx_live(cx: DxCx*, r: DxReq*) -> bool {
 
 // The selected index for m from its live requirements, -1 when none is live.
 fn dx_pick(cx: DxCx*, m: DxMod*) -> int64 {
-  var rootr: DxReq* = (DxReq*)0;
-  var first: DxReq* = (DxReq*)0;
+  var any: bool = false;
   var best: string = "";
   var i: int64 = 0;
   while (i < m->reqs->len) {
@@ -1686,35 +1567,21 @@ fn dx_pick(cx: DxCx*, m: DxMod*) -> int64 {
     if (!dx_live(cx, r)) {
       continue;
     }
-    if (first == (DxReq*)0) {
-      first = r;
-    }
-    if (r->root && rootr == (DxReq*)0) {
-      rootr = r;
-    }
-    if (sv_is(r->label) && (slen(best) == 0 || sv_cmp(r->label, best) > 0)) {
+    any = true;
+    if (slen(best) == 0 || sv_cmp(r->label, best) > 0) {
       best = r->label;
     }
   }
-  if (first == (DxReq*)0) {
+  if (!any) {
     return -1;
   }
   if (m->rep_req != (DxReq*)0) {
     return sl_index(m->labels, m->rep_req->label);
   }
-  if (rootr != (DxReq*)0 && !sv_is(rootr->label)) {
-    return sl_index(m->labels, rootr->label);
-  }
-  if (slen(best) > 0) {
-    return sl_index(m->labels, best);
-  }
-  if (rootr != (DxReq*)0) {
-    return sl_index(m->labels, rootr->label);
-  }
-  return sl_index(m->labels, first->label);
+  return sl_index(m->labels, best);
 }
 
-// Selection to a fixed point: a module whose selected version changes can
+// Selection to a fixed point: a package whose selected version changes can
 // drop or bring back the requirements of the versions it no longer selects.
 fn dx_select_all(cx: DxCx*) {
   var i: int64 = 0;
@@ -1740,9 +1607,9 @@ fn dx_select_all(cx: DxCx*) {
   }
 }
 
-// `latest` stated by the root and resolved now: when the module's other live
-// requirements all name one line, take the newest tag in that line instead
-// (so `latest` never makes a conflict). True when a hint was added.
+// `latest` stated by the root and resolved now: when the package's other
+// live requirements all name one line, take the newest version in that line
+// instead (so `latest` never makes a conflict). True when a hint was added.
 fn dx_latest_hints(cx: DxCx*) -> bool {
   var added: bool = false;
   var i: int64 = 0;
@@ -1793,20 +1660,20 @@ fn dx_walk(cx: DxCx*) {
   }
 }
 
-// "mbuild.toml -> github.com/demo/old v1.0.0" for a requirement's `from`:
-// each requiring node followed back through the first requirement that
-// introduced its version.
+// "mbuild.mettle -> old v1.0.0" for a requirement's `from`: each requiring
+// node followed back through the first requirement that introduced its
+// version.
 fn dx_chain(cx: DxCx*, from: string) -> string {
   var parts: StrList* = sl_of(from);
   var cur: string = from;
   var hops: int64 = 0;
   while (hops < 32) {
     hops = hops + 1;
-    if (s_eq(cur, "mbuild.toml") || s_eq(cur, "mbuild.local.toml")) {
+    if (s_eq(cur, "mbuild.mettle") || s_eq(cur, "mbuild.local.mettle")) {
       break;
     }
     if (s_starts(cur, "path package ") || s_ends(cur, " (replaced)")) {
-      sl_push(parts, "mbuild.toml");
+      sl_push(parts, "mbuild.mettle");
       break;
     }
     var sp: int64 = s_find_byte(cur, 32);
@@ -1885,8 +1752,8 @@ fn dx_vt_cmp(x: string, y: string) -> int32 {
   return s_cmp(x, y);
 }
 
-// For a requirer "R V" on a losing line: R's newest tag after V (at most 20
-// looked at) whose mbuild.toml requires the module in the winning line.
+// For a requirer "R V" on a losing line: R's newest version after V (at most
+// 20 manifests read) that requires the package in the winning line.
 fn dx_upgrade_help(cx: DxCx*, module: string, from: string, win: string) -> string {
   var sp: int64 = s_find_byte(from, 32);
   if (sp < 0) {
@@ -1894,10 +1761,11 @@ fn dx_upgrade_help(cx: DxCx*, module: string, from: string, win: string) -> stri
   }
   var rm: DxMod* = dx_mod_find(cx, s_sub(from, 0, sp));
   var ver: string = s_from(from, sp + 1);
-  if (rm == (DxMod*)0 || !sv_is(ver) || !git_has_mirror(dx_mdir(rm))) {
+  if (rm == (DxMod*)0 || !sv_is(ver)) {
     return s_empty();
   }
-  var vs: StrList* = dx_semver_tags(git_tags(dx_mdir(rm)));
+  var ix: RegIndex* = dx_index(cx, rm, false);
+  var vs: StrList* = dx_versions(ix, false);
   var found: string = "";
   var looked: int64 = 0;
   var i: int64 = vs->len - 1;
@@ -1908,15 +1776,10 @@ fn dx_upgrade_help(cx: DxCx*, module: string, from: string, win: string) -> stri
       break;
     }
     looked = looked + 1;
-    var c: string = git_rev(dx_mdir(rm), "refs/tags/" + t);
-    if (slen(c) == 0) {
+    var nm: Manifest* = reg_manifest(cx->p, ix, t);
+    if (nm == (Manifest*)0) {
       continue;
     }
-    var g: GitShow* = git_show(dx_mdir(rm), c, "mbuild.toml");
-    if (!g->ok || !g->found) {
-      continue;
-    }
-    var nm: Manifest* = man_parse(toml_parse(g->text, rm->module + "@" + t + "/mbuild.toml"), dx_deps_dir(cx->p) + "/" + rm->module);
     var d: DepSpec* = man_dep_find(nm, module);
     if (d != (DepSpec*)0 && slen(d->path) == 0 && sv_is(d->version) && s_eq(sv_line(d->version), win)) {
       found = rm->module + " " + t + " requires " + module + " " + d->version + ": run `mbuild get " + rm->module + "@" + t + "`";
@@ -1947,7 +1810,7 @@ fn dx_conflict_lines(cx: DxCx*, m: DxMod*, vers: DxReqs*) {
     i = i + 1;
   }
   var win: string = sv_line(highest);
-  error_msg(m->module + " is required at incompatible versions:\n    " + sl_join(shown, "\n    ") + "\n  a program holds one version of a module: two lines would declare the same exported names twice");
+  error_msg(m->module + " is required at incompatible versions:\n    " + sl_join(shown, "\n    ") + "\n  a program holds one version of a package: two lines would declare the same exported names twice");
   var done: StrList* = sl_new();
   i = 0;
   while (i < vers->len) {
@@ -1962,9 +1825,8 @@ fn dx_conflict_lines(cx: DxCx*, m: DxMod*, vers: DxReqs*) {
       dx_help(h);
     }
   }
-  dx_help("or choose one version for the whole build in mbuild.toml (you take responsibility for the others):");
-  err_line("          [replace]");
-  err_line("          \"" + m->module + "\" = {{ version = \"" + highest + "\" }");
+  dx_help("or choose one version for the whole build in mbuild.mettle (you take responsibility for the others):");
+  err_line("          mb_replace_version(\"" + m->module + "\", \"" + highest + "\");");
   free(rows);
   free(shown);
   free(done);
@@ -1972,20 +1834,12 @@ fn dx_conflict_lines(cx: DxCx*, m: DxMod*, vers: DxReqs*) {
   exit_with(1);
 }
 
-fn dx_req_desc(cx: DxCx*, r: DxReq*) -> string {
-  if (sv_is(r->label)) {
-    return r->label + " (line " + sv_line(r->label) + ") by " + dx_chain(cx, r->from);
-  }
-  return r->label + " (" + dx_short(r->commit) + ") by " + dx_chain(cx, r->from);
-}
-
 // Checks the selection of m against its live requirements (12.3).
 fn dx_check_select(cx: DxCx*, m: DxMod*) {
   var live: DxReqs* = dx_live_reqs(cx, m);
-  var chosen: string = sl_get(m->labels, m->sel);
-  var c: string = sl_get(m->commits, m->sel);
   var i: int64 = 0;
   if (m->rep_req != (DxReq*)0) {
+    var chosen: string = sl_get(m->labels, m->sel);
     while (i < live->len) {
       var lr: DxReq* = dx_req_at(live, i);
       verbose(m->module + " is replaced (" + chosen + "); ignoring " + dx_chain(cx, lr->from) + " requires " + lr->spec);
@@ -1994,74 +1848,16 @@ fn dx_check_select(cx: DxCx*, m: DxMod*) {
     free(live);
     return;
   }
-  var rootr: DxReq* = (DxReq*)0;
-  var vers: DxReqs* = drq_new();
-  var nons: DxReqs* = drq_new();
-  i = 0;
-  while (i < live->len) {
-    var r: DxReq* = dx_req_at(live, i);
-    if (r->root && rootr == (DxReq*)0) {
-      rootr = r;
-    }
-    if (sv_is(r->label)) {
-      drq_push(vers, r);
-    } else {
-      drq_push(nons, r);
-    }
-    i = i + 1;
-  }
-  if (rootr != (DxReq*)0 && !sv_is(rootr->label)) {
-    var rows: StrList* = sl_new();
-    var differs: bool = false;
-    i = 0;
-    while (i < live->len) {
-      var r2: DxReq* = dx_req_at(live, i);
-      sl_add_uniq(rows, dx_chain(cx, r2->from) + " requires " + r2->spec);
-      if (!s_eq(r2->commit, c)) {
-        differs = true;
-      }
-      i = i + 1;
-    }
-    if (differs) {
-      warn("conflicting requirements for " + m->module + ":\n    " + sl_join(rows, "\n    ") + "\n  using " + chosen);
-    }
-    free(rows);
-    free(live);
-    free(vers);
-    free(nons);
-    return;
-  }
   var lines: StrList* = sl_new();
-  i = 0;
-  while (i < vers->len) {
-    sl_add_uniq(lines, sv_line(dx_req_at(vers, i)->label));
+  while (i < live->len) {
+    sl_add_uniq(lines, sv_line(dx_req_at(live, i)->label));
     i = i + 1;
   }
   if (lines->len > 1) {
-    dx_conflict_lines(cx, m, vers);
-  }
-  var commits: StrList* = sl_new();
-  i = 0;
-  while (i < nons->len) {
-    sl_add_uniq(commits, dx_req_at(nons, i)->commit);
-    i = i + 1;
-  }
-  if (nons->len > 0 && (vers->len > 0 || commits->len > 1)) {
-    var rows2: StrList* = sl_new();
-    i = 0;
-    while (i < live->len) {
-      sl_add_uniq(rows2, dx_req_desc(cx, dx_req_at(live, i)));
-      i = i + 1;
-    }
-    var listed: string = sl_join(rows2, "\n    ");
-    free(rows2);
-    dx_fail_hint(m->module + " is required at versions that cannot be combined:\n    " + listed + "\n  a branch or commit and other versions do not order: mbuild cannot choose between them", "pin it in your mbuild.toml: `mbuild get " + m->module + "@VERSION` (the project's own requirement decides)");
+    dx_conflict_lines(cx, m, live);
   }
   free(lines);
-  free(commits);
   free(live);
-  free(vers);
-  free(nons);
 }
 
 fn dx_sort_mods(cx: DxCx*) {
@@ -2080,170 +1876,56 @@ fn dx_sort_mods(cx: DxCx*) {
 }
 
 // ---------------------------------------------------------------------------
-// Checkouts, mettle.deps, the DepState
+// Package directories, mettle.deps, the DepState
 // ---------------------------------------------------------------------------
 
-// The submodules to check out in m: the root's dependency field, else the
-// package's own [package] submodules. 0 for all, an empty list for none.
-fn dx_sub_select(cx: DxCx*, m: DxMod*) -> StrList* {
-  var d: DepSpec* = man_dep_find(cx->p->man, m->module);
-  var mode: string = "";
-  var list: StrList* = (StrList*)0;
-  if (d != (DepSpec*)0 && slen(d->path) == 0 && slen(d->subs_mode) > 0) {
-    mode = d->subs_mode;
-    list = d->subs;
-  } else if (m->sel >= 0 && m->sel < m->mans->len && m->mans->items[m->sel] != (Manifest*)0) {
-    var nm: Manifest* = m->mans->items[m->sel];
-    mode = nm->subs_mode;
-    list = nm->subs;
-  }
-  if (s_eq(mode, "none")) {
-    return sl_new();
-  }
-  if (s_eq(mode, "list")) {
-    if (list == (StrList*)0) {
-      return sl_new();
-    }
-    return list;
-  }
-  return (StrList*)0;
+// The .mbuild-pkg line (14.4).
+fn dx_marker_line(name: string, version: string, sha: string, registry: string) -> string {
+  return name + " " + version + " " + sha + " " + registry;
 }
 
-fn dx_sub_key(sel: StrList*) -> string {
-  if (sel == (StrList*)0) {
-    return "all";
-  }
-  if (sel->len == 0) {
-    return "none";
-  }
-  return "list:" + sl_join(sel, ",");
+fn dx_has_marker(dest: string, marker: string) -> bool {
+  return !sys_is_link(dest) && s_eq(s_trim(reg_marker(dest)), marker);
 }
 
-fn dx_subs_file(p: Project*) -> string {
-  return p->state_dir + "/deps.subs";
-}
-
-// The submodule selection each checkout was made with ("module key" lines).
-fn dx_subs_recorded(p: Project*, module: string) -> string {
-  var r: FsRead = fs_read(dx_subs_file(p));
-  if (!r.ok) {
-    return s_empty();
-  }
-  var lines: StrList* = s_lines(r.data);
-  var found: string = "";
-  var i: int64 = 0;
-  while (i < lines->len) {
-    var l: string = sl_get(lines, i);
-    if (s_starts(l, module + " ")) {
-      found = s_from(l, slen(module) + 1);
-    }
-    i = i + 1;
-  }
-  free(lines);
-  return found;
-}
-
-fn dx_subs_record(p: Project*, mods: StrList*, keys: StrList*) {
-  var b: Buf* = buf_new();
-  var i: int64 = 0;
-  while (i < mods->len) {
-    buf_line(b, sl_get(mods, i) + " " + sl_get(keys, i));
-    i = i + 1;
-  }
-  fs_mkdirs(p->state_dir);
-  fs_write_if_changed(dx_subs_file(p), buf_take(b));
-}
-
-// The top-level submodule paths a checkout's marker lists.
-fn dx_marker_subs(dest: string) -> StrList* {
-  var all: StrList* = sl_new();
-  var r: FsRead = fs_read(dest + "/.mbuild-commit");
-  if (r.ok) {
-    var lines: StrList* = s_lines(r.data);
-    var i: int64 = 0;
-    while (i < lines->len) {
-      var f: StrList* = s_fields(sl_get(lines, i));
-      if (f->len >= 3 && s_eq(sl_get(f, 0), "sub")) {
-        sl_push(all, sl_get(f, 1));
-      }
-      free(f);
-      i = i + 1;
-    }
-    free(lines);
-  }
-  var top: StrList* = sl_new();
-  var a: int64 = 0;
-  while (a < all->len) {
-    var path: string = sl_get(all, a);
-    var nested: bool = false;
-    var k: int64 = 0;
-    while (k < all->len) {
-      if (k != a && s_starts(path, sl_get(all, k) + "/")) {
-        nested = true;
-      }
-      k = k + 1;
-    }
-    if (!nested) {
-      sl_push(top, path);
-    }
-    a = a + 1;
-  }
-  free(all);
-  return top;
-}
-
-// Checks out the selected version of m with its submodules (12.7); returns
-// the selection key it used.
-fn dx_materialise(cx: DxCx*, m: DxMod*) -> string {
-  var label: string = sl_get(m->labels, m->sel);
-  var commit: string = sl_get(m->commits, m->sel);
-  var dest: string = dx_deps_dir(cx->p) + "/" + m->module;
-  var sel: StrList* = dx_sub_select(cx, m);
-  var key: string = dx_sub_key(sel);
+// Extracts the selected version of a package into .mbuild/deps/<name>
+// unless its marker already names it.
+fn dx_materialise(cx: DxCx*, ix: RegIndex*, rv: RegVersion*) {
+  var name: string = ix->name;
+  var dest: string = dx_deps_dir(cx->p) + "/" + name;
+  var marker: string = dx_marker_line(name, rv->version, dx_sha(rv), ix->registry);
   if (sys_is_link(dest)) {
-    // It was a local replacement (or the project itself): the link goes,
-    // its target stays.
+    // It was a local replacement: the link goes, its target stays.
     verbose("removing the link " + dest);
     sys_remove_link(dest);
   }
   var force: bool = cx->p->opts->force && !dx_set_has(g_dx_forced, dest);
-  if (s_eq(git_checkout_commit(dest), commit) && git_marker_complete(dest) && s_eq(dx_subs_recorded(cx->p, m->module), key) && !force) {
-    return key;
+  if (dx_has_marker(dest, marker) && !force) {
+    return;
   }
   if (force) {
-    // --force: check out and clean again, restoring edited or deleted files.
+    // --force: extract again, restoring edited or deleted files.
     g_dx_forced = g_dx_forced + dest + "\n";
-    sys_remove_file(dest + "/.mbuild-commit");
   }
-  dx_need_commit(cx, m, commit, label);
-  verbose("checkout " + m->module + " " + label + " (" + commit + ") into " + dest);
-  if (g_dx_sub_fetched == (StrList*)0) {
-    g_dx_sub_fetched = sl_new();
+  var archive: string = reg_fetch(cx->p, ix, rv->version);
+  if (slen(archive) == 0) {
+    dx_fail(reg_error());
   }
-  var t: GitTree* = new GitTree;
-  t->mirror = dx_mdir(m);
-  t->url = git_url(m->module, m->url);
-  t->commit = commit;
-  t->dest = dest;
-  t->offline = dx_offline(cx);
-  t->fetched = g_dx_sub_fetched;
-  t->select = sel;
-  t->label = m->module + " " + label;
-  var e: string = git_checkout_tree(t);
-  free(t);
+  if (fs_exists(dest)) {
+    sys_remove_tree(dest);
+  }
+  fs_mkdirs(dx_deps_dir(cx->p));
+  verbose("extracting " + name + " " + rv->version + " into " + dest);
+  var e: string = reg_extract(archive, rv->sha, dest, marker);
   if (slen(e) > 0) {
-    if (s_starts(e, "submodule") || s_starts(e, "cannot ")) {
-      dx_fail(e);
-    }
-    dx_fail("cannot check out " + m->module + " " + label + " into " + dest + ":\n  " + git_summary(e));
+    dx_fail(e);
   }
-  return key;
 }
 
-// Links .mbuild/deps/<module> to target (an absolute directory).
+// Links .mbuild/deps/<name> to target (an absolute directory).
 fn dx_link(dest: string, target: string) {
   if (!sys_is_link(dest) && fs_exists(dest)) {
-    verbose("removing the checkout " + dest + " (now a link to " + target + ")");
+    verbose("removing " + dest + " (now a link to " + target + ")");
     sys_remove_tree(dest);
   }
   fs_mkdirs(p_dir(dest));
@@ -2253,99 +1935,58 @@ fn dx_link(dest: string, target: string) {
   }
 }
 
-// The links .mbuild/deps should hold: path replacements and, for a project
-// with [package] module, the project itself ("module" and "target" lists).
-fn dx_wanted_links(cx: DxCx*, mods: StrList*, targets: StrList*) {
+fn dx_make_links(cx: DxCx*) {
   var i: int64 = 0;
   while (i < cx->rpaths->len) {
-    sl_push(mods, cx->rpaths->items[i]->module);
-    sl_push(targets, cx->rpaths->items[i]->dir);
+    var rp: DxRPath* = cx->rpaths->items[i];
+    dx_link(dx_deps_dir(cx->p) + "/" + rp->module, rp->dir);
     i = i + 1;
   }
-  var own: string = cx->p->man->module;
-  if (slen(own) > 0 && man_is_remote_module(own) && !sl_has(mods, own)) {
-    sl_push(mods, own);
-    sl_push(targets, cx->p->root);
-  }
 }
 
-// Removes checkouts (host/owner/repo with a .mbuild-commit) no longer
-// selected, and links no longer wanted. Never enters a link.
-fn dx_prune(p: Project*, selected: StrList*, links: StrList*) {
-  var root: string = dx_deps_dir(p);
-  var hf: StrList* = sl_new();
-  var hosts: StrList* = sl_new();
-  if (!sys_list_dir(root, hf, hosts)) {
-    free(hf);
-    free(hosts);
-    return;
-  }
-  var a: int64 = 0;
-  while (a < hosts->len) {
-    var hdir: string = root + "/" + sl_get(hosts, a);
-    var of: StrList* = sl_new();
-    var owners: StrList* = sl_new();
-    if (sys_list_dir(hdir, of, owners)) {
-      var b: int64 = 0;
-      while (b < owners->len) {
-        var odir: string = hdir + "/" + sl_get(owners, b);
-        var rf: StrList* = sl_new();
-        var repos: StrList* = sl_new();
-        if (sys_list_dir(odir, rf, repos)) {
-          var names: StrList* = sl_copy(repos);
-          sl_extend(names, rf);
-          var c: int64 = 0;
-          while (c < names->len) {
-            var module: string = sl_get(hosts, a) + "/" + sl_get(owners, b) + "/" + sl_get(names, c);
-            var dir: string = odir + "/" + sl_get(names, c);
-            var is_dir: bool = c < repos->len;
-            c = c + 1;
-            if (sys_is_link(dir)) {
-              if (!sl_has(links, module)) {
-                verbose("removing the link " + dir);
-                sys_remove_link(dir);
-              }
-            } else if (is_dir && !sl_has(selected, module) && fs_is_file(dir + "/.mbuild-commit")) {
-              verbose("removing unused checkout " + dir);
-              sys_remove_tree(dir);
-            }
-          }
-          free(names);
-        }
-        free(rf);
-        free(repos);
-        b = b + 1;
-      }
-    }
-    free(of);
-    free(owners);
-    a = a + 1;
-  }
-  free(hf);
-  free(hosts);
-}
-
-fn dx_first_component(s: string) -> string {
-  var at: int64 = s_find_byte(s, 47);
-  if (at < 0) {
-    return s;
-  }
-  return s_sub(s, 0, at);
-}
-
-fn dx_add_aliases(keys: StrList*, mods: StrList*, m: Manifest*) {
-  if (m == (Manifest*)0) {
-    return;
-  }
+fn dx_links_present(cx: DxCx*) -> bool {
   var i: int64 = 0;
-  while (i < m->ndeps) {
-    var d: DepSpec* = man_dep(m, i);
-    if (slen(d->path) == 0 && slen(d->module) > 0 && !s_eq(d->key, d->module) && !sl_has(keys, d->key)) {
-      sl_push(keys, d->key);
-      sl_push(mods, d->module);
+  while (i < cx->rpaths->len) {
+    if (!sys_is_link(dx_deps_dir(cx->p) + "/" + cx->rpaths->items[i]->module)) {
+      return false;
     }
     i = i + 1;
   }
+  return true;
+}
+
+// Removes package directories (with a .mbuild-pkg) no longer selected, and
+// links no longer wanted. Never enters a link.
+fn dx_prune(cx: DxCx*, selected: StrList*) {
+  var root: string = dx_deps_dir(cx->p);
+  var files: StrList* = sl_new();
+  var dirs: StrList* = sl_new();
+  if (!sys_list_dir(root, files, dirs)) {
+    free(files);
+    free(dirs);
+    return;
+  }
+  var names: StrList* = sl_copy(dirs);
+  sl_extend(names, files);
+  var i: int64 = 0;
+  while (i < names->len) {
+    var name: string = sl_get(names, i);
+    var dir: string = root + "/" + name;
+    var is_dir: bool = i < dirs->len;
+    i = i + 1;
+    if (sys_is_link(dir)) {
+      if (dx_rpath_find(cx, name) == (DxRPath*)0) {
+        verbose("removing the link " + dir);
+        sys_remove_link(dir);
+      }
+    } else if (is_dir && !sl_has(selected, name) && fs_is_file(dir + "/.mbuild-pkg")) {
+      verbose("removing unused package " + dir);
+      sys_remove_tree(dir);
+    }
+  }
+  free(names);
+  free(files);
+  free(dirs);
 }
 
 fn dx_block_begin() -> string {
@@ -2421,9 +2062,8 @@ struct DxBlock {
   cx: DxCx*;
   dir: string;          // the package directory (the file goes here)
   man: Manifest*;       // its manifest, 0 when it has none
-  mods: StrList*;       // the selected modules
-  hosts: StrList*;      // their first components
-  is_root: bool;        // the root: also its path packages, with warnings
+  selected: StrList*;   // the registry and replaced packages of the build
+  is_root: bool;        // the root: also `mbuild=`, with warnings
   local: bool;          // root or a path package: path dependencies apply
 }
 
@@ -2438,28 +2078,29 @@ fn dx_path_by_dir(cx: DxCx*, dir: string) -> DxPath* {
   return (DxPath*)0;
 }
 
-// Host lines (pointing at the root's .mbuild/deps), then the package's own
-// aliases (to the selected module's checkout), then its path packages.
+// The directory the compiler should see for a selected package.
+fn dx_pkg_dir(cx: DxCx*, name: string) -> string {
+  if (dx_rpath_find(cx, name) != (DxRPath*)0) {
+    return dx_deps_dir(cx->p) + "/" + name;
+  }
+  return cx->deps_root + "/" + name;
+}
+
+// The packages the manifest declares (14.5), its path packages, itself
+// (`name=.`) and, for the root, the mbuild API.
 fn dx_block_write(bl: DxBlock*) {
-  var p: Project* = bl->cx->p;
-  var deps: string = dx_deps_dir(p);
+  var cx: DxCx* = bl->cx;
+  var p: Project* = cx->p;
   var lines: StrList* = sl_new();
   var used: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < bl->hosts->len) {
-    var host: string = sl_get(bl->hosts, i);
-    sl_push(lines, host + "=" + dx_rel(bl->dir, deps + "/" + host));
-    sl_push(used, host);
-    i = i + 1;
-  }
   var m: Manifest* = bl->man;
   if (m != (Manifest*)0) {
-    i = 0;
+    var i: int64 = 0;
     while (i < m->ndeps) {
       var d: DepSpec* = man_dep(m, i);
       i = i + 1;
-      if (slen(d->path) == 0 && slen(d->module) > 0 && !s_eq(d->key, d->module) && sl_has(bl->mods, d->module) && !sl_has(used, d->key)) {
-        sl_push(lines, d->key + "=" + dx_rel(bl->dir, deps + "/" + d->module));
+      if (slen(d->path) == 0 && sl_has(bl->selected, d->key) && !sl_has(used, d->key)) {
+        sl_push(lines, d->key + "=" + dx_rel(bl->dir, dx_pkg_dir(cx, d->key)));
         sl_push(used, d->key);
       }
     }
@@ -2470,15 +2111,11 @@ fn dx_block_write(bl: DxBlock*) {
       if (slen(pd->path) == 0) {
         continue;
       }
-      var pp: DxPath* = dx_path_by_dir(bl->cx, p_clean(p_join(m->dir, pd->path)));
+      var pp: DxPath* = dx_path_by_dir(cx, p_clean(p_join(m->dir, pd->path)));
       if (pp == (DxPath*)0) {
         continue;
       }
-      if (man_is_remote_module(pd->key)) {
-        if (bl->is_root) {
-          warn("path dependency '" + pd->key + "' cannot be published in mettle.deps (it matches only the first path component); give it a plain key such as " + p_base(pp->dir) + " = {{ path = " + toml_quote(pp->rel) + " }");
-        }
-      } else if (sl_has(used, pd->key)) {
+      if (sl_has(used, pd->key)) {
         if (bl->is_root) {
           warn("path dependency '" + pd->key + "' uses a name that is already published in mettle.deps");
         }
@@ -2487,20 +2124,24 @@ fn dx_block_write(bl: DxBlock*) {
         sl_push(used, pd->key);
       }
     }
+    var own: bool = !bl->is_root || p->has_manifest;
+    if (own && man_is_package_name(m->name) && !sl_has(used, m->name)) {
+      sl_push(lines, m->name + "=.");
+      sl_push(used, m->name);
+    }
+  }
+  if (bl->is_root && slen(p->mbfile) > 0 && !sl_has(used, "mbuild")) {
+    sl_push(lines, "mbuild=" + dx_rel(bl->dir, p->state_dir + "/api/mbuild"));
+    sl_push(used, "mbuild");
   }
   dx_write_mettle_deps(bl->dir, lines);
   if (bl->is_root) {
-    sl_extend(bl->cx->published, used);
+    sl_extend(cx->published, used);
   }
   free(lines);
   free(used);
 }
 
-// The DepState for the selected modules (already checked out) and the path
-// packages; also publishes them in mettle.deps files: the root's (hosts,
-// root aliases, root path packages), and one in every checkout and every
-// path package with the hosts and that package's own aliases, so an alias is
-// visible only to the files of the package that declares it.
 fn dx_replaced_kind(rs: ReplaceSpec*) -> string {
   if (rs == (ReplaceSpec*)0) {
     return s_empty();
@@ -2508,60 +2149,32 @@ fn dx_replaced_kind(rs: ReplaceSpec*) -> string {
   if (slen(rs->path) > 0) {
     return "path";
   }
-  if (slen(rs->version) > 0) {
-    return "version";
-  }
-  return "url";
+  return "version";
 }
 
-fn dx_finish(cx: DxCx*, mods: StrList*, vers: StrList*, commits: StrList*) -> DepState* {
+// The DepState for the selected packages (already in place) and the path
+// packages; also writes the mettle.deps blocks: the root's, and one in every
+// path package, package directory and path replacement.
+fn dx_finish(cx: DxCx*, a: DxLockArgs*, mans: DxMans*) -> DepState* {
   var p: Project* = cx->p;
   var ds: DepState* = depstate_empty(dx_deps_dir(p));
-  var akeys: StrList* = sl_new();
-  var amods: StrList* = sl_new();
-  dx_add_aliases(akeys, amods, p->man);
+  var selected: StrList* = sl_copy(a->mods);
   var i: int64 = 0;
-  while (i < cx->paths->len) {
-    dx_add_aliases(akeys, amods, dx_path_at(cx, i)->man);
-    i = i + 1;
-  }
-  var dmans: DxMans* = dma_new();
-  i = 0;
-  while (i < mods->len) {
-    var man: Manifest* = dx_read_manifest(dx_deps_dir(p) + "/" + sl_get(mods, i));
-    dma_push(dmans, man);
-    i = i + 1;
-  }
-  i = 0;
-  while (i < mods->len) {
-    dx_add_aliases(akeys, amods, dmans->items[i]);
-    i = i + 1;
-  }
-  i = 0;
-  while (i < cx->rpaths->len) {
-    dx_add_aliases(akeys, amods, cx->rpaths->items[i]->man);
-    i = i + 1;
-  }
-  var hosts: StrList* = sl_new();
-  i = 0;
-  while (i < mods->len) {
-    var module: string = sl_get(mods, i);
+  while (i < a->mods->len) {
+    var name: string = sl_get(a->mods, i);
     var dm: DepModule;
-    dm.module = module;
-    dm.version = sl_get(vers, i);
-    dm.commit = sl_get(commits, i);
-    dm.dir = dx_deps_dir(p) + "/" + module;
+    dm.module = name;
+    dm.version = sl_get(a->vers, i);
+    dm.commit = s_empty();
+    dm.dir = dx_pkg_dir(cx, name);
     dm.alias = s_empty();
-    var ai: int64 = sl_index(amods, module);
-    if (ai >= 0) {
-      dm.alias = sl_get(akeys, ai);
-    }
     dm.is_path = false;
-    dm.man = dmans->items[i];
-    dm.replaced = dx_replaced_kind(man_replace_find(p->man, module));
-    dm.submodules = dx_marker_subs(dm.dir);
+    dm.man = mans->items[i];
+    dm.replaced = dx_replaced_kind(man_replace_find(p->man, name));
+    dm.submodules = sl_new();
+    dm.checksum = sl_get(a->shas, i);
+    dm.registry = sl_get(a->regs, i);
     depstate_add(ds, dm);
-    sl_add_uniq(hosts, dx_first_component(module));
     i = i + 1;
   }
   i = 0;
@@ -2573,23 +2186,16 @@ fn dx_finish(cx: DxCx*, mods: StrList*, vers: StrList*, commits: StrList*) -> De
     rm.commit = s_empty();
     rm.dir = rp->dir;
     rm.alias = s_empty();
-    var ri: int64 = sl_index(amods, rp->module);
-    if (ri >= 0) {
-      rm.alias = sl_get(akeys, ri);
-    }
     rm.is_path = false;
     rm.man = rp->man;
     rm.replaced = "path";
     rm.submodules = sl_new();
+    rm.checksum = s_empty();
+    rm.registry = s_empty();
     depstate_add(ds, rm);
-    sl_add_uniq(hosts, dx_first_component(rp->module));
+    sl_add_uniq(selected, rp->module);
     i = i + 1;
   }
-  var own: string = p->man->module;
-  if (slen(own) > 0 && man_is_remote_module(own)) {
-    sl_add_uniq(hosts, dx_first_component(own));
-  }
-  sl_sort(hosts);
   i = 0;
   while (i < cx->paths->len) {
     var pp: DxPath* = dx_path_at(cx, i);
@@ -2598,18 +2204,19 @@ fn dx_finish(cx: DxCx*, mods: StrList*, vers: StrList*, commits: StrList*) -> De
     pm.version = s_empty();
     pm.commit = s_empty();
     pm.dir = pp->dir;
-    pm.alias = pp->key;
+    pm.alias = s_empty();
     pm.is_path = true;
     pm.man = pp->man;
     pm.replaced = s_empty();
     pm.submodules = sl_new();
+    pm.checksum = s_empty();
+    pm.registry = s_empty();
     depstate_add(ds, pm);
     i = i + 1;
   }
   var bl: DxBlock* = new DxBlock;
   bl->cx = cx;
-  bl->mods = mods;
-  bl->hosts = hosts;
+  bl->selected = selected;
   bl->dir = p->root;
   bl->man = p->man;
   bl->is_root = true;
@@ -2628,11 +2235,11 @@ fn dx_finish(cx: DxCx*, mods: StrList*, vers: StrList*, commits: StrList*) -> De
   }
   bl->local = false;
   i = 0;
-  while (i < mods->len) {
-    var cdir: string = dx_deps_dir(p) + "/" + sl_get(mods, i);
-    if (fs_is_dir(cdir)) {
+  while (i < a->mods->len) {
+    var cdir: string = dx_pkg_dir(cx, sl_get(a->mods, i));
+    if (fs_is_dir(cdir) && !sys_is_link(cdir)) {
       bl->dir = cdir;
-      bl->man = dmans->items[i];
+      bl->man = mans->items[i];
       dx_block_write(bl);
     }
     i = i + 1;
@@ -2648,10 +2255,7 @@ fn dx_finish(cx: DxCx*, mods: StrList*, vers: StrList*, commits: StrList*) -> De
     i = i + 1;
   }
   free(bl);
-  free(akeys);
-  free(amods);
-  free(dmans);
-  free(hosts);
+  free(selected);
   if (!g_dx_md_checked) {
     g_dx_md_checked = true;
     dx_check_user_lines(cx);
@@ -2660,7 +2264,7 @@ fn dx_finish(cx: DxCx*, mods: StrList*, vers: StrList*, commits: StrList*) -> De
 }
 
 // The lines of the root mettle.deps outside mbuild's block: warnings once
-// per command (12.9).
+// per command (12.6).
 fn dx_check_user_lines(cx: DxCx*) {
   var r: FsRead = fs_read(cx->p->root + "/mettle.deps");
   if (!r.ok) {
@@ -2695,62 +2299,82 @@ fn dx_check_user_lines(cx: DxCx*) {
     if (!cx->p->has_manifest) {
       if (!noted) {
         noted = true;
-        note("mettle.deps names packages mbuild does not manage; `mbuild init` turns them into [dependencies]");
+        note("mettle.deps names packages mbuild does not manage; `mbuild init` turns them into dependencies in mbuild.mettle");
       }
       continue;
     }
     if (before_block && sl_has(cx->published, name)) {
-      warn("mettle.deps:" + s_int(n) + ": `" + t + "` shadows mbuild's entry for " + name + "; remove it");
+      warn("mettle.deps:" + s_int(n) + ": " + t + " shadows mbuild's entry for " + name + "; remove it");
       continue;
     }
-    warn("mettle.deps:" + s_int(n) + ": `" + t + "` is not managed by mbuild (its dependencies and C code are ignored)");
-    if (s_find_byte(name, 46) < 0) {
-      dx_help("run `mbuild tidy` to move it into mbuild.toml as " + name + " = {{ path = " + toml_quote(dir) + " }");
+    warn("mettle.deps:" + s_int(n) + ": " + t + " is not managed by mbuild (its dependencies and C code are ignored)");
+    if (man_is_package_name(name)) {
+      dx_help("run mbuild tidy to move it into mbuild.mettle as mb_dep_path(\"" + name + "\", \"" + dir + "\");");
     }
   }
   free(lines);
 }
 
 fn dx_stamp_text(cx: DxCx*) -> string {
-  return "mbuild-deps-2\nlock " + hash_string(cx->lock->text) + "\nreqs " + cx->reqs_hash + "\nlocal " + dx_local_hash(cx->p) + "\n";
+  return "mbuild-deps-3\nlock " + hash_string(cx->lock->text) + "\nreqs " + cx->reqs_hash + "\nlocal " + dx_local_hash(cx->p) + "\n";
 }
 
-// Zero git commands: the stamp matches, every checkout holds its commit with
-// its submodules, and the wanted links are there.
+// A manifest from the registry cache only (the fast path); 0 when missing.
+fn dx_cached_manifest(cx: DxCx*, name: string, version: string, registry: string) -> Manifest* {
+  var ix: RegIndex* = reg_index(cx->p, registry, name, false);
+  g_dx_last_ix = ix;
+  if (!ix->ok || !ix->found) {
+    return (Manifest*)0;
+  }
+  return reg_manifest(cx->p, ix, version);
+}
+
+fn dx_lock_args(cx: DxCx*) -> DxLockArgs* {
+  var a: DxLockArgs* = dx_args_new(cx->lock->reqs);
+  sl_extend(a->mods, cx->lock->mods);
+  sl_extend(a->vers, cx->lock->vers);
+  sl_extend(a->regs, cx->lock->regs);
+  sl_extend(a->shas, cx->lock->shas);
+  return a;
+}
+
+// No registry: the stamp matches, every package directory carries the
+// marker of its locked version, and the replacement links are there.
 fn dx_fast(cx: DxCx*) -> DepState* {
   var st: FsRead = fs_read(dx_stamp_path(cx->p));
-  if (!st.ok || !s_eq(st.data, dx_stamp_text(cx))) {
+  if (!st.ok || !s_eq(st.data, dx_stamp_text(cx)) || !dx_links_present(cx)) {
     return (DepState*)0;
   }
+  var a: DxLockArgs* = dx_lock_args(cx);
+  var mans: DxMans* = dma_new();
   var i: int64 = 0;
-  while (i < cx->lock->mods->len) {
-    var dest: string = dx_deps_dir(cx->p) + "/" + sl_get(cx->lock->mods, i);
-    if (!s_eq(git_checkout_commit(dest), sl_get(cx->lock->commits, i)) || !git_marker_complete(dest)) {
+  while (i < a->mods->len) {
+    var name: string = sl_get(a->mods, i);
+    var marker: string = dx_marker_line(name, sl_get(a->vers, i), sl_get(a->shas, i), sl_get(a->regs, i));
+    var nm: Manifest* = (Manifest*)0;
+    if (dx_has_marker(dx_deps_dir(cx->p) + "/" + name, marker)) {
+      nm = dx_cached_manifest(cx, name, sl_get(a->vers, i), sl_get(a->regs, i));
+    }
+    if (nm == (Manifest*)0) {
+      free(mans->items);
+      free(mans);
+      free(a);
       return (DepState*)0;
     }
+    dma_push(mans, nm);
     i = i + 1;
   }
-  var lmods: StrList* = sl_new();
-  var ltargets: StrList* = sl_new();
-  dx_wanted_links(cx, lmods, ltargets);
-  i = 0;
-  while (i < lmods->len) {
-    if (!sys_is_link(dx_deps_dir(cx->p) + "/" + sl_get(lmods, i))) {
-      free(lmods);
-      free(ltargets);
-      return (DepState*)0;
-    }
-    i = i + 1;
-  }
-  free(lmods);
-  free(ltargets);
-  verbose("dependencies: mbuild.lock unchanged, checkouts current");
-  return dx_finish(cx, cx->lock->mods, cx->lock->vers, cx->lock->commits);
+  verbose("dependencies: mbuild.lock unchanged, packages in place");
+  var ds: DepState* = dx_finish(cx, a, mans);
+  free(mans->items);
+  free(mans);
+  free(a);
+  return ds;
 }
 
-// update --all: every selected module the root does not require whose
-// selected tag has a newer one in its compatibility line goes to
-// g_dx_raise_mods / g_dx_raise_vers. True when there is one.
+// update --all: every selected package the root does not require whose
+// selected version has a newer one in its line goes to g_dx_raise_mods /
+// g_dx_raise_vers. True when there is one.
 fn dx_find_raises(cx: DxCx*) -> bool {
   g_dx_raise_mods = sl_new();
   g_dx_raise_vers = sl_new();
@@ -2770,21 +2394,76 @@ fn dx_find_raises(cx: DxCx*) -> bool {
       k = k + 1;
     }
     var label: string = sl_get(m->labels, m->sel);
-    if (rooted || !sv_is(label)) {
+    if (rooted) {
       continue;
     }
-    dx_mirror(cx, m, true);
-    var newer: string = dx_newest_in_line(git_tags(dx_mdir(m)), label);
+    var vs: StrList* = dx_versions(dx_index(cx, m, true), false);
+    var newer: string = dx_newest_in_line(vs, label);
+    free(vs);
     if (slen(newer) > 0) {
       sl_push(g_dx_raise_mods, m->module);
       sl_push(g_dx_raise_vers, newer);
-      dx_announce("Updating", m->module, label + " -> " + newer + " (now required in mbuild.toml)", newer);
+      dx_announce("Updating", m->module, label + " -> " + newer + " (now required in mbuild.mettle)", newer);
     }
   }
   return g_dx_raise_mods->len > 0;
 }
 
-// The whole of deps_ensure. unpin: modules whose lock pins are ignored;
+// vendor/ in place of the registry (14.5): its modules.txt must name the
+// current lock. 0 when there is no vendor/.
+fn dx_vendor_state(cx: DxCx*) -> DepState* {
+  var p: Project* = cx->p;
+  var vdir: string = dx_vendor_dir(p);
+  var r: FsRead = fs_read(vdir + "/modules.txt");
+  if (!r.ok) {
+    return (DepState*)0;
+  }
+  var lines: StrList* = s_lines(r.data);
+  var fresh: bool = lines->len > 0 && s_eq(s_trim(sl_get(lines, 0)), "# lock " + hash_string(cx->lock->text)) && s_eq(cx->lock->reqs, cx->reqs_hash);
+  if (!fresh) {
+    free(lines);
+    dx_fail_hint("vendor/ is out of date with mbuild.lock", "run mbuild vendor (or delete vendor/)");
+  }
+  var a: DxLockArgs* = dx_args_new(cx->lock->reqs);
+  var mans: DxMans* = dma_new();
+  var i: int64 = 1;
+  while (i < lines->len) {
+    var f: StrList* = s_fields(sl_get(lines, i));
+    i = i + 1;
+    if (f->len < 3 || s_starts(sl_get(f, 0), "#")) {
+      free(f);
+      continue;
+    }
+    var name: string = sl_get(f, 0);
+    var file: string = vdir + "/" + name + ".toml";
+    var mr: FsRead = fs_read(file);
+    if (!fs_is_dir(vdir + "/" + name) || !mr.ok) {
+      dx_fail_hint("vendor/ is missing " + name, "run mbuild vendor (or delete vendor/)");
+    }
+    var li: int64 = sl_index(cx->lock->mods, name);
+    var reg: string = "";
+    if (li >= 0) {
+      reg = sl_get(cx->lock->regs, li);
+    }
+    sl_push(a->mods, name);
+    sl_push(a->vers, sl_get(f, 1));
+    sl_push(a->shas, sl_get(f, 2));
+    sl_push(a->regs, reg);
+    dma_push(mans, dx_parse_manifest(mr.data, vdir + "/" + name, file));
+    free(f);
+  }
+  free(lines);
+  cx->deps_root = vdir;
+  dx_make_links(cx);
+  verbose("dependencies: from vendor/");
+  var ds: DepState* = dx_finish(cx, a, mans);
+  free(mans->items);
+  free(mans);
+  free(a);
+  return ds;
+}
+
+// The whole of deps_ensure. unpin: packages whose lock pins are ignored;
 // slow: skip the fast path (fetch, update).
 fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
   var cx: DxCx* = dx_cx_new(p);
@@ -2794,7 +2473,13 @@ fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
   var local: bool = cx->local_names->len > 0;
   if (local && !g_dx_local_noted) {
     g_dx_local_noted = true;
-    note("using replacements from mbuild.local.toml (" + sl_join(cx->local_names, ", ") + "); mbuild.lock is left as it is");
+    note("using replacements from mbuild.local.mettle (" + sl_join(cx->local_names, ", ") + "); mbuild.lock is left as it is");
+  }
+  if (!g_dx_no_vendor) {
+    var vds: DepState* = dx_vendor_state(cx);
+    if (vds != (DepState*)0) {
+      return vds;
+    }
   }
   if (!slow && !p->opts->force) {
     var fast: DepState* = dx_fast(cx);
@@ -2823,11 +2508,9 @@ fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
   }
   dx_walk(cx);
   dx_sort_mods(cx);
-  var a: DxLockArgs* = new DxLockArgs;
-  a->mods = sl_new();
-  a->vers = sl_new();
-  a->commits = sl_new();
-  a->reqs = cx->reqs_hash;
+  var a: DxLockArgs* = dx_args_new(cx->reqs_hash);
+  var mans: DxMans* = dma_new();
+  var picked: DxMods* = dmo_new();
   var i: int64 = 0;
   while (i < cx->mods->len) {
     var m: DxMod* = dx_mod_at(cx, i);
@@ -2836,9 +2519,17 @@ fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
       continue;
     }
     dx_check_select(cx, m);
+    var label: string = sl_get(m->labels, m->sel);
+    var rv: RegVersion* = dx_find_version(dx_index(cx, m, false), label);
+    if (rv == (RegVersion*)0) {
+      dx_fail(m->module + " " + label + " is not in the index of registry " + m->ix->registry);
+    }
     sl_push(a->mods, m->module);
-    sl_push(a->vers, sl_get(m->labels, m->sel));
-    sl_push(a->commits, sl_get(m->commits, m->sel));
+    sl_push(a->vers, label);
+    sl_push(a->regs, m->ix->registry);
+    sl_push(a->shas, dx_sha(rv));
+    dma_push(mans, m->mans->items[m->sel]);
+    dmo_push(picked, m);
   }
   if (g_dx_raise_all && dx_find_raises(cx)) {
     return (DepState*)0;
@@ -2853,28 +2544,16 @@ fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
     dx_fail_hint(what + " and --locked forbids changing it", "run the command without --locked (for example `mbuild fetch`) and commit the new mbuild.lock");
   }
   dx_lock_diff(cx->lock, a);
-  var keys: StrList* = sl_new();
   i = 0;
-  while (i < cx->mods->len) {
-    var mm: DxMod* = dx_mod_at(cx, i);
-    i = i + 1;
-    if (mm->sel >= 0) {
-      sl_push(keys, dx_materialise(cx, mm));
-    }
-  }
-  dx_subs_record(p, a->mods, keys);
-  free(keys);
-  var lmods: StrList* = sl_new();
-  var ltargets: StrList* = sl_new();
-  dx_wanted_links(cx, lmods, ltargets);
-  i = 0;
-  while (i < lmods->len) {
-    dx_link(dx_deps_dir(p) + "/" + sl_get(lmods, i), sl_get(ltargets, i));
+  while (i < picked->len) {
+    var pm2: DxMod* = picked->items[i];
+    dx_materialise(cx, pm2->ix, dx_find_version(pm2->ix, sl_get(a->vers, i)));
     i = i + 1;
   }
-  dx_prune(p, a->mods, lmods);
-  free(lmods);
-  free(ltargets);
+  free(picked->items);
+  free(picked);
+  dx_make_links(cx);
+  dx_prune(cx, a->mods);
   var lock_file: string = dx_lock_path(p);
   if (local) {
     lock_file = dx_local_lock_path(p);
@@ -2887,8 +2566,11 @@ fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
     }
     cx->lock->text = text;
   }
-  var ds: DepState* = dx_finish(cx, a->mods, a->vers, a->commits);
+  var ds: DepState* = dx_finish(cx, a, mans);
+  fs_mkdirs(p->state_dir);
   fs_write(dx_stamp_path(p), dx_stamp_text(cx));
+  free(mans->items);
+  free(mans);
   free(a);
   return ds;
 }
@@ -2898,442 +2580,227 @@ export fn deps_ensure(p: Project*) -> DepState* {
 }
 
 // ---------------------------------------------------------------------------
-// Editing mbuild.toml
+// Editing mbuild.mettle (through config.mettle)
 // ---------------------------------------------------------------------------
 
-fn dx_manifest_text(p: Project*) -> string {
-  var r: FsRead = fs_read(dx_manifest_path(p));
-  if (!r.ok) {
-    dx_fail_hint("no mbuild.toml in " + p->root, "run `mbuild init` first");
+fn dx_set_dep(p: Project*, name: string, version: string) {
+  if (!cfg_set_dep(p, name, version)) {
+    dx_fail("could not set " + name + " to " + version + " in mbuild.mettle");
   }
-  return r.data;
-}
-
-// Writes the new manifest text and reloads p->man from it.
-fn dx_save_manifest(p: Project*, text: string) {
-  var file: string = dx_manifest_path(p);
-  var doc: Toml* = toml_parse(text, file);
-  var m: Manifest* = man_parse(doc, p->root);
-  if (slen(m->error) > 0) {
-    dx_fail("mbuild produced an invalid mbuild.toml (" + m->error + "); the file was not changed");
-  }
-  if (!fs_write(file, text)) {
-    dx_fail("cannot write " + file);
-  }
-  p->man = m;
   p->has_manifest = true;
 }
 
-// kinds: "1" string (quoted again), "2"/"3"/"4" integer, bool, array (raw
-// TOML text, kept as written).
-fn dx_inline_literal(names: StrList*, values: StrList*, kinds: StrList*) -> string {
-  var parts: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < names->len) {
-    var kind: string = sl_get(kinds, i);
-    var lit: string = toml_quote(sl_get(values, i));
-    if (s_eq(kind, "2") || s_eq(kind, "3") || s_eq(kind, "4")) {
-      lit = sl_get(values, i);
-    }
-    sl_push(parts, toml_key_literal(sl_get(names, i)) + " = " + lit);
-    i = i + 1;
+fn dx_remove_dep(p: Project*, name: string) {
+  if (!cfg_remove_dep(p, name)) {
+    dx_fail("could not remove " + name + " from mbuild.mettle");
   }
-  var lit: string = "{{ " + sl_join(parts, ", ") + " }";
-  free(parts);
-  return lit;
 }
 
-// Sets the version of a requirement (d) or adds `"module" = "spec"` (d == 0).
-fn dx_text_set_version(text: string, d: DepSpec*, spec_and_module: StrList*) -> string {
-  var spec: string = sl_get(spec_and_module, 0);
-  var module: string = sl_get(spec_and_module, 1);
-  if (d == (DepSpec*)0) {
-    return toml_set_in_text(text, "dependencies", module, toml_quote(spec));
+fn dx_need_mbfile(p: Project*) {
+  if (!fs_is_file(dx_mbfile_path(p))) {
+    dx_fail_hint("no mbuild.mettle in " + p->root, "run `mbuild init` first");
   }
-  var doc: Toml* = toml_parse(text, "mbuild.toml");
-  var v: TomlValue* = toml_get(doc, "dependencies", d->key);
-  if (v == (TomlValue*)0) {
-    return toml_set_in_text(text, "dependencies." + d->key, "version", toml_quote(spec));
-  }
-  if (v->kind == 1) {
-    return toml_set_in_text(text, "dependencies", d->key, toml_quote(spec));
-  }
-  var names: StrList* = sl_new();
-  var values: StrList* = sl_new();
-  var kinds: StrList* = sl_new();
-  var found: bool = false;
-  var i: int64 = 0;
-  while (i < v->fields->len) {
-    var f: string = sl_get(v->fields, i);
-    sl_push(names, f);
-    if (s_eq(f, "version")) {
-      sl_push(values, spec);
-      sl_push(kinds, "1");
-      found = true;
-    } else {
-      sl_push(values, sl_get(v->field_values, i));
-      sl_push(kinds, sl_get(v->field_kinds, i));
-    }
-    i = i + 1;
-  }
-  if (!found) {
-    sl_push(names, "version");
-    sl_push(values, spec);
-    sl_push(kinds, "1");
-  }
-  var edited: string = toml_set_in_text(text, "dependencies", d->key, dx_inline_literal(names, values, kinds));
-  free(names);
-  free(values);
-  free(kinds);
-  return edited;
-}
-
-fn dx_text_remove(text: string, key: string) -> string {
-  var doc: Toml* = toml_parse(text, "mbuild.toml");
-  if (toml_get(doc, "dependencies", key) != (TomlValue*)0) {
-    return toml_remove_in_text(text, "dependencies", key);
-  }
-  var sec: string = "dependencies." + key;
-  var keys: StrList* = toml_keys(doc, sec);
-  var t: string = text;
-  var i: int64 = 0;
-  while (i < keys->len) {
-    t = toml_remove_in_text(t, sec, sl_get(keys, i));
-    i = i + 1;
-  }
-  free(keys);
-  var header: string = "[" + toml_section_literal(sec) + "]";
-  var lines: StrList* = s_split(t, 10);
-  var kept: StrList* = sl_new();
-  i = 0;
-  while (i < lines->len) {
-    if (!s_eq(s_trim(sl_get(lines, i)), header)) {
-      sl_push(kept, sl_get(lines, i));
-    }
-    i = i + 1;
-  }
-  var joined: string = sl_join(kept, "\n");
-  free(lines);
-  free(kept);
-  return joined;
 }
 
 fn dx_refuse_locked(p: Project*, what: string) {
   if (p->opts->locked) {
-    dx_fail_hint(what + " would change mbuild.toml, and --locked forbids it", "run it without --locked");
+    dx_fail_hint(what + " would change mbuild.mettle, and --locked forbids it", "run it without --locked");
   }
 }
 
-// The concrete version `want` names for a module, as written into
-// mbuild.toml: a tag, a branch name or the commit as given.
+// The concrete version `want` names for a package, as written into
+// mbuild.mettle (the index is refreshed first).
 fn dx_pick_for_get(cx: DxCx*, m: DxMod*, want: string) -> string {
-  dx_mirror(cx, m, true);
-  var r: DxReq* = new DxReq;
-  r->module = m->module;
-  r->spec = want;
-  r->url = m->url;
-  r->from = "the command line";
-  r->root = true;
+  dx_index(cx, m, true);
   if (s_eq(want, "latest")) {
-    dx_pick_latest(cx, m, r);
-  } else if (sv_is(want)) {
-    dx_pick_tag(cx, m, r, true);
-  } else {
-    dx_pick_named(cx, m, r);
+    return dx_pick_latest(cx, m, "");
   }
-  var label: string = r->label;
-  free(r);
-  return label;
+  if (!sv_is(want)) {
+    dx_fail(m->module + "@" + want + ": registry packages have versions only (v1.2.0, v1, latest)");
+  }
+  return dx_pick_version(cx, m, want, "the command line");
+}
+
+// "note: vendor/ is out of date; run mbuild vendor" after an edit.
+fn dx_vendor_note(p: Project*) {
+  var r: FsRead = fs_read(dx_vendor_dir(p) + "/modules.txt");
+  if (!r.ok) {
+    return;
+  }
+  var lock: DxLock* = dx_lock_read(p);
+  if (!s_starts(r.data, "# lock " + hash_string(lock->text) + "\n")) {
+    note("vendor/ is out of date; run mbuild vendor");
+  }
+  free(lock);
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-// Adds `"module" = version` to the manifest text for an imported module
-// that the root does not require: at the version already selected in
-// mbuild.lock when the module is there (a direct import of a transitive
-// module never moves it), else at the latest version.
-fn dx_add_import(cx: DxCx*, module: string, text: string) -> string {
-  var label: string = "";
-  var li: int64 = sl_index(cx->lock->mods, module);
-  if (li >= 0) {
-    label = sl_get(cx->lock->vers, li);
-  } else {
-    var m: DxMod* = dx_mod_get(cx, module, "");
-    var r: DxReq* = new DxReq;
-    r->from = "an import in this project";
-    drq_push(m->reqs, r);
-    label = dx_pick_for_get(cx, m, "latest");
+// A package name an import names that the manifest does not declare and
+// that is not local or a component: an import of it must be added.
+fn dx_needs_adding(cx: DxCx*, m: Manifest*, name: string) -> bool {
+  if (!man_is_package_name(name) || s_eq(name, "std") || s_eq(name, "mbuild")) {
+    return false;
   }
-  var pair: StrList* = sl_of(label);
-  sl_push(pair, module);
-  var edited: string = dx_text_set_version(text, (DepSpec*)0, pair);
-  free(pair);
-  if (li >= 0) {
-    dx_announce("Adding", module, label + " (already selected)", label);
-  } else {
-    dx_announce("Adding", module, label, label);
-  }
-  return edited;
+  return man_dep_find(m, name) == (DepSpec*)0 && !dx_is_local_module(cx, name) && man_comp_find(cx->p->man, name) == (CompSpec*)0;
 }
 
-// A remote module the root manifest does not require (under any key) and
-// that is not local: an import of it must be added.
-fn dx_needs_adding(cx: DxCx*, m: Manifest*, module: string) -> bool {
-  return man_is_remote_module(module) && man_dep_find(m, module) == (DepSpec*)0 && !dx_is_local_module(cx, module);
+// Declares an imported package: at the version mbuild.lock already selects
+// (a direct import of a transitive package never moves it), else at the
+// newest stable version. False when no registry has it.
+fn dx_add_import(cx: DxCx*, name: string) -> bool {
+  var p: Project* = cx->p;
+  var label: string = "";
+  var reg: string = "";
+  var li: int64 = sl_index(cx->lock->mods, name);
+  if (li >= 0) {
+    label = sl_get(cx->lock->vers, li);
+    reg = sl_get(cx->lock->regs, li);
+  } else {
+    var ix: RegIndex* = reg_find(p, name, "", !p->opts->offline);
+    if (!ix->ok) {
+      dx_fail(dx_ix_err(ix));
+    }
+    if (!ix->found) {
+      note("no registry has a package named " + name + " (searched " + dx_reg_names(p) + ")");
+      return false;
+    }
+    var m: DxMod* = dx_mod_get(cx, name);
+    m->ix = ix;
+    drq_push(m->reqs, dx_req_new(name, "latest", "an import in this project", true));
+    label = dx_pick_latest(cx, m, "");
+    reg = ix->registry;
+  }
+  dx_announce("Adding", name, label + " (registry " + reg + ")", label);
+  dx_set_dep(p, name, label);
+  return true;
 }
 
 export fn deps_add_missing(p: Project*, modules: StrList*) -> bool {
   var cx: DxCx* = dx_cx_new(p);
   defer free(cx);
   dx_collect_paths(cx);
-  var text: string = "";
+  if (g_dx_looked == (StrList*)0) {
+    g_dx_looked = sl_new();
+  }
   var added: bool = false;
-  var done: StrList* = sl_new();
-  defer free(done);
   var i: int64 = 0;
   while (i < modules->len) {
-    var module: string = sl_get(modules, i);
+    var name: string = sl_get(modules, i);
     i = i + 1;
-    if (!dx_needs_adding(cx, p->man, module) || sl_has(done, module)) {
+    if (!dx_needs_adding(cx, p->man, name) || sl_has(g_dx_looked, name)) {
       continue;
     }
-    sl_push(done, module);
+    sl_push(g_dx_looked, name);
     if (p->opts->locked) {
-      dx_fail_hint(module + " is imported but not required in mbuild.toml, and --locked forbids adding it", "run `mbuild get " + module + "` (or build once without --locked) and commit mbuild.toml and mbuild.lock");
+      dx_fail_hint(name + " is imported but not required in mbuild.mettle, and --locked forbids adding it", "run `mbuild get " + name + "` (or build once without --locked) and commit mbuild.mettle and mbuild.lock");
     }
-    if (!added) {
-      text = dx_manifest_text(p);
+    if (dx_add_import(cx, name)) {
+      added = true;
     }
-    text = dx_add_import(cx, module, text);
-    added = true;
-  }
-  if (added) {
-    dx_save_manifest(p, text);
   }
   return added;
-}
-
-// Splits a `get` argument into [module or key, version]. Accepts repository
-// URLs as well: https://host/x/y, http://..., ssh://git@host/x/y,
-// git@host:x/y, with or without a trailing .git or /; all give host/x/y.
-fn dx_get_arg(arg: string) -> StrList* {
-  var s: string = s_trim(arg);
-  var had_scheme: bool = false;
-  var sch: int64 = s_find(s, "://");
-  if (sch >= 0) {
-    s = s_from(s, sch + 3);
-    had_scheme = true;
-  }
-  var at: int64 = s_find_byte(s, 64);
-  var slash: int64 = s_find_byte(s, 47);
-  var colon: int64 = s_find_byte(s, 58);
-  if (at >= 0 && (slash < 0 || at < slash)) {
-    if (had_scheme || (colon > at && (slash < 0 || colon < slash))) {
-      s = s_from(s, at + 1);
-    }
-  }
-  var want: string = "latest";
-  var vat: int64 = s_rfind_byte(s, 64);
-  if (vat >= 0) {
-    if (vat + 1 < slen(s)) {
-      want = s_from(s, vat + 1);
-    }
-    s = s_sub(s, 0, vat);
-  }
-  colon = s_find_byte(s, 58);
-  slash = s_find_byte(s, 47);
-  if (colon > 0 && (slash < 0 || colon < slash)) {
-    var host: string = s_sub(s, 0, colon);
-    var rest: string = s_from(s, colon + 1);
-    var rs: int64 = s_find_byte(rest, 47);
-    if (had_scheme && rs > 0 && s_is_int(s_sub(rest, 0, rs))) {
-      rest = s_from(rest, rs + 1);
-    }
-    s = host + "/" + rest;
-  }
-  while (s_ends(s, "/")) {
-    s = s_sub(s, 0, slen(s) - 1);
-  }
-  if (s_ends(s, ".git") && slen(s) > 4) {
-    s = s_sub(s, 0, slen(s) - 4);
-  }
-  while (s_ends(s, "/")) {
-    s = s_sub(s, 0, slen(s) - 1);
-  }
-  var parts: StrList* = sl_of(s);
-  sl_push(parts, want);
-  return parts;
 }
 
 export fn deps_cmd_get(p: Project*) -> int32 {
   var args: StrList* = p->opts->rest;
   if (args->len == 0) {
-    error_msg("usage: mbuild get MODULE[@VERSION]...  (VERSION: latest, v1.2.3, v1, a branch or a commit)");
+    error_msg("usage: mbuild get NAME[@VERSION]...  (VERSION: latest, v1.2.3, v1.2 or v1)");
     return 2;
   }
   dx_refuse_locked(p, "mbuild get");
-  var text: string = dx_manifest_text(p);
+  dx_need_mbfile(p);
+  g_dx_no_vendor = true;
   var cx: DxCx* = dx_cx_new(p);
   defer free(cx);
   dx_collect_paths(cx);
-  var unpin: StrList* = sl_new();
-  defer free(unpin);
+  var names: StrList* = sl_new();
+  var labels: StrList* = sl_new();
   var i: int64 = 0;
   while (i < args->len) {
-    var arg: string = sl_get(args, i);
+    var arg: string = s_trim(sl_get(args, i));
     i = i + 1;
-    var split: StrList* = dx_get_arg(arg);
-    var name: string = sl_get(split, 0);
-    var want: string = sl_get(split, 1);
-    free(split);
+    var name: string = arg;
+    var want: string = "latest";
+    var at: int64 = s_rfind_byte(arg, 64);
+    if (at >= 0) {
+      name = s_sub(arg, 0, at);
+      if (at + 1 < slen(arg)) {
+        want = s_from(arg, at + 1);
+      }
+    }
     var d: DepSpec* = man_dep_find(p->man, name);
-    var module: string = name;
-    var req_url: string = "";
-    if (d != (DepSpec*)0) {
-      if (slen(d->path) > 0) {
-        error_msg("'" + name + "' is a local path dependency; edit its path in mbuild.toml instead");
-        return 1;
-      }
-      module = d->module;
-      req_url = d->url;
-    } else if (!man_is_remote_module(name)) {
-      error_msg("'" + name + "' is not a module path (expected host/owner/repo, e.g. github.com/someone/json) or a dependency of this project");
+    if (d != (DepSpec*)0 && slen(d->path) > 0) {
+      error_msg("'" + name + "' is a path dependency; edit its mb_dep_path in mbuild.mettle instead");
       return 1;
     }
-    if (dx_rpath_find(cx, module) != (DxRPath*)0) {
-      error_msg(module + " is replaced by a local path in [replace]; remove the replacement to choose a version");
+    if (d == (DepSpec*)0 && !man_is_package_name(name)) {
+      error_msg("'" + name + "' is not a package name (a lower-case letter, then lower-case letters, digits and '_')");
       return 1;
     }
-    if (dx_is_local_module(cx, module)) {
-      error_msg(module + " is this project or one of its path packages");
+    if (dx_rpath_find(cx, name) != (DxRPath*)0) {
+      error_msg(name + " is replaced by a local path; remove the replacement to choose a version");
       return 1;
     }
-    var m: DxMod* = dx_mod_get(cx, module, req_url);
-    var r: DxReq* = new DxReq;
-    r->from = "the command line";
-    drq_push(m->reqs, r);
-    var label: string = dx_pick_for_get(cx, m, want);
-    var old: string = "";
-    if (d != (DepSpec*)0) {
-      old = d->version;
+    if (dx_is_local_module(cx, name)) {
+      error_msg(name + " is this project or one of its path packages");
+      return 1;
     }
-    if (!s_eq(old, label)) {
-      var pair: StrList* = sl_of(label);
-      sl_push(pair, module);
-      text = dx_text_set_version(text, d, pair);
-      free(pair);
-      if (d == (DepSpec*)0) {
-        dx_announce("Adding", module, label, label);
-      } else {
-        dx_announce("Updating", module, old + " -> " + label, label);
-      }
-    }
-    sl_push(unpin, module);
+    var m: DxMod* = dx_mod_get(cx, name);
+    drq_push(m->reqs, dx_req_new(name, want, "the command line", true));
+    sl_push(names, name);
+    sl_push(labels, dx_pick_for_get(cx, m, want));
   }
   dx_arm(p);
-  dx_save_manifest(p, text);
-  dx_ensure(p, unpin, false);
+  i = 0;
+  while (i < names->len) {
+    var n: string = sl_get(names, i);
+    var label: string = sl_get(labels, i);
+    i = i + 1;
+    var od: DepSpec* = man_dep_find(p->man, n);
+    if (od == (DepSpec*)0) {
+      dx_announce("Adding", n, label, label);
+      dx_set_dep(p, n, label);
+    } else if (!s_eq(od->version, label)) {
+      dx_announce("Updating", n, od->version + " -> " + label, label);
+      dx_set_dep(p, n, label);
+    }
+  }
+  dx_ensure(p, names, false);
   dx_disarm();
+  dx_vendor_note(p);
+  free(names);
+  free(labels);
   return 0;
 }
 
 export fn deps_cmd_remove(p: Project*) -> int32 {
   var args: StrList* = p->opts->rest;
   if (args->len == 0) {
-    error_msg("usage: mbuild remove MODULE...  (a module path or a dependency key)");
+    error_msg("usage: mbuild remove NAME...");
     return 2;
   }
   dx_refuse_locked(p, "mbuild remove");
-  var text: string = dx_manifest_text(p);
+  dx_need_mbfile(p);
+  g_dx_no_vendor = true;
   var i: int64 = 0;
   while (i < args->len) {
     var name: string = sl_get(args, i);
     i = i + 1;
-    var d: DepSpec* = man_dep_find(p->man, name);
-    if (d == (DepSpec*)0) {
-      error_msg(name + " is not in [dependencies] of " + dx_manifest_path(p));
+    if (man_dep_find(p->man, name) == (DepSpec*)0) {
+      error_msg(name + " is not a dependency in mbuild.mettle");
       return 1;
     }
-    var key: string = d->key;
-    var module: string = d->module;
-    text = dx_text_remove(text, key);
-    if (slen(module) == 0) {
-      module = key;
-    }
-    dx_announce("Removing", module, "from mbuild.toml", "-");
+    dx_announce("Removing", name, "from mbuild.mettle", "-");
     dx_arm(p);
-    dx_save_manifest(p, text);
+    dx_remove_dep(p, name);
   }
   dx_ensure(p, sl_new(), false);
   dx_disarm();
+  dx_vendor_note(p);
   return 0;
-}
-
-// The newest tag in cur's compatibility line (pre-releases only when cur is
-// one), "" when none is newer.
-fn dx_newest_in_line(tags: StrList*, cur: string) -> string {
-  var cv: SemVer = sv_parse(cur);
-  var line: string = sv_line(cur);
-  var best: string = "";
-  var i: int64 = 0;
-  while (i < tags->len) {
-    var t: string = sl_get(tags, i);
-    var v: SemVer = sv_parse(t);
-    if (v.ok && s_eq(sv_line(t), line) && (slen(v.pre) == 0 || slen(cv.pre) > 0)) {
-      if (slen(best) == 0 || sv_cmp(t, best) > 0) {
-        best = t;
-      }
-    }
-    i = i + 1;
-  }
-  if (slen(best) > 0 && sv_cmp(best, cur) > 0) {
-    return best;
-  }
-  return s_empty();
-}
-
-// The newest stable tag of any line, "" when there is none.
-fn dx_newest_stable(tags: StrList*) -> string {
-  var best: string = "";
-  var i: int64 = 0;
-  while (i < tags->len) {
-    var t: string = sl_get(tags, i);
-    var v: SemVer = sv_parse(t);
-    if (v.ok && slen(v.pre) == 0 && (slen(best) == 0 || sv_cmp(t, best) > 0)) {
-      best = t;
-    }
-    i = i + 1;
-  }
-  return best;
-}
-
-// Tags after `from` up to `to` (inclusive), newest first, space-separated;
-// pre-releases only when `from` is one; in from's line unless cross.
-fn dx_candidates(tags: StrList*, from: string, to: string, cross: bool) -> string {
-  var vs: StrList* = dx_semver_tags(tags);
-  var pre_ok: bool = slen(sv_parse(from).pre) > 0;
-  var picked: StrList* = sl_new();
-  var i: int64 = vs->len - 1;
-  while (i >= 0) {
-    var t: string = sl_get(vs, i);
-    i = i - 1;
-    if (sv_cmp(t, from) <= 0 || sv_cmp(t, to) > 0) {
-      continue;
-    }
-    if (slen(sv_parse(t).pre) > 0 && !pre_ok && !s_eq(t, to)) {
-      continue;
-    }
-    if (!cross && !s_eq(sv_line(t), sv_line(from))) {
-      continue;
-    }
-    sl_push(picked, t);
-  }
-  var joined: string = sl_join(picked, " ");
-  free(vs);
-  free(picked);
-  return joined;
 }
 
 export fn deps_cmd_update(p: Project*) -> int32 {
@@ -3354,22 +2821,16 @@ export fn deps_cmd_update(p: Project*) -> int32 {
     }
   }
   if (req->all && req->modules->len > 0) {
-    error_msg("mbuild update --all takes no module names");
+    error_msg("mbuild update --all takes no package names");
     free(req);
     return 2;
   }
   dx_refuse_locked(p, "mbuild update");
+  g_dx_no_vendor = true;
   var plan: UpdatePlan* = deps_plan_update(p, req);
   var before: FsRead = fs_read(dx_lock_path(p));
   if (plan->mods->len > 0) {
-    var vers: StrList* = sl_new();
-    var i: int64 = 0;
-    while (i < plan->tos->len) {
-      sl_push(vers, sl_get(plan->tos, i));
-      i = i + 1;
-    }
-    dx_apply(p, plan->mods, vers, false);
-    free(vers);
+    dx_apply(p, plan->mods, plan->tos, false);
   }
   var k: int64 = 0;
   while (k < plan->lines_mods->len) {
@@ -3382,62 +2843,57 @@ export fn deps_cmd_update(p: Project*) -> int32 {
   if (plan->mods->len == 0 && plan->lines_mods->len == 0 && same) {
     status("Checked", "dependencies are up to date");
   }
+  dx_vendor_note(p);
   free(plan);
   free(req);
   return 0;
 }
 
-// used_modules: the keys imported directly by the root package's own files:
-// alias keys, path package keys and remote module paths. Requirements
-// (aliases and path packages included) nothing there imports are removed;
-// imported remote modules the root does not require are added, at the
-// version already selected when the module is in the graph.
+// used_modules: the package names imported directly by the root package's
+// own files. Requirements (path packages included) nothing there imports
+// are removed; imported packages the root does not declare are added, at
+// the version already selected when the package is in the graph.
 export fn deps_cmd_tidy(p: Project*, used_modules: StrList*) -> int32 {
   dx_refuse_locked(p, "mbuild tidy");
+  dx_need_mbfile(p);
+  g_dx_no_vendor = true;
   dx_arm(p);
   var adopted: StrList* = dx_adopt(p, true);
-  var cx: DxCx* = dx_cx_new(p);
-  defer free(cx);
-  dx_collect_paths(cx);
-  var text: string = dx_manifest_text(p);
-  var changed: bool = false;
+  var drop: StrList* = sl_new();
   var i: int64 = 0;
   while (i < p->man->ndeps) {
     var d: DepSpec* = man_dep(p->man, i);
     i = i + 1;
-    var used: bool = sl_has(used_modules, d->key) || sl_has(adopted, d->key);
-    if (slen(d->path) > 0 && slen(d->module) > 0 && sl_has(used_modules, d->module)) {
-      used = true;
-    }
-    if (!used) {
-      text = dx_text_remove(text, d->key);
-      var shown: string = d->module;
-      if (slen(shown) == 0 || !s_eq(d->key, d->module)) {
-        shown = d->key;
-      }
-      dx_announce("Removing", shown, "(not imported)", "-");
-      changed = true;
+    if (!sl_has(used_modules, d->key) && !sl_has(adopted, d->key)) {
+      sl_push(drop, d->key);
     }
   }
-  var kept: Manifest* = dx_parse_manifest(text, p->root, dx_manifest_path(p));
+  i = 0;
+  while (i < drop->len) {
+    var key: string = sl_get(drop, i);
+    i = i + 1;
+    dx_announce("Removing", key, "(not imported)", "-");
+    dx_remove_dep(p, key);
+  }
+  var cx: DxCx* = dx_cx_new(p);
+  defer free(cx);
+  dx_collect_paths(cx);
   var done: StrList* = sl_new();
-  defer free(done);
   i = 0;
   while (i < used_modules->len) {
-    var module: string = sl_get(used_modules, i);
+    var name: string = sl_get(used_modules, i);
     i = i + 1;
-    if (!dx_needs_adding(cx, kept, module) || sl_has(done, module)) {
+    if (!dx_needs_adding(cx, p->man, name) || sl_has(done, name)) {
       continue;
     }
-    sl_push(done, module);
-    text = dx_add_import(cx, module, text);
-    changed = true;
-  }
-  if (changed) {
-    dx_save_manifest(p, text);
+    sl_push(done, name);
+    dx_add_import(cx, name);
   }
   dx_ensure(p, sl_new(), false);
   dx_disarm();
+  dx_vendor_note(p);
+  free(drop);
+  free(done);
   return 0;
 }
 
@@ -3502,11 +2958,7 @@ fn dx_ds_find(ds: DepState*, d: DepSpec*) -> int64 {
   var i: int64 = 0;
   while (i < ds->n) {
     var dm: DepModule* = &ds->mods[i];
-    if (slen(d->path) > 0) {
-      if (dm->is_path && s_eq(dm->module, d->key)) {
-        return i;
-      }
-    } else if (!dm->is_path && s_eq(dm->module, d->module)) {
+    if (s_eq(dm->module, d->key) && dm->is_path == (slen(d->path) > 0)) {
       return i;
     }
     i = i + 1;
@@ -3527,23 +2979,9 @@ fn dx_describe(p: Project*, dm: DepModule*) -> string {
     if (slen(rs->path) > 0) {
       return dm->module + " => " + rs->path + dim(tail);
     }
-    if (slen(rs->url) > 0) {
-      return dm->module + " => " + rs->url + " " + dm->version + dim(tail);
-    }
     return dm->module + " => " + dm->version + dim(tail);
   }
-  var s: string = dm->module + " " + dm->version;
-  if (!sv_is(dm->version) || slen(dm->version) == 40) {
-    s = s + " " + dim("(" + dx_short(dm->commit) + ")");
-  }
-  return s;
-}
-
-fn dx_subs_note(dm: DepModule*) -> string {
-  if (dm->submodules == (StrList*)0 || dm->submodules->len == 0) {
-    return "";
-  }
-  return " [submodules: " + sl_join(dm->submodules, ", ") + "]";
+  return dm->module + " " + dm->version + " " + dim("(" + dm->registry + ")");
 }
 
 struct DxTree {
@@ -3571,13 +3009,10 @@ fn dx_tree(t: DxTree*, m: Manifest*, prefix: string) {
     }
     var dm: DepModule* = &t->ds->mods[at];
     var line: string = dx_describe(t->p, dm);
-    if (slen(d->module) > 0 && !s_eq(d->key, d->module)) {
-      line = d->key + " -> " + line;
-    }
     if (slen(d->path) == 0 && !s_eq(d->version, dm->version) && !s_eq(d->version, "latest")) {
       line = line + " " + dim("(requires " + d->version + ")");
     }
-    line = line + dx_subs_note(dm) + dx_native_note(dm->man);
+    line = line + dx_native_note(dm->man);
     var id: string = dm->module + "@" + dm->version;
     var expand: bool = dm->man != (Manifest*)0 && dm->man->ndeps > 0;
     if (expand && sl_has(t->seen, id)) {
@@ -3615,11 +3050,7 @@ export fn deps_cmd_list(p: Project*) -> int32 {
   var i: int64 = 0;
   while (i < ds->n) {
     var dm: DepModule* = &ds->mods[i];
-    var line: string = dx_describe(p, dm);
-    if (slen(dm->alias) > 0 && !dm->is_path) {
-      line = line + " " + dim("(as " + dm->alias + ")");
-    }
-    say(line + dx_subs_note(dm) + dx_native_note(dm->man));
+    say(dx_describe(p, dm) + dx_native_note(dm->man));
     i = i + 1;
   }
   var need: StrList* = deps_mettle_minimum(ds);
@@ -3635,24 +3066,34 @@ export fn deps_cmd_list(p: Project*) -> int32 {
   return 0;
 }
 
+// Indexes, manifests and archives for everything in the lock, so --offline
+// builds work afterwards.
 export fn deps_cmd_fetch(p: Project*) -> int32 {
+  var refresh_was: bool = g_dx_refresh;
+  g_dx_refresh = !p->opts->offline;
   var ds: DepState* = dx_ensure(p, sl_new(), true);
+  g_dx_refresh = refresh_was;
   var n: int64 = 0;
   var i: int64 = 0;
   while (i < ds->n) {
-    if (!ds->mods[i].is_path) {
-      n = n + 1;
-    }
+    var dm: DepModule* = &ds->mods[i];
     i = i + 1;
+    if (dm->is_path || slen(dm->registry) == 0) {
+      continue;
+    }
+    var ix: RegIndex* = reg_index(p, dm->registry, dm->module, false);
+    g_dx_last_ix = ix;
+    if (!ix->ok || !ix->found || slen(reg_fetch(p, ix, dm->version)) == 0) {
+      fail(reg_error());
+    }
+    n = n + 1;
   }
-  status("Fetched", "{n} module(s); builds can now run with --offline");
+  status("Fetched", "{n} package(s); builds can now run with --offline");
   return 0;
 }
 
 // ---------------------------------------------------------------------------
-// Round 2 interface (DESIGN.md 12.20). STUBS added by the orchestrator so
-// build.mettle can compile against them; the dependency agent replaces each
-// body and keeps these signatures.
+// Interface types (DESIGN.md 12.9, 17.2)
 // ---------------------------------------------------------------------------
 
 export struct DepSnap {
@@ -3681,12 +3122,12 @@ export struct ApiQuery {
   module: string;
   from_version: string;
   to_version: string;
-  files: StrList*;      // the files whose uses are listed (0 or empty: the project's files importing the module)
+  files: StrList*;      // the files whose uses are listed (0 or empty: the project's files importing the package)
   with_added: bool;     // also list `added` entries (default: only what breaks callers)
 }
 
 // ---------------------------------------------------------------------------
-// The resolved graph without checkouts (why, outdated, plans)
+// The resolved graph without extracting (why, outdated)
 // ---------------------------------------------------------------------------
 
 fn dx_graph(p: Project*) -> DxCx* {
@@ -3698,43 +3139,22 @@ fn dx_graph(p: Project*) -> DxCx* {
   return cx;
 }
 
-// The module a command-line name means: a dependency key, a module path or
-// a module in the lock; "" when it is none of them.
+// The package a command-line name means: a dependency or a package in the
+// lock; "" when it is neither.
 fn dx_name_module(cx: DxCx*, name: string) -> string {
-  var d: DepSpec* = man_dep_find(cx->p->man, name);
-  if (d != (DepSpec*)0) {
-    if (slen(d->module) > 0) {
-      return d->module;
-    }
-    return d->key;
-  }
-  if (sl_has(cx->lock->mods, name) || man_is_remote_module(name)) {
+  if (man_dep_find(cx->p->man, name) != (DepSpec*)0 || sl_has(cx->lock->mods, name) || dx_mod_find(cx, name) != (DxMod*)0) {
     return name;
   }
   return s_empty();
 }
 
-// Import prefixes that name module inside a package with manifest m.
-fn dx_import_prefixes(m: Manifest*, module: string) -> StrList* {
-  var l: StrList* = sl_of(module + "/");
-  if (m != (Manifest*)0) {
-    var i: int64 = 0;
-    while (i < m->ndeps) {
-      var d: DepSpec* = man_dep(m, i);
-      if (s_eq(d->module, module) && !s_eq(d->key, module)) {
-        sl_add_uniq(l, d->key + "/");
-      }
-      i = i + 1;
-    }
-  }
-  return l;
-}
-
-// "<label>file:line" for each import of the prefixes in the .mettle files
+// "<label>file:line" for each import of `name/...` in the .mettle files
 // under dir; with abs, the absolute paths of the importing files instead.
-fn dx_import_hits(dir: string, prefixes: StrList*, label: string, hits: StrList*, abs: bool) {
+fn dx_import_hits(dir: string, name: string, label: string, hits: StrList*, abs: bool) {
   var skip: StrList* = sl_of("build");
+  sl_push(skip, "vendor");
   var files: StrList* = fs_walk(dir, ".mettle", skip);
+  var prefix: string = name + "/";
   var i: int64 = 0;
   while (i < files->len) {
     var rel: string = sl_get(files, i);
@@ -3749,15 +3169,7 @@ fn dx_import_hits(dir: string, prefixes: StrList*, label: string, hits: StrList*
       var ip: string = scan_import(sr, k)->path;
       var ln: int64 = scan_import(sr, k)->line;
       k = k + 1;
-      var j: int64 = 0;
-      var hit: bool = false;
-      while (j < prefixes->len) {
-        if (s_starts(ip, sl_get(prefixes, j))) {
-          hit = true;
-        }
-        j = j + 1;
-      }
-      if (hit) {
+      if (s_starts(ip, prefix)) {
         if (abs) {
           sl_add_uniq(hits, dir + "/" + rel);
         } else {
@@ -3771,15 +3183,15 @@ fn dx_import_hits(dir: string, prefixes: StrList*, label: string, hits: StrList*
   free(files);
 }
 
-// The project's own files (root and path packages) that import module.
-fn dx_files_importing(p: Project*, cx: DxCx*, module: string) -> StrList* {
+// The project's own files (root and path packages) that import name.
+fn dx_files_importing(p: Project*, cx: DxCx*, name: string) -> StrList* {
   var hits: StrList* = sl_new();
-  dx_import_hits(p->root, dx_import_prefixes(p->man, module), "", hits, true);
+  dx_import_hits(p->root, name, "", hits, true);
   var i: int64 = 0;
   while (i < cx->paths->len) {
     var pp: DxPath* = dx_path_at(cx, i);
     if (!p_has_prefix_dir(pp->dir, p->root)) {
-      dx_import_hits(pp->dir, dx_import_prefixes(pp->man, module), "", hits, true);
+      dx_import_hits(pp->dir, name, "", hits, true);
     }
     i = i + 1;
   }
@@ -3787,35 +3199,36 @@ fn dx_files_importing(p: Project*, cx: DxCx*, module: string) -> StrList* {
 }
 
 // ---------------------------------------------------------------------------
-// mbuild why MODULE (12.4)
+// mbuild why NAME (12.4)
 // ---------------------------------------------------------------------------
 
 export fn deps_cmd_why(p: Project*) -> int32 {
   if (p->opts->rest->len != 1) {
-    error_msg("usage: mbuild why MODULE  (with two arguments, `mbuild why A B` asks the compiler)");
+    error_msg("usage: mbuild why NAME  (with two arguments, `mbuild why A B` asks the compiler)");
     return 2;
   }
   var name: string = sl_get(p->opts->rest, 0);
   var ds: DepState* = deps_ensure(p);
   var cx: DxCx* = dx_graph(p);
   defer free(cx);
+  var pathdep: DepSpec* = man_dep_find(p->man, name);
+  if (pathdep != (DepSpec*)0 && slen(pathdep->path) > 0) {
+    say(pathdep->key + " (path " + pathdep->path + ", required by mbuild.mettle)");
+    return 0;
+  }
+  var rp: DxRPath* = dx_rpath_find(cx, name);
   var module: string = dx_name_module(cx, name);
-  if (slen(module) == 0) {
+  if (slen(module) == 0 && rp == (DxRPath*)0) {
     error_msg("'" + name + "' is not a dependency of this project (with two arguments, `mbuild why A B` asks the compiler)");
     return 1;
   }
+  module = name;
   var m: DxMod* = dx_mod_find(cx, module);
-  var rp: DxRPath* = dx_rpath_find(cx, module);
-  var pathdep: DepSpec* = man_dep_find(p->man, name);
-  if (pathdep != (DepSpec*)0 && slen(pathdep->path) > 0) {
-    say(pathdep->key + " (path " + pathdep->path + ", required by mbuild.toml)");
-    return 0;
-  }
   if ((m == (DxMod*)0 || m->sel < 0) && rp == (DxRPath*)0) {
     error_msg(module + " is not in the build");
     return 1;
   }
-  var reqs: DxReqs* = drq_new();
+  var reqs: DxReqs* = (DxReqs*)0;
   var head: string = "";
   var reason: string = "";
   var rs: ReplaceSpec* = man_replace_find(p->man, module);
@@ -3832,18 +3245,18 @@ export fn deps_cmd_why(p: Project*) -> int32 {
   while (i < reqs->len) {
     var r: DxReq* = dx_req_at(reqs, i);
     sl_add_uniq(rows, dx_chain(cx, r->from) + " requires " + r->spec);
-    if (r->root && !sv_is(r->label) && slen(r->label) > 0) {
+    if (r->root && s_eq(r->spec, "latest")) {
       rootpin = true;
     }
     i = i + 1;
   }
-  if (rs != (ReplaceSpec*)0 && (rp != (DxRPath*)0 || (m != (DxMod*)0 && m->rep_req != (DxReq*)0) || slen(rs->url) > 0)) {
-    reason = "replaced in mbuild.toml";
+  if (rs != (ReplaceSpec*)0 && (rp != (DxRPath*)0 || (m != (DxMod*)0 && m->rep_req != (DxReq*)0))) {
+    reason = "replaced in mbuild.mettle";
     if (rs->local) {
-      reason = "replaced in mbuild.local.toml";
+      reason = "replaced in mbuild.local.mettle";
     }
   } else if (rootpin) {
-    reason = "pinned by mbuild.toml";
+    reason = "pinned by mbuild.mettle";
   } else if (rows->len == 1) {
     reason = "the only requirement";
   } else {
@@ -3857,12 +3270,12 @@ export fn deps_cmd_why(p: Project*) -> int32 {
     i = i + 1;
   }
   var hits: StrList* = sl_new();
-  dx_import_hits(p->root, dx_import_prefixes(p->man, module), "", hits, false);
+  dx_import_hits(p->root, module, "", hits, false);
   i = 0;
   while (i < cx->paths->len) {
     var pp: DxPath* = dx_path_at(cx, i);
     if (!p_has_prefix_dir(pp->dir, p->root)) {
-      dx_import_hits(pp->dir, dx_import_prefixes(pp->man, module), "path package " + pp->key + ": ", hits, false);
+      dx_import_hits(pp->dir, module, "path package " + pp->key + ": ", hits, false);
     }
     i = i + 1;
   }
@@ -3877,7 +3290,7 @@ export fn deps_cmd_why(p: Project*) -> int32 {
     if (s_eq(dm->replaced, "path")) {
       label = dm->module + " (replaced): ";
     }
-    dx_import_hits(dm->dir, dx_import_prefixes(dm->man, module), label, hits, false);
+    dx_import_hits(dm->dir, module, label, hits, false);
   }
   say("  imported by:");
   if (hits->len == 0) {
@@ -3894,51 +3307,43 @@ export fn deps_cmd_why(p: Project*) -> int32 {
 }
 
 // ---------------------------------------------------------------------------
-// mbuild outdated [-v] [MODULE] (12.13)
+// mbuild outdated [-v] [NAME] (12.9)
 // ---------------------------------------------------------------------------
 
 fn dx_outdated_row(cx: DxCx*, m: DxMod*, cells: StrList*, newer: StrList*) {
   var label: string = sl_get(m->labels, m->sel);
-  var commit: string = sl_get(m->commits, m->sel);
-  var tags: StrList* = git_tags(dx_mdir(m));
-  var current: string = label;
+  var vs: StrList* = dx_versions(dx_index(cx, m, !cx->p->opts->offline), false);
   var compat: string = "-";
   var latest: string = "-";
-  if (sv_is(label)) {
-    var c: string = dx_newest_in_line(tags, label);
-    if (slen(c) > 0) {
-      compat = c;
-    }
-    var st: string = dx_newest_stable(tags);
-    var top: string = sv_max(tags);
-    if (slen(st) > 0 && sv_cmp(st, label) > 0 && !s_eq(sv_line(st), sv_line(label))) {
-      latest = st + " (new line)";
-    } else if (slen(top) > 0 && slen(sv_parse(top).pre) > 0 && sv_cmp(top, label) > 0 && (slen(st) == 0 || sv_cmp(top, st) > 0) && !s_eq(top, compat)) {
-      latest = top + " (pre)";
-    }
-    var vs: StrList* = dx_semver_tags(tags);
-    var i: int64 = vs->len - 1;
-    while (i >= 0) {
-      if (sv_cmp(sl_get(vs, i), label) > 0) {
-        sl_push(newer, sl_get(vs, i));
-      }
-      i = i - 1;
-    }
-    free(vs);
-  } else {
-    current = label + " " + dx_short(commit);
-    var head: string = git_rev(dx_mdir(m), "refs/heads/" + label);
-    if (slen(head) > 0 && !s_eq(head, commit)) {
-      compat = label + " " + dx_short(head);
-    }
+  var c: string = dx_newest_in_line(vs, label);
+  if (slen(c) > 0) {
+    compat = c;
   }
+  var st: string = dx_newest_stable(vs);
+  var top: string = sv_max(vs);
+  if (vs->len > 0) {
+    top = sl_get(vs, vs->len - 1);
+  }
+  if (slen(st) > 0 && sv_cmp(st, label) > 0 && !s_eq(sv_line(st), sv_line(label))) {
+    latest = st + " (new line)";
+  } else if (slen(top) > 0 && slen(sv_parse(top).pre) > 0 && sv_cmp(top, label) > 0 && (slen(st) == 0 || sv_cmp(top, st) > 0) && !s_eq(top, compat)) {
+    latest = top + " (pre)";
+  }
+  var i: int64 = vs->len - 1;
+  while (i >= 0) {
+    if (sv_cmp(sl_get(vs, i), label) > 0) {
+      sl_push(newer, sl_get(vs, i));
+    }
+    i = i - 1;
+  }
+  free(vs);
   var by: string = "";
   var live: DxReqs* = dx_live_reqs(cx, m);
   var i2: int64 = 0;
   while (i2 < live->len) {
     var r: DxReq* = dx_req_at(live, i2);
     if (r->root) {
-      by = "mbuild.toml";
+      by = "mbuild.mettle";
     } else if (slen(by) == 0) {
       by = r->from;
     }
@@ -3949,10 +3354,22 @@ fn dx_outdated_row(cx: DxCx*, m: DxMod*, cells: StrList*, newer: StrList*) {
     by = "-";
   }
   sl_push(cells, m->module);
-  sl_push(cells, current);
+  sl_push(cells, label);
   sl_push(cells, compat);
   sl_push(cells, latest);
   sl_push(cells, by);
+}
+
+fn dx_meta(m: Manifest*, key: string) -> string {
+  var i: int64 = 0;
+  while (i < m->meta->len) {
+    var kv: string = sl_get(m->meta, i);
+    if (s_starts(kv, key + "=")) {
+      return s_from(kv, slen(key) + 1);
+    }
+    i = i + 1;
+  }
+  return s_empty();
 }
 
 export fn deps_cmd_outdated(p: Project*) -> int32 {
@@ -3963,15 +3380,11 @@ export fn deps_cmd_outdated(p: Project*) -> int32 {
   deps_ensure(p);
   var cx: DxCx* = dx_graph(p);
   defer free(cx);
-  if (slen(only) > 0) {
-    var named: string = dx_name_module(cx, only);
-    if (slen(named) == 0 || dx_mod_find(cx, named) == (DxMod*)0) {
-      error_msg(only + " is not in the build");
-      return 1;
-    }
-    only = named;
+  if (slen(only) > 0 && dx_mod_find(cx, only) == (DxMod*)0) {
+    error_msg(only + " is not in the build");
+    return 1;
   }
-  var cells: StrList* = sl_of("MODULE");
+  var cells: StrList* = sl_of("NAME");
   sl_push(cells, "CURRENT");
   sl_push(cells, "COMPATIBLE");
   sl_push(cells, "LATEST");
@@ -3984,14 +3397,18 @@ export fn deps_cmd_outdated(p: Project*) -> int32 {
     if (m->sel < 0 || (slen(only) > 0 && !s_eq(m->module, only))) {
       continue;
     }
-    dx_mirror(cx, m, true);
     var newer: StrList* = sl_new();
     dx_outdated_row(cx, m, cells, newer);
     var b: Buf* = buf_new();
     if (p->opts->verbose) {
       var k: int64 = 0;
       while (k < newer->len && k < 5) {
-        buf_line(b, "    " + sl_get(newer, k) + " " + git_tag_subject(dx_mdir(m), sl_get(newer, k)));
+        var nm: Manifest* = reg_manifest(p, m->ix, sl_get(newer, k));
+        var desc: string = "";
+        if (nm != (Manifest*)0) {
+          desc = dx_meta(nm, "description");
+        }
+        buf_line(b, "    " + sl_get(newer, k) + " " + desc);
         k = k + 1;
       }
     }
@@ -4060,22 +3477,170 @@ export fn deps_cmd_outdated(p: Project*) -> int32 {
   free(cells);
   free(extra);
   if (p->opts->offline) {
-    say("(--offline: mirrors not refreshed)");
+    say("(--offline: indexes not refreshed)");
   }
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// mbuild vendor [--remove] (14.5)
+// ---------------------------------------------------------------------------
+
+fn dx_toml_scalar(kind: string, text: string) -> string {
+  if (s_eq(kind, "1")) {
+    return toml_quote(text);
+  }
+  return text;
+}
+
+fn dx_toml_value(v: TomlValue*) -> string {
+  if (v->kind == 1) {
+    return toml_quote(v->text);
+  }
+  var parts: StrList* = sl_new();
+  var i: int64 = 0;
+  var out_s: string = v->text;
+  if (v->kind == 4) {
+    while (i < v->items->len) {
+      sl_push(parts, dx_toml_scalar(sl_get(v->item_kinds, i), sl_get(v->items, i)));
+      i = i + 1;
+    }
+    out_s = "[" + sl_join(parts, ", ") + "]";
+  } else if (v->kind == 5) {
+    while (i < v->fields->len) {
+      sl_push(parts, toml_key_literal(sl_get(v->fields, i)) + " = " + dx_toml_scalar(sl_get(v->field_kinds, i), sl_get(v->field_values, i)));
+      i = i + 1;
+    }
+    out_s = "{{ " + sl_join(parts, ", ") + " }";
+  }
+  free(parts);
+  return out_s;
+}
+
+fn dx_toml_section(b: Buf*, doc: Toml*, sec: string) {
+  if (slen(sec) > 0) {
+    buf_line(b, "[" + toml_section_literal(sec) + "]");
+  }
+  var i: int64 = 0;
+  while (i < doc->n) {
+    var e: TomlEntry* = doc->entries[i];
+    if (s_eq(e->section, sec)) {
+      buf_line(b, toml_key_literal(e->key) + " = " + dx_toml_value(e->value));
+    }
+    i = i + 1;
+  }
+}
+
+// TOML text for a parsed document: vendor/<name>.toml keeps a registry
+// manifest beside its package.
+fn dx_toml_text(doc: Toml*) -> string {
+  var b: Buf* = buf_new();
+  dx_toml_section(b, doc, "");
+  var s: int64 = 0;
+  while (s < doc->sections->len) {
+    dx_toml_section(b, doc, sl_get(doc->sections, s));
+    s = s + 1;
+  }
+  return buf_take(b);
+}
+
+fn dx_copy_tree(from: string, to: string) -> bool {
+  var files: StrList* = fs_walk(from, "", (StrList*)0);
+  var ok: bool = true;
+  var i: int64 = 0;
+  while (i < files->len && ok) {
+    var rel: string = sl_get(files, i);
+    i = i + 1;
+    fs_mkdirs(p_dir(to + "/" + rel));
+    ok = fs_copy(from + "/" + rel, to + "/" + rel);
+  }
+  free(files);
+  return ok;
+}
+
 export fn deps_cmd_vendor(p: Project*) -> int32 {
-  error_msg("mbuild vendor is not implemented yet (DESIGN.md 12.16)");
-  return 1;
+  var vdir: string = dx_vendor_dir(p);
+  if (sl_has(p->opts->rest, "--remove")) {
+    if (fs_exists(vdir)) {
+      sys_remove_tree(vdir);
+      status("Removed", "vendor/");
+    }
+    return 0;
+  }
+  g_dx_no_vendor = true;
+  var ds: DepState* = deps_ensure(p);
+  g_dx_no_vendor = false;
+  var lock: DxLock* = dx_lock_read(p);
+  if (fs_exists(vdir)) {
+    sys_remove_tree(vdir);
+  }
+  fs_mkdirs(vdir);
+  var b: Buf* = buf_new();
+  buf_line(b, "# lock " + hash_string(lock->text));
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (i < ds->n) {
+    var dm: DepModule* = &ds->mods[i];
+    i = i + 1;
+    if (dm->is_path) {
+      continue;
+    }
+    if (s_eq(dm->replaced, "path")) {
+      warn(dm->module + " is replaced by a local path and is not vendored");
+      continue;
+    }
+    if (!dx_copy_tree(dm->dir, vdir + "/" + dm->module) || dm->man == (Manifest*)0 || !fs_write(vdir + "/" + dm->module + ".toml", dx_toml_text(dm->man->doc))) {
+      error_msg("cannot copy " + dm->module + " into " + vdir);
+      return 1;
+    }
+    buf_line(b, dm->module + " " + dm->version + " " + dm->checksum);
+    n = n + 1;
+  }
+  fs_write(vdir + "/modules.txt", buf_take(b));
+  free(lock);
+  status("Vendored", "{n} package(s) into vendor/");
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
-// mettle.deps adoption (12.9)
+// mettle.deps adoption (12.6)
 // ---------------------------------------------------------------------------
 
-// Moves plain `name=dir` lines of the root mettle.deps into [dependencies];
-// answers the keys adopted (with write false: the keys it would adopt).
+// `mb_dep_path("name", "dir");` lines added at the top of fn project().
+fn dx_add_path_deps(p: Project*, lines: StrList*) {
+  var file: string = dx_mbfile_path(p);
+  var r: FsRead = fs_read(file);
+  if (!r.ok) {
+    dx_fail("cannot read " + file);
+  }
+  var info: MbfInfo* = mbf_scan(r.data);
+  if (!info->ok || !info->has_project) {
+    dx_fail("cannot find fn project() in " + file);
+  }
+  var at: int64 = info->body_start;
+  free(info);
+  if (at < slen(r.data) && s_byte(r.data, at) == 123) {
+    at = at + 1;
+  }
+  var b: Buf* = buf_new();
+  buf_add(b, s_sub(r.data, 0, at));
+  var i: int64 = 0;
+  while (i < lines->len) {
+    buf_add(b, "\n  " + sl_get(lines, i));
+    i = i + 1;
+  }
+  buf_add(b, s_from(r.data, at));
+  if (!fs_write(file, buf_take(b))) {
+    dx_fail("cannot write " + file);
+  }
+  var m: Manifest* = cfg_load(p);
+  if (m != (Manifest*)0) {
+    p->man = m;
+  }
+}
+
+// Moves plain `name=dir` lines of the root mettle.deps into mbuild.mettle;
+// answers the names adopted (with write false: the names it would adopt).
 fn dx_adopt(p: Project*, write: bool) -> StrList* {
   var adopted: StrList* = sl_new();
   var file: string = p->root + "/mettle.deps";
@@ -4085,7 +3650,7 @@ fn dx_adopt(p: Project*, write: bool) -> StrList* {
   }
   var lines: StrList* = s_lines(r.data);
   var kept: StrList* = sl_new();
-  var text: string = dx_manifest_text(p);
+  var calls: StrList* = sl_new();
   var inside: bool = false;
   var i: int64 = 0;
   while (i < lines->len) {
@@ -4109,14 +3674,14 @@ fn dx_adopt(p: Project*, write: bool) -> StrList* {
         abs = p_join(p->root, dir);
       }
       abs = p_clean(abs);
-      var where_at: string = "mettle.deps:" + s_int(n) + ": `" + t + "`";
-      if (s_find_byte(name, 46) >= 0) {
+      var where_at: string = "mettle.deps:" + s_int(n) + ": " + t;
+      if (!man_is_package_name(name)) {
         if (write) {
-          warn(where_at + " cannot be a path dependency key; it stays in mettle.deps");
+          warn(where_at + ": " + name + " is not a package name; it stays in mettle.deps");
         }
       } else if (man_dep_find(p->man, name) != (DepSpec*)0) {
         if (write) {
-          warn(where_at + ": " + name + " is already declared in mbuild.toml; remove the line");
+          warn(where_at + ": " + name + " is already declared in mbuild.mettle; remove the line");
         }
       } else if (!fs_is_dir(abs)) {
         if (write) {
@@ -4125,10 +3690,9 @@ fn dx_adopt(p: Project*, write: bool) -> StrList* {
       } else if (!p_has_prefix_dir(abs, p->state_dir)) {
         keep = false;
         sl_push(adopted, name);
-        var lit: string = "{{ path = " + toml_quote(dir) + " }";
-        text = toml_set_in_text(text, "dependencies", name, lit);
+        sl_push(calls, "mb_dep_path(" + toml_quote(name) + ", " + toml_quote(dir) + ");");
         if (write) {
-          status("Adopted", name + " = " + lit + " from mettle.deps");
+          status("Adopted", name + " = " + dir + " from mettle.deps");
         }
       }
     }
@@ -4138,7 +3702,7 @@ fn dx_adopt(p: Project*, write: bool) -> StrList* {
   }
   if (write && adopted->len > 0) {
     dx_refuse_locked(p, "adopting mettle.deps lines");
-    dx_save_manifest(p, text);
+    dx_add_path_deps(p, calls);
     var joined: string = sl_join(kept, "\n");
     if (s_ends(r.data, "\n")) {
       joined = joined + "\n";
@@ -4147,6 +3711,7 @@ fn dx_adopt(p: Project*, write: bool) -> StrList* {
   }
   free(lines);
   free(kept);
+  free(calls);
   return adopted;
 }
 
@@ -4158,24 +3723,23 @@ export fn deps_adopt_mettle_deps(p: Project*, write: bool) -> int32 {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot, restore, update plans (12.13; build drives verification)
+// Snapshot, restore, update plans (12.9; build drives verification)
 // ---------------------------------------------------------------------------
 
 export fn deps_snapshot(p: Project*) -> DepSnap* {
   return dx_snap_take(p);
 }
 
-// Writes the snapshot back and checks the old commits out again (no
-// network: the mirrors hold them). Prints nothing.
+// Writes the snapshot back and extracts the old versions again (from the
+// download cache). Prints nothing.
 export fn deps_restore(p: Project*, s: DepSnap*) {
   var armed: DepSnap* = g_dx_guard;
   g_dx_guard = (DepSnap*)0;
   dx_snap_write(s);
   sys_remove_file(dx_stamp_path(p));
-  var r: FsRead = fs_read(dx_manifest_path(p));
-  if (r.ok) {
-    var m: Manifest* = man_parse(toml_parse(r.data, dx_manifest_path(p)), p->root);
-    if (slen(m->error) == 0) {
+  if (fs_is_file(dx_mbfile_path(p))) {
+    var m: Manifest* = cfg_load(p);
+    if (m != (Manifest*)0) {
       p->man = m;
     }
   }
@@ -4194,6 +3758,13 @@ fn dx_plan_push(u: UpdatePlan*, module: string, from: string, to: string, kind: 
   sl_push(u->cands, cands);
 }
 
+fn dx_kind(from: string, to: string) -> string {
+  if (s_eq(sv_line(from), sv_line(to))) {
+    return "compatible";
+  }
+  return "major";
+}
+
 export fn deps_plan_update(p: Project*, r: UpdateReq*) -> UpdatePlan* {
   var u: UpdatePlan* = new UpdatePlan;
   u->mods = sl_new();
@@ -4210,34 +3781,28 @@ export fn deps_plan_update(p: Project*, r: UpdateReq*) -> UpdatePlan* {
   if (r->modules != (StrList*)0) {
     while (i < r->modules->len) {
       var name: string = sl_get(r->modules, i);
-      var d: DepSpec* = man_dep_find(p->man, name);
-      if (d != (DepSpec*)0 && slen(d->module) > 0) {
-        sl_push(only, d->module);
-      } else if (sl_has(cx->lock->mods, name)) {
-        sl_push(only, name);
-      } else {
-        dx_fail(name + " is neither a dependency in mbuild.toml nor a module in mbuild.lock");
+      if (man_dep_find(p->man, name) == (DepSpec*)0 && !sl_has(cx->lock->mods, name)) {
+        dx_fail(name + " is neither a dependency in mbuild.mettle nor a package in mbuild.lock");
       }
+      sl_push(only, name);
       i = i + 1;
     }
   }
-  // (module, spec, url) of everything the plan looks at.
+  // (package, spec) of everything the plan looks at.
   var mods: StrList* = sl_new();
   var specs: StrList* = sl_new();
-  var urls: StrList* = sl_new();
   i = 0;
   while (i < p->man->ndeps) {
     var dep: DepSpec* = man_dep(p->man, i);
     i = i + 1;
-    if (slen(dep->path) > 0 || slen(dep->module) == 0 || dx_is_local_module(cx, dep->module) || sl_has(mods, dep->module)) {
+    if (slen(dep->path) > 0 || dx_is_local_module(cx, dep->key) || sl_has(mods, dep->key)) {
       continue;
     }
-    if (only->len > 0 && !sl_has(only, dep->module)) {
+    if (only->len > 0 && !sl_has(only, dep->key)) {
       continue;
     }
-    sl_push(mods, dep->module);
+    sl_push(mods, dep->key);
     sl_push(specs, dep->version);
-    sl_push(urls, dep->url);
   }
   i = 0;
   while (i < cx->lock->mods->len) {
@@ -4249,30 +3814,20 @@ export fn deps_plan_update(p: Project*, r: UpdateReq*) -> UpdatePlan* {
     if ((only->len > 0 && sl_has(only, lm)) || (only->len == 0 && r->all)) {
       sl_push(mods, lm);
       sl_push(specs, sl_get(cx->lock->vers, i - 1));
-      sl_push(urls, s_empty());
     }
   }
   i = 0;
   while (i < mods->len) {
     var module: string = sl_get(mods, i);
     var spec: string = sl_get(specs, i);
-    var m: DxMod* = dx_mod_get(cx, module, sl_get(urls, i));
-    var rs: ReplaceSpec* = man_replace_find(p->man, module);
-    if (rs != (ReplaceSpec*)0 && slen(rs->url) > 0) {
-      m->url = rs->url;
-    }
     i = i + 1;
-    var rq: DxReq* = new DxReq;
-    rq->from = "mbuild.toml";
-    drq_push(m->reqs, rq);
-    dx_mirror(cx, m, true);
-    var tags: StrList* = git_tags(dx_mdir(m));
+    var m: DxMod* = dx_mod_get(cx, module);
+    drq_push(m->reqs, dx_req_new(module, spec, "mbuild.mettle", true));
+    var vs: StrList* = dx_versions(dx_index(cx, m, true), false);
     var li: int64 = sl_index(cx->lock->mods, module);
     var lv: string = "";
-    var lc: string = "";
     if (li >= 0) {
       lv = sl_get(cx->lock->vers, li);
-      lc = sl_get(cx->lock->commits, li);
     }
     var direct: bool = man_dep_find(p->man, module) != (DepSpec*)0;
     if (sv_is(spec) && !dx_is_partial(spec)) {
@@ -4282,75 +3837,51 @@ export fn deps_plan_update(p: Project*, r: UpdateReq*) -> UpdatePlan* {
       }
       var target: string = "";
       if (r->major) {
-        target = dx_newest_stable(tags);
+        target = dx_newest_stable(vs);
         if (slen(target) > 0 && sv_cmp(target, cur) <= 0) {
           target = s_empty();
         }
       } else {
-        target = dx_newest_in_line(tags, cur);
+        target = dx_newest_in_line(vs, cur);
       }
       if (!direct && !r->all) {
-        // A named transitive module: only its pin moves (a moved tag).
+        // A named transitive package moves only with --all.
         target = s_empty();
       }
       if (slen(target) > 0) {
-        var kind: string = "compatible";
-        if (!s_eq(sv_line(target), sv_line(cur))) {
-          kind = "major";
-        }
-        dx_plan_push(u, module, cur, target, kind, dx_candidates(tags, cur, target, r->major));
-      } else if (slen(lc) > 0 && sv_is(lv)) {
-        var now: string = git_rev(dx_mdir(m), "refs/tags/" + lv);
-        if (slen(now) > 0 && !s_eq(now, lc)) {
-          dx_plan_push(u, module, lv + " " + dx_short(lc), lv + " " + dx_short(now), "pin", s_empty());
-        }
+        dx_plan_push(u, module, cur, target, dx_kind(cur, target), dx_candidates(vs, cur, target, r->major));
       }
       var base: string = cur;
       if (slen(target) > 0) {
         base = target;
       }
-      var st: string = dx_newest_stable(tags);
+      var st: string = dx_newest_stable(vs);
       if (!r->major && slen(st) > 0 && sv_cmp(st, base) > 0 && !s_eq(sv_line(st), sv_line(base))) {
         sl_push(u->lines_mods, module);
         sl_push(u->lines_vers, st);
       }
-    } else if (s_eq(spec, "latest") || (!sv_is(spec) && !dx_is_hex_id(spec))) {
-      var req: DxReq* = new DxReq;
-      req->module = module;
-      req->spec = spec;
-      req->url = m->url;
-      req->from = "mbuild.toml";
-      req->root = true;
-      req->label = s_empty();
-      req->commit = s_empty();
-      req->fresh = false;
-      if (s_eq(spec, "latest")) {
-        dx_pick_latest(cx, m, req);
-      } else {
-        dx_pick_named(cx, m, req);
+    } else if (s_eq(spec, "latest") && sv_is(lv)) {
+      var newest: string = dx_newest_stable(vs);
+      if (slen(newest) > 0 && sv_cmp(newest, lv) > 0) {
+        dx_plan_push(u, module, lv, newest, dx_kind(lv, newest), dx_candidates(vs, lv, newest, true));
       }
-      if (slen(lc) > 0 && !s_eq(req->commit, lc)) {
-        dx_plan_push(u, module, lv + " " + dx_short(lc), req->label + " " + dx_short(req->commit), "pin", s_empty());
-      }
-      free(req);
     }
+    free(vs);
   }
   free(only);
   free(mods);
   free(specs);
-  free(urls);
   free(cx);
   return u;
 }
 
-// get/update: set each module's version in mbuild.toml (adding transitive
-// ones), unpin them, resolve. vers may carry "label short" (pins): the
-// first field counts.
+// get/update: set each package's version in mbuild.mettle (adding
+// transitive ones; `latest` stays and is only unpinned), unpin them,
+// resolve.
 fn dx_apply(p: Project*, mods: StrList*, vers: StrList*, quiet: bool) -> DepState* {
   dx_arm(p);
-  var text: string = dx_manifest_text(p);
+  g_dx_no_vendor = true;
   var lock: DxLock* = dx_lock_read(p);
-  var edited: bool = false;
   var unpin: StrList* = sl_new();
   var i: int64 = 0;
   while (i < mods->len) {
@@ -4362,24 +3893,17 @@ fn dx_apply(p: Project*, mods: StrList*, vers: StrList*, quiet: bool) -> DepStat
       ver = s_sub(ver, 0, sp);
     }
     var d: DepSpec* = man_dep_find(p->man, module);
-    var pair: StrList* = sl_of(ver);
-    sl_push(pair, module);
     if (d == (DepSpec*)0) {
       var li: int64 = sl_index(lock->mods, module);
       if (sv_is(ver) && (li < 0 || !s_eq(sl_get(lock->vers, li), ver))) {
-        text = dx_text_set_version(text, d, pair);
-        edited = true;
+        dx_set_dep(p, module, ver);
       }
-    } else if (slen(d->path) == 0 && sv_is(ver) && !s_eq(d->version, ver)) {
-      text = dx_text_set_version(text, d, pair);
-      edited = true;
+    } else if (slen(d->path) == 0 && sv_is(ver) && !s_eq(d->version, "latest") && !s_eq(d->version, ver)) {
+      dx_set_dep(p, module, ver);
     }
-    free(pair);
     sl_push(unpin, module);
   }
-  if (edited) {
-    dx_save_manifest(p, text);
-  }
+  free(lock);
   var quiet_was: bool = g_quiet;
   if (quiet) {
     g_quiet = true;
@@ -4401,49 +3925,56 @@ export fn deps_apply(p: Project*, mods: StrList*, vers: StrList*) -> DepState* {
 }
 
 // ---------------------------------------------------------------------------
-// API report (12.13)
+// API reports (12.9, 14.5, 14.7)
 // ---------------------------------------------------------------------------
 
-fn dx_mod_url(p: Project*, module: string) -> string {
-  var rs: ReplaceSpec* = man_replace_find(p->man, module);
-  if (rs != (ReplaceSpec*)0 && slen(rs->url) > 0) {
-    return rs->url;
-  }
-  var d: DepSpec* = man_dep_find(p->man, module);
-  if (d != (DepSpec*)0) {
-    return d->url;
-  }
-  return s_empty();
-}
-
-// The exported surface of module at version: the existing checkout when it
-// is that commit, else a temporary checkout. 0 when the version is unknown.
-fn dx_surface(p: Project*, module: string, version: string) -> ApiSurface* {
-  var mirror: string = git_mirror_dir(module, dx_mod_url(p, module));
-  if (!git_has_mirror(mirror)) {
+// The exported surface of one version from its archive, extracted into
+// .mbuild/tmp/api/<name>@<version>; 0 when it cannot be had.
+fn dx_surface_ix(p: Project*, ix: RegIndex*, version: string) -> ApiSurface* {
+  var rv: RegVersion* = dx_find_version(ix, version);
+  if (rv == (RegVersion*)0) {
     return (ApiSurface*)0;
   }
-  var commit: string = git_rev(mirror, "refs/tags/" + version);
-  if (slen(commit) == 0) {
-    commit = dx_rev_named(mirror, version);
-  }
-  if (slen(commit) == 0) {
+  var archive: string = reg_fetch(p, ix, rv->version);
+  if (slen(archive) == 0) {
+    verbose(reg_error());
     return (ApiSurface*)0;
   }
-  var cur: string = dx_deps_dir(p) + "/" + module;
-  if (s_eq(git_checkout_commit(cur), commit) && !sys_is_link(cur)) {
-    return api_surface_dir(cur);
+  var tmp: string = p->state_dir + "/tmp/api/" + ix->name + "@" + rv->version;
+  if (fs_exists(tmp)) {
+    sys_remove_tree(tmp);
   }
-  var tmp: string = p->state_dir + "/tmp/api/" + module + "@" + version;
-  var e: string = git_checkout(mirror, commit, tmp);
+  fs_mkdirs(p_dir(tmp));
+  var e: string = reg_extract(archive, rv->sha, tmp, dx_marker_line(ix->name, rv->version, dx_sha(rv), ix->registry));
   if (slen(e) > 0) {
-    verbose("cannot check out " + module + " " + version + " for its API: " + git_summary(e));
+    verbose("cannot extract " + ix->name + " " + version + " for its API: " + e);
     sys_remove_tree(tmp);
     return (ApiSurface*)0;
   }
   var surf: ApiSurface* = api_surface_dir(tmp);
   sys_remove_tree(tmp);
   return surf;
+}
+
+// The surface of module at version: .mbuild/deps/<name> when it holds that
+// version, else the archive.
+fn dx_surface(p: Project*, module: string, version: string) -> ApiSurface* {
+  var cur: string = dx_deps_dir(p) + "/" + module;
+  var mk: StrList* = s_fields(reg_marker(cur));
+  var here: bool = !sys_is_link(cur) && mk->len >= 2 && s_eq(sl_get(mk, 0), module) && s_eq(sl_get(mk, 1), version);
+  free(mk);
+  if (here) {
+    return api_surface_dir(cur);
+  }
+  var cx: DxCx* = dx_cx_new(p);
+  var pin: string = dx_pinned(cx, module);
+  free(cx);
+  var ix: RegIndex* = reg_find(p, module, pin, false);
+  g_dx_last_ix = ix;
+  if (!ix->ok || !ix->found) {
+    return (ApiSurface*)0;
+  }
+  return dx_surface_ix(p, ix, version);
 }
 
 export fn deps_api_report(p: Project*, q: ApiQuery*) -> string {
@@ -4505,12 +4036,61 @@ export fn deps_api_report(p: Project*, q: ApiQuery*) -> string {
   return report;
 }
 
+// The first version of the next line: v1.4.2 -> v2.0.0, v0.3.1 -> v0.4.0.
+fn dx_next_line(version: string) -> string {
+  var v: SemVer = sv_parse(version);
+  if (v.major == 0) {
+    return "v0." + s_int(v.minor + 1) + ".0";
+  }
+  return "v" + s_int(v.major + 1) + ".0.0";
+}
+
+// publish step 4 (14.7): the project's surface against the newest earlier
+// version of name in version's line, from the registry. "" when nothing
+// breaks (or there is no earlier version), else the report.
+export fn deps_api_breaks(p: Project*, name: string, version: string) -> string {
+  if (!sv_is(version)) {
+    return s_empty();
+  }
+  var ix: RegIndex* = reg_find(p, name, "", !p->opts->offline);
+  g_dx_last_ix = ix;
+  if (!ix->ok || !ix->found) {
+    return s_empty();
+  }
+  var vs: StrList* = dx_versions(ix, false);
+  var prev: string = "";
+  var i: int64 = 0;
+  while (i < vs->len) {
+    var v: string = sl_get(vs, i);
+    if (sv_cmp(v, version) < 0 && s_eq(sv_line(v), sv_line(version))) {
+      prev = v;
+    }
+    i = i + 1;
+  }
+  free(vs);
+  if (slen(prev) == 0) {
+    return s_empty();
+  }
+  var old: ApiSurface* = dx_surface_ix(p, ix, prev);
+  if (old == (ApiSurface*)0) {
+    return s_empty();
+  }
+  var d: ApiDiff* = api_breaking(api_diff(old, api_surface_dir(p->root)));
+  var n: int64 = d->what->len;
+  var listed: string = api_render(d, sl_new());
+  free(d);
+  if (n == 0) {
+    return s_empty();
+  }
+  return "  API changes from " + prev + " to " + version + " (inside line " + sv_line(version) + ", which should not break):\n" + listed + "\n  a breaking change needs a new line: publish " + dx_next_line(version);
+}
+
 // ---------------------------------------------------------------------------
-// Mettle version requirements (12.11)
+// Mettle version requirements (12.7)
 // ---------------------------------------------------------------------------
 
 // The highest [package] mettle among the selected packages:
-// ["v0.99.0", "github.com/demo/needs v1.0.0"], or empty.
+// ["v0.99.0", "needs v1.0.0"], or empty.
 export fn deps_mettle_minimum(ds: DepState*) -> StrList* {
   var need: string = "";
   var who: string = "";
@@ -4537,9 +4117,9 @@ export fn deps_mettle_minimum(ds: DepState*) -> StrList* {
   return l;
 }
 
-// For who = "MODULE VERSION": ", or require MODULE vX, the newest version
-// that supports Mettle HAVE" (the newest stable tag before VERSION, at most 20
-// looked at, whose [package] mettle is absent or <= have), or "".
+// For who = "NAME VERSION": ", or require NAME vX, the newest version that
+// supports Mettle HAVE" (the newest stable version before VERSION, at most
+// 20 manifests read, whose [package] mettle is absent or <= have), or "".
 export fn deps_mettle_fallback(p: Project*, who: string, have: string) -> string {
   var sp: int64 = s_find_byte(who, 32);
   if (sp < 0 || !sv_is(have)) {
@@ -4547,11 +4127,18 @@ export fn deps_mettle_fallback(p: Project*, who: string, have: string) -> string
   }
   var module: string = s_sub(who, 0, sp);
   var version: string = s_from(who, sp + 1);
-  var mirror: string = git_mirror_dir(module, dx_mod_url(p, module));
-  if (!sv_is(version) || !git_has_mirror(mirror)) {
+  if (!sv_is(version)) {
     return s_empty();
   }
-  var vs: StrList* = dx_semver_tags(git_tags(mirror));
+  var cx: DxCx* = dx_cx_new(p);
+  var pin: string = dx_pinned(cx, module);
+  free(cx);
+  var ix: RegIndex* = reg_find(p, module, pin, false);
+  g_dx_last_ix = ix;
+  if (!ix->ok || !ix->found) {
+    return s_empty();
+  }
+  var vs: StrList* = dx_versions(ix, false);
   var found: string = "";
   var looked: int64 = 0;
   var i: int64 = vs->len - 1;
@@ -4562,17 +4149,11 @@ export fn deps_mettle_fallback(p: Project*, who: string, have: string) -> string
       continue;
     }
     looked = looked + 1;
-    var c: string = git_rev(mirror, "refs/tags/" + t);
-    var g: GitShow* = git_show(mirror, c, "mbuild.toml");
-    if (!g->ok) {
+    var nm: Manifest* = reg_manifest(p, ix, t);
+    if (nm == (Manifest*)0) {
       continue;
     }
-    var need: string = "";
-    if (g->found) {
-      var nm: Manifest* = man_parse(toml_parse(g->text, module + "@" + t + "/mbuild.toml"), p->root);
-      need = nm->mettle_min;
-    }
-    if (!sv_is(need) || sv_cmp(need, have) <= 0) {
+    if (!sv_is(nm->mettle_min) || sv_cmp(nm->mettle_min, have) <= 0) {
       found = t;
     }
   }
@@ -4583,7 +4164,7 @@ export fn deps_mettle_fallback(p: Project*, who: string, have: string) -> string
   return ", or require " + module + " " + found + ", the newest version that supports Mettle " + have;
 }
 
-// The whole 12.11 check for one compiler: "" or the error text (without
+// The whole 12.7 check for one compiler: "" or the error text (without
 // "error: "), the project's own [package] mettle included.
 export fn deps_mettle_check(p: Project*, ds: DepState*, m: Mettle*) -> string {
   var l: StrList* = deps_mettle_minimum(ds);
