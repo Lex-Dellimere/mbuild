@@ -258,7 +258,7 @@ Global flags go before the command name and reach the command only through
 | `mb_cmd(program)` | a command to run, found on PATH |
 | `mb_cmd_arg(c, s)`, `mb_cmd_cwd(c, dir)`, `mb_cmd_env(c, "NAME=value")` | add an argument, set its directory, set a variable for it only |
 | `mb_cmd_run(c)` | runs it with your terminal, returns the exit code (127: could not start) |
-| `mb_cmd_output(c)` | runs it, returns stdout as is (trailing newline included); the exit code is then `mb_cmd_status(c)` |
+| `mb_cmd_output(c)` | runs it, returns stdout without one trailing newline; the exit code is then `mb_cmd_status(c)` |
 | `mb_sh(line)` | runs a line through `sh -c` (Linux) or `cmd /c` (Windows) |
 | `mb_env(name)`, `mb_home()` | an environment variable, the home directory |
 | `mb_exists(p)`, `mb_is_dir(p)` | |

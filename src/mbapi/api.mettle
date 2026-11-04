@@ -1028,7 +1028,8 @@ export fn mb_cmd_run(c: MbCmd*) -> int32 {
   return c->status;
 }
 
-// Runs it and answers its stdout; the exit code is then mb_cmd_status(c).
+// Runs it and answers its stdout without one trailing newline; the exit code
+// is then mb_cmd_status(c).
 export fn mb_cmd_output(c: MbCmd*) -> string {
   mbi_flush();
   c->status = 127;
@@ -1050,8 +1051,14 @@ export fn mb_cmd_output(c: MbCmd*) -> string {
     }
     n = n + got;
   }
-  p[n] = 0;
   c->status = mbi_status(mbi_c_pclose(fp));
+  if (n > 0 && p[n - 1] == 10) {
+    n = n - 1;
+    if (n > 0 && p[n - 1] == 13) {
+      n = n - 1;
+    }
+  }
+  p[n] = 0;
   return mbi_view(p, n);
 }
 

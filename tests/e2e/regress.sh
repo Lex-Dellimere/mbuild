@@ -85,6 +85,21 @@ check "$mode: a partial version skips pre-releases" has "error: strutil has no s
 check "$mode: ... and names the full version" has "help: a pre-release is selected only by its full version, e.g. strutil@v2.0.0-rc.1"
 mb get strutil@v1
 check "$mode: a partial version takes the newest stable" grep -qF 'mb_dep("strutil", "v1.1.0");' mbuild.mettle
+
+P="$W/cmdout"
+proj "$P" </dev/null
+cat >>"$P/mbuild.mettle" <<'MEOF'
+
+fn cmd_out(a: MbArgs*) -> int32 {
+  var c: MbCmd* = mb_cmd("printf");
+  mb_cmd_arg(c, "one\\ntwo\\n\\n");
+  mb_say("[" + mb_cmd_output(c) + "]");
+  return 0;
+}
+MEOF
+cd "$P" || exit 1
+mb out
+check "$mode: mb_cmd_output drops one trailing newline" sh -c 'printf "[one\ntwo\n]\n" | cmp -s - "$0"' "$T/last.out"
 done
 
 for suite in ${*:-deps}; do
