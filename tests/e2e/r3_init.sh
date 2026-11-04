@@ -342,6 +342,8 @@ else
   if ! "$METTLE" --build "$here/src/main.mettle" -o "$MB" > "$T/mbuild.log" 2>&1; then
     bad "mbuild builds" "$(cat "$T/mbuild.log")"
   else
+    # a fresh cache, so the transcript has its Fetching line (14.3)
+    rm -rf "$MBUILD_HOME"
     out=$("$MB" new site --from webfw --opt port=9000 --yes 2>&1); rc=$?
     expect_line "cli new: mbuild.mettle line" "$out" "     Created site/mbuild.mettle (package \`site\`, depends on webfw v1.0.0, sqlite v1.2.0)"
     expect_line "cli new: files line" "$out" "     Created site/src/main.mettle, site/src/routes.mettle, site/static/"
@@ -388,6 +390,8 @@ EOF
 
     cp -r "$W" pub
     rm pub/AGENT.rules
+    # a new version: an indexed one stops publish earlier (14.7 step 2)
+    sed -i 's/mb_package("webfw", "v1.0.0");/mb_package("webfw", "v1.0.1");/' pub/mbuild.mettle
     cd pub || exit 1
     out=$("$MB" publish --to "$REG" --dry-run 2>&1)
     expect_has "cli publish without AGENT.rules" "$out" "error: webfw cannot be published without AGENT.rules (mbuild init --package writes one)"
