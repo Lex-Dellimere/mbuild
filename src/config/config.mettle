@@ -46,6 +46,7 @@ fn cfx_write_api(dir: string) {
   fs_write_if_changed(dir + "/api.mettle", cfg_api_text());
   fs_write_if_changed(dir + "/api_linux.mettle", import_str "../mbapi/api_linux.mettle");
   fs_write_if_changed(dir + "/api_windows.mettle", import_str "../mbapi/api_windows.mettle");
+  fs_write_if_changed(dir + "/shell.mettle", import_str "../mbapi/shell.mettle");
 }
 
 // A path as the user sees it from the working directory.

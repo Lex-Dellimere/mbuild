@@ -177,6 +177,29 @@ export fn sys_isatty(fd: int32) -> bool {
   return w_rt_isatty(fd) != 0;
 }
 
+// `mbuild shell` is Linux-only for now: no raw console, no pids.
+export fn sys_term_raw() -> bool {
+  return false;
+}
+
+export fn sys_term_cooked() {
+}
+
+export fn sys_stdin_ready(ms: int64) -> bool {
+  return true;
+}
+
+export fn sys_read_byte() -> int32 {
+  return -1;
+}
+
+export fn sys_pid_alive(pid: int64) -> bool {
+  return false;
+}
+
+export fn sys_kill(pid: int64) {
+}
+
 fn w_rd32(p: uint8*, off: int64) -> int64 {
   var v: int64 = 0;
   var i: int64 = 3;

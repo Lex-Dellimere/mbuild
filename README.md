@@ -191,6 +191,7 @@ this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_W
 | `mbuild run` | build and run (`-- args` go to the program), with its `mb_service` processes around it |
 | `mbuild services` | list the processes `mbuild run` starts |
 | `mbuild live` | run the program and patch it as you save |
+| `mbuild shell` | a prompt inside the running program: read and set its state, redefine functions |
 | `mbuild test` | run `@test` functions, cached |
 | `mbuild check` | type check without linking |
 | `mbuild clean` | remove build output |

@@ -1,0 +1,70 @@
+// "mbuild/shell" in `mbuild shell` builds (generated from mbuild's
+// src/mbapi/shell_live.mettle). shell_point() runs mbsh_eval, whose body
+// each input at the prompt patches in and out again.
+
+import "std/file";
+
+struct MbshProbe {
+  x: int8;
+}
+
+var mbsh_seq: int64 = 0;
+
+fn mbsh_put(path: string, s: string) {
+  var tmp: string = path + ".tmp";
+  var fd: int64 = file_open(tmp, FILE_WRITE | FILE_CREATE | FILE_TRUNCATE);
+  if (fd < 0) {
+    return;
+  }
+  file_write_at(fd, (uint8*)s.chars, (int64)s.length, 0);
+  file_close(fd);
+  file_rename(tmp, path);
+}
+
+fn mbsh_q(s: string) -> string {
+  return "\"" + s + "\"";
+}
+
+fn mbsh_digit(d: int64) -> string {
+  if (d < 10) {
+    return "{d}";
+  }
+  if (d == 10) { return "a"; }
+  if (d == 11) { return "b"; }
+  if (d == 12) { return "c"; }
+  if (d == 13) { return "d"; }
+  if (d == 14) { return "e"; }
+  return "f";
+}
+
+fn mbsh_hex(n: int64) -> string {
+  if (n == 0) {
+    return "null";
+  }
+  var u: uint64 = (uint64)n;
+  var out: string = "";
+  while (u != (uint64)0) {
+    out = mbsh_digit((int64)(u % (uint64)16)) + out;
+    u = u / (uint64)16;
+  }
+  return "0x" + out;
+}
+
+//@printers
+
+fn mbsh_eval() {
+//@body
+}
+
+// Never true: keeps the helpers in the build, so a patch only replaces mbsh_eval.
+fn mbsh_keep() {
+  mbsh_put("", mbsh_q(mbsh_hex(0)));
+//@keep
+}
+
+export fn shell_point() {
+  if (mbsh_seq < 0) {
+    mbsh_keep();
+  }
+  mbsh_eval();
+}

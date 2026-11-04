@@ -402,6 +402,43 @@ A command named like a built-in can't be reached; `mbuild help` lists it as
 Relative paths are relative to the project root. What a command or hook
 starts with `mb_spawn` and doesn't stop is stopped when it returns.
 
+## mbuild shell
+
+`mbuild shell [BIN] [-- ARGS]` builds the program with `--live`, starts it
+and gives you a `mettle> ` prompt inside it. The program opts in with one
+call next to its `quiesce;`:
+
+```mettle
+import "mbuild/shell";
+
+  while (running) {
+    quiesce;
+    shell_point();
+    step();
+  }
+```
+
+Outside `mbuild shell` the import is an empty `shell_point()`, so the code
+builds everywhere. Each input runs once at the next `shell_point()`:
+
+| input | does |
+|---|---|
+| `world.pop + 1` | prints the value; a struct prints field by field |
+| `world.food = 1000;` | runs the statement, prints `ok` |
+| `fn harvest(pop: int32) -> int32 { ... }` | redefines `harvest` in the running program; `undo` takes it back |
+| `r` | patches in the files on disk (redefinitions dropped) |
+| `h NAME` / `i EXPR` | signature and doc comment / type and fields |
+| `:q`, Ctrl-D | quit; the program stops too |
+
+Globals and functions of every module are in scope; locals of running
+functions are not. Redefinitions go to a copy of the sources in
+`.mbuild/shell/tree`, never to `src/`. An input that doesn't answer within
+5 seconds (`MBUILD_SHELL_TIMEOUT`, ms) means the program never reached
+`shell_point()`. `mbuild shell --local` runs no program: each input is built
+into a small one that imports what the entry imports, and `var` statements
+are replayed before each input. Linux only for now; [the example](../examples/live)
+has a transcript.
+
 ## Hooks
 
 `fn hook_pre_build() -> int32` runs once per target and profile of every

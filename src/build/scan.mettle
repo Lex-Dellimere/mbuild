@@ -613,6 +613,9 @@ export struct ExportItem {
   name: string;
   sig: string;
   line: int64;
+  exported: bool;
+  spos: int64;          // source span of the whole declaration (scan_decls)
+  epos: int64;
 }
 
 export struct ExportList {
@@ -665,6 +668,9 @@ fn scx_new_export(l: ExportList*) -> ExportItem* {
   it->name = s_empty();
   it->sig = s_empty();
   it->line = 0;
+  it->exported = true;
+  it->spos = 0;
+  it->epos = 0;
   l->n = l->n + 1;
   return it;
 }
@@ -731,9 +737,26 @@ fn scx_body_parts(lx: ScxLex*, open: int64, sep: int32) -> StrList* {
   return parts;
 }
 
+// The `}` closing the brace at token open (the last token when unclosed).
+fn scx_close(lx: ScxLex*, open: int64) -> int64 {
+  var depth: int64 = lx->toks[open].depth;
+  var j: int64 = open + 1;
+  while (j < lx->n) {
+    if (lx->toks[j].kind == 4 && lx->toks[j].depth == depth && s_byte(lx->toks[j].text, 0) == 125) {
+      return j;
+    }
+    j = j + 1;
+  }
+  return lx->n - 1;
+}
+
 // Token i is a top-level `export`; adds the declaration it introduces.
 fn scx_export(lx: ScxLex*, i: int64, l: ExportList*) {
-  var j: int64 = i + 1;
+  scx_decl(lx, i + 1, i, l);
+}
+
+// Token j is a declaration keyword, i the first token of the declaration.
+fn scx_decl(lx: ScxLex*, j: int64, i: int64, l: ExportList*) {
   if (scx_kind(lx, j) != 1 || scx_kind(lx, j + 1) != 1) {
     return;
   }
@@ -746,6 +769,12 @@ fn scx_export(lx: ScxLex*, i: int64, l: ExportList*) {
     f->name = s_dup(lx->toks[j + 1].text);
     f->sig = scx_text(lx, j + 2, fend);
     f->line = line;
+    f->spos = lx->toks[i].spos;
+    if (scx_punct(lx, fend, 123)) {
+      f->epos = lx->toks[scx_close(lx, fend)].epos;
+    } else if (fend < lx->n) {
+      f->epos = lx->toks[fend].epos;
+    }
     return;
   }
   if (s_eq(w, "extern")) {
@@ -826,6 +855,35 @@ export fn scan_exports(text: string) -> ExportList* {
     var t: ScxTok* = &lx->toks[i];
     if (t->kind == 1 && t->depth == 0 && s_eq(t->text, "export")) {
       scx_export(lx, i, l);
+    }
+    i = i + 1;
+  }
+  free(lx->toks);
+  free(lx);
+  return l;
+}
+
+// Every top-level declaration, exported or not, in file order; a fn also
+// gets the source span from its first token (`export` included) to its `}`.
+export fn scan_decls(text: string) -> ExportList* {
+  var l: ExportList* = new ExportList;
+  l->items = (ExportItem*)0;
+  l->n = 0;
+  var lx: ScxLex* = scx_tokenize(text);
+  var i: int64 = 0;
+  while (i < lx->n) {
+    var t: ScxTok* = &lx->toks[i];
+    if (t->kind == 1 && t->depth == 0) {
+      var after: bool = i > 0 && (scx_is(lx, i - 1, 1, "export") || scx_is(lx, i - 1, 1, "extern"));
+      if (s_eq(t->text, "export")) {
+        scx_export(lx, i, l);
+      } else if (!after && (s_eq(t->text, "fn") || s_eq(t->text, "struct") || s_eq(t->text, "enum") || s_eq(t->text, "var") || s_eq(t->text, "const"))) {
+        var before: int64 = l->n;
+        scx_decl(lx, i, i, l);
+        if (l->n > before) {
+          l->items[before].exported = false;
+        }
+      }
     }
     i = i + 1;
   }

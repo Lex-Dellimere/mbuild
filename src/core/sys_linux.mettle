@@ -145,6 +145,64 @@ export fn sys_isatty(fd: int32) -> bool {
   return lx_isatty(fd) != 0;
 }
 
+// stdin's termios before sys_term_raw (x86-64: 60 bytes).
+var g_lx_term: uint8* = (uint8*)0;
+
+// Keys one at a time without echo, Ctrl-C as a byte; output processing
+// stays on. False when stdin is no terminal.
+export fn sys_term_raw() -> bool {
+  if (g_lx_term == (uint8*)0) {
+    g_lx_term = (uint8*)malloc(64);
+  }
+  if (syscall(16, 0, 0x5401, g_lx_term) != 0) {   // ioctl TCGETS
+    return false;
+  }
+  var t: uint8* = (uint8*)malloc(64);
+  defer free(t);
+  memcpy((rawptr)t, (rawptr)g_lx_term, 64);
+  t[1] = t[1] & (uint8)0xFA;   // c_iflag: ICRNL, IXON off
+  t[12] = t[12] & (uint8)0xF4; // c_lflag: ISIG, ICANON, ECHO off
+  t[13] = t[13] & (uint8)0x7F; // IEXTEN off
+  t[17 + 6] = (uint8)1;        // VMIN
+  t[17 + 5] = (uint8)0;        // VTIME
+  return syscall(16, 0, 0x5402, t) == 0;          // TCSETS
+}
+
+export fn sys_term_cooked() {
+  if (g_lx_term != (uint8*)0) {
+    syscall(16, 0, 0x5402, g_lx_term);
+  }
+}
+
+// True when stdin has input within ms.
+export fn sys_stdin_ready(ms: int64) -> bool {
+  var fds: int32[2];
+  fds[0] = 0;
+  fds[1] = 1;                                     // POLLIN
+  return syscall(7, &fds[0], 1, ms) > 0 && ((fds[1] >> 16) & 0x19) != 0;
+}
+
+// One byte from stdin, unbuffered; -1 at its end.
+export fn sys_read_byte() -> int32 {
+  var b: uint8[1];
+  b[0] = (uint8)0;
+  if (syscall(0, 0, &b[0], 1) != 1) {
+    return -1;
+  }
+  return (int32)b[0];
+}
+
+export fn sys_pid_alive(pid: int64) -> bool {
+  return pid > 0 && syscall(62, pid, 0) == 0;
+}
+
+// SIGTERM.
+export fn sys_kill(pid: int64) {
+  if (pid > 0) {
+    syscall(62, pid, 15);
+  }
+}
+
 fn lx_rd32(p: uint8*, off: int64) -> int64 {
   var v: int64 = 0;
   var i: int64 = 3;

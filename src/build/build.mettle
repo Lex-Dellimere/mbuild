@@ -2433,6 +2433,78 @@ fn bx_live_cmd(s: BxSess*, u: BxUnit*, nl: NatLink*, outp: string, first: bool) 
   return c;
 }
 
+// What `mbuild shell` needs of the bin's build: its compiler with the
+// build's flags and -I (no input, no -o), and the project files it is made of.
+export struct ShellBuild {
+  p: Project*;
+  m: Mettle*;
+  base: Cmd*;          // cwd is the root
+  exe: string;         // build/<host>/<profile>/shell/BIN
+  entry: string;       // the bin's entry, absolute
+  files: StrList*;     // its sources inside the project, absolute
+  label: string;       // "app (linux, debug)"
+  deps: StrList*;      // directories of the resolved packages
+  includes: StrList*;  // the -I directories, absolute
+}
+
+export fn build_shell_open(p: Project*) -> ShellBuild* {
+  var bs: BinSet* = bx_run_bin(p, "shell");
+  if (p->opts->targets->len > 0 && !(p->opts->targets->len == 1 && (s_eq(sl_get(p->opts->targets, 0), sys_os()) || s_eq(sl_get(p->opts->targets, 0), "host")))) {
+    fail("mbuild shell runs on the host target only (" + sys_os() + ")");
+  }
+  var s: BxSess* = bx_sess(p, sl_of(sys_os()));
+  g_bx_sess = s;
+  var us: BxUnits* = bx_bin_units(s, bs);
+  g_bx_units = us;
+  bx_prepare(s, us, s_empty());
+  var u: BxUnit* = us->items[0];
+  if (!s_eq(u->entry, u->file)) {
+    fail_hint("mbuild shell can't build " + u->b->name + " yet: it goes through a generated entry (rules or components)", "mbuild live works on it");
+  }
+  var t: TargetCtx* = bx_targetctx(s, 0);
+  g_bx_t = t;
+  var nl: NatLink* = nat_prepare(p, s->ds, t);
+  s->cur_nl = nl;
+  t->out_dir = t->out_dir + "/shell";
+  fs_mkdirs(t->out_dir);
+  bx_copy_beside(nl, t);
+  var sb: ShellBuild* = new ShellBuild;
+  sb->p = p;
+  sb->m = u->m;
+  sb->exe = t->out_dir + "/" + u->b->name + target_exe_ext(t->target);
+  sb->entry = u->file;
+  sb->label = bx_label(s, u->b, t);
+  sb->files = sl_new();
+  var i: int64 = 0;
+  while (i < u->g->files->len) {
+    var f: string = sl_get(u->g->files, i);
+    if (p_has_prefix_dir(f, p->root) && !p_has_prefix_dir(f, p->state_dir) && !p_has_prefix_dir(f, p->root + "/build")) {
+      sl_push(sb->files, f);
+    }
+    i = i + 1;
+  }
+  sb->deps = sl_new();
+  i = 0;
+  while (i < s->ds->n) {
+    sl_push(sb->deps, s->ds->mods[i].dir);
+    i = i + 1;
+  }
+  sb->includes = sl_new();
+  if (slen(bx_unit_gen(u)) > 0) {
+    sl_push(sb->includes, bx_unit_gen(u));
+  }
+  sl_push(sb->includes, s->ds->include_dir);
+  var c: Cmd* = tc_cmd(u->m);
+  var st: Settings* = bx_add_flags(c, s, u);
+  free(st);
+  bx_add_include(c, p, s->ds, bx_unit_gen(u));
+  cmd_args(c, nl->mettle_args);
+  sl_extend(c->env, nl->env);
+  c->cwd = p->root;
+  sb->base = c;
+  return sb;
+}
+
 fn bx_walk_owned(root: string, rel: string, skip: StrList*, found: StrList*) {
   var dir: string = root;
   if (slen(rel) > 0) {
@@ -4594,6 +4666,13 @@ fn bx_init_cmds() {
   bx_ex("mbuild live", "");
   bx_ex("mbuild use render=gl", "in another terminal: switch a component");
   bx_note("saved files patch the running program at its next `quiesce;`. host target only.");
+  bx_def("shell", "a prompt inside the running program", "mbuild shell [BIN] [-p PROFILE] [--local] [-- ARGS...]", "project.md");
+  bx_ex("mbuild shell", "build, start, then type at `mettle> `");
+  bx_ex("mbuild shell --local", "no program: each input runs on its own");
+  bx_fl("--local", "evaluate in a small program that imports the project's code");
+  bx_note("the program calls `shell_point();` (import \"mbuild/shell\") next to its `quiesce;`; elsewhere it is an empty function.");
+  bx_note("inputs: an expression prints its value, a statement runs, `fn NAME(...) {{...}` redefines NAME; `h NAME`, `i EXPR`, `r`, `undo`, `:q`. type `help` at the prompt.");
+  bx_note("globals and functions are in scope, locals of running functions are not. Linux only.");
   bx_def("test", "run @test functions and test programs", "mbuild test [NAMES | FILES...] [--filter S] [-r]", "project.md");
   bx_ex("mbuild test", "every file with an @test, then every test program");
   bx_ex("mbuild test --filter parse", "tests and test programs whose names contain parse");

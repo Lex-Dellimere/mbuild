@@ -11,6 +11,7 @@ import "model/manifest";
 import "model/project";
 import "build/build";
 import "build/complete";
+import "build/shell";
 import "pkg/deps";
 import "pkg/search";
 import "pkg/info";
@@ -266,6 +267,7 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "build")) { return build_cmd_build(p); }
   if (s_eq(command, "run")) { return build_cmd_run(p); }
   if (s_eq(command, "live")) { return build_cmd_live(p); }
+  if (s_eq(command, "shell")) { return shell_cmd(p); }
   if (s_eq(command, "test")) { return build_cmd_test(p); }
   if (s_eq(command, "check")) { return build_cmd_check(p); }
   if (s_eq(command, "clean")) { return build_cmd_clean(p); }
