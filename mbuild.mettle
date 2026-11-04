@@ -8,6 +8,9 @@ fn project() {
   mb_set("optimize", "full");
 }
 
+fn deps() {
+}
+
 // install: build a release mbuild for this machine and copy it to --to DIR (default ~/.local/bin)
 fn cmd_install(a: MbArgs*) -> int32 {
   var dir: string = mb_opt(a, "--to", mb_home() + "/.local/bin");

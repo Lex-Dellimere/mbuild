@@ -24,6 +24,9 @@ expect_has() {
 expect_no() {
   if printf '%s\n' "$2" | grep -qF -- "$3"; then bad "$1 (unwanted: $3)" "$2"; else ok "$1"; fi
 }
+# deps_of FILE: the body of fn deps()
+deps_of() { sed -n '/^fn deps() {/,/^}/p' "$1"; }
+proj_of() { sed -n '/^fn project() {/,/^}/p' "$1"; }
 file_has() {
   if [ -f "$2" ] && grep -qF -- "$3" "$2"; then ok "$1"; else bad "$1 ($2 lacks: $3)" "$(cat "$2" 2>/dev/null)"; fi
 }
@@ -81,6 +84,9 @@ file_has "template variables" site/src/main.mettle "// site, started from webfw 
 file_has "mbuild.mettle depends on webfw" site/mbuild.mettle "mb_dep_path(\"webfw\", \"$W\");"
 file_has "mbuild.mettle depends on sqlite" site/mbuild.mettle 'mb_dep("sqlite", "v1.2.0");'
 file_has "mbuild.mettle release profile" site/mbuild.mettle 'mb_profile("release");'
+expect_has "new: webfw in fn deps()" "$(deps_of site/mbuild.mettle)" "mb_dep_path(\"webfw\", \"$W\");"
+expect_has "new: sqlite in fn deps()" "$(deps_of site/mbuild.mettle)" 'mb_dep("sqlite", "v1.2.0");'
+expect_no "new: no deps in fn project()" "$(proj_of site/mbuild.mettle)" "mb_dep"
 file_has "mbuild.mettle release setting" site/mbuild.mettle 'mb_set("optimize", "full");'
 file_has "mbuild.mettle cmd_serve" site/mbuild.mettle 'return mb_mbuild("run -- --port 9000");'
 file_lacks "no example command" site/mbuild.mettle "cmd_hello"
@@ -137,6 +143,7 @@ out=$("$D" . init --from "$W" --yes 2>&1); rc=$?
 expect_line "init --from without mbuild.mettle runs plain init" "$out" "     Created mbuild.mettle (package \`bare\`)"
 file_has "plain init keeps the example command" mbuild.mettle "cmd_hello"
 file_has "then applies the plan" mbuild.mettle 'mb_dep("sqlite", "v1.2.0");'
+expect_has "init --from: the plan's deps in fn deps()" "$(deps_of mbuild.mettle)" 'mb_dep("sqlite", "v1.2.0");'
 file_has "plain init: .gitignore" .gitignore "/mbuild.local.mettle"
 cd "$P" || exit 1
 mkdir -p legacy
@@ -294,6 +301,9 @@ import "mbuild/api";
 
 fn project() {
 mb_package("tapp", "0.1.0");
+}
+
+fn deps() {
 mb_dep("textfmt", "v0.1.0");
 }
 EOF
@@ -309,7 +319,7 @@ EOF
   expect_line "cli agents --all: strutil" "$out" "== strutil v1.1.0 (.mbuild/deps/strutil/AGENT.rules)"
   cd "$P" || exit 1
   mkdir -p toff/src
-  sed 's/mb_dep("textfmt", "v0.1.0");/mb_dep("textfmt", "v0.1.0");\n  mb_agents(false);/' tapp/mbuild.mettle > toff/mbuild.mettle
+  sed 's/mb_package("tapp", "0.1.0");/mb_package("tapp", "0.1.0");\n  mb_agents(false);/' tapp/mbuild.mettle > toff/mbuild.mettle
   cp tapp/src/main.mettle toff/src/
   cd toff || exit 1
   out=$("$MB" build 2>&1)

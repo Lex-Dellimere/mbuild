@@ -46,6 +46,7 @@ mkdir -p "$W/hello" && cd "$W/hello"
 mb init
 check "init transcript" sh -c 'grep -qF "Created mbuild.mettle (package \`hello\`)" "$0/last.out" && grep -qF "Created src/main.mettle" "$0/last.out" && grep -qF "Updated .gitignore" "$0/last.out" && grep -qF "next: mbuild run" "$0/last.out"' "$S"
 check "gitignore lines" grep -qx "/mbuild.local.mettle" .gitignore
+check "init writes an empty fn deps() after fn project()" sh -c '[ "$(sed -n 4,9p mbuild.mettle)" = "$(printf "fn project() {\n  mb_package(\"hello\", \"0.1.0\");\n}\n\nfn deps() {\n}")" ]'
 mb run
 check "run prints the greeting" has "Hello from hello!"
 mb hello bob
@@ -243,6 +244,7 @@ mb publish --to "$S/reg-$mode"
 check "publish without init.rules" has "strx cannot be published without init.rules (mbuild init --package writes one)"
 rm mbuild.mettle
 mb init strx --package
+check "init --package: fn deps()" grep -qx "fn deps() {" mbuild.mettle
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("strx", "1.0.0");\n}\n' > mbuild.mettle
 rm -f src/main.mettle
 printf '# strx\n# >>> mbuild: AGENT.rules of this project'"'"'s dependencies (generated)\n# x\n# <<< mbuild\n' >> AGENT.rules
