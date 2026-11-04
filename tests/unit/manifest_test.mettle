@@ -387,7 +387,81 @@ fn test_round3() {
   t_eq("package: no warnings", sl_join(inc->warnings, "|"), "");
 }
 
+fn test_basics() {
+  var m: Manifest* = man_of("[package]\nname = \"app\"\nversion = \"0.1.0\"\n[build]\ntargets = [\"linux\", \"windows\"]\nflags = [\"--safe\"]\nprelude = false\n[bin.app]\nmain = \"src/main.mettle\"\nflags = []\n[c]\nsources = [\"csrc\"]\nlibs = [\"m\"]\n[link]\nlibs = [\"raylib\"]\n[link.windows]\n");
+  t_eq("basics: valid", m->error, "");
+  t_eq("basics: no warnings", sl_join(m->warnings, " / "), "");
+  t_eq("basics: package", m->name + " " + m->version, "app 0.1.0");
+  t_eq("basics: targets/flags", sl_join(m->targets, ",") + " " + sl_join(m->flags, ","), "linux,windows --safe");
+  t_ok("basics: prelude", !m->prelude);
+  t_ok("basics: one bin", m->nbins == 1);
+  t_eq("basics: bin", man_bin(m, 0)->name + " " + man_bin(m, 0)->main, "app src/main.mettle");
+  t_eq("basics: os list", sl_join(man_os_list(m, "link.libs", "linux"), ","), "raylib");
+  t_ok("basics: has c", man_has_c(m));
+
+  var d: Manifest* = man_of(pkg("[profile.fast]\ncflags = [\"-O2\", \"-DFAST\"]\n[link]\nlibs = [\"a\"]\nlinux.libs = [\"b\"]\n[link.windows]\nlibs = [\"w\"]\n"));
+  t_eq("basics: profile cflags", sl_join(man_profile_cflags(d, "fast"), ","), "-O2,-DFAST");
+  t_eq("basics: profile cflags absent", sl_join(man_profile_cflags(d, "release"), ","), "");
+  t_eq("basics: profile cflags unknown profile", sl_join(man_profile_cflags(d, "nope"), ","), "");
+  t_eq("basics: os list linux", sl_join(man_os_list(d, "link.libs", "linux"), ","), "a,b");
+  t_eq("basics: os list windows", sl_join(man_os_list(d, "link.libs", "windows"), ","), "a,w");
+  t_ok("basics: no c", !man_has_c(d));
+  t_ok("basics: no bins", d->nbins == 0);
+
+  var cases: StrList* = sl_new();
+  defer free(cases);
+  var want: StrList* = sl_new();
+  defer free(want);
+  sl_push(cases, "[package]\nversion = \"1.0.0\"\n");
+  sl_push(want, "/p/mbuild.toml:1: [package] name is required");
+  sl_push(cases, "[package]\nname = 5\n");
+  sl_push(want, "/p/mbuild.toml:2: [package] name must be a string, not an integer");
+  sl_push(cases, pkg("[build]\ntargets = [\"linux\", 3]\n"));
+  sl_push(want, "/p/mbuild.toml:4: [build] targets must be an array of strings");
+  sl_push(cases, pkg("[build]\ntargets = [\"macos\"]\n"));
+  sl_push(want, "/p/mbuild.toml:4: unknown target 'macos' (expected \"linux\" or \"windows\")");
+  sl_push(cases, pkg("[build]\nprelude = \"yes\"\n"));
+  sl_push(want, "/p/mbuild.toml:4: [build] prelude must be true or false, not a string");
+  sl_push(cases, pkg("[dependencies]\nl = {{ path = \"../l\", version = \"v1.0.0\" }\n"));
+  sl_push(want, "/p/mbuild.toml:4: dependency 'l' has both a path and a version");
+  sl_push(cases, pkg("[dependencies]\nstrutil = true\n"));
+  sl_push(want, "/p/mbuild.toml:4: dependency 'strutil' must be a version string or an inline table, not a boolean");
+  sl_push(cases, pkg("[bin.tool]\nflags = 3\n"));
+  sl_push(want, "/p/mbuild.toml:4: [bin.tool] flags must be an array of strings, not an integer");
+  sl_push(cases, pkg("[c]\nsources = \"csrc\"\ncflags = [1]\n"));
+  sl_push(want, "/p/mbuild.toml:5: [c] cflags must be an array of strings");
+  sl_push(cases, pkg("[profile.fast]\ncflags = 3\n"));
+  sl_push(want, "/p/mbuild.toml:4: [profile.fast] cflags must be an array of strings, not an integer");
+  sl_push(cases, pkg("name = \"y\"\n"));
+  sl_push(want, "/p/mbuild.toml:3: duplicate key 'name' (first set on line 2)");
+  var i: int64 = 0;
+  while (i < cases->len) {
+    t_eq("basics: error " + s_int(i), man_of(sl_get(cases, i))->error, sl_get(want, i));
+    i = i + 1;
+  }
+
+  var w: Manifest* = man_of(pkg("nmae = \"y\"\n[buidl]\nflags = []\n[profiles.release]\n[bin]\nmain = \"m\"\n[c.macos]\n[zzz]\n[link]\nlib = []\n[dependencies]\nk = {{ path = \"p\", verison = \"v1\" }\n"));
+  t_eq("basics: warnings valid", w->error, "");
+  var ww: StrList* = sl_new();
+  defer free(ww);
+  sl_push(ww, "/p/mbuild.toml:14: unknown field 'verison' in dependency 'k' (did you mean 'version'?)");
+  sl_push(ww, "/p/mbuild.toml:3: unknown key 'nmae' in [package] (did you mean 'name'?)");
+  sl_push(ww, "/p/mbuild.toml:4: unknown section [buidl] (did you mean [build]?)");
+  sl_push(ww, "/p/mbuild.toml:6: unknown section [profiles.release] (did you mean [profile.release]?)");
+  sl_push(ww, "/p/mbuild.toml:7: unknown section [bin] (did you mean [bin.NAME]?)");
+  sl_push(ww, "/p/mbuild.toml:9: unknown section [c.macos]");
+  sl_push(ww, "/p/mbuild.toml:10: unknown section [zzz]");
+  sl_push(ww, "/p/mbuild.toml:12: unknown key 'lib' in [link] (did you mean 'libs'?)");
+  t_eq("basics: warnings", sl_join(w->warnings, "\n"), sl_join(ww, "\n"));
+
+  var z: Manifest* = man_empty("/q", "q");
+  defer free(z);
+  t_eq("basics: empty", z->name + " " + z->error, "q ");
+  t_ok("basics: edit distance", man_edit_distance("kitten", "sitting") == 3 && man_edit_distance("", "abc") == 3);
+}
+
 fn run_all() -> int64 {
+  test_basics();
   test_settings();
   test_replace_and_removed();
   test_local();

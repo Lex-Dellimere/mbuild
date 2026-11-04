@@ -1,0 +1,88 @@
+// semver_test: version parsing, ordering and compatibility lines.
+//   tools/mcheck.sh tests/unit/semver_test.mettle --run
+
+import "std/io";
+import "../../src/core/base";
+import "../../src/model/semver";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_ok(name: string, ok: bool) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+  }
+}
+
+fn t_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+fn test_semver() {
+  var v: SemVer = sv_parse("v1.2.3-rc.1+build.5");
+  t_ok("sv: full parse", v.ok && v.major == 1 && v.minor == 2 && v.patch == 3 && s_eq(v.pre, "rc.1"));
+  v = sv_parse("1.2.3");
+  t_ok("sv: no v", v.ok && v.patch == 3 && slen(v.pre) == 0);
+  v = sv_parse("v1.2");
+  t_ok("sv: two parts", v.ok && v.minor == 2 && v.patch == 0);
+  v = sv_parse("v1");
+  t_ok("sv: one part", v.ok && v.major == 1 && v.minor == 0);
+  var bad: StrList* = s_split("main,latest,,v,v1.2.3.4,1.x,v1.-2,1.0.0-,1.0.0+,1.0.0-a..b,abcdef0,v1.2.3-a_b", 44);
+  defer free(bad);
+  var i: int64 = 0;
+  while (i < bad->len) {
+    t_ok("sv: rejects '" + sl_get(bad, i) + "'", !sv_is(sl_get(bad, i)));
+    i = i + 1;
+  }
+  var order: StrList* = s_split("0.0.1,0.1.0,1.0.0-0,1.0.0-2,1.0.0-10,1.0.0-alpha,1.0.0-alpha.1,1.0.0-alpha.beta,1.0.0-beta,1.0.0-beta.2,1.0.0-beta.11,1.0.0-rc.1,1.0.0,1.0.1,1.1.0,1.10.0,2.0.0,10.0.0", 44);
+  defer free(order);
+  i = 0;
+  while (i + 1 < order->len) {
+    var a: string = sl_get(order, i);
+    var b: string = sl_get(order, i + 1);
+    t_ok("sv: " + a + " < " + b, sv_cmp(a, b) < 0 && sv_cmp(b, a) > 0);
+    i = i + 1;
+  }
+  t_ok("sv: equal ignoring v and build", sv_cmp("v1.2.0+abc", "1.2") == 0);
+  t_ok("sv: invalid below valid", sv_cmp("main", "v0.0.1") < 0);
+  t_eq("sv: max stable", sv_max(s_split("v1.0.0,v2.0.0-rc.1,v1.10.0,main,v1.9.9", 44)), "v1.10.0");
+  t_eq("sv: max pre-release only", sv_max(s_split("v2.0.0-rc.1,v2.0.0-rc.2,junk", 44)), "v2.0.0-rc.2");
+  t_eq("sv: max none", sv_max(s_split("main,dev", 44)), "");
+  t_eq("sv: max empty", sv_max(sl_new()), "");
+  t_eq("sv: canonical 1.2", sv_canonical("1.2"), "v1.2.0");
+  t_eq("sv: canonical pre", sv_canonical("v1.0.0-rc.1+b5"), "v1.0.0-rc.1");
+  t_eq("sv: canonical bad", sv_canonical("main"), "");
+
+  var lin: StrList* = s_split("v1.4.2=v1,v0.3.1=v0.3,v2.0.0-rc.1=v2,1.2=v1,v0.0.4=v0.0,main=,v10.1.0+b=v10,=", 44);
+  defer free(lin);
+  i = 0;
+  while (i < lin->len) {
+    var pair: StrList* = s_split(sl_get(lin, i), 61);
+    t_eq("sv: line of '" + sl_get(pair, 0) + "'", sv_line(sl_get(pair, 0)), sl_get(pair, 1));
+    free(pair);
+    i = i + 1;
+  }
+}
+
+fn main() -> int32 {
+  test_semver();
+  say("");
+  say("semver_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  flush_out();
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}

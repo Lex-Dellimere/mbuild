@@ -1,0 +1,288 @@
+// scan_test: imports, strings, externs, tests and exports as the scanner reads them.
+//   tools/mcheck.sh tests/unit/scan_test.mettle --run
+
+import "std/io";
+import "../../src/core/base";
+import "../../src/build/scan";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_ok(name: string, ok: bool) {
+  if (ok) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+  }
+}
+
+fn t_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+fn t_int(name: string, got: int64, want: int64) {
+  t_eq(name, s_int(got), s_int(want));
+}
+
+fn lines_of(l: StrList*) -> string {
+  return sl_join(l, "\n");
+}
+
+// In scanner sources ` stands for " and $ for an opening brace.
+fn src_of(s: string) -> string {
+  return s_replace_byte(s_replace_byte(s, 96, 34), 36, 123);
+}
+
+fn imports_of(r: ScanResult*) -> string {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < r->nimports) {
+    var ir: ImportRef* = scan_import(r, i);
+    var g: string = ir->guard;
+    if (slen(g) > 0) {
+      g = " if " + g;
+    }
+    sl_push(l, ir->path + g + " @" + s_int(ir->line));
+    i = i + 1;
+  }
+  var joined: string = sl_join(l, "; ");
+  free(l);
+  return joined;
+}
+
+fn externs_of(r: ScanResult*) -> string {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < r->externs->len) {
+    sl_push(l, sl_get(r->extern_names, i) + "=" + sl_get(r->externs, i) + " @" + sl_get(r->extern_lines, i));
+    i = i + 1;
+  }
+  var joined: string = sl_join(l, "; ");
+  free(l);
+  return joined;
+}
+
+fn test_scan_imports() {
+  var l: StrList* = sl_new();
+  defer free(l);
+  sl_push(l, "import `std/io`;");
+  sl_push(l, "import `lib/a` as a;");
+  sl_push(l, "import $ x, y } from `lib/b` if linux;");
+  sl_push(l, "import `sys_windows` if windows;");
+  sl_push(l, "// import `no/comment`;");
+  sl_push(l, "/* import `no/block` /* nested */ import `no/block2` */ import `after/block`;");
+  sl_push(l, "var s: string = `import \\`no/str\\``;");
+  sl_push(l, "/* multi");
+  sl_push(l, "   line */");
+  sl_push(l, "import `posix_only` if posix;");
+  sl_push(l, "import `mac` if macos");
+  sl_push(l, "var page: string = import_str `data/page.html`;");
+  sl_push(l, "import `github.com/x/y/z`;");
+  var r: ScanResult* = scan_source(src_of(lines_of(l)));
+  defer free(r);
+  t_eq("scan: imports", imports_of(r),
+       "std/io @1; lib/a @2; lib/b if linux @3; sys_windows if windows @4; after/block @6; posix_only if posix @10; mac if macos @11; github.com/x/y/z @13");
+  t_eq("scan: embeds", sl_join(r->embeds, ",") + " @" + sl_join(r->embed_lines, ","), "data/page.html @12");
+  t_ok("scan: no main, no tests", !r->has_main && !r->has_tests);
+}
+
+fn test_scan_strings() {
+  var l: StrList* = sl_new();
+  defer free(l);
+  sl_push(l, "var a: string = `$f(`import \\`x\\``)} $$ import `;");
+  sl_push(l, "import `one`;");
+  sl_push(l, "var b: string = `$g(`}`)} import \\`z\\``; import `two`;");
+  sl_push(l, "var c: string = `$m[$1}]} $ $k: `}`}.k } $$`; import `three`;");
+  sl_push(l, "var d: char = '`'; import `four`; var e: char = '\\''; import `five`;");
+  sl_push(l, "var f: char = '$'; import `six`;");
+  sl_push(l, "var g: string = `a\\\\`; import `seven`;");
+  sl_push(l, "var h: string = `line1");
+  sl_push(l, "line2 import `no`");
+  sl_push(l, "`; import `eight`;");
+  var r: ScanResult* = scan_source(src_of(lines_of(l)));
+  defer free(r);
+  t_eq("scan: interpolation, chars, escapes", imports_of(r),
+       "one @2; two @3; three @4; four @5; five @5; six @6; seven @7; eight @10");
+
+  var fb: ScanResult* = scan_source(src_of("var s: string = `$ `; import `fallback`;\n"));
+  defer free(fb);
+  t_eq("scan: unterminated interpolation falls back", imports_of(fb), "fallback @1");
+}
+
+fn test_scan_asm_externs() {
+  var l: StrList* = sl_new();
+  defer free(l);
+  sl_push(l, "extern fn puts(msg: cstring) -> int32;");
+  sl_push(l, "extern fn c_strlen(s: cstring) -> int64 = `strlen`;");
+  sl_push(l, "export extern fn rand() -> int32 = `rand`;");
+  sl_push(l, "extern fn Win_BitBlt(");
+  sl_push(l, "  a: int64,");
+  sl_push(l, "  b: int32) -> int32 = `BitBlt`;");
+  sl_push(l, "extern fn eff() -> int32 with Render");
+  sl_push(l, "  = `eff_sym`;");
+  sl_push(l, "extern var g_counter: int32;");
+  sl_push(l, "extern var g_flag: int32 = `c_side_flag`;");
+  sl_push(l, "extern kernel(block = 256) vadd(a: float32*, n: int32);");
+  sl_push(l, "extern fn nolink(a: int32)");
+  sl_push(l, "fn after() -> int32 $");
+  sl_push(l, "  asm $ mov rax, 1 ; import `no` extern fn x() = `no`");
+  sl_push(l, "    `}` '$' /* } */ }");
+  sl_push(l, "  extern fn inner(x: fn(int32) -> int32) -> int32 = `inner_sym`;");
+  sl_push(l, "  var s: string = `= \\`not\\``;");
+  sl_push(l, "  return 0;");
+  sl_push(l, "}");
+  sl_push(l, "import `after_asm`;");
+  sl_push(l, "extern fn arr(p: int32[4]) -> int32");
+  sl_push(l, "var q: string = `x`;");
+  var r: ScanResult* = scan_source(src_of(lines_of(l)));
+  defer free(r);
+  t_eq("scan: externs", externs_of(r),
+       "puts=puts @1; c_strlen=strlen @2; rand=rand @3; Win_BitBlt=BitBlt @4; eff=eff_sym @7; g_counter=g_counter @9; g_flag=c_side_flag @10; nolink=nolink @12; inner=inner_sym @16; arr=arr @21");
+  t_eq("scan: import after asm", imports_of(r), "after_asm @20");
+}
+
+fn scan_tests_of(src: string) -> bool {
+  var r: ScanResult* = scan_source(src_of(src));
+  var has: bool = r->has_tests;
+  free(r);
+  return has;
+}
+
+fn test_scan_main_tests() {
+  var l: StrList* = sl_new();
+  defer free(l);
+  sl_push(l, "struct S $ x: int32; }");
+  sl_push(l, "impl S $");
+  sl_push(l, "  fn main() -> int32 $ return 0; }");
+  sl_push(l, "}");
+  sl_push(l, "// fn main() and @test");
+  sl_push(l, "var s: string = `fn main @test`;");
+  var r: ScanResult* = scan_source(src_of(lines_of(l)));
+  defer free(r);
+  t_ok("scan: nested fn main not counted", !r->has_main);
+  t_ok("scan: @test in comment/string not counted", !r->has_tests);
+  sl_push(l, "@test fn t1() -> int32 $ return 0; }");
+  sl_push(l, "export fn main() -> int32 $ return 0; }");
+  var r2: ScanResult* = scan_source(src_of(lines_of(l)));
+  defer free(r2);
+  t_ok("scan: top-level fn main", r2->has_main);
+  t_ok("scan: @test", r2->has_tests);
+
+  t_ok("scan: @test fn on one line", scan_tests_of("@test fn t() $ }"));
+  t_ok("scan: @test export fn", scan_tests_of("@test export fn t() $ }"));
+  t_ok("scan: @test then fn on the next line not counted", !scan_tests_of("@test\nfn t() $ }"));
+  t_ok("scan: @test @pure then fn on the next line not counted", !scan_tests_of("@test @pure\nfn t() $ }"));
+  t_ok("scan: @test /* c */ fn", scan_tests_of("@test /* c */ fn t() $ }"));
+  t_ok("scan: @pure @test fn", scan_tests_of("@pure @test fn t() $ }"));
+  t_ok("scan: @test @inline! fn", scan_tests_of("@test @inline! fn t() $ }"));
+  t_ok("scan: @test before struct not counted", !scan_tests_of("@test struct S $ x: int32; }"));
+  t_ok("scan: @test before extern not counted", !scan_tests_of("@test extern fn f() -> int32;"));
+  t_ok("scan: export @test not counted", !scan_tests_of("export @test fn t() $ }"));
+  t_ok("scan: @test @rule not counted", !scan_tests_of("@test @rule fn t() $ }"));
+  t_ok("scan: @unroll(2) @test not counted", !scan_tests_of("@unroll(2) @test fn t() $ }"));
+  t_ok("scan: @test @test not counted", !scan_tests_of("@test @test fn t() $ }"));
+  t_ok("scan: unknown decorator not counted", !scan_tests_of("@bogus @test fn t() $ }"));
+  t_ok("scan: @test inside a body not counted", !scan_tests_of("fn f() $ @test fn t() $ } }"));
+
+  t_ok("guard: none", scan_guard_active("", "windows"));
+  t_ok("guard: linux on linux", scan_guard_active("linux", "linux"));
+  t_ok("guard: posix on linux", scan_guard_active("posix", "linux"));
+  t_ok("guard: posix not on windows", !scan_guard_active("posix", "windows"));
+  t_ok("guard: windows", scan_guard_active("windows", "windows") && !scan_guard_active("windows", "linux"));
+  t_ok("guard: macos never", !scan_guard_active("macos", "linux") && !scan_guard_active("macos", "windows"));
+}
+
+fn exports_of(src: string) -> string {
+  var l: ExportList* = scan_exports(src_of(src));
+  var out_l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < l->n) {
+    var it: ExportItem* = scan_export(l, i);
+    sl_push(out_l, it->kind + " " + it->name + "|" + it->sig + " @" + s_int(it->line));
+    i = i + 1;
+  }
+  var joined: string = sl_join(out_l, "\n");
+  free(out_l);
+  free(l);
+  return joined;
+}
+
+fn test_scan_exports() {
+  var a: StrList* = sl_new();
+  defer free(a);
+  sl_push(a, "export struct AlPair $ a: int32; b: int32; }");
+  sl_push(a, "export fn al_add(a: int32, b: int32, c: int32) -> int32 $ return a + b + c; }");
+  sl_push(a, "export fn al_sub(a: int32, b: int32) -> int32 $ return a - b; }");
+  var l: ExportList* = scan_exports(src_of(lines_of(a)));
+  defer free(l);
+  t_int("exports: apilib v1.2.0 count", l->n, 3);
+  t_eq("exports: struct AlPair", scan_export(l, 0)->kind + " " + scan_export(l, 0)->name + "|" + scan_export(l, 0)->sig, "struct AlPair|a: int32; b: int32");
+  t_eq("exports: al_add sig", scan_export(l, 1)->name + scan_export(l, 1)->sig, "al_add(a: int32, b: int32, c: int32) -> int32");
+  t_int("exports: al_sub line", scan_export(l, 2)->line, 3);
+
+  var b: StrList* = sl_new();
+  defer free(b);
+  sl_push(b, "import `std/io`;");
+  sl_push(b, "export fn f() -> string $ return `}}} $$ export fn no_str() $`; }");
+  sl_push(b, "// export fn no_line() $ }");
+  sl_push(b, "/* } export fn no_block() $ } */");
+  sl_push(b, "fn private_fn() -> int32 $ return 0; }");
+  sl_push(b, "fn g() $ export fn no_nested() $ } }");
+  sl_push(b, "export var g_x: int32 = 5;");
+  sl_push(b, "export const K = 3;");
+  sl_push(b, "export extern fn c_val(a: int32) -> int32 = `c_val_sym`;");
+  sl_push(b, "export enum Color $ Red = 1, Green, Blue = 4 }");
+  sl_push(b, "export struct Gen $");
+  sl_push(b, "  a: fn(int32, int32) -> int32;   // c $");
+  sl_push(b, "  b: string;");
+  sl_push(b, "}");
+  sl_push(b, "export fn multi(");
+  sl_push(b, "  a: int64,   // first");
+  sl_push(b, "  b: int32)   ->   int32 $ return 0; }");
+  sl_push(b, "@inline export fn deco() $ }");
+  sl_push(b, "export extern var g_c: int32;");
+  sl_push(b, "export enum Option<T> $ Some(T), None }");
+  var want: StrList* = sl_new();
+  defer free(want);
+  sl_push(want, "fn f|() -> string @2");
+  sl_push(want, "var g_x|int32 @7");
+  sl_push(want, "const K| @8");
+  sl_push(want, "extern c_val|(a: int32) -> int32 = `c_val_sym` @9");
+  sl_push(want, "enum Color|Red = 1, Green, Blue = 4 @10");
+  sl_push(want, "struct Gen|a: fn(int32, int32) -> int32; b: string @11");
+  sl_push(want, "fn multi|(a: int64, b: int32) -> int32 @15");
+  sl_push(want, "fn deco|() @18");
+  sl_push(want, "extern g_c|: int32 @19");
+  sl_push(want, "enum Option|<T> Some(T), None @20");
+  t_eq("exports: kinds, strings, comments, nesting", exports_of(lines_of(b)), src_of(sl_join(want, "\n")));
+
+  var names: StrList* = s_split("al_mul,al_add,al_sub", 44);
+  defer free(names);
+  t_eq("uses: outside strings and comments", sl_join(scan_uses("var x = al_mul(1,2); // al_add\n\"al_sub\"", names), ","), "al_mul 1");
+  t_eq("uses: lines, once per line", sl_join(scan_uses(src_of("al_add(al_add(1, 2), 3);\n/* al_sub\n */ x = al_sub;\ny = `$al_mul(1)}`;\nal_mul"), names), ","), "al_add 1,al_sub 3,al_mul 5");
+}
+
+fn main() -> int32 {
+  test_scan_imports();
+  test_scan_strings();
+  test_scan_asm_externs();
+  test_scan_main_tests();
+  test_scan_exports();
+  say("");
+  say("scan_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  flush_out();
+  if (g_fail > 0) {
+    return 1;
+  }
+  return 0;
+}
