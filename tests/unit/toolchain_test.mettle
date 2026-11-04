@@ -1,7 +1,6 @@
-// toolchain_driver: a command line over src/toolchain.mettle for
-// tests/toolchain_test.sh. Build it with tools/mcheck.sh (all three compilers).
+// toolchain_test: a command line over src/build/toolchain.mettle for tests/e2e/toolchain.sh.
 //
-//   toolchain_driver [--root DIR] [--offline] [--locked] [-v] [-t T]... [--mettle PATH] CMD ...
+//   toolchain_test [--root DIR] [--offline] [--locked] [-v] [-t T]... [--mettle PATH] CMD ...
 //     select T            the chosen compiler as key=value lines
 //     version T           tc_version
 //     toolchain ARGS...   tc_cmd_toolchain (list / install / use / remove)
@@ -10,7 +9,8 @@
 //     unsupported T FLAG... tc_unsupported, twice (the second answer is cached)
 //     require-min T NEED WHO  tc_require_minimum
 //
-// DIR and EXE may be given in Linux form under wine.
+// DIR's manifest.toml and local.toml (what mbuild.mettle and mbuild.local.mettle
+// emit) are read when present. DIR and EXE may be given in Linux form under wine.
 
 import "std/io";
 import "std/mem";
@@ -36,7 +36,7 @@ fn drv_project(root: string, opts: Options*) -> Project* {
   p->root = root;
   p->opts = opts;
   p->state_dir = root + "/.mbuild";
-  var file: string = root + "/mbuild.toml";
+  var file: string = root + "/manifest.toml";
   var r: FsRead = fs_read(file);
   if (r.ok) {
     var m: Manifest* = man_parse(toml_parse(r.data, file), root);
@@ -48,6 +48,10 @@ fn drv_project(root: string, opts: Options*) -> Project* {
   } else {
     p->man = man_empty(root, "scratch");
     p->has_manifest = false;
+  }
+  var lr: FsRead = fs_read(root + "/local.toml");
+  if (lr.ok) {
+    man_merge_local(p->man, man_parse_local(toml_parse(lr.data, root + "/local.toml"), root));
   }
   return p;
 }
@@ -236,7 +240,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   } else if (s_eq(cmd, "require-min") && rest->len == 3) {
     code = drv_require_min(p, sl_get(rest, 0), sl_get(rest, 1), sl_get(rest, 2));
   } else {
-    err_line("usage: toolchain_driver [--root DIR] [--offline] [--locked] [-v] [-t T] [--mettle PATH] select|version|toolchain|build-hello|run-cmd|unsupported|require-min ...");
+    err_line("usage: toolchain_test [--root DIR] [--offline] [--locked] [-v] [-t T] [--mettle PATH] select|version|toolchain|build-hello|run-cmd|unsupported|require-min ...");
   }
   flush_out();
   return code;
