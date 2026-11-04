@@ -219,8 +219,6 @@ on linux, child processes run on [alph](https://github.com/Lex-Dellimere/Alph), 
 
 both use `METTLE` (default `../Mettle/bin/mettle`). set `METTLE_WIN` to a windows build of the compiler to add wine builds and tests, or `SKIP_WINE=1` to skip them.
 
-`DESIGN.md` explains how it all fits together, including every compiler and wine quirk we hit.
-
 ## license
 
 apache 2.0, see [LICENSE](LICENSE).

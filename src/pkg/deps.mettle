@@ -1,6 +1,6 @@
 // deps: the requirement graph, minimal version selection, mbuild.lock, the
 // packages under .mbuild/deps and the managed mettle.deps blocks
-// (DESIGN.md 11 and 13).
+//.
 //
 // deps_ensure has a fast path that asks no registry: when .mbuild/deps.stamp
 // records the current lock (its hash) and the current requirements (a hash
@@ -3186,7 +3186,7 @@ export fn deps_cmd_fetch(p: Project*) -> int32 {
 }
 
 // ---------------------------------------------------------------------------
-// Interface types (DESIGN.md 11.5)
+// Interface types
 // ---------------------------------------------------------------------------
 
 export struct DepSnap {

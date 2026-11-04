@@ -60,7 +60,7 @@ export fn s_byte(s: string, i: int64) -> int32 {
 }
 
 // The compiler frees a temporary `a + b` argument after the call unless the
-// callee stores it (DESIGN.md 2), and a view into it would dangle:
+// callee stores it, and a view into it would dangle:
 // s_sub and s_from store their source here, so a temporary passed to any
 // function that returns a view of it stays alive.
 var g_view_src: string;

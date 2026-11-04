@@ -1,4 +1,4 @@
-// init: a package's init.rules starts or extends a project (DESIGN.md 15.1).
+// init: a package's init.rules starts or extends a project.
 //
 // The rules are compiled into a driver with mbuild/init, after a check that
 // nothing they import can reach the OS. The driver only writes records; this
@@ -419,7 +419,7 @@ fn inx_first_use(text: string, words: StrList*) -> string {
 
 // Writes the API and driver files and checks that the driver's import graph
 // declares no extern, syscall or asm outside the API and embeds nothing from
-// outside the package (DESIGN.md 15.1). Nothing is compiled.
+// outside the package. Nothing is compiled.
 fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
   var rules: string = src->dir + "/init.rules";
   var rf: FsRead = fs_read(rules);
@@ -1372,7 +1372,7 @@ export fn ini_run(p: Project*, r: IniRequest*) -> int32 {
 }
 
 // publish: the package in dir has both rules files and its init.rules,
-// run with defaults, gives a valid plan (DESIGN.md 15.3).
+// run with defaults, gives a valid plan.
 export fn ini_check_package(p: Project*, dir: string) -> string {
   g_inx_hint = s_empty();
   var src: InxSrc* = new InxSrc;

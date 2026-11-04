@@ -1,4 +1,4 @@
-// services_windows: svc_run on Windows, polling the job code (DESIGN.md 12.9).
+// services_windows: svc_run on Windows, polling the job code.
 
 import "std/mem";
 import "../core/base";

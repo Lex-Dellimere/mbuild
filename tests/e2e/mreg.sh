@@ -1,5 +1,5 @@
 #!/bin/sh
-# mreg.sh: a registry in the Mettle project's format (DESIGN.md 13.9) through a path and
+# mreg.sh: a registry in the Mettle project's format through a path and
 # http, end to end with a real mbuild: resolve, lock, fetch, verify, extract, build, run.
 #   METTLE=dev-compiler sh tests/e2e/mreg.sh   (scratch: $MBTEST_TMP)
 

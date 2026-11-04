@@ -1,4 +1,4 @@
-// manifest: the manifest model: the TOML mbuild.mettle emits and registries serve (DESIGN.md 6.1).
+// manifest: the manifest model: the TOML mbuild.mettle emits and registries serve.
 //
 // man_parse checks types and dependency rules (first problem -> m->error as
 // "file:line: message") and reports unknown sections and keys as warnings,
@@ -7,7 +7,7 @@
 // table (`[dependencies.x]`); keys are package names. Removed keys
 // are errors naming the replacement.
 //
-// Build settings (DESIGN.md 11.7): typed keys in [profile.NAME] and
+// Build settings: typed keys in [profile.NAME] and
 // [bin.NAME], resolved by man_settings through built-in profile ->
 // the profile's inherits chain (ancestor first, each followed by the same
 // profile of mbuild.local.mettle) -> [bin.NAME] -> --set; raw flags
@@ -36,7 +36,7 @@ export struct DepSpec {
   registry: string;   // "" = search order
 }
 
-// [component.NAME] (DESIGN.md 14.1).
+// [component.NAME].
 export struct CompSpec {
   name: string;
   dir: string;           // absolute
@@ -63,7 +63,7 @@ export struct RegSpec {
   line: int64;
 }
 
-// One [replace] entry (DESIGN.md 11.4): path or version.
+// One [replace] entry: path or version.
 export struct ReplaceSpec {
   module: string;
   path: string;
@@ -538,7 +538,7 @@ fn mnx_deps(m: Manifest*) {
 fn mnx_known_keys(section: string) -> StrList* {
   if (s_eq(section, "package")) { return mnx_list("name version mettle toolchain include description license repository authors import-root"); }
   if (s_eq(section, "build")) { return mnx_list("targets flags prelude agents"); }
-  // bound to locals: mnx_list keeps views into its argument (DESIGN.md 2)
+  // bound to locals: mnx_list keeps views into its argument
   if (s_starts(section, "profile.")) {
     var pw: string = "flags cflags inherits components " + mnx_typed_words();
     if (mnx_is_os_profile(section)) {
@@ -700,7 +700,7 @@ fn mnx_unknown_keys(m: Manifest*, sec: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Build settings (DESIGN.md 11.7)
+// Build settings
 // ---------------------------------------------------------------------------
 
 fn mnx_typed_words() -> string {
@@ -1209,7 +1209,7 @@ fn mnx_package_extra(m: Manifest*) {
   }
 }
 
-// Removed keys (DESIGN.md 6.1), each an error naming its replacement.
+// Removed keys, each an error naming its replacement.
 fn mnx_removed(m: Manifest*) {
   var mv: TomlValue* = toml_get(m->doc, "package", "module");
   if (mv != (TomlValue*)0) {
@@ -1330,7 +1330,7 @@ fn mnx_tools(m: Manifest*) {
 }
 
 // ---------------------------------------------------------------------------
-// [registry.NAME], [component.NAME], [rules] (DESIGN.md 13.2, 14)
+// [registry.NAME], [component.NAME], [rules]
 // ---------------------------------------------------------------------------
 
 fn mnx_push_reg(m: Manifest*, r: RegSpec) {
@@ -1908,7 +1908,7 @@ export fn man_profile_cflags(m: Manifest*, profile: string) -> StrList* {
   return cf;
 }
 
-// The build settings of one compile (DESIGN.md 11.7). Problems go to the
+// The build settings of one compile. Problems go to the
 // result's error ("file:line: message", or "--set ITEM: message").
 export fn man_settings(m: Manifest*, q: SettingsQuery*) -> Settings* {
   var st: Settings* = mnx_settings_new();
@@ -2038,7 +2038,7 @@ export fn man_replace_find(m: Manifest*, module: string) -> ReplaceSpec* {
   return (ReplaceSpec*)0;
 }
 
-// mbuild.local.mettle (DESIGN.md 11.4, 6.1): only [replace], [tools],
+// mbuild.local.mettle: only [replace], [tools],
 // [profile.NAME] (and .os), [build] targets, [components] and
 // [registry.NAME] url.
 export fn man_parse_local(doc: Toml*, dir: string) -> Manifest* {

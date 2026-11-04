@@ -1,5 +1,5 @@
 // toolchain: finds and runs Mettle compilers per target, and installs,
-// pins and updates toolchains (DESIGN.md section 9).
+// pins and updates toolchains.
 //
 // A Windows .exe is built by the Windows compiler and a Linux binary by the
 // Linux one, so each target has its own compiler: on Linux the Windows
@@ -637,7 +637,7 @@ export fn tc_version(m: Mettle*) -> string {
   return v;
 }
 
-// "" when m is new enough for `need`, else the error text (DESIGN.md 11.6)
+// "" when m is new enough for `need`, else the error text
 // without the "error: " prefix: the first line, then "\n  help: ..." that
 // callers may extend with ", or require ...". A compiler whose version is
 // not a release number (a development build) passes.
@@ -658,7 +658,7 @@ export fn tc_require_minimum(m: Mettle*, need: string, who: string) -> string {
 }
 
 // ---------------------------------------------------------------------------
-// Flag support (DESIGN.md 11.7): probed once per compiler identity
+// Flag support: probed once per compiler identity
 // ---------------------------------------------------------------------------
 
 // The argument the compiler rejected in `out`, "" when it rejected none.

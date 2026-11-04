@@ -1,4 +1,4 @@
-// registry: package registries (DESIGN.md 13): the search order, the index,
+// registry: package registries: the search order, the index,
 // manifests and archives in the download cache, extraction, publishing.
 //
 // A registry is a static tree of one of two kinds: mbuild's own (index/<name>,

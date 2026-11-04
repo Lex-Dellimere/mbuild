@@ -529,7 +529,7 @@ export fn sym_format(path: string) -> string {
 }
 
 // DT_SONAME of an ELF64 shared object read from its .dynamic section ("" when
-// there is none). No defer here: see DESIGN.md on head --release.
+// there is none). No defer here: head --release can't compile it.
 fn symx_elf_soname(f: SymxFile*) -> string {
   var hdr: uint8* = symx_read(f, 0, 64);
   if (hdr == (uint8*)0) {

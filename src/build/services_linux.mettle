@@ -1,4 +1,4 @@
-// services_linux: svc_run on Linux as one alph actor (DESIGN.md 12.9). Each
+// services_linux: svc_run on Linux as one alph actor. Each
 // service gets its own process group; the app stays in mbuild's, so the
 // terminal's Ctrl-C and reads reach it.
 

@@ -1,4 +1,4 @@
-// config: mbuild.mettle compiled into a driver program and run (DESIGN.md 12).
+// config: mbuild.mettle compiled into a driver program and run.
 //
 // The API file is written to .mbuild/api/mbuild/api.mettle; the driver to
 // .mbuild/config/driver.mettle, compiled with the host compiler only when its

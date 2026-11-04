@@ -1,5 +1,5 @@
 // manifest_test: the manifest mbuild.mettle emits: typed build settings, [replace],
-// [package] mettle, mbuild.local.mettle, components, registries (DESIGN.md 11.7, 6.1).
+// [package] mettle, mbuild.local.mettle, components, registries.
 //
 //   mettle test tests/unit/manifest_test.mettle     (leak warnings are expected)
 //   tools/mcheck.sh tests/unit/manifest_test.mettle --run

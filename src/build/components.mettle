@@ -1,5 +1,5 @@
 // components: selection, interface checks and the generated modules of a
-// build's components (DESIGN.md 14), the rule wrapper (14.7), `mbuild
+// build's components, the rule wrapper (14.7), `mbuild
 // components` and `mbuild use`.
 //
 // A build's gen dir, .mbuild/gen/<target>-<profile>-<bin>/, holds

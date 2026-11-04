@@ -1,5 +1,5 @@
 // services: the processes mb_service declares, started around `mbuild run`
-// (DESIGN.md 12.9), and `mbuild services`. svc_run is in services_linux
+//, and `mbuild services`. svc_run is in services_linux
 // (alph) and services_windows; this file holds what they share.
 
 import "std/mem";

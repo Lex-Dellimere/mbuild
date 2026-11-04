@@ -1,6 +1,6 @@
 // sys_linux: the platform layer on Linux. sys_windows exports the same API.
 //
-// Only names the v0.17.0 Linux runtime carries are used (DESIGN.md section 3).
+// Only names the v0.17.0 Linux runtime carries are used.
 // What that runtime lacks (rename, rmdir, directory listing, fork) is done by
 // host programs: `ls`, `rm`, `mv`. Child processes that run in the
 // background (the -j pool, services) go through alph (third_party/alph): a

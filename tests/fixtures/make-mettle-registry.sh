@@ -1,5 +1,5 @@
 #!/bin/sh
-# make-mettle-registry.sh ROOT: a registry in the Mettle project's format (DESIGN.md 13.9) at
+# make-mettle-registry.sh ROOT: a registry in the Mettle project's format at
 # ROOT/mreg: v1/index.json and plain tar archives in v1/archives (tar + sha256sum only).
 # textkit 1.0.0 and 1.1.0, greet 1.0.0 (requires textkit 1.0.0), badsha 1.0.0 (its index
 # hash is wrong), evil 1.0.0 (holds a symlink), old 1.0.0 (yanked).

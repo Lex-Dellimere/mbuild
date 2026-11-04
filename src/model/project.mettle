@@ -47,7 +47,7 @@ export struct DepModule {
   dir: string;        // absolute directory holding its files
   is_path: bool;      // a local { path = ... } package
   man: Manifest*;     // its manifest, 0 when it has none
-  replaced: string;   // "" | "path" | "version" ([replace], DESIGN.md 11.4)
+  replaced: string;   // "" | "path" | "version" ([replace])
   checksum: string;   // "sha256:<hex>", "" for a path package
   registry: string;   // registry name, "" for a path package
 }
