@@ -1058,6 +1058,9 @@ fn dx_index(cx: DxCx*, m: DxMod*, refresh: bool) -> RegIndex* {
   if (!ix->ok) {
     dx_fail(dx_ix_err(ix));
   }
+  if (!ix->found && s_contains(ix->err, "--offline")) {
+    dx_fail(ix->err);
+  }
   if (!ix->found) {
     dx_fail_missing(cx, m->module, dx_first_from(m), pin);
   }

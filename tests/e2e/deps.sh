@@ -404,6 +404,7 @@ check "why of a non-dependency" has "$S/last.out" "'nothere' is not a dependency
 rm -rf "$P/.mbuild"
 MBUILD_HOME="$S/empty-home" drv "$P" ensure --offline
 check "offline with an empty cache fails" code_is 1
+check "offline with an empty cache: the cache error" has "$S/last.out" "error: the index of vecmath from registry default is not in the download cache and --offline forbids fetching it"
 
 echo "== path packages"
 L="$S/mylib"
