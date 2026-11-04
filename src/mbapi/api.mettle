@@ -59,6 +59,7 @@ var g_mbi_pkg_name: string;
 var g_mbi_pkg_version: string;
 // fn local() runs after fn project(); the project's TOML is kept here meanwhile.
 var g_mbi_in_local: bool = false;
+var g_mbi_in_deps: bool = false;
 var g_mbi_project_toml: string;
 
 // ---------------------------------------------------------------------------
@@ -363,8 +364,14 @@ fn mbi_reset() {
   g_mbi_os = "";
 }
 
+// The driver calls this between fn project() and fn deps().
+export fn mbi_deps() {
+  g_mbi_in_deps = true;
+}
+
 // Declarations from here on go to the local part (mbuild.local.mettle).
 export fn mbi_local() {
+  g_mbi_in_deps = false;
   g_mbi_project_toml = mbi_toml();
   mbi_reset();
   g_mbi_in_local = true;
@@ -399,6 +406,9 @@ fn mbi_refuse(what: string) {
   if (g_mbi_config) {
     if (g_mbi_in_local) {
       mbi_die("mbuild.local.mettle: " + what + " cannot be used in fn local() (write the value itself)", 3);
+    }
+    if (g_mbi_in_deps) {
+      mbi_die("mbuild.mettle: " + what + " cannot be used in fn deps() (the dependency list must be the same on every machine; use mbuild.local.mettle, a command, or a hook)", 3);
     }
     mbi_die("mbuild.mettle: " + what + " cannot be used in fn project() (the project description must be the same on every machine; use mbuild.local.mettle, a command, or a hook)", 3);
   }

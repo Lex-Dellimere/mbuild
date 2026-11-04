@@ -61,6 +61,7 @@ struct MfxFn {
   decl: int64;
   body_open: int64;
   body_close: int64;
+  noparams: bool;
 }
 
 // One `mb_*(...)` call. args hold the decoded value of a string literal
@@ -78,6 +79,8 @@ struct MfxCall {
   alone: bool;
   line_start: int64;
   line_end: int64;
+  depth: int64;
+  stmt_end: int64;
 }
 
 struct MfxScan {
@@ -87,6 +90,7 @@ struct MfxScan {
   calls: MfxCall*;
   ncalls: int64;
   exports: bool;
+  deps_call_line: int64;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +301,7 @@ fn mfx_push_call(sc: MfxScan*, c: MfxCall) {
 }
 
 // The call whose `(` is at open; its arguments split at top-level commas.
-fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64) -> int64 {
+fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64, at_depth: int64) -> int64 {
   var text: string = sc->text;
   var n: int64 = slen(text);
   var c: MfxCall;
@@ -309,6 +313,7 @@ fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64)
   c.start = start;
   c.line = mfx_line_of(text, start);
   c.in_fn = in_fn;
+  c.depth = at_depth;
   var depth: int64 = 0;
   var piece: int64 = open + 1;
   var j: int64 = open + 1;
@@ -362,6 +367,10 @@ fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64)
   while (after < n && (s_byte(text, after) == 32 || s_byte(text, after) == 9)) {
     after = after + 1;
   }
+  c.stmt_end = -1;
+  if (after < n && s_byte(text, after) == 59) {
+    c.stmt_end = after + 1;
+  }
   var alone: bool = after < c.line_end && s_byte(text, after) == 59 && slen(s_trim(s_sub(text, c.line_start, start))) == 0;
   if (alone) {
     var rest: string = s_trim(s_sub(text, after + 1, c.line_end));
@@ -388,6 +397,7 @@ fn mfx_scan(text: string) -> MfxScan* {
   sc->calls = (MfxCall*)0;
   sc->ncalls = 0;
   sc->exports = false;
+  sc->deps_call_line = 0;
   var n: int64 = slen(text);
   var depth: int64 = 0;
   var pending_export: bool = false;
@@ -473,6 +483,8 @@ fn mfx_scan(text: string) -> MfxScan* {
           f.line = mfx_line_of(text, i);
           f.body_open = -1;
           f.body_close = -1;
+          var pa: int64 = mfx_skip_space(text, mfx_skip_space(text, ne) + 1);
+          f.noparams = pa < n && s_byte(text, pa) == 41;
           mfx_push_fn(sc, f);
           awaiting = sc->nfns - 1;
           e = ne;
@@ -486,9 +498,15 @@ fn mfx_scan(text: string) -> MfxScan* {
     if (s_starts(word, "mb_")) {
       var open: int64 = mfx_skip_space(text, e);
       if (open < n && s_byte(text, open) == 40) {
-        mfx_call(sc, word, i, open, cur);
+        mfx_call(sc, word, i, open, cur, depth);
         i = open + 1;
         continue;
+      }
+    }
+    if (s_eq(word, "deps") && cur >= 0 && sc->deps_call_line == 0 && s_eq(sc->fns[cur].name, "project") && (i == 0 || s_byte(text, i - 1) != 46)) {
+      var dopen: int64 = mfx_skip_space(text, e);
+      if (dopen < n && s_byte(text, dopen) == 40) {
+        sc->deps_call_line = mfx_line_of(text, i);
       }
     }
     i = e;
@@ -496,10 +514,12 @@ fn mfx_scan(text: string) -> MfxScan* {
   return sc;
 }
 
+// fn deps counts only without parameters (a helper deps(x) is not the section).
 fn mfx_find_fn(sc: MfxScan*, name: string) -> int64 {
+  var deps: bool = s_eq(name, "deps");
   var i: int64 = 0;
   while (i < sc->nfns) {
-    if (s_eq(sc->fns[i].name, name)) {
+    if (s_eq(sc->fns[i].name, name) && (!deps || sc->fns[i].noparams)) {
       return i;
     }
     i = i + 1;
@@ -645,7 +665,7 @@ export fn mbf_scan(text: string) -> MbfInfo* {
     if (is_hook) {
       sl_push(info->hooks, s_from(f.name, 5));
     }
-    if (sc->exports && !f.exported && (is_cmd || is_hook || s_eq(f.name, "project") || s_eq(f.name, "deps"))) {
+    if (sc->exports && !f.exported && (is_cmd || is_hook || s_eq(f.name, "project") || (s_eq(f.name, "deps") && f.noparams))) {
       sl_push(info->unexported, f.name);
       if (info->ok) {
         info->ok = false;
@@ -678,6 +698,10 @@ export fn mbf_scan(text: string) -> MbfInfo* {
     i = i + 1;
   }
   var main_at: int64 = mfx_find_fn(sc, "main");
+  if (dfn >= 0 && sc->deps_call_line > 0 && info->ok) {
+    info->ok = false;
+    info->err = "mbuild.mettle:" + s_int(sc->deps_call_line) + ": fn deps() is called by mbuild; don't call it from fn project()";
+  }
   if (main_at >= 0) {
     info->ok = false;
     info->err = "mbuild.mettle:" + s_int(sc->fns[main_at].line) + ": mbuild.mettle cannot define fn main (mbuild generates the program around it)";
@@ -871,9 +895,9 @@ fn mfx_new_deps(text: string, sc: MfxScan*, add: string) -> MbfEdit {
   return mfx_edit(true, buf_take(b), line, s_empty());
 }
 
-// `mbuild tidy`: moves every deps-section call of fn project() that sits on
-// its own line into fn deps() (made when missing), keeping each line's text
-// and order. why holds the number of lines moved.
+// `mbuild tidy`: moves every deps-section call of fn project() into fn deps()
+// (made when missing), in order: a call alone on its line moves with the
+// line; one sharing its line moves as its own statement. why holds the count.
 export fn mbf_move_deps(text: string) -> MbfEdit {
   var sc: MfxScan* = mfx_scan(text);
   var proj: int64 = mfx_find_fn(sc, "project");
@@ -888,7 +912,38 @@ export fn mbf_move_deps(text: string) -> MbfEdit {
   while (i < sc->ncalls) {
     var c: MfxCall* = &sc->calls[i];
     i = i + 1;
-    if (c->in_fn != proj || !c->alone || !mfx_is_deps_fn(c->fn_name)) {
+    if (c->in_fn != proj || !mfx_is_deps_fn(c->fn_name)) {
+      continue;
+    }
+    if (!c->alone) {
+      var pre: string = s_trim(s_sub(text, c->line_start, c->start));
+      if (c->depth != 1 || c->stmt_end < 0 || c->stmt_end > c->line_end || (slen(pre) > 0 && !s_ends(pre, ";"))) {
+        continue;
+      }
+      var from: int64 = c->start;
+      var to: int64 = c->stmt_end;
+      if (slen(pre) == 0) {
+        while (to < c->line_end && (s_byte(text, to) == 32 || s_byte(text, to) == 9)) {
+          to = to + 1;
+        }
+      } else {
+        while (from > pos && (s_byte(text, from - 1) == 32 || s_byte(text, from - 1) == 9)) {
+          from = from - 1;
+        }
+      }
+      if (from < pos) {
+        from = pos;
+      }
+      var ind: int64 = c->line_start;
+      while (ind < c->start && (s_byte(text, ind) == 32 || s_byte(text, ind) == 9)) {
+        ind = ind + 1;
+      }
+      buf_add(kept, s_sub(text, pos, from));
+      buf_add(moved, s_sub(text, c->line_start, ind));
+      buf_add(moved, s_sub(text, c->start, c->stmt_end));
+      buf_addb(moved, 10);
+      pos = to;
+      n = n + 1;
       continue;
     }
     buf_add(kept, s_sub(text, pos, c->line_start));
@@ -1127,7 +1182,7 @@ export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, con
   buf_line(b, "  mbi_start(argc, argv);");
   var decl: string = "project(); ";
   if (info->has_deps) {
-    decl = "project(); deps(); ";
+    decl = "project(); mbi_deps(); deps(); ";
   }
   if (slen(local_file) > 0) {
     buf_line(b, "  if (mbi_mode(\"config\")) {{ " + decl + "mbi_local(); local(); return mbi_finish_config(); }");

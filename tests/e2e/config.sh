@@ -138,6 +138,9 @@ hooks pre_build"
   out=$("$D" load 2>&1); code=$?
   expect_line "$mode: mb_env in project() refused" "$out" "error: mbuild.mettle: mb_env cannot be used in fn project() (the project description must be the same on every machine; use mbuild.local.mettle, a command, or a hook)"
   expect_eq "$mode: refusal exit 3" "$code" "3"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("e", "0.1.0");\n}\n\nfn deps() {\n  mb_dep("x", mb_env("V"));\n}\n' > mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: mb_env in deps() names fn deps()" "$out" "error: mbuild.mettle: mb_env cannot be used in fn deps() (the dependency list must be the same on every machine; use mbuild.local.mettle, a command, or a hook)"
 
   mkdir -p "$P/fast" && cd "$P/fast"
   printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("f", "0.1.0");\n  mb_profile("release");\n  mb_set("optimize", "fast");\n}\n' > mbuild.mettle
