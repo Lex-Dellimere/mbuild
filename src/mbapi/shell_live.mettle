@@ -1,14 +1,21 @@
 // "mbuild/shell" in `mbuild shell` builds (generated from mbuild's
 // src/mbapi/shell_live.mettle). shell_point() runs mbsh_eval, whose body
-// each input at the prompt patches in and out again.
+// each input at the prompt patches in and out again, writes the watch
+// values to the state file, and while the pause file exists waits there,
+// taking patches and running evals, until it goes or a step file comes.
 
 import "std/file";
+import "std/thread";
 
 struct MbshProbe {
   x: int8;
 }
 
 var mbsh_seq: int64 = 0;
+var mbsh_tick: int64 = 0;     // shell_point calls so far
+var mbsh_hit: bool = false;   // the pause-when condition turned true
+var mbsh_was: bool = false;   // its value at the last tick
+//@paths
 
 fn mbsh_put(path: string, s: string) {
   var tmp: string = path + ".tmp";
@@ -56,6 +63,48 @@ fn mbsh_eval() {
 //@body
 }
 
+// The watch lines; sets mbsh_hit when the pause-when condition turns true.
+fn mbsh_watch() -> string {
+  var s: string = "";
+//@watch
+  return s;
+}
+
+fn mbsh_exists(path: string) -> bool {
+  var fd: int64 = file_open(path, FILE_READ);
+  if (fd < 0) {
+    return false;
+  }
+  file_close(fd);
+  return true;
+}
+
+fn mbsh_state(paused: string, w: string) {
+  var s: string = "tick {mbsh_tick}\npaused " + paused + "\n" + w;
+  mbsh_put(mbsh_state_path, s);
+}
+
+// Waits while the pause file exists: patches come in at the quiesce, evals
+// run, the state is written again after each and every 100 ms.
+fn mbsh_paused() {
+  var n: int64 = 0;
+  var seen: int64 = mbsh_seq;
+  while (mbsh_exists(mbsh_pause_path)) {
+    if (mbsh_exists(mbsh_step_path)) {
+      file_remove(mbsh_step_path);
+      return;
+    }
+    quiesce;
+    mbsh_eval();
+    n = n + 1;
+    if (mbsh_seq != seen || n % 20 == 0) {
+      seen = mbsh_seq;
+      mbsh_state("1", mbsh_watch());
+    }
+    Sleep(5);
+  }
+}
+
 // Never true: keeps the helpers in the build, so a patch only replaces mbsh_eval.
 fn mbsh_keep() {
   mbsh_put("", mbsh_q(mbsh_hex(0)));
@@ -66,5 +115,17 @@ export fn shell_point() {
   if (mbsh_seq < 0) {
     mbsh_keep();
   }
+  mbsh_tick = mbsh_tick + 1;
+  var w: string = mbsh_watch();
+  if (mbsh_hit) {
+    mbsh_hit = false;
+    mbsh_put(mbsh_pause_path, "when\n");
+  }
   mbsh_eval();
+  if (!mbsh_exists(mbsh_pause_path)) {
+    mbsh_state("0", w);
+    return;
+  }
+  mbsh_state("1", mbsh_watch());
+  mbsh_paused();
 }

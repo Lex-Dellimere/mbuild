@@ -28,6 +28,7 @@ export struct Options {
   flags: StrList*;    // --flag=RAW, in order
   uses: StrList*;     // --use NAME=IMPL, in order
   no_hooks: bool;
+  argv: StrList*;     // the whole command line, after the program's name
 }
 
 export struct Project {
@@ -90,6 +91,7 @@ export fn options_new() -> Options* {
   o->sets = sl_new();
   o->flags = sl_new();
   o->uses = sl_new();
+  o->argv = sl_new();
   return o;
 }
 

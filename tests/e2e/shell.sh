@@ -47,6 +47,10 @@ echo "== the prompt redrawn above program output (a fake terminal)"
 "$METTLE" --build "$here/tests/unit/shell_term_test.mettle" -o "$T/shell_term_test" >"$T/term.log" 2>&1 && "$T/shell_term_test" >"$T/term.out" 2>&1
 has "redraw unit test" "$T/term.out" '^shell_term_test: [0-9]+ passed, 0 failed$'
 
+echo "== lib/tui: UTF-8, widths, the diff renderer, keys"
+"$METTLE" --build "$here/tests/unit/tui_test.mettle" -o "$T/tui_test" >"$T/tui.log" 2>&1 && "$T/tui_test" >"$T/tui.out" 2>&1
+has "tui unit test" "$T/tui.out" '^tui_test: [0-9]+ passed, 0 failed$'
+
 # The live example, ticking faster and longer.
 W="$T/live"
 mkdir -p "$W/src"
@@ -189,6 +193,74 @@ has "exit code shown" "$T/s6.out" '^  the program exited with code 3$'
 n=$(grep -c '^tick ' "$T/s6.out")
 [ "$n" = 5 ] && has "the last line is shown" "$T/s6.out" '^tick 11 ' && ok "only its last 5 lines are shown" || bad "last 5 lines shown (got $n tick lines)" "$(cat "$T/s6.out")"
 cd "$W"
+
+echo "== pause, step, resume, watch, pause when, edit"
+printf '#!/bin/sh\nsed -i "s|return pop / 2;|return pop * 3;|" "$1"\n' >"$T/ed.sh"
+chmod +x "$T/ed.sh"
+cat >"$T/in6" <<'EOF'
+pause
+world.tick
+status
+world.food = 5000;
+world.tick
+status
+step
+status
+world.tick
+resume
+status
+watch world.pop * 2
+watch
+unwatch world.pop * 2
+watch
+pause when world.food > 6000
+world.food = 7000;
+world.tick
+status
+pause when
+resume
+edit harvest
+harvest(10)
+status
+edit harvest
+undo harvest
+harvest(10)
+:q
+EOF
+EDITOR="$T/ed.sh" timeout 60 "$MB" shell <"$T/in6" >"$T/s6.out" 2>&1
+after "pause" "$T/s6.out" "pause" '^paused at tick [0-9]+$'
+p1=$(block "$T/s6.out" pause | sed -n 's/^paused at tick //p')
+st=$(awk '/^mettle> status$/ { f = 1; next } f && /^(paused|running)/ { print; f = 0 }' "$T/s6.out")
+s1=$(printf '%s\n' "$st" | sed -n 1p)
+s2=$(printf '%s\n' "$st" | sed -n 2p)
+s3=$(printf '%s\n' "$st" | sed -n 3p)
+[ -n "$p1" ] && [ "$s1" = "paused at tick $p1 · 0 patches" ] && [ "$s2" = "$s1" ] && ok "paused: the tick stays" || bad "paused: the tick stays (pause at $p1; $s1 / $s2)" "$(cat "$T/s6.out")"
+wt=$(awk '/^mettle> world.tick$/ { f = 1; next } f && /^[0-9]+$/ { print; f = 0 }' "$T/s6.out" | tr '\n' ' ')
+w1=$(echo $wt | cut -d' ' -f1); w2=$(echo $wt | cut -d' ' -f2); w3=$(echo $wt | cut -d' ' -f3)
+[ -n "$w1" ] && [ "$w1" = "$w2" ] && [ "$w3" = $((w2 + 1)) ] && ok "paused: the program's state stays; step runs one tick" || bad "world.tick while paused and after step ($wt)" "$(cat "$T/s6.out")"
+[ "$s3" = "paused at tick $((p1 + 1)) · 0 patches" ] && ok "step: one tick on, paused again" || bad "step: one tick on ($s3)" "$(cat "$T/s6.out")"
+after "step answer" "$T/s6.out" "step" "^paused at tick $((p1 + 1))\$"
+after "resume" "$T/s6.out" "resume" '^running from tick [0-9]+$'
+s4=$(printf '%s\n' "$st" | sed -n 4p)
+case "$s4" in "running · tick "*) ok "running again";; *) bad "running again ($s4)" "$(cat "$T/s6.out")";; esac
+after "watch EXPR" "$T/s6.out" "watch world.pop * 2" '^watching world\.pop \* 2$'
+blk=$(awk '$0 == "mettle> watch" { n++; f = 1; next } f && /^mettle> / { f = 0 } f && n == 1' "$T/s6.out")
+lines "$blk" '^world = World \{ tick: [0-9]+, pop: [0-9]+, food: [0-9]+ \}$' && lines "$blk" '^world\.pop \* 2 = [0-9]+$' && ok "watch: the globals and EXPR, with values" || bad "watch: values" "$blk"
+blk=$(awk '$0 == "mettle> watch" { n++; f = 1; next } f && /^mettle> / { f = 0 } f && n == 2' "$T/s6.out")
+lines "$blk" '^world = ' && ! lines "$blk" 'world\.pop \* 2' && ok "unwatch" || bad "unwatch" "$blk"
+after "pause when" "$T/s6.out" "pause when world.food > 6000" '^will pause when world\.food > 6000$'
+s5=$(printf '%s\n' "$st" | sed -n 5p)
+case "$s5" in "paused at tick "*" · pause when world.food > 6000") ok "pause when: paused where it turned true";; *) bad "pause when: paused ($s5)" "$(cat "$T/s6.out")";; esac
+after "pause when cleared" "$T/s6.out" "pause when" '^cleared: pause when world\.food > 6000$'
+after "edit" "$T/s6.out" "edit harvest" '^redefined harvest$'
+answers=$(awk '/^mettle> harvest\(10\)/ { f = 1; next } f && /^[0-9]+$/ { print; f = 0 }' "$T/s6.out" | tr '\n' ' ')
+[ "$answers" = "30 5 " ] && ok "edit patches the saved text, undo NAME takes it back" || bad "edit then undo harvest (answers: $answers)" "$(cat "$T/s6.out")"
+s6=$(printf '%s\n' "$st" | sed -n 6p)
+case "$s6" in *" · 1 patch") ok "status counts the patch";; *) bad "status counts the patch ($s6)" "$(cat "$T/s6.out")";; esac
+has "edit: nothing changed the second time" "$T/s6.out" '^no changes to harvest$'
+after "undo NAME" "$T/s6.out" "undo harvest" '^undone: harvest as before$'
+cmp -s "$here/examples/live/src/rules.mettle" "$W/src/rules.mettle" && ok "edit leaves src/ alone" || bad "edit leaves src/ alone"
+gone "the program stops (pause session)" "$EXE"
 
 echo "== r: the files on disk"
 rm -f "$T/fifo"

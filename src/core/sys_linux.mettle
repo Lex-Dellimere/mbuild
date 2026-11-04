@@ -168,6 +168,15 @@ export fn sys_term_raw() -> bool {
   return syscall(16, 0, 0x5402, t) == 0;          // TCSETS
 }
 
+// stdin's termios kept for sys_term_cooked (before handing the terminal to a
+// child that may leave it raw); false when stdin is no terminal.
+export fn sys_term_save() -> bool {
+  if (g_lx_term == (uint8*)0) {
+    g_lx_term = (uint8*)malloc(64);
+  }
+  return syscall(16, 0, 0x5401, g_lx_term) == 0;  // ioctl TCGETS
+}
+
 export fn sys_term_cooked() {
   if (g_lx_term != (uint8*)0) {
     syscall(16, 0, 0x5402, g_lx_term);
