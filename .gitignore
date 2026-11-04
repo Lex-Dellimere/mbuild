@@ -2,7 +2,8 @@
 /build/
 /.mbuild/
 .mbuild/
-mbuild.local.toml
+/mbuild.local.mettle
+/dist/
 
 # compiler leftovers
 *.o
