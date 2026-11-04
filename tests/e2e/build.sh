@@ -256,6 +256,8 @@ sed -i 's/1.0.0/1.1.0/' mbuild.mettle
 printf 'export fn strx_a() -> int32 { return 1; }\n' > strx.mettle
 mb publish --to "$S/reg-$mode"
 check "removed export refused" has "strx_b"
+MBUILD_HOME="$S/home-off-$mode" mb publish --to "$S/reg-$mode" --offline --dry-run
+check "--offline into an uncached registry dir still checks the API" has "breaks the API of v1.0.0"
 mb publish --to "$S/reg-$mode" --allow-breaking
 check "--allow-breaking publishes" has "Published strx v1.1.0"
 sed -i 's/1.1.0/1.1.1/' mbuild.mettle

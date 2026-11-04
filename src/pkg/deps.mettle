@@ -4147,13 +4147,27 @@ export fn deps_api_breaks(p: Project*, name: string, version: string, dir: strin
   if (!sv_is(version)) {
     return s_empty();
   }
+  // A registry directory needs no network: read it even with --offline.
+  var offline: bool = p->opts->offline;
+  if (slen(dir) > 0) {
+    p->opts->offline = false;
+  }
+  var rep: string = dx_api_breaks(p, name, version, dir);
+  p->opts->offline = offline;
+  return rep;
+}
+
+fn dx_api_breaks(p: Project*, name: string, version: string, dir: string) -> string {
   var ix: RegIndex* = (RegIndex*)0;
   if (slen(dir) > 0) {
-    ix = reg_index_dir(p, dir, name, !p->opts->offline);
+    ix = reg_index_dir(p, dir, name, true);
   } else {
     ix = reg_find(p, name, "", !p->opts->offline);
   }
   g_dx_last_ix = ix;
+  if (ix->ok && !ix->found && s_contains(ix->err, "--offline")) {
+    warn("skipped the API break check: the index of " + name + " is not cached and --offline forbids fetching it");
+  }
   if (!ix->ok || !ix->found) {
     return s_empty();
   }
