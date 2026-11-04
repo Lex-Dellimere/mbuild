@@ -1,14 +1,14 @@
-// init_driver: a small CLI over init.mettle and agents.mettle for tests/e2e/r3_init.sh.
+// init_test: a small CLI over init.mettle and agents.mettle for tests/e2e/init.sh.
 //
-//   init_driver DIR new NAME --from PKG [--opt K=V]... [--yes] [--dry-run] [--force] [--registry R] [-v]
-//   init_driver DIR init --from PKG [...]          init --from in the project at DIR
-//   init_driver DIR check PKGDIR                   ini_check_package: prints "ok" or the error
-//   init_driver DIR scaffold NAME                  ini_scaffold_package into DIR
-//   init_driver DIR api                            prints ini_api_text
-//   init_driver DIR strip FILE                     prints agt_strip_block of FILE
-//   init_driver DIR refresh MOD...                 agt_refresh, then "changed=0|1"
-//   init_driver DIR agents [NAME] [--all] MOD...   agt_cmd_agents
-//   init_driver DIR selftest                       pure checks of agt_strip_block
+//   init_test DIR new NAME --from PKG [--opt K=V]... [--yes] [--dry-run] [--force] [--registry R] [-v]
+//   init_test DIR init --from PKG [...]            init --from in the project at DIR
+//   init_test DIR check PKGDIR                     ini_check_package: prints "ok" or the error
+//   init_test DIR scaffold NAME                    ini_scaffold_package into DIR
+//   init_test DIR api                              prints ini_api_text
+//   init_test DIR strip FILE                       prints agt_strip_block of FILE
+//   init_test DIR refresh MOD...                   agt_refresh, then "changed=0|1"
+//   init_test DIR agents [NAME] [--all] MOD...     agt_cmd_agents
+//   init_test DIR selftest                         pure checks of agt_strip_block
 //
 // DIR's manifest.toml (the manifest schema mbuild.mettle emits) gives the root's direct dependencies and
 // [build] agents; MOD is name:version:dir (version "" for a path package),
@@ -78,7 +78,7 @@ fn drv_depstate(p: Project*, mods: StrList*) -> DepState* {
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
   if (argc < 3) {
-    err_line("usage: init_driver DIR COMMAND [args]");
+    err_line("usage: init_test DIR COMMAND [args]");
     return 2;
   }
   var opts: Options* = options_new();

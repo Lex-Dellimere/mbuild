@@ -1,24 +1,24 @@
-// registry_driver: a small CLI over sha256.mettle and registry.mettle for
-// tests/e2e/r3_registry.sh. ROOT is a project directory (manifest.toml and
+// registry_test: a small CLI over sha256.mettle and registry.mettle for
+// tests/e2e/registry.sh. ROOT is a project directory (manifest.toml and
 // local.toml, what mbuild.mettle and mbuild.local.mettle emit, are read when
 // present).
 //
-//   registry_driver sha-string TEXT             sha_string
-//   registry_driver sha-repeat CHAR N           sha_hex of N copies of CHAR
-//   registry_driver sha-file PATH               sha_file ("<none>" when unreadable)
-//   registry_driver list ROOT                   reg_list: "NAME URL" per registry
-//   registry_driver dir ROOT REG                reg_dir_of ("<none>" for "")
-//   registry_driver index ROOT REG NAME [--refresh] [--twice]
+//   registry_test sha-string TEXT               sha_string
+//   registry_test sha-repeat CHAR N             sha_hex of N copies of CHAR
+//   registry_test sha-file PATH                 sha_file ("<none>" when unreadable)
+//   registry_test list ROOT                     reg_list: "NAME URL" per registry
+//   registry_test dir ROOT REG                  reg_dir_of ("<none>" for "")
+//   registry_test index ROOT REG NAME [--refresh] [--twice]
 //                                               reg_index (twice: the same call again)
-//   registry_driver find ROOT NAME [PINNED]     reg_find
-//   registry_driver manifest ROOT REG NAME V    reg_manifest: "dep KEY VERSION" lines
-//   registry_driver fetch ROOT REG NAME V       reg_fetch: the cached archive
-//   registry_driver get ROOT REG NAME V DEST    reg_fetch, reg_extract, reg_marker
-//   registry_driver extract ARCHIVE SHA DEST MARKER
-//   registry_driver init DIR NAME               reg_init_dir
-//   registry_driver publish DIR NAME V ROOT MANIFEST [--dry-run]
+//   registry_test find ROOT NAME [PINNED]       reg_find
+//   registry_test manifest ROOT REG NAME V      reg_manifest: "dep KEY VERSION" lines
+//   registry_test fetch ROOT REG NAME V         reg_fetch: the cached archive
+//   registry_test get ROOT REG NAME V DEST      reg_fetch, reg_extract, reg_marker
+//   registry_test extract ARCHIVE SHA DEST MARKER
+//   registry_test init DIR NAME                 reg_init_dir
+//   registry_test publish DIR NAME V ROOT MANIFEST [--dry-run]
 //                                               reg_publish of every file under ROOT
-//   registry_driver yank DIR NAME V [--undo]    reg_yank
+//   registry_test yank DIR NAME V [--undo]      reg_yank
 // Flags anywhere: -v (verbose), --offline. Errors print "ERR", the kind and
 // the message, exit 1.
 

@@ -1,10 +1,10 @@
-// components_driver: the components module against the projects that
-// tests/e2e/r3_components.sh writes under WORK (DESIGN.md 15, 17.4 group K).
+// components_test: the components module against the projects that
+// tests/e2e/components.sh writes under WORK.
 //
-//   components_driver WORK all            every check, "ok NAME" / "FAIL NAME: why"; exit 1 on a failure
-//   components_driver WORK prepare        the static project's gen dir; prints gen dir and entry
-//   components_driver WORK use NAME [IMPL] cmp_cmd_use on the static project
-//   components_driver WORK components     cmp_cmd_components on the static project
+//   components_test WORK all              every check, "ok NAME" / "FAIL NAME: why"; exit 1 on a failure
+//   components_test WORK prepare          the static project's gen dir; prints gen dir and entry
+//   components_test WORK use NAME [IMPL]  cmp_cmd_use on the static project
+//   components_test WORK components       cmp_cmd_components on the static project
 //
 // Projects and dependency states are built by hand; programs are compiled
 // with METTLE (default `mettle` on PATH) with -I gen_dir, debug and --release.
@@ -46,7 +46,7 @@ fn drv_manifest(file: string, dir: string) -> Manifest* {
   return m;
 }
 
-// What evaluating mbuild.local.mettle gives (group C's job): its mb_use("NAME", "IMPL") lines.
+// What evaluating mbuild.local.mettle gives: its mb_use("NAME", "IMPL") lines.
 fn drv_local(m: Manifest*, text: string) {
   var lines: StrList* = s_lines(text);
   var i: int64 = 0;
@@ -372,7 +372,7 @@ fn drv_kinds() {
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
   if (argc < 3) {
-    fail("usage: components_driver WORK all|prepare|use NAME [IMPL]|components");
+    fail("usage: components_test WORK all|prepare|use NAME [IMPL]|components");
   }
   var work: string = p_clean(s_from_c(argv[1]));
   g_work = work;

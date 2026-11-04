@@ -1,8 +1,8 @@
-// manifest_test: typed build settings, [replace], [package] mettle,
-// mbuild.local.mettle and the round 3 schema (DESIGN.md 12.21, 13.5, 16.4 Group M).
+// manifest_test: the manifest mbuild.mettle emits: typed build settings, [replace],
+// [package] mettle, mbuild.local.mettle, components, registries (DESIGN.md 12.8, 13.5).
 //
-//   mettle test tests/manifest_test.mettle     (leak warnings are expected)
-//   tools/mcheck.sh tests/manifest_test.mettle --run
+//   mettle test tests/unit/manifest_test.mettle     (leak warnings are expected)
+//   tools/mcheck.sh tests/unit/manifest_test.mettle --run
 //
 // Run both: `mettle test` reports a failing run as skipped (reports issue 10).
 
@@ -290,7 +290,7 @@ fn settings_of(m: Manifest*, profile: string, bin: string, target: string) -> Se
   return s;
 }
 
-fn test_round3() {
+fn test_schema() {
   var m: Manifest* = man_parse(toml_parse(example_text(), "/home/me/app/.mbuild/config/manifest.toml"), "/home/me/app");
   t_eq("example: valid", m->error, "");
   t_eq("example: no warnings", sl_join(m->warnings, "|"), "");
@@ -465,7 +465,7 @@ fn run_all() -> int64 {
   test_settings();
   test_replace_and_removed();
   test_local();
-  test_round3();
+  test_schema();
   say("");
   say("manifest_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
   flush_out();

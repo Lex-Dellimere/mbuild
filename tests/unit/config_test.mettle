@@ -1,19 +1,19 @@
-// config_driver: cfg_* on the project in the working directory, for
-// tests/e2e/r3_config.sh (DESIGN.md 13, 17.4 Group C).
+// config_test: cfg_* on the project in the working directory, for
+// tests/e2e/config.sh.
 //
-//   config_driver [-v] [--locked] load              cfg_load, then the manifest as lines
-//   config_driver dumptoml FILE                     man_parse of a TOML file, the same lines
-//   config_driver loaddir DIR KEY                   cfg_load_dir
-//   config_driver text                              cfg_manifest_text
-//   config_driver info                              cfg_info: commands and hooks
-//   config_driver inittext NAME                     writes mbf_init_text(NAME) to mbuild.mettle
-//   config_driver hook NAME CODE...                 cfg_run_hook (linux, debug)
-//   config_driver setdep NAME VERSION / removedep NAME
-//   config_driver setcall FILE CALL ARG...          mbf_set_call on FILE (first_arg = the first ARG), written back
-//   config_driver removecall FILE CALL FIRST         mbf_remove_call
-//   config_driver build-driver DIR                  cfg_build_driver of a tiny program
-//   config_driver version                           what mb_mbuild("version") reaches
-//   config_driver NAME ARGS...                      cfg_run_command
+//   config_test [-v] [--locked] load                cfg_load, then the manifest as lines
+//   config_test dumptoml FILE                       man_parse of a TOML file, the same lines
+//   config_test loaddir DIR KEY                     cfg_load_dir
+//   config_test text                                cfg_manifest_text
+//   config_test info                                cfg_info: commands and hooks
+//   config_test inittext NAME                       writes mbf_init_text(NAME) to mbuild.mettle
+//   config_test hook NAME CODE...                   cfg_run_hook (linux, debug)
+//   config_test setdep NAME VERSION / removedep NAME
+//   config_test setcall FILE CALL ARG...            mbf_set_call on FILE (first_arg = the first ARG), written back
+//   config_test removecall FILE CALL FIRST           mbf_remove_call
+//   config_test build-driver DIR                    cfg_build_driver of a tiny program
+//   config_test version                             what mb_mbuild("version") reaches
+//   config_test NAME ARGS...                        cfg_run_command
 
 import "std/io";
 import "std/mem";
@@ -145,7 +145,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     at = at + 1;
   }
   if (at >= argc) {
-    err_line("usage: config_driver [-v] [--locked] COMMAND ...");
+    err_line("usage: config_test [-v] [--locked] COMMAND ...");
     return 2;
   }
   var cmd: string = s_from_c(argv[at]);

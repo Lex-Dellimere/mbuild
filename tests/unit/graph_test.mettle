@@ -1,8 +1,8 @@
-// core_graph: import-graph resolution against a scratch tree, checked
+// graph_test: import-graph resolution against a scratch tree, checked
 // against the compiler's rules (mettle.deps nearest first, std variants,
 // guards, relative, -I, working directory) and fingerprint sensitivity.
 //
-//   tools/mcheck.sh tests/core_graph.mettle --run
+//   tools/mcheck.sh tests/unit/graph_test.mettle --run
 
 import "std/io";
 import "std/mem";
@@ -170,7 +170,7 @@ fn main() -> int32 {
   sys_remove_tree(moved);
 
   sys_remove_tree(base);
-  say("core_graph: {g_pass} passed, {g_fail} failed");
+  say("graph_test: {g_pass} passed, {g_fail} failed");
   flush_out();
   if (g_fail > 0) {
     return 1;

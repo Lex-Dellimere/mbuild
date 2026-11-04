@@ -2,7 +2,7 @@
 //
 //   api_test surface DIR                  one line per export: kind name file:line|sig
 //   api_test diff OLD_DIR NEW_DIR [USE]...  "what name" lines, then "--", then api_render
-//                                           (each USE is "name file:line")
+//                                         (each USE is "name file:line")
 //   api_test breaking OLD_DIR NEW_DIR [USE]...  the same over api_breaking
 //
 // Directories may be given in Linux form under wine.
@@ -76,7 +76,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     }
     code = drv_diff(sl_get(args, 1), sl_get(args, 2), uses, s_eq(sl_get(args, 0), "breaking"));
   } else {
-    err_line("usage: api_driver surface DIR | diff|breaking OLD NEW [USE]...");
+    err_line("usage: api_test surface DIR | diff|breaking OLD NEW [USE]...");
   }
   flush_out();
   return code;

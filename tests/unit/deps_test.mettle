@@ -1,6 +1,6 @@
-// deps_driver: a small CLI over deps.mettle for tests/e2e/r3_deps.sh.
+// deps_test: a small CLI over src/pkg/deps.mettle for tests/e2e/deps.sh.
 //
-//   deps_driver <project-dir> <command> [args] [--offline] [--locked] [--force] [--verbose] [--quiet]
+//   deps_test <project-dir> <command> [args] [--offline] [--locked] [--force] [--verbose] [--quiet]
 //
 // Commands: ensure | add-missing NAME... | auto NAME... | get SPEC... | remove NAME... |
 // update [NAME... | --all] | tidy USED... | deps [--tree] | fetch | why NAME |
@@ -34,7 +34,7 @@ fn drv_bool(b: bool) -> string {
 fn main(argc: int32, argv: cstring*) -> int32 {
   esc_init();
   if (argc < 3) {
-    err_line("usage: deps_driver <project-dir> <command> [args]");
+    err_line("usage: deps_test <project-dir> <command> [args]");
     return 2;
   }
   var opts: Options* = options_new();
