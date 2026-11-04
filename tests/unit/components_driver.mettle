@@ -1,0 +1,393 @@
+// components_driver: the components module against the projects that
+// tests/e2e/r3_components.sh writes under WORK (DESIGN.md 15, 17.4 group K).
+//
+//   components_driver WORK all            every check, "ok NAME" / "FAIL NAME: why"; exit 1 on a failure
+//   components_driver WORK prepare        the static project's gen dir; prints gen dir and entry
+//   components_driver WORK use ARG        cmp_cmd_use on the static project
+//   components_driver WORK components     cmp_cmd_components on the static project
+//
+// Projects and dependency states are built by hand; programs are compiled
+// with METTLE (default `mettle` on PATH) with -I gen_dir, debug and --release.
+
+import "std/io";
+import "std/mem";
+import "../../src/core/base";
+import "../../src/core/path";
+import "../../src/core/fs";
+import "../../src/core/proc";
+import "../../src/model/toml";
+import "../../src/model/manifest";
+import "../../src/model/project";
+import "../../src/build/components";
+import "../../src/core/sys_linux" if linux;
+import "../../src/core/sys_windows" if windows;
+
+var g_fails: int32 = 0;
+var g_work: string;
+
+fn drv_check(name: string, ok: bool, why: string) {
+  if (ok) {
+    say("ok " + name);
+  } else {
+    say("FAIL " + name + ": " + why);
+    g_fails = g_fails + 1;
+  }
+}
+
+fn drv_manifest(file: string, dir: string) -> Manifest* {
+  var rd: FsRead = fs_read(file);
+  if (!rd.ok) {
+    fail("cannot read " + file);
+  }
+  var m: Manifest* = man_parse(toml_parse(rd.data, file), dir);
+  if (slen(m->error) > 0) {
+    fail(m->error);
+  }
+  return m;
+}
+
+fn drv_project(name: string) -> Project* {
+  var root: string = g_work + "/" + name;
+  var p: Project* = new Project;
+  p->root = root;
+  p->state_dir = root + "/.mbuild";
+  p->mbfile = s_empty();
+  p->has_manifest = true;
+  p->opts = options_new();
+  p->opts->mettle = env_get("METTLE");
+  p->man = drv_manifest(root + "/mbuild.toml", root);
+  var lrd: FsRead = fs_read(root + "/mbuild.local.toml");
+  if (lrd.ok) {
+    var lm: Manifest* = man_parse_local(toml_parse(lrd.data, root + "/mbuild.local.toml"), root);
+    man_merge_local(p->man, lm);
+  }
+  return p;
+}
+
+fn drv_fresh(name: string) -> Project* {
+  var root: string = g_work + "/" + name;
+  sys_remove_tree(root + "/.mbuild");
+  sys_remove_file(root + "/mbuild.local.toml");
+  return drv_project(name);
+}
+
+fn drv_deps(p: Project*, names: StrList*) -> DepState* {
+  var ds: DepState* = depstate_empty(p->state_dir + "/deps");
+  var i: int64 = 0;
+  while (i < names->len) {
+    var dir: string = g_work + "/" + sl_get(names, i);
+    var dm: DepModule;
+    dm.module = sl_get(names, i);
+    dm.version = "v1.0.0";
+    dm.commit = s_empty();
+    dm.dir = dir;
+    dm.alias = s_empty();
+    dm.is_path = true;
+    dm.man = drv_manifest(dir + "/mbuild.toml", dir);
+    dm.replaced = s_empty();
+    dm.submodules = sl_new();
+    dm.checksum = s_empty();
+    dm.registry = s_empty();
+    depstate_add(ds, dm);
+    i = i + 1;
+  }
+  return ds;
+}
+
+fn drv_build(p: Project*, target: string, profile: string, bin: string, main: string) -> CmpBuild* {
+  var b: CmpBuild* = new CmpBuild;
+  b->target = target;
+  b->profile = profile;
+  b->bin = bin;
+  b->entry = p->root + "/" + main;
+  var q: SettingsQuery;
+  q.profile = profile;
+  q.bin = bin;
+  q.target = target;
+  q.sets = (StrList*)0;
+  b->settings = man_settings(p->man, &q);
+  if (slen(b->settings->error) > 0) {
+    fail(b->settings->error);
+  }
+  return b;
+}
+
+fn drv_prepare(p: Project*, ds: DepState*, target: string, profile: string) -> CmpOut* {
+  return cmp_prepare(p, ds, drv_build(p, target, profile, "app", "src/main.mettle"));
+}
+
+fn drv_read(path: string) -> string {
+  var r: FsRead = fs_read(path);
+  if (!r.ok) {
+    return s_empty();
+  }
+  return r.data;
+}
+
+// Compiles o's entry with -I gen_dir (release or not) and runs it with arg;
+// "" for no arg. The program's output, or "COMPILE: " + the compiler's.
+fn drv_run(p: Project*, o: CmpOut*, release: bool, arg: string) -> string {
+  var exe: string = o->gen_dir + "/prog";
+  if (release) {
+    exe = exe + "-r";
+  }
+  var c: Cmd* = cmd_new(proc_tool("mettle", "METTLE"));
+  cmd_arg(c, "--build");
+  cmd_path(c, o->entry);
+  cmd_arg(c, "-I");
+  cmd_path(c, o->gen_dir);
+  if (release) {
+    cmd_arg(c, "--release");
+  }
+  cmd_arg(c, "-o");
+  cmd_path(c, exe);
+  cmd_env(c, "NO_COLOR", "1");
+  c->cwd = p->root;
+  var cc: Captured = proc_capture_all(c);
+  free(c);
+  if (cc.code != 0) {
+    return "COMPILE: " + cc.out;
+  }
+  var r: Cmd* = cmd_new(sys_find_tool(exe));
+  if (slen(arg) > 0) {
+    cmd_arg(r, arg);
+  }
+  var rc: Captured = proc_capture_all(r);
+  free(r);
+  return rc.out;
+}
+
+// The same output from a debug and a --release build.
+fn drv_runs(name: string, p: Project*, o: CmpOut*, arg: string, want: string) {
+  if (!o->ok) {
+    drv_check(name, false, "prepare: " + o->err);
+    return;
+  }
+  var d: string = drv_run(p, o, false, arg);
+  var r: string = drv_run(p, o, true, arg);
+  drv_check(name, s_eq(d, want), "debug printed [" + d + "], want [" + want + "]");
+  drv_check(name + " (release)", s_eq(r, want), "--release printed [" + r + "], want [" + want + "]");
+}
+
+fn drv_fails(name: string, o: CmpOut*, needles: StrList*) {
+  var ok: bool = !o->ok;
+  var i: int64 = 0;
+  while (i < needles->len) {
+    ok = ok && s_contains(o->err, sl_get(needles, i));
+    i = i + 1;
+  }
+  drv_check(name, ok, "err [" + o->err + "] lacks [" + sl_join(needles, "] [") + "]");
+}
+
+fn drv_static() {
+  var p: Project* = drv_fresh("static");
+  var ds: DepState* = drv_deps(p, sl_new());
+  var stale: string = p->state_dir + "/gen/linux-debug-app/old.mettle";
+  fs_mkdirs(p_dir(stale));
+  fs_write(stale, "// from an older build\n");
+  var o: CmpOut* = drv_prepare(p, ds, "linux", "debug");
+  drv_check("static selection", o->ok && sl_has(o->selected, "logger=stdout") && sl_has(o->origins, "logger=default"), o->err + " " + sl_join(o->origins, ","));
+  drv_check("static gen dir", s_ends(o->gen_dir, "/.mbuild/gen/linux-debug-app") && s_eq(o->entry, p->root + "/src/main.mettle"), o->gen_dir + " " + o->entry);
+  drv_check("stale file removed", !fs_exists(stale), stale);
+  var text: string = drv_read(o->gen_dir + "/logger.mettle");
+  var want: string = "// generated by mbuild: component logger = stdout (linux, debug, app); do not edit\nimport \"" + p->root + "/src/logger/stdout.mettle\";\nexport const LOGGER_IMPL: string = \"stdout\";\n";
+  drv_check("static module text", s_eq(text, want), "[" + text + "]");
+  drv_runs("static stdout", p, o, "", "stdout: hi\n");
+
+  var rel: CmpOut* = drv_prepare(p, ds, "linux", "release");
+  drv_check("release profile selection", sl_has(rel->selected, "logger=quiet") && sl_has(rel->origins, "logger=mbuild.toml:8"), sl_join(rel->origins, ","));
+  drv_runs("release quiet", p, rel, "", "");
+
+  var win: CmpOut* = drv_prepare(p, ds, "windows", "debug");
+  var wtext: string = drv_read(win->gen_dir + "/logger.mettle");
+  drv_check("windows default", win->ok && s_contains(wtext, "/src/logger/quiet.mettle\";") && s_contains(wtext, "LOGGER_IMPL: string = \"quiet\"") && sl_has(win->origins, "logger=default for windows"), wtext);
+
+  sl_push(p->opts->uses, "logger=quiet");
+  var used: CmpOut* = drv_prepare(p, ds, "linux", "debug");
+  drv_check("--use", sl_has(used->selected, "logger=quiet") && sl_has(used->origins, "logger=--use"), sl_join(used->origins, ","));
+  sl_set(p->opts->uses, 0, "logger=quiett");
+  drv_fails("unknown impl", drv_prepare(p, ds, "linux", "debug"), sl_of("did you mean 'quiet'?"));
+  sl_set(p->opts->uses, 0, "loger=quiet");
+  drv_fails("unknown component", drv_prepare(p, ds, "linux", "debug"), sl_of("no component 'loger' (did you mean 'logger'?)"));
+  sl_set(p->opts->uses, 0, "logger=file");
+  var miss: StrList* = sl_of("component logger: impl file does not match stdout: missing fn log_line(s: string) -> int32 (src/logger/stdout.mettle:3)");
+  drv_fails("missing export", drv_prepare(p, ds, "linux", "debug"), miss);
+  sl_remove_at(p->opts->uses, 0);
+
+  p->opts->rest = sl_of("logger=quiet");
+  var rc: int32 = cmp_cmd_use(p);
+  var local: string = drv_read(p->root + "/mbuild.local.toml");
+  drv_check("use writes mbuild.local.toml", rc == 0 && s_contains(local, "[components]\nlogger = \"quiet\""), "[" + local + "]");
+  var sel: string = drv_read(p->state_dir + "/gen/linux-debug-app/logger.mettle");
+  drv_check("use rewrites the selector", s_contains(sel, "/src/logger/quiet.mettle\";") && s_contains(sel, "component logger = quiet"), sel);
+  var after: CmpOut* = drv_prepare(p, ds, "linux", "debug");
+  drv_check("origin mbuild.local.toml", sl_has(after->origins, "logger=mbuild.local.toml"), sl_join(after->origins, ","));
+  var reread: Project* = drv_project("static");
+  var again: CmpOut* = drv_prepare(reread, ds, "linux", "debug");
+  drv_check("origin mbuild.local.toml (reloaded)", sl_has(again->origins, "logger=mbuild.local.toml"), sl_join(again->origins, ","));
+  p->opts->rest = sl_of("logger=quite");
+  drv_check("use unknown impl", cmp_cmd_use(p) != 0, "accepted logger=quite");
+  p->opts->rest = sl_of("logger");
+  rc = cmp_cmd_use(p);
+  var dropped: string = drv_read(p->state_dir + "/gen/linux-debug-app/logger.mettle");
+  drv_check("use NAME drops the choice", rc == 0 && !s_contains(drv_read(p->root + "/mbuild.local.toml"), "logger") && s_contains(dropped, "stdout.mettle"), dropped);
+  free(miss);
+  free(reread);
+  free(ds);
+  free(p);
+}
+
+fn drv_dyn() {
+  var p: Project* = drv_fresh("dyn");
+  var ds: DepState* = drv_deps(p, sl_new());
+  var o: CmpOut* = drv_prepare(p, ds, "linux", "debug");
+  drv_runs("dyn fancy", p, o, "fancy", "fancy: 5000\n");
+  drv_runs("dyn default", p, o, "", "ascii: 105\n");
+  var bad: Project* = drv_fresh("dynbad");
+  var needles: StrList* = sl_of("struct Fancy");
+  sl_push(needles, "export it");
+  drv_fails("dyn private struct", drv_prepare(bad, drv_deps(bad, sl_new()), "linux", "debug"), needles);
+  free(needles);
+  free(bad);
+  free(ds);
+  free(p);
+}
+
+fn drv_swap() {
+  var p: Project* = drv_fresh("swap");
+  var ds: DepState* = drv_deps(p, sl_new());
+  var o: CmpOut* = drv_prepare(p, ds, "linux", "debug");
+  drv_check("swap has_swap", o->ok && o->has_swap, o->err);
+  drv_runs("swap staged", p, o, "", "6\n6\n50\n");
+  var bad: Project* = drv_fresh("swapbad");
+  var needles: StrList* = sl_of("fn policy_rate(m: LogMsg*) -> int32 uses the struct LogMsg; a swap component's functions take built-in types only (pass a rawptr)");
+  drv_fails("swap struct parameter", drv_prepare(bad, drv_deps(bad, sl_new()), "linux", "debug"), needles);
+  free(needles);
+  free(bad);
+  free(ds);
+  free(p);
+}
+
+fn drv_rules() {
+  var p: Project* = drv_fresh("rules");
+  var o: CmpOut* = drv_prepare(p, drv_deps(p, sl_new()), "linux", "debug");
+  var text: string = drv_read(o->entry);
+  drv_check("rule wrapper", o->ok && s_ends(o->entry, "/linux-debug-app/entry.mettle") && s_starts(text, "// generated by mbuild: app + rules; do not edit\nimport \"") && s_contains(text, "/rules/norec.mettle\";\n"), text);
+  if (o->ok) {
+    var out: string = drv_run(p, o, false, "");
+    drv_check("rule fails the build", s_starts(out, "COMPILE: ") && s_contains(out, "R0002") && s_contains(out, "src/util.mettle"), out);
+  }
+  free(p);
+}
+
+fn drv_deps_comps() {
+  var p: Project* = drv_fresh("static");
+  var ds: DepState* = drv_deps(p, sl_of("comps"));
+  var all: CompSpec** = cmp_all(p, ds);
+  var n: int64 = 0;
+  var kv_owner: string = s_empty();
+  while (all[n] != (CompSpec*)0) {
+    if (s_eq(all[n]->name, "kv")) {
+      kv_owner = all[n]->owner;
+    }
+    n = n + 1;
+  }
+  drv_check("cmp_all", n == 2 && s_eq(all[0]->name, "logger") && s_eq(kv_owner, "comps"), s_int(n) + " " + kv_owner);
+  var o: CmpOut* = drv_prepare(p, ds, "linux", "debug");
+  var kv: string = drv_read(o->gen_dir + "/kv.mettle");
+  drv_check("dependency component", o->ok && sl_has(o->selected, "kv=mem") && s_contains(kv, "/comps/src/kv/mem.mettle\";"), o->err + kv);
+  p->opts->rest = sl_of("kv=file");
+  var rc: int32 = cmp_cmd_use(p);
+  var kv2: string = drv_read(o->gen_dir + "/kv.mettle");
+  drv_check("use on a dependency component", rc == 0 && s_contains(kv2, "/comps/src/kv/file.mettle\";"), kv2);
+  drv_fails("clash", drv_prepare(p, drv_deps(p, sl_of("clash")), "linux", "debug"), sl_of("component logger is declared by both this project (mbuild.toml:3) and clash"));
+  drv_fails("package name", drv_prepare(p, drv_deps(p, sl_of("kv")), "linux", "debug"), sl_of("has the name of the package kv"));
+  free(ds);
+  free(p);
+}
+
+fn drv_check_cmd() {
+  var ok: Project* = drv_fresh("chk");
+  drv_check("cmp_check clean", cmp_check(ok, drv_deps(ok, sl_new())) == 0, "returned non-zero");
+  var bad: Project* = drv_fresh("chkbad");
+  drv_check("cmp_check broken impl", cmp_check(bad, drv_deps(bad, sl_new())) != 0, "returned 0");
+  var st: Project* = drv_fresh("static");
+  drv_check("cmp_cmd_components", cmp_cmd_components(st, drv_deps(st, sl_new())) == 0, "returned non-zero");
+  free(ok);
+  free(bad);
+  free(st);
+}
+
+fn drv_kinds() {
+  var p: Project* = drv_fresh("static");
+  var b: BinSpec;
+  b.name = "boot";
+  b.main = "src/boot.mettle";
+  b.flags = sl_new();
+  b.kind = "flat";
+  b.triple = "x86_64-none";
+  var q: SettingsQuery;
+  q.profile = "debug";
+  q.bin = s_empty();
+  q.target = "linux";
+  q.sets = (StrList*)0;
+  var st: Settings* = man_settings(p->man, &q);
+  drv_check("freestanding", cmp_freestanding(&b), b.triple);
+  drv_check("flat needs image-base", s_contains(cmp_bin_problem(p, &b, st), "image-base"), "no problem reported");
+  st->image_base = "0x100000";
+  drv_check("flat with image-base", slen(cmp_bin_problem(p, &b, st)) == 0, cmp_bin_problem(p, &b, st));
+  b.kind = "exe";
+  b.triple = s_empty();
+  drv_check("exe", !cmp_freestanding(&b) && slen(cmp_bin_problem(p, &b, st)) == 0, cmp_bin_problem(p, &b, st));
+  var fl: StrList* = sl_of("--safe");
+  sl_push(fl, "-s");
+  sl_push(fl, "--check-effects");
+  var kept: StrList* = cmp_freestanding_flags(fl);
+  drv_check("freestanding flags", kept->len == 1 && s_eq(sl_get(kept, 0), "-s"), sl_join(kept, " "));
+  free(fl);
+  free(kept);
+  free(st);
+  free(p);
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  esc_init();
+  if (argc < 3) {
+    fail("usage: components_driver WORK all|prepare|use ARG|components");
+  }
+  var work: string = p_clean(s_from_c(argv[1]));
+  g_work = work;
+  var what: string = s_from_c(argv[2]);
+  if (s_eq(what, "prepare")) {
+    var p: Project* = drv_fresh("static");
+    var o: CmpOut* = cmp_prepare(p, drv_deps(p, sl_new()), drv_build(p, "linux", "debug", "live", "src/live.mettle"));
+    if (!o->ok) {
+      fail(o->err);
+    }
+    say(o->gen_dir);
+    say(o->entry);
+    return 0;
+  }
+  if (s_eq(what, "use") && argc > 3) {
+    var up: Project* = drv_project("static");
+    up->opts->rest = sl_of(s_from_c(argv[3]));
+    return cmp_cmd_use(up);
+  }
+  if (s_eq(what, "components")) {
+    var cp: Project* = drv_project("static");
+    return cmp_cmd_components(cp, drv_deps(cp, sl_new()));
+  }
+  drv_static();
+  drv_dyn();
+  drv_swap();
+  drv_rules();
+  drv_deps_comps();
+  drv_check_cmd();
+  drv_kinds();
+  if (g_fails > 0) {
+    say(s_int(g_fails) + " failed");
+    return 1;
+  }
+  say("all passed");
+  return 0;
+}
