@@ -1,0 +1,19 @@
+// Edit these while `mbuild live` runs: the next tick uses the new code,
+// and the world (tick, pop, food) carries on where it was.
+
+export fn rule_name() -> string {
+  return "steady";
+}
+
+// food gathered this tick
+export fn harvest(pop: int32) -> int32 {
+  return pop / 2;
+}
+
+// population next tick
+export fn grow(pop: int32, food: int32) -> int32 {
+  if (food > pop * 2) {
+    return pop + 1;
+  }
+  return pop;
+}

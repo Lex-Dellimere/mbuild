@@ -1,0 +1,30 @@
+// A tiny simulation to patch while it runs: `mbuild live`, then edit rules.mettle.
+import "std/io";
+import "std/thread";
+import "rules";
+
+struct World {
+  tick: int32;
+  pop: int32;
+  food: int32;
+}
+
+fn main() -> int32 {
+  var w: World;
+  w.tick = 0;
+  w.pop = 10;
+  w.food = 100;
+  while (w.tick < 600) {
+    quiesce;
+    w.food = w.food + harvest(w.pop);
+    w.pop = grow(w.pop, w.food);
+    w.food = w.food - w.pop;
+    if (w.food < 0) {
+      w.food = 0;
+    }
+    println("tick {w.tick}  pop {w.pop}  food {w.food}  ({rule_name()})");
+    w.tick = w.tick + 1;
+    Sleep(500);
+  }
+  return 0;
+}

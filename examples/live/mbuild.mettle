@@ -1,0 +1,8 @@
+import "mbuild/api";
+
+fn project() {
+  mb_package("live_demo", "0.1.0");
+}
+
+fn deps() {
+}
