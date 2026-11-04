@@ -1227,6 +1227,7 @@ export fn shell_cmd(p: Project*) -> int32 {
     fail("mbuild shell runs on Linux only for now");
   }
   var ss: ShxSess* = new ShxSess;
+  defer free(ss);
   ss->local = sl_has(p->opts->rest, "--local");
   ss->sb = build_shell_open(p);
   ss->dir = p->state_dir + "/shell";
