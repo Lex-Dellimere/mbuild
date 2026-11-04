@@ -1,15 +1,15 @@
-// manifest: the mbuild.toml model (DESIGN.md section 6).
+// manifest: the manifest model: the TOML mbuild.mettle emits and registries serve (DESIGN.md 13.5).
 //
 // man_parse checks types and dependency rules (first problem -> m->error as
 // "file:line: message") and reports unknown sections and keys as warnings,
 // with a "did you mean" when one known name is within edit distance 2.
 // Dependencies may be written inline (`x = "v1"`, `x = {{ ... }`) or as a
-// table (`[dependencies.x]`); keys are package names (DESIGN.md 13.5). Keys
-// removed in round 3 are errors naming the replacement.
+// table (`[dependencies.x]`); keys are package names. Removed keys
+// are errors naming the replacement.
 //
-// Build settings (DESIGN.md 12.12): typed keys in [profile.NAME] and
+// Build settings (DESIGN.md 12.8): typed keys in [profile.NAME] and
 // [bin.NAME], resolved by man_settings through built-in profile ->
-// mbuild.toml inherits chain (ancestor first, each followed by the same
+// the profile's inherits chain (ancestor first, each followed by the same
 // profile of mbuild.local.mettle) -> [bin.NAME] -> --set; raw flags
 // concatenate in that order and [build] flags come last. With a target,
 // the chain's [profile.NAME.os] sections follow the chain (ancestor first).
@@ -374,7 +374,7 @@ fn mnx_table_as_inline(doc: Toml*, sec: string, line: int64) -> TomlValue* {
   return v;
 }
 
-// The replacement for a dependency field removed in round 3; "" when f is not one.
+// The replacement for a removed dependency field; "" when f is not one.
 fn mnx_dep_removed(f: string) -> string {
   if (s_eq(f, "url")) { return "url was removed: packages come from a registry (registry = \"NAME\" with [registry.NAME] url) or a path"; }
   if (s_eq(f, "module")) { return "module was removed: the key is the package name"; }
@@ -684,7 +684,7 @@ fn mnx_unknown_keys(m: Manifest*, sec: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Build settings (DESIGN.md 12.12)
+// Build settings (DESIGN.md 12.8)
 // ---------------------------------------------------------------------------
 
 fn mnx_typed_words() -> string {
@@ -1182,7 +1182,7 @@ fn mnx_package_extra(m: Manifest*) {
   }
 }
 
-// Keys removed in round 3 (DESIGN.md 13.5), each an error naming its replacement.
+// Removed keys (DESIGN.md 13.5), each an error naming its replacement.
 fn mnx_removed(m: Manifest*) {
   var mv: TomlValue* = toml_get(m->doc, "package", "module");
   if (mv != (TomlValue*)0) {
