@@ -1,5 +1,5 @@
 // api: the exported surface of a package version, the difference between two
-// surfaces, and the report lines of DESIGN.md 12.13. Scanner-based: it sees
+// surfaces, and the report lines of DESIGN.md 11.8. Scanner-based: it sees
 // declarations, not types, so the report is information, not a verdict.
 
 import "std/mem";

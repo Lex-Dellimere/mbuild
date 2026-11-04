@@ -1,4 +1,4 @@
-// registry: package registries (DESIGN.md 14): the search order, the index,
+// registry: package registries (DESIGN.md 13): the search order, the index,
 // manifests and archives in the download cache, extraction, publishing.
 //
 // A registry is a static tree: index/<name>, pkg/<name>/<name>-<v>.toml and
@@ -22,7 +22,7 @@ import "../model/manifest";
 import "../model/project";
 
 // The registry named `default` when neither MBUILD_REGISTRY nor the project
-// names one. To be decided (DESIGN.md 17.5).
+// names one. To be decided (DESIGN.md 16).
 const REG_DEFAULT_URL: string = "";
 
 export struct RegVersion {

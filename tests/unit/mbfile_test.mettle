@@ -1,4 +1,4 @@
-// mbfile_test: scanning and editing mbuild.mettle (DESIGN.md 13.8).
+// mbfile_test: scanning and editing mbuild.mettle (DESIGN.md 12.5).
 //
 //   mettle test tests/unit/mbfile_test.mettle     (leak warnings are expected)
 //   mettle --build tests/unit/mbfile_test.mettle -o t && ./t

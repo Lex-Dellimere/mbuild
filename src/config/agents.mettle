@@ -1,5 +1,5 @@
 // agents: the managed block in a project's AGENT.rules that points at the
-// AGENT.rules of its dependencies (DESIGN.md 16.3).
+// AGENT.rules of its dependencies (DESIGN.md 15.2).
 
 import "std/mem";
 import "../core/base";

@@ -1,5 +1,5 @@
 // components: selection, interface checks and the generated modules of a
-// build's components (DESIGN.md 15), the rule wrapper (15.8), `mbuild
+// build's components (DESIGN.md 14), the rule wrapper (14.7), `mbuild
 // components` and `mbuild use`.
 //
 // A build's gen dir, .mbuild/gen/<target>-<profile>-<bin>/, holds
@@ -775,7 +775,7 @@ fn cmx_swap_slots(p: Project*, c: CompSpec*, iname: string, err: string*) -> Cmx
       var bad: string = s_empty();
       var ty: string = cmx_slot_type(it->sig, &bad);
       if (slen(bad) > 0) {
-        *err = label + ": " + at + ": fn " + it->name + it->sig + " uses the struct " + bad + "; a swap component's functions take built-in types only (pass a rawptr), see DESIGN.md 15.4";
+        *err = label + ": " + at + ": fn " + it->name + it->sig + " uses the struct " + bad + "; a swap component's functions take built-in types only (pass a rawptr), see docs/components.md";
       } else {
         out->items[out->n].name = it->name;
         out->items[out->n].ty = ty;
@@ -1298,7 +1298,7 @@ export fn cmp_cmd_components(p: Project*, ds: DepState*) -> int32 {
   var err: string = cmx_clashes(p, cs, packages);
   cmx_free(packages);
   if (cs->n == 0) {
-    say("no components (declare one with mb_component in mbuild.mettle, DESIGN.md 15.2)");
+    say("no components (declare one with mb_component in mbuild.mettle, docs/components.md)");
     free(cs->items);
     free(cs);
     return 0;

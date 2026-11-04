@@ -1,5 +1,5 @@
 // services: the processes mb_service declares, started around `mbuild run`
-// (DESIGN.md 13.12), and `mbuild services`.
+// (DESIGN.md 12.9), and `mbuild services`.
 
 import "std/mem";
 import "../core/base";

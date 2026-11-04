@@ -1,4 +1,4 @@
-// mbfile: mbuild.mettle as text (DESIGN.md 13.2, 13.3, 13.8, 13.10, 13.11).
+// mbfile: mbuild.mettle as text (DESIGN.md 12.1, 12.2, 12.5, 12.6, 12.8).
 //
 // A light scanner, not a parser: it skips strings (with their `{expr}`
 // interpolations), comments and char literals, tracks braces, and records the

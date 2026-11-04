@@ -1,4 +1,4 @@
-// mbuild/api: what mbuild.mettle imports (DESIGN.md 13.4).
+// mbuild/api: what mbuild.mettle imports (docs/project.md).
 //
 // mbuild compiles mbuild.mettle into a driver program and runs it: `driver
 // config OUT` calls fn project(), whose mb_* declarations collect TOML that

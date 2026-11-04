@@ -134,7 +134,7 @@ fn natx_wine_form(dir: string) -> string {
 
 // A directory with links resolved ('/' separators); the path itself when it
 // cannot be resolved. The runtime's realpath does not follow links, so a
-// link (a [replace] path, DESIGN.md 12.5) is read with the host's
+// link (a [replace] path, DESIGN.md 11.4) is read with the host's
 // `readlink -f` (also under wine; native Windows junctions stay as they are).
 fn natx_real_dir(dir: string) -> string {
   var d: string = p_clean(s_replace_byte(dir, 92, 47));
@@ -901,7 +901,7 @@ fn natx_link_c(c: NatCtx*, i: int64, objs: StrList*) {
   } else {
     cmd_arg(cm, "-Wl,-soname,libmb_" + pk->name + ".so");
     // The package's C calls its own functions, never another library's
-    // copy of the same name (ELF interposition; DESIGN.md 12.14). PE DLLs
+    // copy of the same name (ELF interposition; DESIGN.md 8.1). PE DLLs
     // bind their internal calls at link time already.
     cmd_arg(cm, "-Wl,-Bsymbolic");
   }
@@ -1233,7 +1233,7 @@ export fn nat_prepare(p: Project*, ds: DepState*, t: TargetCtx*) -> NatLink* {
 }
 
 // ---------------------------------------------------------------------------
-// One C symbol in two package libraries (DESIGN.md 12.14)
+// One C symbol in two package libraries (DESIGN.md 8.1)
 // ---------------------------------------------------------------------------
 
 // Names a library defines that are not the package's own API.

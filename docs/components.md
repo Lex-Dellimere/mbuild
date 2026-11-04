@@ -235,7 +235,7 @@ Rules:
   as a `rawptr`:
 
   ```text
-  error: component policy (swap): src/policy/gentle.mettle:6: fn policy_rate(m: LogMsg*) -> int32 uses the struct LogMsg; a swap component's functions take built-in types only (pass a rawptr), see DESIGN.md 15.4
+  error: component policy (swap): src/policy/gentle.mettle:6: fn policy_rate(m: LogMsg*) -> int32 uses the struct LogMsg; a swap component's functions take built-in types only (pass a rawptr), see docs/components.md
   ```
 - at most 256 functions per component;
 - the program needs a `quiesce;` somewhere, or a staged swap never applies:
