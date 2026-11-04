@@ -66,6 +66,8 @@ export struct TargetCtx {
   cache_dir: string;             // absolute .mbuild/cache/<target>
   compiler_runtime_dir: string;  // runtime objects of the selected Mettle compiler, "" if unknown
   compiler_stdlib_dir: string;
+  app: Project*;                 // the project being built: its root, cache and profile C flags apply to native code
+  app_profile: string;
 }
 
 // What the native step contributes to one compile for one target.
@@ -113,6 +115,8 @@ export fn targetctx_new(p: Project*, target: string, profile: string) -> TargetC
   t->cache_dir = p->state_dir + "/cache/" + target;
   t->compiler_runtime_dir = s_empty();
   t->compiler_stdlib_dir = s_empty();
+  t->app = p;
+  t->app_profile = profile;
   return t;
 }
 

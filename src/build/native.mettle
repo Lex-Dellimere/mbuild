@@ -364,7 +364,7 @@ fn natx_new(p: Project*, ds: DepState*, t: TargetCtx*) -> NatCtx* {
   c->ext = (NatExterns*)0;
   c->base = (NatBase*)0;
   c->linked = (NatLinked*)0;
-  c->root_host = s_replace_byte(sys_host_path(p->root), 92, 47);
+  c->root_host = s_replace_byte(sys_host_path(t->app->root), 92, 47);
   natx_load_pkgs(c);
   g_natx_ctx = c;
   return c;
@@ -435,11 +435,11 @@ fn natx_hash_args(c: NatCtx*, h: Hasher*, cm: Cmd*) {
 // `[profile.<profile>] cflags` of the root manifest: C flags for this build's
 // profile, applied to every package's C code.
 fn natx_profile_cflags(c: NatCtx*) -> StrList* {
-  var m: Manifest* = c->p->man;
+  var m: Manifest* = c->t->app->man;
   if (m == 0 || m->doc == 0) {
     return sl_new();
   }
-  return toml_list(m->doc, "profile." + c->t->profile, "cflags");
+  return toml_list(m->doc, "profile." + c->t->app_profile, "cflags");
 }
 
 // The cache subdirectory suffix for C output: "" unless the profile adds
@@ -451,7 +451,7 @@ fn natx_c_suffix(c: NatCtx*) -> string {
   if (n == 0) {
     return s_empty();
   }
-  return "-" + natx_sanitise(c->t->profile);
+  return "-" + natx_sanitise(c->t->app_profile);
 }
 
 fn natx_try_tool(name: string, allow_unix: bool) -> Tool {
@@ -1328,6 +1328,9 @@ fn natx_dup_check(c: NatCtx*, fp: string) {
     return;
   }
   var cache: string = c->t->cache_dir + "/dupsyms";
+  if (c->t->app != c->p) {
+    cache = cache + "-" + c->pkgs[0].name;
+  }
   var dups: StrList* = sl_new();
   var rd: FsRead = fs_read(cache);
   var cached: bool = false;

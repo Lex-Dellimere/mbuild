@@ -1933,6 +1933,10 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
 fn bx_tctx_new(s: BxSess*, target: string, m: Mettle*) -> TargetCtx* {
   var t: TargetCtx* = targetctx_new(s->p, target, s->profile);
   t->out_dir = s->app->root + "/build/" + target + "/" + s->app_profile;
+  // A dependency's bins share the app's native cache: its C builds once.
+  t->cache_dir = s->app->state_dir + "/cache/" + target;
+  t->app = s->app;
+  t->app_profile = s->app_profile;
   t->compiler_stdlib_dir = m->stdlib_dir;
   t->compiler_runtime_dir = m->runtime_dir;
   return t;

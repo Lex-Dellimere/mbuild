@@ -736,8 +736,10 @@ check "a dependency's bin is built" has "Compiling meosql/server (linux, debug)"
 check "... into the project's output directory" sh -c './build/linux/debug/server | grep -qx "serving on 5433"'
 check "... with the library it needs" test -f build/linux/debug/libmb_meosql.so
 check "only the bins named" test ! -e build/linux/debug/admin
+check "its C library compiles once" sh -c '[ "$(grep -c "Compiling meosql (C" "$0/last.out")" = 1 ] && [ ! -e .mbuild/dep-bins/meosql/cache ]' "$S"
 mb build
 check "an unchanged dependency bin is Fresh" has "Fresh meosql/server (linux, debug)"
+check "... and its C library too" sh -c '! grep -q "Compiling meosql (C" "$0/last.out"' "$S"
 printf '// edited\n' >> ../meosql/cmd/server/main.mettle
 mb build
 check "an edit rebuilds it" sh -c 'grep -qF "Compiling meosql/server" "$0/last.out" && grep -qF "Fresh sass" "$0/last.out"' "$S"
