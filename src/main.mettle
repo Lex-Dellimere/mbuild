@@ -18,7 +18,7 @@ import "core/sys_linux" if linux;
 import "core/sys_windows" if windows;
 
 fn mx_flag_names() -> StrList* {
-  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt", 32);
+  return s_split("--verbose --quiet --color --offline --locked --jobs --target --release --profile --force --mettle --filter --all --tree --help --set --flag --use --no-hooks --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --to --registry --name --from --opt --no-services", 32);
 }
 
 fn mx_bad_flag(a: string) {
@@ -65,7 +65,7 @@ fn mx_add_targets(o: Options*, v: string) {
 
 // Value-less command flags: they go to rest as written.
 fn mx_is_cmd_flag(name: string) -> bool {
-  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking", 32);
+  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --allow-breaking --no-services", 32);
   var has: bool = sl_has(l, name);
   free(l);
   return has;
@@ -273,6 +273,7 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "outdated")) { return deps_cmd_outdated(p); }
   if (s_eq(command, "vendor")) { return deps_cmd_vendor(p); }
   if (s_eq(command, "profiles")) { return build_cmd_profiles(p); }
+  if (s_eq(command, "services")) { return build_cmd_services(p); }
   if (s_eq(command, "fetch")) { return build_cmd_fetch(p); }
   if (s_eq(command, "publish")) { return build_cmd_publish(p); }
   if (s_eq(command, "components")) { return build_cmd_components(p); }

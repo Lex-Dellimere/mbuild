@@ -1,0 +1,150 @@
+// mbuild/api_windows: the Windows half of mb_spawn and friends (kernel32,
+// Winsock). Untested: no Windows dev compiler yet.
+
+extern fn mbi_w_CreateProcessA(app: cstring, cmd: cstring, pa: rawptr, ta: rawptr, inherit: int32, flags: uint32, env: rawptr, cwd: cstring, si: rawptr, pi: rawptr) -> int32 = "CreateProcessA";
+extern fn mbi_w_CreateFileA(path: cstring, access: uint32, share: uint32, sa: rawptr, creation: uint32, flags: uint32, template: int64) -> int64 = "CreateFileA";
+extern fn mbi_w_CloseHandle(h: int64) -> int32 = "CloseHandle";
+extern fn mbi_w_WaitForSingleObject(h: int64, ms: uint32) -> uint32 = "WaitForSingleObject";
+extern fn mbi_w_GetExitCodeProcess(h: int64, code: uint32*) -> int32 = "GetExitCodeProcess";
+extern fn mbi_w_TerminateProcess(h: int64, code: uint32) -> int32 = "TerminateProcess";
+extern fn mbi_w_SetEnvironmentVariableA(name: cstring, value: cstring) -> int32 = "SetEnvironmentVariableA";
+extern fn mbi_w_Sleep(ms: uint32) = "Sleep";
+extern fn mbi_w_GetTickCount64() -> uint64 = "GetTickCount64";
+extern fn mbi_w_WSAStartup(version: uint16, data: rawptr) -> int32 = "WSAStartup";
+extern fn mbi_w_socket(af: int32, kind: int32, proto: int32) -> int64 = "socket";
+extern fn mbi_w_connect(s: int64, addr: rawptr, len: int32) -> int32 = "connect";
+extern fn mbi_w_closesocket(s: int64) -> int32 = "closesocket";
+
+var g_mbi_w_wsa: uint8* = (uint8*)0;
+
+fn mbi_w_put64(p: uint8*, off: int64, v: int64) {
+  var i: int64 = 0;
+  while (i < 8) {
+    p[off + i] = (uint8)((v >> (i * 8)) & 255);
+    i = i + 1;
+  }
+}
+
+fn mbi_w_get64(p: uint8*, off: int64) -> int64 {
+  var v: int64 = 0;
+  var i: int64 = 7;
+  while (i >= 0) {
+    v = (v << 8) | (int64)p[off + i];
+    i = i - 1;
+  }
+  return v;
+}
+
+fn mbi_w_inheritable(path: cstring, write: bool) -> int64 {
+  var sa: uint8* = (uint8*)malloc(24);
+  defer free(sa);
+  memset(sa, 0, 24);
+  sa[0] = (uint8)24;
+  sa[16] = (uint8)1;
+  if (write) {
+    return mbi_w_CreateFileA(path, (uint32)1073741824, (uint32)3, (rawptr)sa, (uint32)2, (uint32)128, 0);
+  }
+  return mbi_w_CreateFileA(path, (uint32)2147483648, (uint32)3, (rawptr)sa, (uint32)3, (uint32)128, 0);
+}
+
+// Runs cmdline (extra: "K=V" entries, set for the child only), output to log; -1 on failure.
+export fn mbi_sys_spawn(path: cstring, argv: cstring*, envp: cstring*, cmdline: cstring, extra: cstring*, cwd: cstring, log: cstring) -> int64 {
+  var out: int64 = mbi_w_inheritable(log, true);
+  if (out == -1) {
+    return -1;
+  }
+  var nul: int64 = mbi_w_inheritable("NUL", false);
+  var si: uint8* = (uint8*)malloc(104);
+  defer free(si);
+  var pi: uint8* = (uint8*)malloc(24);
+  defer free(pi);
+  memset(si, 0, 104);
+  memset(pi, 0, 24);
+  si[0] = (uint8)104;
+  si[61] = (uint8)1;
+  mbi_w_put64(si, 80, nul);
+  mbi_w_put64(si, 88, out);
+  mbi_w_put64(si, 96, out);
+  var i: int64 = 0;
+  while (extra[i] != (cstring)0) {
+    mbi_w_env(extra[i], true);
+    i = i + 1;
+  }
+  var ok: int32 = mbi_w_CreateProcessA((cstring)0, cmdline, 0, 0, 1, (uint32)0, 0, cwd, (rawptr)si, (rawptr)pi);
+  i = 0;
+  while (extra[i] != (cstring)0) {
+    mbi_w_env(extra[i], false);
+    i = i + 1;
+  }
+  mbi_w_CloseHandle(out);
+  if (nul != -1) {
+    mbi_w_CloseHandle(nul);
+  }
+  if (ok == 0) {
+    return -1;
+  }
+  mbi_w_CloseHandle(mbi_w_get64(pi, 8));
+  return mbi_w_get64(pi, 0);
+}
+
+// "K=V": sets K (on) or removes it again.
+fn mbi_w_env(kv: cstring, on: bool) {
+  var p: uint8* = (uint8*)kv;
+  var n: int64 = 0;
+  while (p[n] != (uint8)0 && p[n] != (uint8)61) {
+    n = n + 1;
+  }
+  var name: uint8* = (uint8*)malloc(n + 1);
+  defer free(name);
+  memcpy(name, p, n);
+  name[n] = (uint8)0;
+  if (on && p[n] == (uint8)61) {
+    mbi_w_SetEnvironmentVariableA((cstring)name, (cstring)&p[n + 1]);
+  } else {
+    mbi_w_SetEnvironmentVariableA((cstring)name, (cstring)0);
+  }
+}
+
+export fn mbi_sys_poll(h: int64) -> int32 {
+  if (mbi_w_WaitForSingleObject(h, (uint32)0) != (uint32)0) {
+    return -1;
+  }
+  var code: uint32 = (uint32)127;
+  mbi_w_GetExitCodeProcess(h, &code);
+  return (int32)code;
+}
+
+// No SIGTERM for console programs: both terminate.
+export fn mbi_sys_signal(h: int64, kill: bool) {
+  mbi_w_TerminateProcess(h, (uint32)1);
+}
+
+export fn mbi_sys_port_open(port: int64) -> bool {
+  if (g_mbi_w_wsa == (uint8*)0) {
+    g_mbi_w_wsa = (uint8*)malloc(512);
+    mbi_w_WSAStartup((uint16)514, (rawptr)g_mbi_w_wsa);
+  }
+  var fd: int64 = mbi_w_socket(2, 1, 6);
+  if (fd == -1) {
+    return false;
+  }
+  var a: uint8* = (uint8*)malloc(16);
+  defer free(a);
+  memset(a, 0, 16);
+  a[0] = (uint8)2;
+  a[2] = (uint8)((port >> 8) & 255);
+  a[3] = (uint8)(port & 255);
+  a[4] = (uint8)127;
+  a[7] = (uint8)1;
+  var r: int32 = mbi_w_connect(fd, (rawptr)a, 16);
+  mbi_w_closesocket(fd);
+  return r == 0;
+}
+
+export fn mbi_sys_sleep_ms(ms: int64) {
+  mbi_w_Sleep((uint32)ms);
+}
+
+export fn mbi_sys_now_ms() -> int64 {
+  return (int64)mbi_w_GetTickCount64();
+}

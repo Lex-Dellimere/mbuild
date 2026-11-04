@@ -541,3 +541,242 @@ export fn sys_job_poll(j: Job*) -> bool {
 export fn sys_host_path(p: string) -> string {
   return p;
 }
+
+// ---------------------------------------------------------------------------
+// Background processes (services): fork + execve through raw syscalls
+// (x86-64 numbers), so mbuild holds the pid and can stop the process.
+// Job.handle is the pid, Job.aux 1 when it leads its own process group.
+// ---------------------------------------------------------------------------
+
+var g_lx_sigfd: int64 = -1;
+var g_lx_interrupted: bool = false;
+
+// The environment a child gets: the one mbuild started with, then sys_setenv's, then extra.
+fn lx_child_env(extra: StrList*) -> StrList* {
+  var out: StrList* = sl_new();
+  var fp: cstring = fopen("/proc/self/environ", "rb");
+  if (fp != 0) {
+    var b: Buf* = buf_new();
+    while (true) {
+      buf_reserve(b, 65536);
+      var got: int64 = fread((cstring)&b->data[b->len], 1, 65535, fp);
+      if (got <= 0) {
+        break;
+      }
+      b->len = b->len + got;
+    }
+    fclose(fp);
+    var all: string = buf_take(b);
+    var start: int64 = 0;
+    var i: int64 = 0;
+    while (i < slen(all)) {
+      if (s_byte(all, i) == 0) {
+        if (i > start) {
+          sl_push(out, s_sub(all, start, i));
+        }
+        start = i + 1;
+      }
+      i = i + 1;
+    }
+  }
+  lx_env_merge(out, lx_env_list());
+  lx_env_merge(out, extra);
+  return out;
+}
+
+fn lx_env_merge(env: StrList*, kvs: StrList*) {
+  var i: int64 = 0;
+  while (i < kvs->len) {
+    var kv: string = sl_get(kvs, i);
+    var eq: int64 = s_find_byte(kv, 61);
+    var key: string = s_sub(kv, 0, eq + 1);
+    var k: int64 = 0;
+    var found: bool = false;
+    while (k < env->len) {
+      if (s_starts(sl_get(env, k), key)) {
+        sl_set(env, k, kv);
+        found = true;
+      }
+      k = k + 1;
+    }
+    if (!found) {
+      sl_push(env, kv);
+    }
+    i = i + 1;
+  }
+}
+
+fn lx_cstrs(l: StrList*) -> cstring* {
+  var a: cstring* = (cstring*)malloc((l->len + 1) * 8);
+  var i: int64 = 0;
+  while (i < l->len) {
+    a[i] = s_c(sl_get(l, i));
+    i = i + 1;
+  }
+  a[l->len] = 0;
+  return a;
+}
+
+// Starts c without waiting: output to log_path ("" = inherit stdio, and stdin
+// too), in its own process group when own_group. Job.done at once when the
+// fork failed; an exec failure shows as exit 127.
+export fn sys_spawn(c: Cmd*, log_path: string, own_group: bool) -> Job* {
+  var j: Job* = new Job;
+  j->log_path = log_path;
+  j->status_path = "";
+  j->done = false;
+  j->code = 127;
+  j->handle = 0;
+  j->aux = 0;
+  if (own_group) {
+    j->aux = 1;
+  }
+  var args: StrList* = sl_new();
+  defer free(args);
+  sl_push(args, c->tool.path);
+  sl_extend(args, c->args);
+  var argv: cstring* = lx_cstrs(args);
+  var envp: cstring* = lx_cstrs(lx_child_env(c->env));
+  var path: cstring = s_c(c->tool.path);
+  var cwd: cstring = (cstring)0;
+  if (slen(c->cwd) > 0) {
+    cwd = s_c(c->cwd);
+  }
+  var logc: cstring = (cstring)0;
+  if (slen(log_path) > 0) {
+    logc = s_c(log_path);
+  }
+  var devnull: cstring = s_c("/dev/null");
+  var none: int64 = 0;
+  var dfl: int64[4];
+  dfl[0] = 0;
+  dfl[1] = 0;
+  dfl[2] = 0;
+  dfl[3] = 0;
+  flush_out();
+  var pid: int64 = syscall(57);
+  if (pid == 0) {
+    // the child: syscalls only, then exec, with Ctrl-C back to its default
+    syscall(14, 2, &none, 0, 8);
+    syscall(13, 2, &dfl[0], 0, 8);
+    if (own_group) {
+      syscall(109, 0, 0);
+    }
+    if (logc != 0) {
+      var fd: int64 = syscall(2, logc, 577, 420);
+      if (fd >= 0) {
+        syscall(33, fd, 1);
+        syscall(33, fd, 2);
+      }
+      var nul: int64 = syscall(2, devnull, 0, 0);
+      if (nul >= 0) {
+        syscall(33, nul, 0);
+      }
+    }
+    if (cwd != 0 && syscall(80, cwd) != 0) {
+      syscall(231, 127);
+    }
+    syscall(59, path, argv, envp);
+    syscall(231, 127);
+  }
+  free(argv);
+  free(envp);
+  if (pid < 0) {
+    j->done = true;
+    return j;
+  }
+  j->handle = pid;
+  return j;
+}
+
+fn lx_reap(j: Job*, options: int64) -> bool {
+  if (j->done) {
+    return true;
+  }
+  var st: int32 = 0;
+  var r: int64 = syscall(61, j->handle, &st, options, 0);
+  while (r == -4) {
+    r = syscall(61, j->handle, &st, options, 0);
+  }
+  if (r == 0) {
+    return false;
+  }
+  j->done = true;
+  j->code = 127;
+  if (r == j->handle) {
+    j->code = lx_decode_status(st);
+  }
+  return true;
+}
+
+// True once it has exited (j->code is then its exit code).
+export fn sys_spawn_poll(j: Job*) -> bool {
+  return lx_reap(j, 1);
+}
+
+export fn sys_spawn_wait(j: Job*) -> int32 {
+  lx_reap(j, 0);
+  return j->code;
+}
+
+// SIGTERM (to its whole group when it has one), SIGKILL after grace_ms.
+export fn sys_spawn_stop(j: Job*, grace_ms: int64) {
+  if (j->handle <= 0) {
+    return;
+  }
+  var target: int64 = j->handle;
+  if (j->aux == 1) {
+    target = 0 - j->handle;
+  }
+  syscall(62, target, 15);
+  var until: int64 = sys_now_ms() + grace_ms;
+  while (!sys_spawn_poll(j) && sys_now_ms() < until) {
+    sys_sleep_ms(10);
+  }
+  if (!j->done || j->aux == 1) {
+    syscall(62, target, 9);
+  }
+  sys_spawn_wait(j);
+}
+
+// From here on Ctrl-C does not end mbuild: sys_interrupted reports it.
+// Children started by sys_spawn get the default handling back.
+export fn sys_catch_interrupt() {
+  if (g_lx_sigfd >= 0) {
+    return;
+  }
+  var set: int64 = 2;
+  syscall(14, 0, &set, 0, 8);
+  g_lx_sigfd = syscall(289, -1, &set, 8, 526336);
+}
+
+export fn sys_interrupted() -> bool {
+  if (g_lx_interrupted || g_lx_sigfd < 0) {
+    return g_lx_interrupted;
+  }
+  var buf: uint8* = (uint8*)malloc(128);
+  defer free(buf);
+  if (syscall(0, g_lx_sigfd, buf, 128) > 0) {
+    g_lx_interrupted = true;
+  }
+  return g_lx_interrupted;
+}
+
+// True when 127.0.0.1:port accepts a TCP connection.
+export fn sys_port_open(port: int64) -> bool {
+  var fd: int64 = syscall(41, 2, 524289, 0);
+  if (fd < 0) {
+    return false;
+  }
+  var a: uint8* = (uint8*)malloc(16);
+  defer free(a);
+  memset(a, 0, 16);
+  a[0] = (uint8)2;
+  a[2] = (uint8)((port >> 8) & 255);
+  a[3] = (uint8)(port & 255);
+  a[4] = (uint8)127;
+  a[7] = (uint8)1;
+  var r: int64 = syscall(42, fd, a, 16);
+  syscall(3, fd);
+  return r == 0;
+}

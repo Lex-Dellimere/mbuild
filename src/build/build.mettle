@@ -27,6 +27,7 @@ import "../config/agents";
 import "native";
 import "toolchain";
 import "components";
+import "services";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -2260,6 +2261,34 @@ fn bx_run_targets(p: Project*) -> StrList* {
 
 export fn build_cmd_run(p: Project*) -> int32 {
   var bs: BinSet* = bx_run_bin(p, "run");
+  var services: bool = p->man->nservices > 0 && !sl_has(p->opts->rest, "--no-services");
+  var svc_bins: StrList* = sl_new();
+  defer free(svc_bins);
+  if (services) {
+    // the project's bins a service names are built with the app
+    var progs: StrList* = svc_programs(p->man);
+    var all: BinSet* = build_bins(p);
+    var names: StrList* = sl_of(bs->items[0].name);
+    var i: int64 = 0;
+    while (i < all->n) {
+      if (sl_has(progs, all->items[i].name)) {
+        sl_push(svc_bins, all->items[i].name);
+        sl_add_uniq(names, all->items[i].name);
+      }
+      i = i + 1;
+    }
+    i = 0;
+    while (i < p->man->dep_bins->len) {
+      var e: string = sl_get(p->man->dep_bins, i);
+      sl_push(svc_bins, s_from(e, s_find_byte(e, 61) + 1));
+      i = i + 1;
+    }
+    if (names->len > 1) {
+      bs = bx_select_bins(p, names);
+    }
+    free(names);
+    free(progs);
+  }
   var s: BxSess* = bx_sess(p, bx_run_targets(p));
   g_bx_sess = s;
   if (bx_build_all(s, bs) != 0) {
@@ -2280,6 +2309,9 @@ export fn build_cmd_run(p: Project*) -> int32 {
     cmd_env(c, "METTLE_PROFILE_OUT", prof_out);
   }
   free(st);
+  if (services) {
+    return svc_run(p, t->out_dir, target_exe_ext(t->target), svc_bins, c, bx_show(outp));
+  }
   status("Running", bx_show(outp));
   return proc_run(c);
 }
@@ -4091,6 +4123,11 @@ fn bx_flags_text(p: Project*, prof: string, bin: string, target: string) -> stri
   return s_trim(txt);
 }
 
+// mbuild services
+export fn build_cmd_services(p: Project*) -> int32 {
+  return svc_cmd_list(p);
+}
+
 export fn build_cmd_profiles(p: Project*) -> int32 {
   var m: Manifest* = p->man;
   var names: StrList* = man_profile_names(m);
@@ -4307,7 +4344,9 @@ fn bx_init_cmds() {
   bx_ex("mbuild run -t windows", "through wine");
   bx_fl("-t T", "one target (default: the host)");
   bx_fl("-r, -p NAME", "the release profile, or another one");
+  bx_fl("--no-services", "don't start the mb_service processes");
   bx_note("the exit code is the program's.");
+  bx_note("mb_service processes start first, in order, each waited for on its port; they stop when the program exits. output in .mbuild/logs/NAME.log.");
   bx_def("live", "run a program and patch it as you edit", "mbuild live [BIN] [-p PROFILE] [-- ARGS...]", "components.md");
   bx_ex("mbuild live", "");
   bx_ex("mbuild use render=gl", "in another terminal: switch a component");
@@ -4399,6 +4438,8 @@ fn bx_init_cmds() {
   bx_note("writes mbuild.local.mettle, so a running `mbuild live` switches too.");
   bx_def("profiles", "show the resolved build settings", "mbuild profiles", "project.md");
   bx_ex("mbuild profiles", "settings, where they're set, compiler flags");
+  bx_def("services", "list the processes mbuild run starts", "mbuild services", "project.md");
+  bx_ex("mbuild services", "name, command, port");
   bx_group("tools");
   bx_def("doctor", "check the environment", "mbuild doctor [-t T]", "native.md");
   bx_ex("mbuild doctor", "tools, compilers, the native-code audit");

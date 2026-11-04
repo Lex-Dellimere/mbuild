@@ -44,6 +44,11 @@ extern fn w_CreateFileA(path: cstring, access: uint32, share: uint32, sa: rawptr
 extern fn w_GetStdHandle(which: int32) -> int64 = "GetStdHandle";
 extern fn w_SetHandleInformation(h: int64, mask: uint32, flags: uint32) -> int32 = "SetHandleInformation";
 extern fn w_GetCurrentProcessId() -> uint32 = "GetCurrentProcessId";
+extern fn w_TerminateProcess(h: int64, code: uint32) -> int32 = "TerminateProcess";
+extern fn w_WSAStartup(version: uint16, data: rawptr) -> int32 = "WSAStartup";
+extern fn w_socket(af: int32, kind: int32, proto: int32) -> int64 = "socket";
+extern fn w_connect(s: int64, addr: rawptr, len: int32) -> int32 = "connect";
+extern fn w_closesocket(s: int64) -> int32 = "closesocket";
 extern fn w_rt_getcwd(buf: cstring, size: int32) -> int32 = "mettle_getcwd";
 extern fn w_rt_exe_path(buf: cstring, size: uint64) -> int64 = "mettle_executable_path";
 extern fn w_rt_realpath(path: cstring, buf: cstring) -> cstring = "mettle_realpath";
@@ -1157,4 +1162,105 @@ fn w_host_path_in(p: string, full: uint8*, wide: uint8*) -> string {
     return p;
   }
   return s_from_c(r);
+}
+
+// ---------------------------------------------------------------------------
+// Background processes (services). Untested: no Windows dev compiler yet.
+// ---------------------------------------------------------------------------
+
+var g_w_wsa: uint8* = (uint8*)0;
+
+// Starts c without waiting: output to log_path ("" = inherit stdio).
+export fn sys_spawn(c: Cmd*, log_path: string, own_group: bool) -> Job* {
+  var j: Job* = new Job;
+  j->log_path = log_path;
+  j->status_path = "";
+  j->done = false;
+  j->code = 127;
+  j->handle = 0;
+  j->aux = 0;
+  if (own_group) {
+    j->aux = 1;
+  }
+  if (slen(log_path) == 0) {
+    var h0: int64 = w_spawn("", w_cmdline(c), c->cwd, c->env, 0, 0, 0);
+    if (h0 == -1) {
+      j->done = true;
+    } else {
+      j->handle = h0;
+    }
+    return j;
+  }
+  var fh: int64 = w_open_inheritable(log_path, true);
+  if (fh == -1) {
+    j->done = true;
+    return j;
+  }
+  var nul: int64 = w_open_inheritable("NUL", false);
+  var inh: int64 = 0;
+  if (nul != -1) {
+    inh = nul;
+  }
+  var h: int64 = w_spawn("", w_cmdline(c), c->cwd, c->env, inh, fh, fh);
+  w_CloseHandle(fh);
+  if (nul != -1) {
+    w_CloseHandle(nul);
+  }
+  if (h == -1) {
+    j->done = true;
+    return j;
+  }
+  j->handle = h;
+  return j;
+}
+
+export fn sys_spawn_poll(j: Job*) -> bool {
+  return sys_job_poll(j);
+}
+
+export fn sys_spawn_wait(j: Job*) -> int32 {
+  if (!j->done) {
+    j->code = w_wait(j->handle);
+    j->handle = 0;
+    j->done = true;
+  }
+  return j->code;
+}
+
+// Windows has no SIGTERM for console programs: TerminateProcess at once.
+export fn sys_spawn_stop(j: Job*, grace_ms: int64) {
+  if (j->done || j->handle == 0) {
+    return;
+  }
+  w_TerminateProcess(j->handle, (uint32)1);
+  sys_spawn_wait(j);
+}
+
+export fn sys_catch_interrupt() {
+}
+
+export fn sys_interrupted() -> bool {
+  return false;
+}
+
+export fn sys_port_open(port: int64) -> bool {
+  if (g_w_wsa == (uint8*)0) {
+    g_w_wsa = (uint8*)malloc(512);
+    w_WSAStartup((uint16)514, (rawptr)g_w_wsa);
+  }
+  var fd: int64 = w_socket(2, 1, 6);
+  if (fd == -1) {
+    return false;
+  }
+  var a: uint8* = (uint8*)malloc(16);
+  defer free(a);
+  memset(a, 0, 16);
+  a[0] = (uint8)2;
+  a[2] = (uint8)((port >> 8) & 255);
+  a[3] = (uint8)(port & 255);
+  a[4] = (uint8)127;
+  a[7] = (uint8)1;
+  var r: int32 = w_connect(fd, (rawptr)a, 16);
+  w_closesocket(fd);
+  return r == 0;
 }

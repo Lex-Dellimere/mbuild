@@ -47,6 +47,16 @@ export struct CompSpec {
   line: int64;
 }
 
+// One [service.NAME] (mb_service): a process `mbuild run` starts beside the app.
+export struct ServiceSpec {
+  name: string;
+  cmd: string;
+  port: int64;        // 0 = don't wait for one
+  wait_ms: int64;
+  env: StrList*;      // "K=V"
+  line: int64;
+}
+
 export struct RegSpec {
   name: string;
   url: string;
@@ -92,6 +102,8 @@ export struct Manifest {
   local_components: StrList*;  // "name=impl" from mbuild.local.mettle [components]
   import_root: string;    // [package] import-root, cleaned ("" = the package directory)
   dep_bins: StrList*;     // [dep-bins] as "dep=bin", in call order
+  services: ServiceSpec*; // in declaration order
+  nservices: int64;
 }
 
 export struct SettingsQuery {
@@ -539,6 +551,7 @@ fn mnx_known_keys(section: string) -> StrList* {
   }
   if (s_starts(section, "component.")) { return mnx_list("dir mode impls linux windows"); }
   if (s_starts(section, "registry.")) { return mnx_list("url"); }
+  if (s_starts(section, "service.")) { return mnx_list("cmd port wait env"); }
   if (s_eq(section, "rules")) { return mnx_list("files"); }
   if (s_eq(section, "tools")) { return mnx_list("cc cc-windows mettle-linux mettle-windows pkg-config"); }
   if (s_eq(section, "c") || s_eq(section, "c.linux") || s_eq(section, "c.windows")) {
@@ -584,7 +597,7 @@ fn mnx_section_known(section: string) -> bool {
     if (s_eq(head, "dependencies") || s_eq(head, "replace")) {
       return true;
     }
-    if ((s_eq(head, "profile") || s_eq(head, "bin") || s_eq(head, "component") || s_eq(head, "registry")) && s_find_byte(s_from(section, dot + 1), 46) < 0) {
+    if ((s_eq(head, "profile") || s_eq(head, "bin") || s_eq(head, "component") || s_eq(head, "registry") || s_eq(head, "service")) && s_find_byte(s_from(section, dot + 1), 46) < 0) {
       return true;
     }
   }
@@ -1356,6 +1369,50 @@ fn mnx_lower_name(s: string, max: int64, extra: int32) -> bool {
   return true;
 }
 
+fn mnx_int_key(m: Manifest*, sec: string, key: string, dflt: int64, lo: int64, hi: int64, what: string) -> int64 {
+  var v: TomlValue* = toml_get(m->doc, sec, key);
+  if (v == (TomlValue*)0) {
+    return dflt;
+  }
+  var n: int64 = s_to_int(v->text);
+  if (v->kind != 2 || n < lo || n > hi) {
+    mnx_error(m, v->line, what + " must be a number from " + s_int(lo) + " to " + s_int(hi) + ", not " + v->text);
+  }
+  return n;
+}
+
+// [service.NAME] cmd, port, wait (ms), env: in declaration order.
+fn mnx_services(m: Manifest*) {
+  var i: int64 = 0;
+  while (i < m->doc->sections->len && slen(m->error) == 0) {
+    var sec: string = sl_get(m->doc->sections, i);
+    i = i + 1;
+    if (!mnx_is_named(sec, "service")) {
+      continue;
+    }
+    var sv: ServiceSpec;
+    sv.name = s_from(sec, 8);
+    sv.line = mnx_section_line(m->doc, sec);
+    sv.cmd = mnx_str(m, sec, "cmd");
+    sv.port = mnx_int_key(m, sec, "port", 0, 1, 65535, "mb_service_port(\"" + sv.name + "\", ...)");
+    sv.wait_ms = mnx_int_key(m, sec, "wait", 10000, 1, 3600000, "mb_service_wait(\"" + sv.name + "\", ...)");
+    sv.env = mnx_strs(m, sec, "env");
+    if (!mnx_lower_name(sv.name, 64, 45)) {
+      mnx_error(m, sv.line, "service name '" + sv.name + "' may only hold lower-case letters, digits, '_' and '-', starting with a letter");
+    } else if (slen(m->error) == 0 && slen(s_trim(sv.cmd)) == 0) {
+      mnx_error(m, sv.line, "service " + sv.name + " has no command: mb_service(\"" + sv.name + "\", \"program args\")");
+    }
+    if (slen(m->error) > 0) {
+      return;
+    }
+    if (m->nservices % 8 == 0) {
+      m->services = (ServiceSpec*)realloc(m->services, (m->nservices + 8) * sizeof(ServiceSpec));
+    }
+    m->services[m->nservices] = sv;
+    m->nservices = m->nservices + 1;
+  }
+}
+
 fn mnx_regs(m: Manifest*) {
   var i: int64 = 0;
   while (i < m->doc->sections->len && slen(m->error) == 0) {
@@ -1660,6 +1717,8 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->local_components = sl_new();
   m->import_root = s_empty();
   m->dep_bins = sl_new();
+  m->services = (ServiceSpec*)0;
+  m->nservices = 0;
   return m;
 }
 
@@ -1763,6 +1822,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   mnx_comps(m);
   mnx_rules(m);
   mnx_dep_bins(m);
+  mnx_services(m);
   if (slen(m->error) > 0) {
     return m;
   }

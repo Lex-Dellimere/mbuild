@@ -8,6 +8,8 @@
 
 import "std/io";
 import "std/mem";
+import "api_linux" if linux;
+import "api_windows" if windows;
 
 extern fn mbi_c_strlen(s: cstring) -> int64 = "strlen";
 extern fn mbi_c_getenv(name: cstring) -> cstring = "getenv";
@@ -38,6 +40,14 @@ export struct MbCmd {
   cwd: string;
   env: MbiList*;
   status: int32;
+}
+
+// A process mb_spawn started.
+export struct MbProc {
+  pid: int64;
+  log: string;
+  code: int32;
+  running: bool;
 }
 
 var g_mbi_argc: int32 = 0;
@@ -279,6 +289,7 @@ fn mbi_flush() {
 }
 
 fn mbi_die(msg: string, code: int32) {
+  mbi_stop_all();
   mbi_flush();
   print_err("error: " + msg + "\n");
   mbi_flush();
@@ -711,6 +722,29 @@ export fn mb_dep_path(name: string, path: string) {
 // Also build a dependency's bin, for the same target and profile, into this project's output directory.
 export fn mb_dep_bin(dep: string, bin: string) {
   mbi_append("dep-bins", dep, mbi_quote(bin));
+}
+
+// A process `mbuild run` starts before the app and stops after it, in
+// declaration order: cmdline is split into words like a shell would (quotes,
+// backslashes; no other shell features). A first word naming a bin of this
+// project or of mb_dep_bin runs it from build/<target>/<profile>/.
+export fn mb_service(name: string, cmdline: string) {
+  mbi_put("service." + mbi_key(name), "cmd", mbi_quote(cmdline));
+}
+
+// Wait until 127.0.0.1:port accepts a connection before going on.
+export fn mb_service_port(name: string, port: int32) {
+  mbi_put("service." + mbi_key(name), "port", "{port}");
+}
+
+// How long to wait for the port, in ms (default 10000).
+export fn mb_service_wait(name: string, ms: int32) {
+  mbi_put("service." + mbi_key(name), "wait", "{ms}");
+}
+
+// "K=V" in the service's environment.
+export fn mb_service_env(name: string, kv: string) {
+  mbi_append("service." + mbi_key(name), "env", mbi_quote(kv));
 }
 
 // A registry, searched in call order before the default one.
@@ -1257,4 +1291,240 @@ export fn mb_warn(s: string) {
 // Prints "error: s" on stderr and exits with status 1.
 export fn mb_fail(s: string) {
   mbi_die(s, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Background processes (commands and hooks)
+// ---------------------------------------------------------------------------
+
+var g_mbi_procs: MbProc** = (MbProc**)0;
+var g_mbi_nprocs: int64 = 0;
+
+// Driver plumbing: what a command or hook returned, after stopping what it left running.
+export fn mbi_done(code: int32) -> int32 {
+  mbi_stop_all();
+  return code;
+}
+
+fn mbi_stop_all() {
+  var i: int64 = 0;
+  while (i < g_mbi_nprocs) {
+    mb_stop(g_mbi_procs[i]);
+    i = i + 1;
+  }
+}
+
+fn mbi_cstrs(l: MbiList*) -> cstring* {
+  var a: cstring* = (cstring*)malloc((l->len + 1) * 8);
+  var i: int64 = 0;
+  while (i < l->len) {
+    a[i] = mbi_c(l->items[i]);
+    i = i + 1;
+  }
+  a[l->len] = (cstring)0;
+  return a;
+}
+
+fn mbi_has_slash(s: string) -> bool {
+  var i: int64 = 0;
+  while (i < mbi_len(s)) {
+    if (s.chars[i] == 47 || s.chars[i] == 92) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// The program as an absolute path (PATH searched for a bare name), Linux.
+fn mbi_which(program: string) -> string {
+  if (mbi_starts(program, "/")) {
+    return program;
+  }
+  if (mbi_has_slash(program)) {
+    var rel: string = mbi_env("MBUILD_ROOT") + "/" + program;
+    return rel;
+  }
+  var dirs: MbiList* = mbi_split(mbi_env("PATH"), 58);
+  defer free(dirs);
+  var i: int64 = 0;
+  while (i < dirs->len) {
+    var full: string = dirs->items[i] + "/" + program;
+    if (mbi_len(dirs->items[i]) > 0 && mbi_c_exists(mbi_c(full)) != 0 && mbi_c_is_dir(mbi_c(full)) == 0) {
+      return full;
+    }
+    i = i + 1;
+  }
+  return program;
+}
+
+// The environment a Linux child gets: this one, then c's "K=V" entries.
+fn mbi_child_env(c: MbCmd*, win: bool) -> MbiList* {
+  if (win) {
+    return mbi_list();
+  }
+  var out: MbiList* = mbi_split(mb_read("/proc/self/environ"), 0);
+  var i: int64 = 0;
+  while (i < c->env->len) {
+    var kv: string = c->env->items[i];
+    var eq: int64 = 0;
+    while (eq < mbi_len(kv) && kv.chars[eq] != 61) {
+      eq = eq + 1;
+    }
+    var key: string = mbi_sub(kv, 0, eq + 1);
+    var k: int64 = 0;
+    var found: bool = false;
+    while (k < out->len) {
+      if (mbi_starts(out->items[k], key)) {
+        out->items[k] = kv;
+        found = true;
+      }
+      k = k + 1;
+    }
+    if (!found) {
+      mbi_push(out, kv);
+    }
+    i = i + 1;
+  }
+  return out;
+}
+
+// .mbuild/logs/NAME.log for the program's base name, NAME-2.log for a second one.
+fn mbi_log_for(program: string) -> string {
+  var start: int64 = mbi_len(program);
+  while (start > 0 && program.chars[start - 1] != 47 && program.chars[start - 1] != 92) {
+    start = start - 1;
+  }
+  var base: string = mbi_sub(program, start, mbi_len(program));
+  if (mbi_len(base) > 4 && mbi_starts(mbi_sub(base, mbi_len(base) - 4, mbi_len(base)), ".exe")) {
+    base = mbi_sub(base, 0, mbi_len(base) - 4);
+  }
+  var dir: string = mbi_env("MBUILD_ROOT") + "/.mbuild/logs";
+  var name: string = dir + "/" + base + ".log";
+  var n: int32 = 2;
+  var taken: bool = true;
+  while (taken) {
+    taken = false;
+    var i: int64 = 0;
+    while (i < g_mbi_nprocs) {
+      if (g_mbi_procs[i]->log == name) {
+        taken = true;
+      }
+      i = i + 1;
+    }
+    if (taken) {
+      name = dir + "/" + base + "-{n}.log";
+      n = n + 1;
+    }
+  }
+  return name;
+}
+
+// Starts c in the background, stdout and stderr to a log (mb_proc_log). What
+// a command or hook starts and doesn't stop is stopped when it returns.
+export fn mb_spawn(c: MbCmd*) -> MbProc* {
+  mbi_refuse("mb_spawn");
+  var p: MbProc* = new MbProc;
+  p->log = mbi_log_for(c->program);
+  p->code = 127;
+  p->running = false;
+  mbi_mkdir_parent(p->log);
+  var win: bool = mbi_is_windows();
+  var args: MbiList* = mbi_list();
+  defer free(args);
+  var cmdline: string = "";
+  var envl: MbiList* = mbi_child_env(c, win);
+  defer free(envl);
+  if (win) {
+    cmdline = mbi_win_quote(c->program);
+    var w: int64 = 0;
+    while (w < c->args->len) {
+      cmdline = cmdline + " " + mbi_win_quote(c->args->items[w]);
+      w = w + 1;
+    }
+  } else {
+    mbi_push(args, mbi_which(c->program));
+    var a: int64 = 0;
+    while (a < c->args->len) {
+      mbi_push(args, c->args->items[a]);
+      a = a + 1;
+    }
+  }
+  var argv: cstring* = mbi_cstrs(args);
+  defer free(argv);
+  var envp: cstring* = mbi_cstrs(envl);
+  defer free(envp);
+  var extra: cstring* = mbi_cstrs(c->env);
+  defer free(extra);
+  var cwd: cstring = (cstring)0;
+  if (mbi_len(c->cwd) > 0) {
+    cwd = mbi_c(c->cwd);
+  }
+  var path: cstring = (cstring)0;
+  if (args->len > 0) {
+    path = argv[0];
+  }
+  mbi_flush();
+  p->pid = mbi_sys_spawn(path, argv, envp, mbi_c(cmdline), extra, cwd, mbi_c(p->log));
+  p->running = p->pid > 0;
+  g_mbi_procs = (MbProc**)realloc(g_mbi_procs, (g_mbi_nprocs + 1) * 8);
+  g_mbi_procs[g_mbi_nprocs] = p;
+  g_mbi_nprocs = g_mbi_nprocs + 1;
+  return p;
+}
+
+// True while it runs; once it has exited, mb_proc_code(p) is its exit code.
+export fn mb_proc_running(p: MbProc*) -> bool {
+  if (p->running) {
+    var code: int32 = mbi_sys_poll(p->pid);
+    if (code >= 0) {
+      p->running = false;
+      p->code = code;
+    }
+  }
+  return p->running;
+}
+
+export fn mb_proc_code(p: MbProc*) -> int32 {
+  mb_proc_running(p);
+  return p->code;
+}
+
+// Where its output goes.
+export fn mb_proc_log(p: MbProc*) -> string {
+  return p->log;
+}
+
+// Terminates it, then kills it after 2 s.
+export fn mb_stop(p: MbProc*) {
+  if (!mb_proc_running(p)) {
+    return;
+  }
+  mbi_sys_signal(p->pid, false);
+  var until: int64 = mbi_sys_now_ms() + 2000;
+  while (mb_proc_running(p) && mbi_sys_now_ms() < until) {
+    mbi_sys_sleep_ms(10);
+  }
+  if (mb_proc_running(p)) {
+    mbi_sys_signal(p->pid, true);
+    while (mb_proc_running(p)) {
+      mbi_sys_sleep_ms(5);
+    }
+  }
+}
+
+// True once 127.0.0.1:port accepts a TCP connection, false after ms.
+export fn mb_wait_port(port: int32, ms: int32) -> bool {
+  mbi_refuse("mb_wait_port");
+  var until: int64 = mbi_sys_now_ms() + (int64)ms;
+  while (true) {
+    if (mbi_sys_port_open((int64)port)) {
+      return true;
+    }
+    if (mbi_sys_now_ms() >= until) {
+      return false;
+    }
+    mbi_sys_sleep_ms(20);
+  }
+  return false;
 }

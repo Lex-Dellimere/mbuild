@@ -1195,7 +1195,7 @@ export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, con
     var i: int64 = 0;
     while (i < info->ncommands) {
       var c: MbfCommand = info->commands[i];
-      buf_line(b, "    if (mbi_name(" + mfx_lit(c.name) + ")) {{ return " + c.fn_name + "(a); }");
+      buf_line(b, "    if (mbi_name(" + mfx_lit(c.name) + ")) {{ return mbi_done(" + c.fn_name + "(a)); }");
       i = i + 1;
     }
     buf_line(b, "  }");
@@ -1205,7 +1205,7 @@ export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, con
     var h: int64 = 0;
     while (h < info->hooks->len) {
       var hk: string = sl_get(info->hooks, h);
-      buf_line(b, "    if (mbi_name(" + mfx_lit(hk) + ")) {{ return hook_" + hk + "(); }");
+      buf_line(b, "    if (mbi_name(" + mfx_lit(hk) + ")) {{ return mbi_done(hook_" + hk + "()); }");
       h = h + 1;
     }
     buf_line(b, "  }");
