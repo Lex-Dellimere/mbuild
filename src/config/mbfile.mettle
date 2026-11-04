@@ -1,7 +1,12 @@
-// mbfile: stub, owned by group C (DESIGN.md 13.8).
+// mbfile: mbuild.mettle as text (DESIGN.md 13.2, 13.3, 13.8, 13.10, 13.11).
+//
+// A light scanner, not a parser: it skips strings (with their `{expr}`
+// interpolations), comments and char literals, tracks braces, and records the
+// top-level functions and every `mb_*(...)` call with its arguments. Edits
+// replace or insert whole lines and keep every other byte.
 
+import "std/mem";
 import "../core/base";
-import "../model/manifest";
 
 export struct MbfCommand {
   name: string;
@@ -40,45 +45,1131 @@ export struct MbfEdit {
   why: string;
 }
 
-fn mfx_failed(text: string) -> MbfEdit {
-  var e: MbfEdit;
-  e.ok = false;
-  e.text = text;
-  e.line = 0;
-  e.why = "not implemented";
-  return e;
+// A top-level function. decl is the offset of its first token (a decorator
+// or `export`); body_open/body_close are the offsets of its braces, -1 when
+// it has no body.
+struct MfxFn {
+  name: string;
+  line: int64;
+  exported: bool;
+  decl: int64;
+  body_open: int64;
+  body_close: int64;
 }
 
-export fn mbf_scan(text: string) -> MbfInfo* {
-  var info: MbfInfo* = new MbfInfo;
-  info->err = "not implemented";
-  info->commands = (MbfCommand*)0;
-  info->hooks = sl_new();
-  info->dep_calls = (MbfCall*)0;
-  info->unexported = sl_new();
-  return info;
+// One `mb_*(...)` call. args hold the decoded value of a string literal
+// argument and the source text of any other (literal says which, "1" / "").
+// alone: the call is the only statement on its line.
+struct MfxCall {
+  fn_name: string;
+  args: StrList*;
+  literal: StrList*;
+  arg_start: int64*;
+  arg_end: int64*;
+  start: int64;
+  line: int64;
+  in_fn: int64;
+  alone: bool;
+  line_start: int64;
+  line_end: int64;
 }
 
-export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
-  return mfx_failed(text);
+struct MfxScan {
+  text: string;
+  fns: MfxFn*;
+  nfns: int64;
+  calls: MfxCall*;
+  ncalls: int64;
+  exports: bool;
 }
 
-export fn mbf_remove_dep(text: string, name: string) -> MbfEdit {
-  return mfx_failed(text);
+// ---------------------------------------------------------------------------
+// Scanner
+// ---------------------------------------------------------------------------
+
+fn mfx_line_of(text: string, off: int64) -> int64 {
+  var line: int64 = 1;
+  var i: int64 = 0;
+  while (i < off && i < slen(text)) {
+    if (s_byte(text, i) == 10) {
+      line = line + 1;
+    }
+    i = i + 1;
+  }
+  return line;
 }
 
-export fn mbf_locate(text: string, call: string, first_arg: string, section: string) -> int64 {
+fn mfx_line_start(text: string, off: int64) -> int64 {
+  var i: int64 = off;
+  while (i > 0 && s_byte(text, i - 1) != 10) {
+    i = i - 1;
+  }
+  return i;
+}
+
+// The offset just past the line's newline (or the end of the text).
+fn mfx_line_end(text: string, off: int64) -> int64 {
+  var i: int64 = off;
+  while (i < slen(text) && s_byte(text, i) != 10) {
+    i = i + 1;
+  }
+  if (i < slen(text)) {
+    return i + 1;
+  }
+  return i;
+}
+
+fn mfx_skip_comment(text: string, i: int64) -> int64 {
+  var n: int64 = slen(text);
+  if (i + 1 < n && s_byte(text, i + 1) == 47) {
+    var j: int64 = i;
+    while (j < n && s_byte(text, j) != 10) {
+      j = j + 1;
+    }
+    return j;
+  }
+  var k: int64 = i + 2;
+  while (k + 1 < n && !(s_byte(text, k) == 42 && s_byte(text, k + 1) == 47)) {
+    k = k + 1;
+  }
+  return k + 2;
+}
+
+fn mfx_is_comment(text: string, i: int64) -> bool {
+  return s_byte(text, i) == 47 && i + 1 < slen(text) && (s_byte(text, i + 1) == 47 || s_byte(text, i + 1) == 42);
+}
+
+// i at the opening quote; the offset past the closing one.
+fn mfx_skip_string(text: string, i: int64) -> int64 {
+  var n: int64 = slen(text);
+  var j: int64 = i + 1;
+  while (j < n) {
+    var c: int32 = s_byte(text, j);
+    if (c == 92) {
+      j = j + 2;
+    } else if (c == 34) {
+      return j + 1;
+    } else if (c == 123 && j + 1 < n && s_byte(text, j + 1) == 123) {
+      j = j + 2;
+    } else if (c == 123) {
+      j = mfx_skip_interp(text, j + 1);
+    } else {
+      j = j + 1;
+    }
+  }
+  return n;
+}
+
+fn mfx_skip_interp(text: string, i: int64) -> int64 {
+  var n: int64 = slen(text);
+  var depth: int64 = 1;
+  var j: int64 = i;
+  while (j < n) {
+    var c: int32 = s_byte(text, j);
+    if (c == 34) {
+      j = mfx_skip_string(text, j);
+      continue;
+    }
+    if (c == 123) {
+      depth = depth + 1;
+    } else if (c == 125) {
+      depth = depth - 1;
+      if (depth == 0) {
+        return j + 1;
+      }
+    }
+    j = j + 1;
+  }
+  return n;
+}
+
+fn mfx_skip_char(text: string, i: int64) -> int64 {
+  var n: int64 = slen(text);
+  var j: int64 = i + 1;
+  while (j < n && j < i + 8) {
+    var c: int32 = s_byte(text, j);
+    if (c == 92) {
+      j = j + 2;
+      continue;
+    }
+    if (c == 39) {
+      return j + 1;
+    }
+    j = j + 1;
+  }
+  return i + 1;
+}
+
+fn mfx_skip_space(text: string, i: int64) -> int64 {
+  var j: int64 = i;
+  while (j < slen(text)) {
+    if (is_space_b(s_byte(text, j))) {
+      j = j + 1;
+    } else if (mfx_is_comment(text, j)) {
+      j = mfx_skip_comment(text, j);
+    } else {
+      break;
+    }
+  }
+  return j;
+}
+
+// The value of a string literal that is exactly the text s; ok = false when
+// s is anything else (an expression, an interpolation).
+struct MfxLit {
+  ok: bool;
+  value: string;
+}
+
+fn mfx_decode(s: string) -> MfxLit {
+  var r: MfxLit;
+  r.ok = false;
+  r.value = s_empty();
+  var n: int64 = slen(s);
+  if (n < 2 || s_byte(s, 0) != 34 || mfx_skip_string(s, 0) != n) {
+    return r;
+  }
+  var b: Buf* = buf_new();
+  var i: int64 = 1;
+  while (i < n - 1) {
+    var c: int32 = s_byte(s, i);
+    if (c == 92 && i + 1 < n - 1) {
+      var e: int32 = s_byte(s, i + 1);
+      if (e == 110) { buf_addb(b, 10); }
+      else if (e == 116) { buf_addb(b, 9); }
+      else if (e == 114) { buf_addb(b, 13); }
+      else if (e == 48) { buf_addb(b, 0); }
+      else { buf_addb(b, e); }
+      i = i + 2;
+    } else if (c == 123 && i + 1 < n - 1 && s_byte(s, i + 1) == 123) {
+      buf_addb(b, 123);
+      i = i + 2;
+    } else if (c == 123) {
+      free(b->data);
+      free(b);
+      return r;
+    } else {
+      buf_addb(b, c);
+      i = i + 1;
+    }
+  }
+  r.ok = true;
+  r.value = buf_take(b);
+  return r;
+}
+
+// A Mettle string literal holding s.
+fn mfx_lit(s: string) -> string {
+  var b: Buf* = buf_new();
+  buf_addb(b, 34);
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 34) { buf_add(b, "\\\""); }
+    else if (c == 92) { buf_add(b, "\\\\"); }
+    else if (c == 10) { buf_add(b, "\\n"); }
+    else if (c == 9) { buf_add(b, "\\t"); }
+    else if (c == 13) { buf_add(b, "\\r"); }
+    else if (c == 123) { buf_add(b, "{{{{"); }
+    else { buf_addb(b, c); }
+    i = i + 1;
+  }
+  buf_addb(b, 34);
+  return buf_take(b);
+}
+
+fn mfx_push_fn(sc: MfxScan*, f: MfxFn) {
+  sc->fns = (MfxFn*)realloc(sc->fns, (sc->nfns + 1) * sizeof(MfxFn));
+  sc->fns[sc->nfns] = f;
+  sc->nfns = sc->nfns + 1;
+}
+
+fn mfx_push_call(sc: MfxScan*, c: MfxCall) {
+  sc->calls = (MfxCall*)realloc(sc->calls, (sc->ncalls + 1) * sizeof(MfxCall));
+  sc->calls[sc->ncalls] = c;
+  sc->ncalls = sc->ncalls + 1;
+}
+
+// The call whose `(` is at open; its arguments split at top-level commas.
+fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64) -> int64 {
+  var text: string = sc->text;
+  var n: int64 = slen(text);
+  var c: MfxCall;
+  c.fn_name = name;
+  c.args = sl_new();
+  c.literal = sl_new();
+  c.arg_start = (int64*)malloc(16 * 8);
+  c.arg_end = (int64*)malloc(16 * 8);
+  c.start = start;
+  c.line = mfx_line_of(text, start);
+  c.in_fn = in_fn;
+  var depth: int64 = 0;
+  var piece: int64 = open + 1;
+  var j: int64 = open + 1;
+  var close: int64 = n;
+  while (j < n) {
+    var ch: int32 = s_byte(text, j);
+    if (ch == 34) {
+      j = mfx_skip_string(text, j);
+      continue;
+    }
+    if (mfx_is_comment(text, j)) {
+      j = mfx_skip_comment(text, j);
+      continue;
+    }
+    if (ch == 40 || ch == 91 || ch == 123) {
+      depth = depth + 1;
+    } else if ((ch == 41 || ch == 93 || ch == 125) && depth > 0) {
+      depth = depth - 1;
+    } else if ((ch == 44 || ch == 41) && depth == 0) {
+      var a: int64 = mfx_skip_space(text, piece);
+      var b: int64 = j;
+      while (b > a && is_space_b(s_byte(text, b - 1))) {
+        b = b - 1;
+      }
+      if (b > a || ch == 44) {
+        var raw: string = s_sub(text, a, b);
+        var lit: MfxLit = mfx_decode(raw);
+        if (c.args->len < 16) {
+          c.arg_start[c.args->len] = a;
+          c.arg_end[c.args->len] = b;
+        }
+        if (lit.ok) {
+          sl_push(c.args, lit.value);
+          sl_push(c.literal, "1");
+        } else {
+          sl_push(c.args, raw);
+          sl_push(c.literal, s_empty());
+        }
+      }
+      piece = j + 1;
+      if (ch == 41) {
+        close = j;
+        break;
+      }
+    }
+    j = j + 1;
+  }
+  c.line_start = mfx_line_start(text, start);
+  c.line_end = mfx_line_end(text, start);
+  var after: int64 = close + 1;
+  while (after < n && (s_byte(text, after) == 32 || s_byte(text, after) == 9)) {
+    after = after + 1;
+  }
+  var alone: bool = after < n && s_byte(text, after) == 59 && slen(s_trim(s_sub(text, c.line_start, start))) == 0;
+  if (alone) {
+    var rest: string = s_trim(s_sub(text, after + 1, c.line_end));
+    alone = slen(rest) == 0 || s_starts(rest, "//");
+  }
+  c.alone = alone;
+  mfx_push_call(sc, c);
+  return close;
+}
+
+fn mfx_ident_end(text: string, i: int64) -> int64 {
+  var j: int64 = i;
+  while (j < slen(text) && is_ident_b(s_byte(text, j))) {
+    j = j + 1;
+  }
+  return j;
+}
+
+fn mfx_scan(text: string) -> MfxScan* {
+  var sc: MfxScan* = new MfxScan;
+  sc->text = text;
+  sc->fns = (MfxFn*)0;
+  sc->nfns = 0;
+  sc->calls = (MfxCall*)0;
+  sc->ncalls = 0;
+  sc->exports = false;
+  var n: int64 = slen(text);
+  var depth: int64 = 0;
+  var pending_export: bool = false;
+  var pending_start: int64 = -1;
+  var awaiting: int64 = -1;
+  var cur: int64 = -1;
+  var i: int64 = 0;
+  while (i < n) {
+    var c: int32 = s_byte(text, i);
+    if (mfx_is_comment(text, i)) {
+      i = mfx_skip_comment(text, i);
+      continue;
+    }
+    if (c == 34) {
+      i = mfx_skip_string(text, i);
+      continue;
+    }
+    if (c == 39) {
+      i = mfx_skip_char(text, i);
+      continue;
+    }
+    if (c == 123) {
+      if (depth == 0 && awaiting >= 0) {
+        sc->fns[awaiting].body_open = i;
+        cur = awaiting;
+        awaiting = -1;
+      }
+      depth = depth + 1;
+      i = i + 1;
+      continue;
+    }
+    if (c == 125) {
+      depth = depth - 1;
+      if (depth == 0) {
+        if (cur >= 0) {
+          sc->fns[cur].body_close = i;
+        }
+        cur = -1;
+        pending_export = false;
+        pending_start = -1;
+      }
+      i = i + 1;
+      continue;
+    }
+    if (c == 59 && depth == 0) {
+      awaiting = -1;
+      pending_export = false;
+      pending_start = -1;
+      i = i + 1;
+      continue;
+    }
+    if (c == 64 && depth == 0) {
+      if (pending_start < 0) {
+        pending_start = i;
+      }
+      i = mfx_ident_end(text, i + 1);
+      continue;
+    }
+    if (!is_ident_b(c) || (i > 0 && is_ident_b(s_byte(text, i - 1)))) {
+      i = i + 1;
+      continue;
+    }
+    var e: int64 = mfx_ident_end(text, i);
+    var word: string = s_sub(text, i, e);
+    if (depth == 0) {
+      if (s_eq(word, "export")) {
+        sc->exports = true;
+        pending_export = true;
+        if (pending_start < 0) {
+          pending_start = i;
+        }
+      } else if (s_eq(word, "fn")) {
+        var ns: int64 = mfx_skip_space(text, e);
+        var ne: int64 = mfx_ident_end(text, ns);
+        if (ne > ns && mfx_skip_space(text, ne) < n && s_byte(text, mfx_skip_space(text, ne)) == 40) {
+          var f: MfxFn;
+          f.name = s_sub(text, ns, ne);
+          f.exported = pending_export;
+          f.decl = i;
+          if (pending_start >= 0) {
+            f.decl = pending_start;
+          }
+          f.line = mfx_line_of(text, i);
+          f.body_open = -1;
+          f.body_close = -1;
+          mfx_push_fn(sc, f);
+          awaiting = sc->nfns - 1;
+          e = ne;
+        }
+        pending_export = false;
+        pending_start = -1;
+      }
+      i = e;
+      continue;
+    }
+    if (s_starts(word, "mb_")) {
+      var open: int64 = mfx_skip_space(text, e);
+      if (open < n && s_byte(text, open) == 40) {
+        mfx_call(sc, word, i, open, cur);
+        i = open + 1;
+        continue;
+      }
+    }
+    i = e;
+  }
+  return sc;
+}
+
+fn mfx_find_fn(sc: MfxScan*, name: string) -> int64 {
+  var i: int64 = 0;
+  while (i < sc->nfns) {
+    if (s_eq(sc->fns[i].name, name)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// The `//` lines directly above line `line`, without the slashes.
+fn mfx_doc(text: string, decl: int64) -> StrList* {
+  var out: StrList* = sl_new();
+  var lines: StrList* = s_lines(s_sub(text, 0, mfx_line_start(text, decl)));
+  var i: int64 = lines->len - 1;
+  while (i >= 0) {
+    var l: string = s_trim(sl_get(lines, i));
+    if (!s_starts(l, "//")) {
+      break;
+    }
+    var body: string = s_from(l, 2);
+    if (s_starts(body, " ")) {
+      body = s_from(body, 1);
+    }
+    sl_push(out, body);
+    i = i - 1;
+  }
+  free(lines);
+  var r: StrList* = sl_new();
+  var k: int64 = out->len - 1;
+  while (k >= 0) {
+    sl_push(r, sl_get(out, k));
+    k = k - 1;
+  }
+  free(out);
+  return r;
+}
+
+fn mfx_is_dep_fn(name: string) -> bool {
+  return s_eq(name, "mb_dep") || s_eq(name, "mb_dep_from") || s_eq(name, "mb_dep_path");
+}
+
+fn mfx_all_literal(c: MfxCall*) -> bool {
+  var i: int64 = 0;
+  while (i < c->literal->len) {
+    if (slen(sl_get(c->literal, i)) == 0) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+// The argument a call's TOML key comes from (the package name of
+// mb_dep_from, the key of mb_raw, the OS of mb_component_on), -1 for none.
+fn mfx_key_index(name: string) -> int64 {
+  if (s_eq(name, "mb_dep_from") || s_eq(name, "mb_raw") || s_eq(name, "mb_component_on")) {
+    return 1;
+  }
   return 0;
 }
 
-export fn mbf_driver(info: MbfInfo*, file: string, config_only: bool) -> string {
+fn mfx_arg(c: MfxCall*, i: int64) -> string {
+  if (i < 0 || i >= c->args->len) {
+    return s_empty();
+  }
+  return sl_get(c->args, i);
+}
+
+fn mfx_arg_literal(c: MfxCall*, i: int64) -> bool {
+  return i >= 0 && i < c->literal->len && slen(sl_get(c->literal, i)) > 0;
+}
+
+export fn mbf_scan(text: string) -> MbfInfo* {
+  var sc: MfxScan* = mfx_scan(text);
+  var info: MbfInfo* = new MbfInfo;
+  info->ok = true;
+  info->err = s_empty();
+  info->has_exports = sc->exports;
+  info->body_start = -1;
+  info->body_end = -1;
+  info->commands = (MbfCommand*)0;
+  info->ncommands = 0;
+  info->hooks = sl_new();
+  info->dep_calls = (MbfCall*)0;
+  info->ndep_calls = 0;
+  info->unexported = sl_new();
+  var proj: int64 = mfx_find_fn(sc, "project");
+  info->has_project = proj >= 0;
+  info->has_main = mfx_find_fn(sc, "main") >= 0;
+  if (proj >= 0 && sc->fns[proj].body_open >= 0) {
+    info->body_start = sc->fns[proj].body_open + 1;
+    info->body_end = sc->fns[proj].body_close;
+  }
+  var i: int64 = 0;
+  while (i < sc->nfns) {
+    var f: MfxFn = sc->fns[i];
+    var is_cmd: bool = s_starts(f.name, "cmd_") && slen(f.name) > 4;
+    var is_hook: bool = s_starts(f.name, "hook_") && slen(f.name) > 5;
+    if (is_cmd) {
+      var cmd: MbfCommand;
+      cmd.fn_name = f.name;
+      cmd.name = s_replace_byte(s_from(f.name, 4), 95, 45);
+      cmd.line = f.line;
+      var doc: StrList* = mfx_doc(text, f.decl);
+      cmd.help = sl_join(doc, "\n");
+      cmd.summary = s_empty();
+      if (doc->len > 0) {
+        var first: string = sl_get(doc, 0);
+        if (s_starts(first, cmd.name + ":")) {
+          first = s_from(first, slen(cmd.name) + 1);
+        } else if (s_starts(first, s_from(f.name, 4) + ":")) {
+          first = s_from(first, slen(f.name) - 3);
+        }
+        cmd.summary = s_trim(first);
+      }
+      free(doc);
+      info->commands = (MbfCommand*)realloc(info->commands, (info->ncommands + 1) * sizeof(MbfCommand));
+      info->commands[info->ncommands] = cmd;
+      info->ncommands = info->ncommands + 1;
+    }
+    if (is_hook) {
+      sl_push(info->hooks, s_from(f.name, 5));
+    }
+    if (sc->exports && !f.exported && (is_cmd || is_hook || s_eq(f.name, "project"))) {
+      sl_push(info->unexported, f.name);
+      if (info->ok) {
+        info->ok = false;
+        info->err = "mbuild.mettle:" + s_int(f.line) + ": fn " + f.name + " must be exported, because this file exports other names";
+      }
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < sc->ncalls) {
+    var c: MfxCall* = &sc->calls[i];
+    if (c->in_fn == proj && proj >= 0 && mfx_is_dep_fn(c->fn_name) && mfx_all_literal(c)) {
+      var mc: MbfCall;
+      mc.fn_name = c->fn_name;
+      mc.args = c->args;
+      mc.line = c->line;
+      info->dep_calls = (MbfCall*)realloc(info->dep_calls, (info->ndep_calls + 1) * sizeof(MbfCall));
+      info->dep_calls[info->ndep_calls] = mc;
+      info->ndep_calls = info->ndep_calls + 1;
+    }
+    i = i + 1;
+  }
+  var main_at: int64 = mfx_find_fn(sc, "main");
+  if (main_at >= 0) {
+    info->ok = false;
+    info->err = "mbuild.mettle:" + s_int(sc->fns[main_at].line) + ": mbuild.mettle cannot define fn main (mbuild generates the program around it)";
+  } else if (proj < 0) {
+    info->ok = false;
+    info->err = "mbuild.mettle has no fn project() (it declares the package: mb_package(\"name\", \"0.1.0\"))";
+  }
+  return info;
+}
+
+// ---------------------------------------------------------------------------
+// Edits
+// ---------------------------------------------------------------------------
+
+fn mfx_edit(ok: bool, text: string, line: int64, why: string) -> MbfEdit {
+  var e: MbfEdit;
+  e.ok = ok;
+  e.text = text;
+  e.line = line;
+  e.why = why;
+  return e;
+}
+
+fn mfx_indent(text: string, line_start: int64) -> string {
+  var j: int64 = line_start;
+  while (j < slen(text) && (s_byte(text, j) == 32 || s_byte(text, j) == 9)) {
+    j = j + 1;
+  }
+  return s_sub(text, line_start, j);
+}
+
+// The calls that declare `name`; a refusal when one cannot be edited.
+struct MfxMatch {
+  at: int64;        // index into calls, -1 when none
+  count: int64;
+  bad_line: int64;
+  why: string;
+}
+
+fn mfx_match_dep(sc: MfxScan*, name: string) -> MfxMatch {
+  var m: MfxMatch;
+  m.at = -1;
+  m.count = 0;
+  m.bad_line = 0;
+  m.why = s_empty();
+  var proj: int64 = mfx_find_fn(sc, "project");
+  var i: int64 = 0;
+  while (i < sc->ncalls) {
+    var c: MfxCall* = &sc->calls[i];
+    if (mfx_is_dep_fn(c->fn_name)) {
+      var ki: int64 = mfx_key_index(c->fn_name);
+      if (!mfx_arg_literal(c, ki)) {
+        if (c->in_fn == proj && slen(m.why) == 0) {
+          m.bad_line = c->line;
+          m.why = "a computed package name";
+        }
+      } else if (s_eq(mfx_arg(c, ki), name)) {
+        m.count = m.count + 1;
+        if (c->in_fn != proj) {
+          m.bad_line = c->line;
+          m.why = "a call outside fn project()";
+        } else if (m.count > 1) {
+          m.bad_line = c->line;
+          m.why = "more than one call";
+        } else if (!mfx_all_literal(c)) {
+          m.bad_line = c->line;
+          m.why = "a computed argument";
+        }
+        m.at = i;
+      }
+    }
+    i = i + 1;
+  }
+  return m;
+}
+
+export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
+  var sc: MfxScan* = mfx_scan(text);
+  var proj: int64 = mfx_find_fn(sc, "project");
+  if (proj < 0 || sc->fns[proj].body_open < 0) {
+    return mfx_edit(false, text, 0, "no fn project()");
+  }
+  var m: MfxMatch = mfx_match_dep(sc, name);
+  if (slen(m.why) > 0) {
+    return mfx_edit(false, text, m.bad_line, m.why);
+  }
+  if (m.at >= 0) {
+    var c: MfxCall* = &sc->calls[m.at];
+    if (s_eq(c->fn_name, "mb_dep_path")) {
+      return mfx_edit(false, text, c->line, "a path dependency");
+    }
+    var vi: int64 = 1;
+    if (s_eq(c->fn_name, "mb_dep_from")) {
+      vi = 2;
+    }
+    if (vi >= c->args->len || vi >= 16) {
+      return mfx_edit(false, text, c->line, "a call without a version");
+    }
+    var out: string = s_sub(text, 0, c->arg_start[vi]) + mfx_lit(version) + s_from(text, c->arg_end[vi]);
+    return mfx_edit(true, out, c->line, s_empty());
+  }
+  var stmt: string = "mb_dep(" + mfx_lit(name) + ", " + mfx_lit(version) + ");";
+  var anchor: int64 = -1;
+  var i: int64 = 0;
+  while (i < sc->ncalls) {
+    var ci: MfxCall* = &sc->calls[i];
+    if (ci->in_fn == proj && ci->alone && mfx_is_dep_fn(ci->fn_name) && mfx_all_literal(ci)) {
+      anchor = i;
+    }
+    i = i + 1;
+  }
+  if (anchor < 0) {
+    i = 0;
+    while (i < sc->ncalls && anchor < 0) {
+      if (sc->calls[i].in_fn == proj && sc->calls[i].alone && s_eq(sc->calls[i].fn_name, "mb_package")) {
+        anchor = i;
+      }
+      i = i + 1;
+    }
+  }
+  if (anchor >= 0) {
+    var a: MfxCall* = &sc->calls[anchor];
+    var head: string = s_sub(text, 0, a->line_end);
+    if (!s_ends(head, "\n")) {
+      head = head + "\n";
+    }
+    var out2: string = head + mfx_indent(text, a->line_start) + stmt + "\n" + s_from(text, a->line_end);
+    return mfx_edit(true, out2, a->line + 1, s_empty());
+  }
+  var open: int64 = sc->fns[proj].body_open;
+  var brace_line: int64 = mfx_line_of(text, open);
+  var nl: int64 = open + 1;
+  while (nl < slen(text) && (s_byte(text, nl) == 32 || s_byte(text, nl) == 9 || s_byte(text, nl) == 13)) {
+    nl = nl + 1;
+  }
+  if (nl < slen(text) && s_byte(text, nl) == 10) {
+    return mfx_edit(true, s_sub(text, 0, nl + 1) + "  " + stmt + "\n" + s_from(text, nl + 1), brace_line + 1, s_empty());
+  }
+  return mfx_edit(true, s_sub(text, 0, open + 1) + "\n  " + stmt + "\n" + s_from(text, open + 1), brace_line + 1, s_empty());
+}
+
+export fn mbf_remove_dep(text: string, name: string) -> MbfEdit {
+  var sc: MfxScan* = mfx_scan(text);
+  var m: MfxMatch = mfx_match_dep(sc, name);
+  if (slen(m.why) > 0) {
+    return mfx_edit(false, text, m.bad_line, m.why);
+  }
+  if (m.at < 0) {
+    return mfx_edit(false, text, 0, "not declared");
+  }
+  var c: MfxCall* = &sc->calls[m.at];
+  if (!c->alone) {
+    return mfx_edit(false, text, c->line, "a call that shares its line");
+  }
+  return mfx_edit(true, s_sub(text, 0, c->line_start) + s_from(text, c->line_end), c->line, s_empty());
+}
+
+// The TOML section a declaration in fn project() writes to, following the
+// cursor of mb_profile / mb_for_bin / mb_on as the API does.
+struct MfxCursor {
+  kind: string;
+  name: string;
+  os: string;
+}
+
+fn mfx_os_section(cur: MfxCursor*, base: string) -> string {
+  if (slen(cur->os) > 0) {
+    return base + "." + cur->os;
+  }
+  return base;
+}
+
+fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
+  var f: string = c->fn_name;
+  var a0: string = mfx_arg(c, 0);
+  if (s_eq(f, "mb_profile")) {
+    cur->kind = "profile";
+    cur->name = a0;
+    cur->os = s_empty();
+    return "profile." + a0;
+  }
+  if (s_eq(f, "mb_for_bin")) {
+    cur->kind = "bin";
+    cur->name = a0;
+    cur->os = s_empty();
+    return "bin." + a0;
+  }
+  if (s_eq(f, "mb_on")) {
+    cur->os = a0;
+    return s_empty();
+  }
+  if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include")) { return "package"; }
+  if (s_eq(f, "mb_targets") || s_eq(f, "mb_flags") || s_eq(f, "mb_prelude") || s_eq(f, "mb_agents")) { return "build"; }
+  if (s_eq(f, "mb_bin") || s_eq(f, "mb_bin_kind")) { return "bin." + a0; }
+  if (mfx_is_dep_fn(f)) { return "dependencies"; }
+  if (s_eq(f, "mb_registry")) { return "registry." + a0; }
+  if (s_eq(f, "mb_replace_path") || s_eq(f, "mb_replace_version")) { return "replace"; }
+  if (s_eq(f, "mb_component") || s_eq(f, "mb_component_on")) { return "component." + a0; }
+  if (s_eq(f, "mb_rule")) { return "rules"; }
+  if (s_eq(f, "mb_raw")) { return a0; }
+  if (s_starts(f, "mb_c_")) { return mfx_os_section(cur, "c"); }
+  if (s_starts(f, "mb_link_") || s_eq(f, "mb_pkgconfig")) { return mfx_os_section(cur, "link"); }
+  if (s_eq(cur->kind, "profile")) {
+    return mfx_os_section(cur, "profile." + cur->name);
+  }
+  if (s_eq(cur->kind, "bin")) {
+    return "bin." + cur->name;
+  }
   return s_empty();
+}
+
+// fn project(), else fn local() (mbuild.local.mettle); -1 when neither.
+fn mfx_decl_fn(sc: MfxScan*) -> int64 {
+  var at: int64 = mfx_find_fn(sc, "project");
+  if (at < 0) {
+    at = mfx_find_fn(sc, "local");
+  }
+  return at;
+}
+
+// The line of the first literal `call(...)` in fn project() (or fn local())
+// whose key argument is first_arg ("" = any) and that writes to section ("" =
+// any); 0 when there is none. Calls made from other functions are not followed.
+export fn mbf_locate(text: string, call: string, first_arg: string, section: string) -> int64 {
+  var sc: MfxScan* = mfx_scan(text);
+  var proj: int64 = mfx_decl_fn(sc);
+  var cur: MfxCursor;
+  cur.kind = s_empty();
+  cur.name = s_empty();
+  cur.os = s_empty();
+  var i: int64 = 0;
+  while (i < sc->ncalls) {
+    var c: MfxCall* = &sc->calls[i];
+    i = i + 1;
+    if (c->in_fn != proj || proj < 0) {
+      continue;
+    }
+    var sec: string = mfx_section(&cur, c);
+    if (!s_eq(c->fn_name, call)) {
+      continue;
+    }
+    if (slen(first_arg) > 0 && !s_eq(mfx_arg(c, mfx_key_index(call)), first_arg)) {
+      continue;
+    }
+    if (slen(section) > 0 && !s_eq(sec, section)) {
+      continue;
+    }
+    return c->line;
+  }
+  return 0;
+}
+
+export fn mbf_add_lines(text: string, lines: StrList*) -> MbfEdit {
+  var sc: MfxScan* = mfx_scan(text);
+  defer free(sc);
+  var proj: int64 = mfx_find_fn(sc, "project");
+  if (proj < 0 || sc->fns[proj].body_close < 0) {
+    return mfx_edit(false, text, 0, "no fn project()");
+  }
+  var open: int64 = sc->fns[proj].body_open;
+  var close: int64 = sc->fns[proj].body_close;
+  var indent: string = "  ";
+  var body: StrList* = s_lines(s_sub(text, open + 1, close));
+  var k: int64 = body->len - 1;
+  while (k >= 0) {
+    var l: string = sl_get(body, k);
+    if (slen(s_trim(l)) > 0) {
+      indent = mfx_indent(l, 0);
+      break;
+    }
+    k = k - 1;
+  }
+  free(body);
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < lines->len) {
+    buf_line(b, indent + sl_get(lines, i));
+    i = i + 1;
+  }
+  var add: string = buf_take(b);
+  var cls: int64 = mfx_line_start(text, close);
+  var at_line: int64 = mfx_line_of(text, close);
+  if (slen(s_trim(s_sub(text, cls, close))) == 0 && cls > open) {
+    return mfx_edit(true, s_sub(text, 0, cls) + add + s_from(text, cls), at_line, s_empty());
+  }
+  return mfx_edit(true, s_sub(text, 0, close) + "\n" + add + s_from(text, close), at_line + 1, s_empty());
+}
+
+export fn mbf_add_command(text: string, name: string, summary: string, body: string) -> MbfEdit {
+  var fn_name: string = "cmd_" + s_replace_byte(name, 45, 95);
+  var sc: MfxScan* = mfx_scan(text);
+  defer free(sc);
+  var have: int64 = mfx_find_fn(sc, fn_name);
+  if (have >= 0) {
+    return mfx_edit(false, text, sc->fns[have].line, "fn " + fn_name + " exists");
+  }
+  var b: Buf* = buf_new();
+  buf_add(b, text);
+  if (slen(text) > 0 && !s_ends(text, "\n")) {
+    buf_addb(b, 10);
+  }
+  buf_addb(b, 10);
+  var line: int64 = mfx_line_of(buf_str(b), b->len) + 1;
+  buf_line(b, "// " + name + ": " + summary);
+  if (sc->exports) {
+    buf_add(b, "export ");
+  }
+  buf_line(b, "fn " + fn_name + "(a: MbArgs*) -> int32 {{");
+  var lines: StrList* = s_lines(body);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = sl_get(lines, i);
+    if (slen(s_trim(l)) == 0) {
+      buf_line(b, "");
+    } else {
+      buf_line(b, "  " + l);
+    }
+    i = i + 1;
+  }
+  free(lines);
+  buf_line(b, "}");
+  return mfx_edit(true, buf_take(b), line, s_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Generated text
+// ---------------------------------------------------------------------------
+
+export fn mbf_driver(info: MbfInfo*, file: string, config_only: bool) -> string {
+  return mbf_driver_local(info, file, s_empty(), config_only);
+}
+
+// mbf_driver, with local_file (mbuild.local.mettle, "" = none) compiled in:
+// config mode then runs fn local() after fn project().
+export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, config_only: bool) -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "// generated by mbuild from mbuild.mettle; do not edit");
+  buf_line(b, "import \"mbuild/api\";");
+  buf_line(b, "import " + mfx_lit(file) + ";");
+  if (slen(local_file) > 0) {
+    buf_line(b, "import " + mfx_lit(local_file) + ";");
+  }
+  buf_line(b, "");
+  buf_line(b, "fn main(argc: int32, argv: cstring*) -> int32 {{");
+  buf_line(b, "  mbi_start(argc, argv);");
+  if (slen(local_file) > 0) {
+    buf_line(b, "  if (mbi_mode(\"config\")) {{ project(); mbi_local(); local(); return mbi_finish_config(); }");
+  } else {
+    buf_line(b, "  if (mbi_mode(\"config\")) {{ project(); return mbi_finish_config(); }");
+  }
+  if (!config_only && info->ncommands > 0) {
+    buf_line(b, "  if (mbi_mode(\"cmd\")) {{");
+    buf_line(b, "    var a: MbArgs* = mbi_args();");
+    var i: int64 = 0;
+    while (i < info->ncommands) {
+      var c: MbfCommand = info->commands[i];
+      buf_line(b, "    if (mbi_name(" + mfx_lit(c.name) + ")) {{ return " + c.fn_name + "(a); }");
+      i = i + 1;
+    }
+    buf_line(b, "  }");
+  }
+  if (!config_only && info->hooks->len > 0) {
+    buf_line(b, "  if (mbi_mode(\"hook\")) {{");
+    var h: int64 = 0;
+    while (h < info->hooks->len) {
+      var hk: string = sl_get(info->hooks, h);
+      buf_line(b, "    if (mbi_name(" + mfx_lit(hk) + ")) {{ return hook_" + hk + "(); }");
+      h = h + 1;
+    }
+    buf_line(b, "  }");
+  }
+  buf_line(b, "  return mbi_unknown();");
+  buf_line(b, "}");
+  return buf_take(b);
 }
 
 export fn mbf_init_text(name: string) -> string {
+  var b: Buf* = buf_new();
+  buf_line(b, "// mbuild.mettle: the project file. `mbuild help` lists its commands.");
+  buf_line(b, "import \"mbuild/api\";");
+  buf_line(b, "");
+  buf_line(b, "fn project() {{");
+  buf_line(b, "  mb_package(" + mfx_lit(name) + ", \"0.1.0\");");
+  buf_line(b, "}");
+  buf_line(b, "");
+  buf_line(b, "// hello: an example project command (`mbuild hello NAME`)");
+  buf_line(b, "fn cmd_hello(a: MbArgs*) -> int32 {{");
+  buf_line(b, "  var who: string = \"world\";");
+  buf_line(b, "  if (mb_nargs(a) > 0) {{ who = mb_arg(a, 0); }");
+  buf_line(b, "  mb_say(\"hello, \" + who + \", from \" + mb_name());");
+  buf_line(b, "  return 0;");
+  buf_line(b, "}");
+  return buf_take(b);
+}
+
+// ---------------------------------------------------------------------------
+// mbuild.local.mettle
+// ---------------------------------------------------------------------------
+
+export fn mbf_local_text() -> string {
+  return "import \"mbuild/api\";\n\nfn local() {{\n}\n";
+}
+
+// "" when text is a usable mbuild.local.mettle, else the problem.
+export fn mbf_check_local(text: string) -> string {
+  var sc: MfxScan* = mfx_scan(text);
+  defer free(sc);
+  var at: int64 = mfx_find_fn(sc, "local");
+  var i: int64 = 0;
+  while (i < sc->nfns) {
+    var f: MfxFn = sc->fns[i];
+    i = i + 1;
+    if (s_eq(f.name, "main") || s_eq(f.name, "project") || s_starts(f.name, "cmd_") || s_starts(f.name, "hook_")) {
+      return "mbuild.local.mettle:" + s_int(f.line) + ": fn " + f.name + " belongs in mbuild.mettle (this file holds only fn local())";
+    }
+    if (s_eq(f.name, "local") && sc->exports && !f.exported) {
+      return "mbuild.local.mettle:" + s_int(f.line) + ": fn local must be exported, because this file exports other names";
+    }
+  }
+  if (at < 0) {
+    return "mbuild.local.mettle has no fn local() (it holds machine settings: mb_replace_path(\"name\", \"../dir\"))";
+  }
   return s_empty();
 }
 
-export fn mbf_from_manifest(m: Manifest*, mettle_deps: string) -> string {
-  return s_empty();
+fn mfx_call_text(call: string, args: StrList*) -> string {
+  var lits: StrList* = sl_new();
+  defer free(lits);
+  var i: int64 = 0;
+  while (i < args->len) {
+    sl_push(lits, mfx_lit(sl_get(args, i)));
+    i = i + 1;
+  }
+  return call + "(" + sl_join(lits, ", ") + ");";
+}
+
+// The one call named `call` in the declaring function whose key argument is
+// first_arg; at = -1 when there is none.
+fn mfx_match_call(sc: MfxScan*, call: string, first_arg: string) -> MfxMatch {
+  var m: MfxMatch;
+  m.at = -1;
+  m.count = 0;
+  m.bad_line = 0;
+  m.why = s_empty();
+  var owner: int64 = mfx_decl_fn(sc);
+  var ki: int64 = mfx_key_index(call);
+  var i: int64 = 0;
+  while (i < sc->ncalls) {
+    var c: MfxCall* = &sc->calls[i];
+    i = i + 1;
+    if (!s_eq(c->fn_name, call)) {
+      continue;
+    }
+    if (!mfx_arg_literal(c, ki)) {
+      if (c->in_fn == owner && slen(m.why) == 0) {
+        m.bad_line = c->line;
+        m.why = "a computed argument";
+      }
+      continue;
+    }
+    if (!s_eq(mfx_arg(c, ki), first_arg)) {
+      continue;
+    }
+    m.count = m.count + 1;
+    if (c->in_fn != owner) {
+      m.bad_line = c->line;
+      m.why = "a call outside fn local()";
+    } else if (m.count > 1) {
+      m.bad_line = c->line;
+      m.why = "more than one call";
+    } else if (!c->alone) {
+      m.bad_line = c->line;
+      m.why = "a call that shares its line";
+    }
+    m.at = i - 1;
+  }
+  return m;
+}
+
+// Sets `call(args...)` (string literals) in fn local() (or fn project()):
+// the call whose key argument is first_arg is rewritten, else a new line is
+// added right after the opening brace, ahead of any mb_profile cursor. An
+// empty text starts from mbf_local_text().
+export fn mbf_set_call(text: string, call: string, first_arg: string, args: StrList*) -> MbfEdit {
+  var t: string = text;
+  if (slen(s_trim(t)) == 0) {
+    t = mbf_local_text();
+  }
+  var sc: MfxScan* = mfx_scan(t);
+  var owner: int64 = mfx_decl_fn(sc);
+  if (owner < 0 || sc->fns[owner].body_open < 0) {
+    return mfx_edit(false, t, 0, "no fn local()");
+  }
+  var stmt: string = mfx_call_text(call, args);
+  var m: MfxMatch = mfx_match_call(sc, call, first_arg);
+  if (slen(m.why) > 0) {
+    return mfx_edit(false, t, m.bad_line, m.why);
+  }
+  if (m.at >= 0) {
+    var c: MfxCall* = &sc->calls[m.at];
+    var line: string = s_sub(t, c->line_start, c->line_end);
+    var nl: string = s_empty();
+    if (s_ends(line, "\n")) {
+      nl = "\n";
+    }
+    return mfx_edit(true, s_sub(t, 0, c->line_start) + mfx_indent(t, c->line_start) + stmt + nl + s_from(t, c->line_end), c->line, s_empty());
+  }
+  var open: int64 = sc->fns[owner].body_open;
+  var brace_line: int64 = mfx_line_of(t, open);
+  var j: int64 = open + 1;
+  while (j < slen(t) && (s_byte(t, j) == 32 || s_byte(t, j) == 9 || s_byte(t, j) == 13)) {
+    j = j + 1;
+  }
+  if (j < slen(t) && s_byte(t, j) == 10) {
+    return mfx_edit(true, s_sub(t, 0, j + 1) + "  " + stmt + "\n" + s_from(t, j + 1), brace_line + 1, s_empty());
+  }
+  return mfx_edit(true, s_sub(t, 0, open + 1) + "\n  " + stmt + "\n" + s_from(t, open + 1), brace_line + 1, s_empty());
+}
+
+// Deletes the line of the call whose key argument is first_arg; ok with the
+// text unchanged when there is none.
+export fn mbf_remove_call(text: string, call: string, first_arg: string) -> MbfEdit {
+  var sc: MfxScan* = mfx_scan(text);
+  defer free(sc);
+  var m: MfxMatch = mfx_match_call(sc, call, first_arg);
+  if (slen(m.why) > 0) {
+    return mfx_edit(false, text, m.bad_line, m.why);
+  }
+  if (m.at < 0) {
+    return mfx_edit(true, text, 0, s_empty());
+  }
+  var c: MfxCall* = &sc->calls[m.at];
+  return mfx_edit(true, s_sub(text, 0, c->line_start) + s_from(text, c->line_end), c->line, s_empty());
 }

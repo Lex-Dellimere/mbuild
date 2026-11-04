@@ -1,0 +1,42 @@
+import "mbuild/api";
+
+fn project() {
+  mb_package("viewer", "0.3.0");
+  mb_meta("description", "image viewer");
+  mb_targets("linux, windows");
+  mb_dep("strutil", "v1.1.0");
+  mb_dep_from("corp", "auth", "v2.0.0");
+  mb_dep_path("widgets", "../widgets");
+  mb_registry("corp", "https://pkgs.example.com/mettle");
+
+  mb_component("renderer", "src/renderer", "static", "soft, gl");
+  mb_component_on("renderer", "windows", "soft");
+  mb_rule("rules/no_alloc_in_draw.mettle");
+
+  mb_profile("release");
+  mb_set("optimize", "full");
+  mb_set("crash-report", "false");
+  mb_use("renderer", "gl");
+  mb_on("windows");
+  mb_set("subsystem", "windows");
+  mb_on("");
+
+  mb_profile("debug");
+  mb_set("safe", "true");
+}
+
+// install: build a release and copy it into a bin directory (default ~/.local/bin)
+fn cmd_install(a: MbArgs*) -> int32 {
+  var dir: string = mb_opt(a, "--to", mb_home() + "/.local/bin");
+  if (mb_mbuild("build -r -t host") != 0) { return 1; }
+  mb_mkdirs(dir);
+  if (!mb_copy(mb_out("viewer", mb_os(), "release"), dir + "/viewer" + mb_exe_ext())) { mb_fail("copy failed"); }
+  mb_say("installed " + dir + "/viewer" + mb_exe_ext());
+  return 0;
+}
+
+// regenerate src/version.mettle from the package version
+fn hook_pre_build() -> int32 {
+  mb_write_if_changed("src/version.mettle", "export const VIEWER_VERSION: string = \"" + mb_version() + "\";\n");
+  return 0;
+}
