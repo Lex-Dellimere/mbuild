@@ -30,7 +30,7 @@ fn mx_bad_flag(a: string) {
   if (slen(sug) > 0) {
     fail_hint("unknown flag `" + name + "`", "did you mean `" + sug + "`?");
   }
-  fail_hint("unknown flag `" + name + "`", "run `mbuild help` for the flags");
+  fail_hint("unknown flag `" + name + "`", "run `mbuild help flags` for the flags");
 }
 
 fn mx_set_color(when: string) {
