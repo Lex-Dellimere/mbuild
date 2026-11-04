@@ -262,6 +262,13 @@ check "a user of the published package builds and runs" has "a=1"
 MBUILD_REGISTRY="$S/reg-$mode" "$MB" outdated >"$S/last.out" 2>&1
 check "yanked version not offered" hasnt "v1.1.0"
 
+# --- a manifest warning is printed once per command
+mkdir -p "$W/warn/src" && cd "$W/warn"
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("warn", "0.1.0");\n  mb_tool("cc", "gcc");\n}\n' > mbuild.mettle
+printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
+mb run
+check "warning once" [ "$(grep -c "is machine-specific: move it to mbuild.local.mettle" "$S/last.out")" = 1 ]
+
 # --- mbuild.toml is gone
 mkdir -p "$W/old" && cd "$W/old" && printf '[package]\nname = "old"\n' > mbuild.toml
 mb build
