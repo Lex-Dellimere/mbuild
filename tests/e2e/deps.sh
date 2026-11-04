@@ -441,6 +441,7 @@ check "unmanaged line help" has "$S/last.out" 'help: run mbuild tidy to move it 
 drv "$P" adopt
 check "adopt" has "$S/last.out" "Adopted foo = ../foo from mettle.deps"
 check "adopt writes mb_dep_path" has "$P/mbuild.mettle" 'mb_dep_path("foo", "../foo");'
+check "adopt: after mb_package" [ "$(sed -n 5p "$P/mbuild.mettle")" = '  mb_dep_path("foo", "../foo");' ]
 drv "$P" ensure
 check "adopted: a path package" has "$S/last.out" "MOD foo   registry= path=1 man=0"
 check "adopted: no warning" hasnt "$S/last.out" "not managed"

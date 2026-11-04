@@ -740,7 +740,31 @@ export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
     var out: string = s_sub(text, 0, c->arg_start[vi]) + mfx_lit(version) + s_from(text, c->arg_end[vi]);
     return mfx_edit(true, out, c->line, s_empty());
   }
-  var stmt: string = "mb_dep(" + mfx_lit(name) + ", " + mfx_lit(version) + ");";
+  return mfx_insert_dep(text, sc, proj, "mb_dep(" + mfx_lit(name) + ", " + mfx_lit(version) + ");");
+}
+
+// Adds `mb_dep_path("NAME", "PATH");` where mbf_set_dep adds a new mb_dep;
+// refused when NAME is declared already.
+export fn mbf_add_dep_path(text: string, name: string, path: string) -> MbfEdit {
+  var sc: MfxScan* = mfx_scan(text);
+  defer free(sc);
+  var proj: int64 = mfx_find_fn(sc, "project");
+  if (proj < 0 || sc->fns[proj].body_open < 0) {
+    return mfx_edit(false, text, 0, "no fn project()");
+  }
+  var m: MfxMatch = mfx_match_dep(sc, name);
+  if (slen(m.why) > 0) {
+    return mfx_edit(false, text, m.bad_line, m.why);
+  }
+  if (m.at >= 0) {
+    return mfx_edit(false, text, sc->calls[m.at].line, "declared already");
+  }
+  return mfx_insert_dep(text, sc, proj, "mb_dep_path(" + mfx_lit(name) + ", " + mfx_lit(path) + ");");
+}
+
+// A new dependency line: after the last mb_dep* line, else after
+// mb_package(, else right after the brace of fn project() (13.8).
+fn mfx_insert_dep(text: string, sc: MfxScan*, proj: int64, stmt: string) -> MbfEdit {
   var anchor: int64 = -1;
   var i: int64 = 0;
   while (i < sc->ncalls) {

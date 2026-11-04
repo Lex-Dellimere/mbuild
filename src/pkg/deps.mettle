@@ -3637,31 +3637,27 @@ export fn deps_cmd_vendor(p: Project*) -> int32 {
 // mettle.deps adoption (12.6)
 // ---------------------------------------------------------------------------
 
-// `mb_dep_path("name", "dir");` lines added at the top of fn project().
-fn dx_add_path_deps(p: Project*, lines: StrList*) {
+// Adds an `mb_dep_path("name", "dir");` line per pair ("name\ndir") where a
+// new dependency goes (13.8).
+fn dx_add_path_deps(p: Project*, pairs: StrList*) {
   var file: string = dx_mbfile_path(p);
   var r: FsRead = fs_read(file);
   if (!r.ok) {
     dx_fail("cannot read " + file);
   }
-  var info: MbfInfo* = mbf_scan(r.data);
-  if (!info->ok || !info->has_project) {
-    dx_fail("cannot find fn project() in " + file);
-  }
-  var at: int64 = info->body_start;
-  free(info);
-  if (at < slen(r.data) && s_byte(r.data, at) == 123) {
-    at = at + 1;
-  }
-  var b: Buf* = buf_new();
-  buf_add(b, s_sub(r.data, 0, at));
+  var text: string = r.data;
   var i: int64 = 0;
-  while (i < lines->len) {
-    buf_add(b, "\n  " + sl_get(lines, i));
+  while (i < pairs->len) {
+    var pair: string = sl_get(pairs, i);
     i = i + 1;
+    var nl: int64 = s_find_byte(pair, 10);
+    var e: MbfEdit = mbf_add_dep_path(text, s_sub(pair, 0, nl), s_from(pair, nl + 1));
+    if (!e.ok) {
+      dx_fail(file + ":" + s_int(e.line) + ": cannot add mb_dep_path(\"" + s_sub(pair, 0, nl) + "\", ...): " + e.why);
+    }
+    text = e.text;
   }
-  buf_add(b, s_from(r.data, at));
-  if (!fs_write(file, buf_take(b))) {
+  if (!fs_write(file, text)) {
     dx_fail("cannot write " + file);
   }
   var m: Manifest* = cfg_load(p);
@@ -3721,7 +3717,7 @@ fn dx_adopt(p: Project*, write: bool) -> StrList* {
       } else if (!p_has_prefix_dir(abs, p->state_dir)) {
         keep = false;
         sl_push(adopted, name);
-        sl_push(calls, "mb_dep_path(" + toml_quote(name) + ", " + toml_quote(dir) + ");");
+        sl_push(calls, name + "\n" + dir);
         if (write) {
           status("Adopted", name + " = " + dir + " from mettle.deps");
         }
