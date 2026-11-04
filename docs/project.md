@@ -231,16 +231,17 @@ code. Global flags go before the name and reach the command only through
 `mb_verbose()`.
 
 The `//` comment block right above the function is its help: the first line
-is the summary in `mbuild help` (a leading `NAME:` is dropped), the whole
-block is `mbuild help NAME`.
+is the summary in `mbuild help` (a leading `NAME:` is dropped), the rest
+shows in `mbuild help NAME`.
 
 ```text
 $ mbuild help install
-usage: mbuild install [ARGS...]   (mbuild.mettle:20)
+install - build a release and copy it into a bin directory (default ~/.local/bin)
 
-install: build a release and copy it into a bin directory (default ~/.local/bin)
+  usage: mbuild install [ARGS...]
 
-mbuild install --to DIR puts it somewhere else.
+  mbuild install --to DIR puts it somewhere else.
+From: mbuild.mettle:19 (fn cmd_install)
 $ mbuild instal
 error: no command 'instal'
   help: did you mean install? (mbuild.mettle)

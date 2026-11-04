@@ -51,7 +51,13 @@ check "run prints the greeting" has "Hello from hello!"
 mb hello bob
 check "hello bob" has "hello, bob, from hello"
 mb help
-check "help lists project commands" sh -c 'grep -qF "project commands (mbuild.mettle):" "$0/last.out" && grep -q "^  hello .*example project command" "$0/last.out"' "$S"
+check "help lists project commands" sh -c 'grep -qxF "this project (mbuild.mettle):" "$0/last.out" && grep -q "^  hello .*example project command" "$0/last.out"' "$S"
+check "help groups the commands" sh -c 'grep -qx "build:" "$0/last.out" && grep -qx "dependencies:" "$0/last.out" && grep -qx "tools:" "$0/last.out" && grep -qF "run \`mbuild help COMMAND\` for details" "$0/last.out"' "$S"
+check "help has no trailing spaces" sh -c '! grep -q " $" "$0/last.out"' "$S"
+mb help hello
+check "help of a project command" sh -c 'grep -q "^hello - .*example project command" "$0/last.out" && grep -qF "usage: mbuild hello [ARGS...]" "$0/last.out" && grep -q "^From: mbuild.mettle:[0-9]* (fn cmd_hello)" "$0/last.out"' "$S"
+mb help biuld
+check "help of an unknown command" sh -c '[ "$(cat "$0/last.code")" = 1 ] && grep -qF "error: no command named biuld" "$0/last.out" && grep -qF "help: did you mean build?" "$0/last.out" && grep -qF "help: run \`mbuild help\` for the list" "$0/last.out"' "$S"
 mb helo
 check "helo suggests hello" has "did you mean hello?"
 cat >> mbuild.mettle <<'EOF'
@@ -344,7 +350,7 @@ check "unknown command suggests" sh -c 'grep -qF "did you mean build?" "$0/last.
 mb build --forse
 check "unknown flag suggests" has "--force"
 mb help build
-check "help build" has "usage: mbuild build"
+check "help build" sh -c 'grep -qx "build - build the programs" "$0/last.out" && grep -qF "  usage: mbuild build" "$0/last.out" && grep -qx "  Common:" "$0/last.out" && grep -qx "Doc: docs/project.md" "$0/last.out" && ! grep -qF -- "--verbose" "$0/last.out"' "$S"
 mb build -p fast
 check "unknown profile fails" code_is 1
 mb build -t linux,windoes
