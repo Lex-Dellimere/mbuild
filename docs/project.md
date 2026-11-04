@@ -372,7 +372,8 @@ writes are part of the build. It runs every time; write with
 `mb_write_if_changed` and an unchanged build stays Fresh.
 
 `fn hook_post_build() -> int32` runs once per target and profile after the
-bins are linked (`build`, `run`, `live`), also when everything was Fresh.
+bins are linked (`build`, `run`, `live`), also when everything was Fresh;
+for `live`, once after its first build, before the program starts.
 
 Inside a hook, `mb_target()`, `mb_profile_name()` and `mb_out_dir()` say what
 is being built, `mb_bins()` lists the bins and `mb_built()` the ones that were

@@ -227,6 +227,10 @@ EOF
 timeout 8 "$MB" live >"$S/last.out" 2>&1
 wait
 check "live patches" has "Patch 1"
+printf '\nfn hook_post_build() -> int32 {\n  mb_say("post " + mb_built());\n  return 0;\n}\n' >> mbuild.mettle
+sed -i 's/i < 60/i < 1/' src/main.mettle
+timeout 8 "$MB" live >"$S/last.out" 2>&1
+check "live runs the post-build hook before the program" sh -c 'grep -qx "post live" "$0/last.out" && [ "$(grep -n "^post live" "$0/last.out" | cut -d: -f1)" -lt "$(grep -n "^2$" "$0/last.out" | cut -d: -f1)" ]' "$S"
 
 # --- publish, yank, registry (14.7)
 mkdir -p "$W/pkg" && cd "$W/pkg"

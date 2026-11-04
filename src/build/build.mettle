@@ -2341,9 +2341,33 @@ export fn build_cmd_live(p: Project*) -> int32 {
   fs_mkdirs(t->out_dir);
   bx_copy_beside(nl, t);
   var outp: string = t->out_dir + "/" + u->b->name + target_exe_ext(t->target);
-  var c: Cmd* = tc_cmd(u->m);
+  if (bx_has_hook(p, "post_build")) {
+    // `mettle live` builds and starts in one step: build first so the hook
+    // runs between (it then builds again, unchanged).
+    var fc: Cmd* = bx_live_cmd(s, u, nl, outp, true);
+    defer free(fc);
+    if (proc_run(fc) != 0) {
+      return 1;
+    }
+    var bins: StrList* = sl_of(u->b->name);
+    bx_hook(s, "post_build", t->target, t->out_dir, bins, bins);
+  }
+  var c: Cmd* = bx_live_cmd(s, u, nl, outp, false);
   defer free(c);
-  cmd_arg(c, "live");
+  status("Live", bx_label(s, u->b, t));
+  return proc_run(c);
+}
+
+// The command of `mettle live`, or (first) of the build it starts with.
+fn bx_live_cmd(s: BxSess*, u: BxUnit*, nl: NatLink*, outp: string, first: bool) -> Cmd* {
+  var p: Project* = s->p;
+  var c: Cmd* = tc_cmd(u->m);
+  if (first) {
+    cmd_arg(c, "--build");
+    cmd_arg(c, "--live");
+  } else {
+    cmd_arg(c, "live");
+  }
   cmd_path(c, bx_rel(p, u->entry));
   var st: Settings* = bx_add_flags(c, s, u);
   free(st);
@@ -2351,15 +2375,14 @@ export fn build_cmd_live(p: Project*) -> int32 {
   cmd_args(c, nl->mettle_args);
   cmd_arg(c, "-o");
   cmd_path(c, bx_rel(p, outp));
-  if (p->opts->passthrough->len > 0) {
+  if (!first && p->opts->passthrough->len > 0) {
     cmd_arg(c, "--");
     cmd_args(c, p->opts->passthrough);
   }
   sl_extend(c->env, nl->env);
   c->cwd = p->root;
   verbose(cmd_display(c));
-  status("Live", bx_label(s, u->b, t));
-  return proc_run(c);
+  return c;
 }
 
 fn bx_walk_owned(root: string, rel: string, skip: StrList*, found: StrList*) {
