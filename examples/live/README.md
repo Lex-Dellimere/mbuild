@@ -108,4 +108,5 @@ without `mbuild shell`, `shell_point()` is an empty function.
 - `mbuild live` builds with `--live` and runs the program under `mettle live`, which watches every source file and turns each save into a patch.
 - a patch only lands at a `quiesce;`. this program has one at the top of its loop, so a patch lands on the next tick and never halfway through one.
 - patching code doesn't touch the world. patches can also change function signatures and struct layouts; values are converted in place.
+- `mb_watch` files and patches also reach the program as events (`import "mbuild/live"`), for a preview window that reloads assets: see [live preview](../../docs/project.md#live-preview).
 - linux and windows x64. host target only.

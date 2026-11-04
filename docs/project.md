@@ -473,6 +473,81 @@ into a small one that imports what the entry imports, and `var` statements
 are replayed before each input. Linux only for now; [the example](../examples/live)
 has a capture.
 
+## Live preview
+
+`mbuild live` and `mbuild shell` tell the running program what happens
+around it, so a preview window (a renderer, a game) can reload assets and
+show errors without polling the disk itself. In `fn project()`:
+
+```mettle
+  mb_watch("shaders/**, assets/*.png");   // globs from the root; calls add up
+  mb_preview("right");                     // left, right, top, bottom or off
+```
+
+mbuild polls the `mb_watch` files every 150 ms beside the code `mettle live`
+already patches, and appends events to `.mbuild/live/BIN.events` (emptied at
+start, its absolute path in `MBUILD_LIVE_EVENTS`). Each event is one whole
+UTF-8 line written at once: the kind, then one space and the payload to the
+end of the line, or the kind alone.
+
+| line | when |
+|---|---|
+| `changed PATH`, `removed PATH` | a watched file (from the root) was added or changed, or went |
+| `patched NAME` | a function was patched in, a line each (`mettle live`, or a shell input) |
+| `patch-error MSG` | a patch did not compile: `FILE:LINE:COL: message` of the first error |
+| `built`, `build-error MSG` | the first build worked, or didn't |
+| `paused`, `resumed` | `mbuild shell`: pause, resume, step |
+| `exited CODE` | the program ended |
+
+Readers skip kinds they don't know. `--preview SIDE` (either command) sets
+`MBUILD_PREVIEW` for the program, overriding `mb_preview`; mbuild does
+nothing else with it. The program reads the events with `mbuild/live`:
+
+```mettle
+import "mbuild/live";
+
+  var ev: MbLiveEvent;         // kind, path (changed/removed), detail (the rest)
+  while (mblive_next(&ev)) {   // one read when nothing is buffered: call it every frame
+    if (ev.kind == "changed") { reload(ev.path); }
+  }
+```
+
+`mblive_active()` says whether the variable is set. Elsewhere it isn't, so
+`mblive_next` answers false after one `getenv` and the code builds and runs
+everywhere. The strings stay valid until the next call. Under `mbuild live`
+the program's stdout and stderr come through mbuild (to read `mettle live`'s
+lines), so they are pipes, not the terminal. A program printing each event it
+reads, while `shaders/a.glsl` is saved, `shaders/b.glsl` removed and
+`val` edited, broken and fixed:
+
+```text
+$ mbuild live
+        Live fx (linux, debug)
+Built executable '.../build/linux/debug/live/fx'
+active true preview=right
+ev built||
+ev changed|shaders/a.glsl|
+ev removed|shaders/b.glsl|
+Patch 1: val (320 bytes)
+ev patched||val
+-- .../src/rules.mettle:2:13
+error[E0002]: Expected an expression after '+', found ';'
+...
+ev patch-error||src/rules.mettle:2:13: Expected an expression after '+', found ';'
+Patch 2: val (320 bytes)
+ev patched||val
+$ cat .mbuild/live/fx.events
+built
+changed shaders/a.glsl
+removed shaders/b.glsl
+patched val
+patch-error src/rules.mettle:2:13: Expected an expression after '+', found ';'
+patched val
+```
+
+Changes found in one poll come in path order. On Windows `mbuild live` passes
+only `MBUILD_PREVIEW` for now.
+
 ## Hooks
 
 `fn hook_pre_build() -> int32` runs once per target and profile of every

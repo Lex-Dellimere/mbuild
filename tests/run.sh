@@ -32,7 +32,7 @@ n=$(grep -c '^== ' "$logs/mcheck.log")
 echo "$n entries, $(grep -c '^\[\(debug\|release\|windows\)\] \(FAILED\|[0-9]* warnings\)' "$logs/mcheck.log") failed builds" >>"$logs/mcheck.log"
 line mcheck $code "$logs/mcheck.log" $(($(date +%s) - start))
 
-suites="${*:-build config registry mreg deps api components init native toolchain platform services shell}"
+suites="${*:-build config registry mreg deps api components init native toolchain platform services shell live}"
 for s in $suites; do
   start=$(date +%s)
   # from an empty directory, which must stay empty (a dangling view once made garbage dirs)
