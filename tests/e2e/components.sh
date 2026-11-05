@@ -270,7 +270,7 @@ D="$T/components_driver"
 for mode in debug release; do
   flag=""
   [ "$mode" = release ] && flag="--release"
-  out=$("$METTLE" --build $flag "$here/tests/unit/components_test.mettle" -o "$D-$mode" 2>&1)
+  out=$(sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/components_test.mettle" -o "$D-$mode" 2>&1)
   code=$?
   if [ $code -ne 0 ]; then bad "driver builds ($mode)" "$out"; echo "components: $pass passed, $failn failed"; exit 1; fi
   if printf '%s\n' "$out" | grep -q 'warning'; then bad "driver builds without warnings ($mode)" "$out"; else ok "driver builds without warnings ($mode)"; fi

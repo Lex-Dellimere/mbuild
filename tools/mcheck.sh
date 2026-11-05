@@ -7,6 +7,7 @@
 #
 # METTLE: the dev compiler (default ../Mettle/bin/mettle). METTLE_WIN: a Windows
 # dev compiler (mettle.exe) for a third build under wine; skipped when unset.
+# MBTEST_MODES=debug: the debug build only (no release build or compare). MBTEST_PREBUILT: see mcompile.sh.
 # Outputs: ${TMPDIR:-/tmp}/mbuild-mcheck/<stem>.{debug,release,exe} and their .log.
 
 set -u
@@ -15,6 +16,7 @@ METTLE="${METTLE:-$here/../Mettle/bin/mettle}"
 out="${TMPDIR:-/tmp}/mbuild-mcheck"
 export WINEDEBUG=-all
 mkdir -p "$out"
+case " ${MBTEST_MODES:-debug release} " in *" release "*) rel=1 ;; *) rel=0 ;; esac
 
 usage() { echo "usage: $0 ENTRY [--run] [-- ARGS...] | --all-drivers" >&2; exit 2; }
 [ $# -ge 1 ] || usage
@@ -42,8 +44,8 @@ check() {
   stem="$(basename "$entry" .mettle)"
   echo "== $stem"
   st=0
-  build debug "$out/$stem.debug" "$METTLE" --build "$entry" || st=1
-  build release "$out/$stem.release" "$METTLE" --build --release "$entry" || st=1
+  build debug "$out/$stem.debug" sh "$here/tools/mcompile.sh" "$entry" || st=1
+  [ $rel = 1 ] && { build release "$out/$stem.release" sh "$here/tools/mcompile.sh" --release "$entry" || st=1; }
   if [ -n "${METTLE_WIN:-}" ]; then
     build windows "$out/$stem.exe" wine "$METTLE_WIN" --build "$entry" || st=1
   else
@@ -51,7 +53,8 @@ check() {
   fi
   [ $run = 1 ] && [ $st = 0 ] || return $st
   "$out/$stem.debug" "$@" >"$out/$stem.debug.out" 2>"$out/$stem.debug.err"; dc=$?
-  "$out/$stem.release" "$@" >"$out/$stem.release.out" 2>"$out/$stem.release.err"; rc=$?
+  rc=$dc
+  [ $rel = 1 ] && { "$out/$stem.release" "$@" >"$out/$stem.release.out" 2>"$out/$stem.release.err"; rc=$?; }
   if [ $dc != 0 ]; then
     echo "[run] debug exit $dc"
     cat "$out/$stem.debug.out" "$out/$stem.debug.err" | grep -v '^PASS' | sed 's/^/    /' | head -60
@@ -60,7 +63,7 @@ check() {
   if [ $dc != $rc ]; then
     echo "[run] exit codes differ: debug $dc, release $rc"
     st=1
-  elif ! cmp -s "$out/$stem.debug.out" "$out/$stem.release.out"; then
+  elif [ $rel = 1 ] && ! cmp -s "$out/$stem.debug.out" "$out/$stem.release.out"; then
     echo "[run] stdout differs between debug and release"
     diff "$out/$stem.debug.out" "$out/$stem.release.out" | sed 's/^/    /' | head -40
     st=1

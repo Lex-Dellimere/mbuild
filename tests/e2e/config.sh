@@ -43,9 +43,9 @@ unit mbfile_test
 echo "== building"
 for mode in debug release; do
   flag=""; [ $mode = release ] && flag="--release"
-  log=$("$METTLE" --build $flag "$here/tests/unit/config_test.mettle" -o "$T/config_driver.$mode" 2>&1) || { printf '%s\n' "$log"; echo "config_driver ($mode) does not build"; exit 1; }
+  log=$(sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/config_test.mettle" -o "$T/config_driver.$mode" 2>&1) || { printf '%s\n' "$log"; echo "config_driver ($mode) does not build"; exit 1; }
   expect_no "config_driver ($mode): no warnings" "$log" "warning"
-  log=$("$METTLE" --build $flag "$here/tests/unit/mbfile_test.mettle" -o "$T/mbfile_test.$mode" 2>&1) || { printf '%s\n' "$log"; echo "mbfile_test ($mode) does not build"; exit 1; }
+  log=$(sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/mbfile_test.mettle" -o "$T/mbfile_test.$mode" 2>&1) || { printf '%s\n' "$log"; echo "mbfile_test ($mode) does not build"; exit 1; }
   expect_no "mbfile_test ($mode): no warnings" "$log" "warning"
   out=$("$T/mbfile_test.$mode"); code=$?
   if [ $code = 0 ]; then ok "mbfile_test ($mode): $(printf '%s\n' "$out" | tail -1)"; else bad "mbfile_test ($mode) exit $code" "$(printf '%s\n' "$out" | grep -A2 '^FAIL')"; fi

@@ -46,7 +46,7 @@ for mode in debug release; do
 flag=""
 [ $mode = release ] && flag="--release"
 echo "== mbuild ($mode)"
-"$METTLE" --build $flag "$here/src/main.mettle" -o "$S/mbuild-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
+sh "$here/tools/mcompile.sh" $flag "$here/src/main.mettle" -o "$S/mbuild-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
 MB="$S/mbuild-$mode"
 W="$S/$mode"
 

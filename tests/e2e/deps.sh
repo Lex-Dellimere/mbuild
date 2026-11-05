@@ -25,7 +25,7 @@ idxsha() { awk -v v="$3" '$1 == v { sub("sha256=", "", $2); print $2 }' "$1/inde
 D="${DRV:-}"
 if [ -z "$D" ]; then
   echo "== building the driver"
-  "$METTLE" --build "$here/tests/unit/deps_test.mettle" -o "$S/drv" >"$S/dbuild.log" 2>&1 || { cat "$S/dbuild.log"; exit 1; }
+  sh "$here/tools/mcompile.sh" "$here/tests/unit/deps_test.mettle" -o "$S/drv" >"$S/dbuild.log" 2>&1 || { cat "$S/dbuild.log"; exit 1; }
   D="$S/drv"
 fi
 
@@ -492,7 +492,7 @@ check "adopted: no warning" hasnt "$S/last.out" "not managed"
 
 echo "== with mbuild"
 if [ -z "${MB:-}" ]; then
-  "$METTLE" --build "$here/src/main.mettle" -o "$S/mbuild" >"$S/mbuild.log" 2>&1 || { cat "$S/mbuild.log"; exit 1; }
+  sh "$here/tools/mcompile.sh" "$here/src/main.mettle" -o "$S/mbuild" >"$S/mbuild.log" 2>&1 || { cat "$S/mbuild.log"; exit 1; }
   MB="$S/mbuild"
 fi
 mb() { (cd "$1" && shift && "$MB" "$@") >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }

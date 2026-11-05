@@ -99,7 +99,7 @@ for kind in debug release; do
   echo "== mbuild ($kind)"
   flag=""
   [ $kind = release ] && flag="--release"
-  "$METTLE" --build $flag "$here/src/main.mettle" -o "$T/mbuild-$kind" >"$T/build-$kind.log" 2>&1 || { cat "$T/build-$kind.log"; exit 1; }
+  sh "$here/tools/mcompile.sh" $flag "$here/src/main.mettle" -o "$T/mbuild-$kind" >"$T/build-$kind.log" 2>&1 || { cat "$T/build-$kind.log"; exit 1; }
   MB="$T/mbuild-$kind"
   cd "$W"
   rm -rf build .mbuild

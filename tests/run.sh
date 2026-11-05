@@ -26,6 +26,16 @@ line() {
 }
 
 start=$(date +%s)
+# mbuild, mbuild-shell and every unit driver, each mode built once for all suites (tools/mcompile.sh)
+export MBTEST_PREBUILT="$base/prebuilt"
+rm -rf "$MBTEST_PREBUILT"
+mkdir -p "$MBTEST_PREBUILT"
+realpath "$METTLE" >"$MBTEST_PREBUILT/compiler"
+jobs=$(($(nproc 2>/dev/null || echo 4) / 2)); [ $jobs -ge 2 ] || jobs=2
+( cd "$here" && for e in src/main.mettle cmd/mbuild-shell/main.mettle tests/unit/*_test.mettle; do
+    for m in ${MBTEST_MODES:-debug release}; do echo "$e $m"; done
+  done ) | xargs -P $jobs -n 2 sh -c 'k=$(printf %s "${2%.mettle}" | sed "s|/|_|g"); o="$MBTEST_PREBUILT/$k.$3"
+    if [ $3 = release ]; then "$METTLE" --build --release "$1/$2" -o "$o"; else "$METTLE" --build "$1/$2" -o "$o"; fi >"$o.log" 2>&1 || rm -f "$o"' _ "$here"
 { TMPDIR="$base" sh "$here/tools/mcheck.sh" "$here/src/main.mettle" --run && TMPDIR="$base" sh "$here/tools/mcheck.sh" --all-drivers; } >"$logs/mcheck.log" 2>&1
 code=$?
 n=$(grep -c '^== ' "$logs/mcheck.log")

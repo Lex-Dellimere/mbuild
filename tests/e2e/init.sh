@@ -52,7 +52,7 @@ mkdir -p "$DRV"
 for v in debug release; do
   flag=""
   [ "$v" = release ] && flag="--release"
-  if "$METTLE" --build $flag "$here/tests/unit/init_test.mettle" -o "$DRV/init_driver.$v" > "$DRV/$v.log" 2>&1; then
+  if sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/init_test.mettle" -o "$DRV/init_driver.$v" > "$DRV/$v.log" 2>&1; then
     if grep -q "warning" "$DRV/$v.log"; then bad "driver ($v) compiles without warnings" "$(cat "$DRV/$v.log")"; else ok "driver ($v) compiles without warnings"; fi
   else
     bad "driver ($v) compiles" "$(cat "$DRV/$v.log")"
@@ -285,7 +285,7 @@ file_has "registry: newest version" rsite2/mbuild.mettle 'mb_dep("webfw", "v1.0.
 
 echo "== part 2: CLI"
 MB="$T/mbuild"
-if ! "$METTLE" --build "$here/src/main.mettle" -o "$MB" > "$T/mbuild.log" 2>&1; then
+if ! sh "$here/tools/mcompile.sh" "$here/src/main.mettle" -o "$MB" > "$T/mbuild.log" 2>&1; then
   bad "mbuild builds" "$(cat "$T/mbuild.log")"
 else
   # a fresh cache, so the transcript has its Fetching line (14.3)

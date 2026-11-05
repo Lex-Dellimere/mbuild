@@ -24,7 +24,7 @@ code_is() { [ "$(cat "$S/last.code")" = "$1" ]; }
 mb() { "$MB" "$@" >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
 
 echo "== mbuild and the fixture"
-"$METTLE" --build "$here/src/main.mettle" -o "$S/mbuild" >"$S/build.log" 2>&1 || { cat "$S/build.log"; exit 1; }
+sh "$here/tools/mcompile.sh" "$here/src/main.mettle" -o "$S/mbuild" >"$S/build.log" 2>&1 || { cat "$S/build.log"; exit 1; }
 MB="$S/mbuild"
 sh "$here/tests/fixtures/make-mettle-registry.sh" "$S/fx" >/dev/null || exit 1
 REG="$S/fx/mreg"
@@ -146,7 +146,7 @@ mb build
 check "another format is an error" eval 'code_is 1 && has "is not a format 1 index"'
 
 echo "== mbuild search"
-"$METTLE" --build --release "$here/src/main.mettle" -o "$S/mbuild-release" >"$S/build-release.log" 2>&1 || { cat "$S/build-release.log"; exit 1; }
+sh "$here/tools/mcompile.sh" --release "$here/src/main.mettle" -o "$S/mbuild-release" >"$S/build-release.log" 2>&1 || { cat "$S/build-release.log"; exit 1; }
 search_suite() { # MODE
   mode="$1"
   if [ $mode = debug ]; then MB="$S/mbuild"; else MB="$S/mbuild-release"; fi

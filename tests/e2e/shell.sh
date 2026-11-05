@@ -40,15 +40,15 @@ gone() {
 [ "$(uname -s)" = Linux ] || { echo "note: shell suite skipped (Linux only)"; echo "shell: 0 passed, 0 failed"; exit 0; }
 
 echo "== mbuild"
-"$METTLE" --build "$here/src/main.mettle" -o "$T/mbuild" >"$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
+sh "$here/tools/mcompile.sh" "$here/src/main.mettle" -o "$T/mbuild" >"$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 MB="$T/mbuild"
 
 echo "== the prompt redrawn above program output (a fake terminal)"
-"$METTLE" --build "$here/tests/unit/shell_term_test.mettle" -o "$T/shell_term_test" >"$T/term.log" 2>&1 && "$T/shell_term_test" >"$T/term.out" 2>&1
+sh "$here/tools/mcompile.sh" "$here/tests/unit/shell_term_test.mettle" -o "$T/shell_term_test" >"$T/term.log" 2>&1 && "$T/shell_term_test" >"$T/term.out" 2>&1
 has "redraw unit test" "$T/term.out" '^shell_term_test: [0-9]+ passed, 0 failed$'
 
 echo "== lib/tui: UTF-8, widths, the diff renderer, keys"
-"$METTLE" --build "$here/tests/unit/tui_test.mettle" -o "$T/tui_test" >"$T/tui.log" 2>&1 && "$T/tui_test" >"$T/tui.out" 2>&1
+sh "$here/tools/mcompile.sh" "$here/tests/unit/tui_test.mettle" -o "$T/tui_test" >"$T/tui.log" 2>&1 && "$T/tui_test" >"$T/tui.out" 2>&1
 has "tui unit test" "$T/tui.out" '^tui_test: [0-9]+ passed, 0 failed$'
 
 # The live example, ticking faster and longer.
@@ -289,7 +289,7 @@ else
   ( cd "$here" && "$MB" build mbuild-shell -t host --quiet ) >"$T/tui-build.log" 2>&1 && cp "$here/build/linux/debug/mbuild-shell" "$T/mbuild-shell"
   [ -x "$T/mbuild-shell" ] && ok "mbuild builds mbuild-shell (lib/tui by path)" || bad "mbuild builds mbuild-shell" "$(cat "$T/tui-build.log")"
   for r in "" --release; do
-    "$METTLE" --build $r "$here/cmd/mbuild-shell/main.mettle" -o "$T/mbuild-shell.chk" >"$T/tui-chk.log" 2>&1
+    sh "$here/tools/mcompile.sh" $r "$here/cmd/mbuild-shell/main.mettle" -o "$T/mbuild-shell.chk" >"$T/tui-chk.log" 2>&1
     n=$(grep -c '^warning' "$T/tui-chk.log")
     [ "$n" = 0 ] && ok "mbuild-shell ${r:-debug}: no warnings" || bad "mbuild-shell ${r:-debug}: no warnings" "$(cat "$T/tui-chk.log")"
   done

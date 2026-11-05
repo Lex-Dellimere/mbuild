@@ -33,9 +33,9 @@ mbs() { ( cd "$SW" && "$MBS" "$@" ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"
 echo "== building the driver"
 for mode in debug release; do
   flag=""; [ $mode = release ] && flag="--release"
-  "$METTLE" --build $flag "$here/tests/unit/registry_test.mettle" -o "$S/drv-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
+  sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/registry_test.mettle" -o "$S/drv-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
   if grep -q 'warning' "$S/build-$mode.log"; then bad "driver builds without warnings ($mode)" "$(cat "$S/build-$mode.log")"; fi
-  "$METTLE" --build $flag "$here/src/main.mettle" -o "$S/mbuild-$mode" >"$S/build-mbuild-$mode.log" 2>&1 || { cat "$S/build-mbuild-$mode.log"; exit 1; }
+  sh "$here/tools/mcompile.sh" $flag "$here/src/main.mettle" -o "$S/mbuild-$mode" >"$S/build-mbuild-$mode.log" 2>&1 || { cat "$S/build-mbuild-$mode.log"; exit 1; }
 done
 
 echo "== fixtures"
