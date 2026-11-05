@@ -267,7 +267,7 @@ EOF
 
 echo "== building the driver"
 D="$T/components_driver"
-for mode in debug release; do
+for mode in ${MBTEST_MODES:-debug release}; do
   flag=""
   [ "$mode" = release ] && flag="--release"
   out=$(sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/components_test.mettle" -o "$D-$mode" 2>&1)
@@ -278,11 +278,11 @@ done
 
 echo "== driver checks"
 dbg=$("$D-debug" "$W" all 2>/dev/null); dcode=$?
-rel=$("$D-release" "$W" all 2>/dev/null); rcode=$?
+case " ${MBTEST_MODES:-debug release} " in *" release "*) rel=$("$D-release" "$W" all 2>/dev/null); rcode=$? ;; esac
 printf '%s\n' "$dbg" | grep -E '^(ok|FAIL) ' | sed 's/^ok /PASS /'
 [ $dcode -eq 0 ] && ok "driver passes (debug)" || bad "driver passes (debug)" "$(printf '%s\n' "$dbg" | grep -v '^ok ')"
-[ $rcode -eq 0 ] && ok "driver passes (release)" || bad "driver passes (release)" "$(printf '%s\n' "$rel" | grep -v '^ok ')"
-[ "$dbg" = "$rel" ] && ok "debug and release agree" || bad "debug and release agree" "$(printf '%s\n' "$dbg" > "$T/d.txt"; printf '%s\n' "$rel" > "$T/r.txt"; diff "$T/d.txt" "$T/r.txt")"
+case " ${MBTEST_MODES:-debug release} " in *" release "*) [ $rcode -eq 0 ] && ok "driver passes (release)" || bad "driver passes (release)" "$(printf '%s\n' "$rel" | grep -v '^ok ')" ;; esac
+case " ${MBTEST_MODES:-debug release} " in *" release "*) [ "$dbg" = "$rel" ] && ok "debug and release agree" || bad "debug and release agree" "$(printf '%s\n' "$dbg" > "$T/d.txt"; printf '%s\n' "$rel" > "$T/r.txt"; diff "$T/d.txt" "$T/r.txt")" ;; esac
 
 echo "== mbuild components"
 "$D-debug" "$W" use logger quiet > /dev/null 2>&1

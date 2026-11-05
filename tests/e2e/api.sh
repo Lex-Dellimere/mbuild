@@ -101,7 +101,7 @@ fn f_top top.mettle:1|fn f_top() -> int32"
 }
 
 run_suite debug "$OUT/api_test.debug"
-run_suite release "$OUT/api_test.release"
+case " ${MBTEST_MODES:-debug release} " in *" release "*) run_suite release "$OUT/api_test.release" ;; esac
 if [ -n "${METTLE_WIN:-}" ]; then
   run_suite windows wine "$OUT/api_test.exe"
 else

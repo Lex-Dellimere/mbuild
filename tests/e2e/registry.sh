@@ -31,7 +31,7 @@ sum() { sha256sum | cut -c1-64; }
 mbs() { ( cd "$SW" && "$MBS" "$@" ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"; sed -i '/Removing leading/d' "$S/last.out"; }
 
 echo "== building the driver"
-for mode in debug release; do
+for mode in ${MBTEST_MODES:-debug release}; do
   flag=""; [ $mode = release ] && flag="--release"
   sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/registry_test.mettle" -o "$S/drv-$mode" >"$S/build-$mode.log" 2>&1 || { cat "$S/build-$mode.log"; exit 1; }
   if grep -q 'warning' "$S/build-$mode.log"; then bad "driver builds without warnings ($mode)" "$(cat "$S/build-$mode.log")"; fi
@@ -306,7 +306,7 @@ suite() { # MODE
 }
 
 suite debug
-suite release
+case " ${MBTEST_MODES:-debug release} " in *" release "*) suite release ;; esac
 
 if [ -n "${METTLE_WIN:-}" ]; then
   echo "== wine"

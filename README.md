@@ -236,9 +236,12 @@ bootstrap as in [install](#install), then:
 
 ```bash
 sh tools/mcheck.sh src/main.mettle         # debug and --release builds, zero warnings
-sh tests/run.sh                            # mcheck plus every tests/e2e suite
+sh tests/run.sh                            # mcheck plus every tests/e2e suite, debug and release
+sh tests/run.sh --quick                    # debug only, for the inner loop
 sh tests/run.sh deps native                # just those suites
 ```
+
+suites run in parallel (`-j N`, default half the CPUs) on one shared build of mbuild and the unit drivers per mode.
 
 on linux, child processes run on [alph](https://github.com/Lex-Dellimere/Alph), vendored in `third_party/alph` (apache-2.0; `mbuild vendor-alph --from ../alph` refreshes it).
 

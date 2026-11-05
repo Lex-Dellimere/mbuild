@@ -49,7 +49,7 @@ rm "$W/manifest.toml"
 echo "== building the driver"
 DRV="$T/drv"
 mkdir -p "$DRV"
-for v in debug release; do
+for v in ${MBTEST_MODES:-debug release}; do
   flag=""
   [ "$v" = release ] && flag="--release"
   if sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/init_test.mettle" -o "$DRV/init_driver.$v" > "$DRV/$v.log" 2>&1; then
@@ -60,7 +60,7 @@ for v in debug release; do
   fi
 done
 
-for v in debug release; do
+for v in ${MBTEST_MODES:-debug release}; do
 echo "== part 1 ($v)"
 D="$DRV/init_driver.$v"
 rm -rf "$MBUILD_HOME"

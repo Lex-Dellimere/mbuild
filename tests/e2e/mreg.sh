@@ -146,7 +146,7 @@ mb build
 check "another format is an error" eval 'code_is 1 && has "is not a format 1 index"'
 
 echo "== mbuild search"
-sh "$here/tools/mcompile.sh" --release "$here/src/main.mettle" -o "$S/mbuild-release" >"$S/build-release.log" 2>&1 || { cat "$S/build-release.log"; exit 1; }
+case " ${MBTEST_MODES:-debug release} " in *" release "*) sh "$here/tools/mcompile.sh" --release "$here/src/main.mettle" -o "$S/mbuild-release" >"$S/build-release.log" 2>&1 || { cat "$S/build-release.log"; exit 1; } ;; esac
 search_suite() { # MODE
   mode="$1"
   if [ $mode = debug ]; then MB="$S/mbuild"; else MB="$S/mbuild-release"; fi
@@ -211,7 +211,7 @@ search_suite() { # MODE
   cd "$S" || exit 1
 }
 search_suite debug
-search_suite release
+case " ${MBTEST_MODES:-debug release} " in *" release "*) search_suite release ;; esac
 if [ -n "$H" ]; then
   MB="$S/mbuild"
   export MBUILD_HOME="$S/home-search-http" MBUILD_REGISTRY="$H"
@@ -305,7 +305,7 @@ info_suite() { # MODE
   cd "$S" || exit 1
 }
 info_suite debug
-info_suite release
+case " ${MBTEST_MODES:-debug release} " in *" release "*) info_suite release ;; esac
 if [ -n "$H" ]; then
   MB="$S/mbuild"
   export MBUILD_HOME="$S/home-info-http" MBUILD_REGISTRY="$H"

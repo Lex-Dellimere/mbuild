@@ -41,7 +41,7 @@ unit manifest_test
 unit mbfile_test
 
 echo "== building"
-for mode in debug release; do
+for mode in ${MBTEST_MODES:-debug release}; do
   flag=""; [ $mode = release ] && flag="--release"
   log=$(sh "$here/tools/mcompile.sh" $flag "$here/tests/unit/config_test.mettle" -o "$T/config_driver.$mode" 2>&1) || { printf '%s\n' "$log"; echo "config_driver ($mode) does not build"; exit 1; }
   expect_no "config_driver ($mode): no warnings" "$log" "warning"
@@ -331,13 +331,17 @@ fn local() {
 }
 
 run_cases debug > "$T/debug.log" 2>&1
-run_cases release > "$T/release.log" 2>&1
+: > "$T/release.log"
+rel=0
+case " ${MBTEST_MODES:-debug release} " in *" release "*) rel=1; run_cases release > "$T/release.log" 2>&1 ;; esac
 cat "$T/debug.log"
 pass=$(grep -c '^PASS' "$T/debug.log" "$T/release.log" | awk -F: '{s+=$2} END {print s}')
 failn=$(grep -c '^FAIL' "$T/debug.log" "$T/release.log" | awk -F: '{s+=$2} END {print s}')
 grep '^FAIL' "$T/release.log" | sed 's/^/release: /'
 norm() { sed -e "s|$T/run.$1|RUN|g" -e "s/^\([A-Z=]*\) $1: /\1 /" "$T/$1.log"; }
-if [ "$(norm debug)" = "$(norm release)" ]; then
+if [ $rel = 0 ]; then
+  :
+elif [ "$(norm debug)" = "$(norm release)" ]; then
   echo "PASS debug and release outputs match"
 else
   failn=$((failn + 1))

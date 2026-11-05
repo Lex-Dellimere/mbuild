@@ -97,7 +97,7 @@ rules() {
 }
 RES='^ev (patched|built|patch-error)\|'
 
-for kind in debug release; do
+for kind in ${MBTEST_MODES:-debug release}; do
   echo "== mbuild ($kind)"
   flag=""
   [ $kind = release ] && flag="--release"

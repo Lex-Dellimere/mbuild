@@ -102,8 +102,10 @@ for f in $(copies_of "$W/p1"); do cp "$f" "$OUT/"; done
 "$OUT/app" >"$W/run1.log" 2>&1
 check "linux app runs (dot=50.0 len=5.0)" has "$W/run1.log" "dot=50.0 len=5.0"
 check "linux app calls the vendored library" has "$W/run1.log" "vend=42"
-"$W/mbuild-mcheck/native_test.release" "$APP" linux prepare >"$W/p1r" 2>&1
-check "the --release driver prepares the same" cmp -s "$W/p1r" "$(sed '/Compiling/d' "$W/p1" > "$W/p1n"; echo "$W/p1n")"
+case " ${MBTEST_MODES:-debug release} " in *" release "*)
+  "$W/mbuild-mcheck/native_test.release" "$APP" linux prepare >"$W/p1r" 2>&1
+  check "the --release driver prepares the same" cmp -s "$W/p1r" "$(sed '/Compiling/d' "$W/p1" > "$W/p1n"; echo "$W/p1n")" ;;
+esac
 
 prepare "$APP" linux "$W/p2"
 check "second prepare compiles nothing" hasnt "$W/p2" "Compiling"

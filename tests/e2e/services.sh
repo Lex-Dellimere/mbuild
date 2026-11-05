@@ -54,7 +54,7 @@ proj() {
   } >"$d/mbuild.mettle"
 }
 
-for mode in debug release; do
+for mode in ${MBTEST_MODES:-debug release}; do
 flag=""
 [ $mode = release ] && flag="--release"
 echo "== mbuild ($mode)"

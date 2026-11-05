@@ -288,7 +288,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 else
   ( cd "$here" && "$MB" build mbuild-shell -t host --quiet ) >"$T/tui-build.log" 2>&1 && cp "$here/build/linux/debug/mbuild-shell" "$T/mbuild-shell"
   [ -x "$T/mbuild-shell" ] && ok "mbuild builds mbuild-shell (lib/tui by path)" || bad "mbuild builds mbuild-shell" "$(cat "$T/tui-build.log")"
-  for r in "" --release; do
+  for r in "" $(case " ${MBTEST_MODES:-debug release} " in *" release "*) echo --release ;; esac); do
     sh "$here/tools/mcompile.sh" $r "$here/cmd/mbuild-shell/main.mettle" -o "$T/mbuild-shell.chk" >"$T/tui-chk.log" 2>&1
     n=$(grep -c '^warning' "$T/tui-chk.log")
     [ "$n" = 0 ] && ok "mbuild-shell ${r:-debug}: no warnings" || bad "mbuild-shell ${r:-debug}: no warnings" "$(cat "$T/tui-chk.log")"
