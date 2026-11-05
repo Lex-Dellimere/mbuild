@@ -27,6 +27,14 @@ mb() { "$MB" "$@" >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
 # unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
 unit() { if out=$(METTLE="$METTLE" TMPDIR="$S" sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
 
+# the bootstrap (mettle builds mbuild0, mbuild0 builds mbuild and mbuild-shell) runs beside the rest; checked at the end
+B="$S/bootstrap"
+mkdir -p "$B"
+cp -r "$here/src" "$here/third_party" "$here/lib" "$here/cmd" "$here/mbuild.mettle" "$B/"
+bmode=release; bflag=-r
+case " ${MBTEST_MODES:-debug release} " in *" release "*) ;; *) bmode=debug; bflag="" ;; esac
+( cd "$B" && sh "$here/tools/mcompile.sh" src/main.mettle -o mbuild0 && MBUILD_HOME="$S/home-bootstrap" ./mbuild0 build $bflag -t host; echo $? >"$S/boot.code" ) >"$S/boot.out" 2>&1 &
+bootpid=$!
 echo "== unit tests"
 unit graph_test
 unit scan_test
@@ -416,6 +424,9 @@ fn main() -> int32 {
   var i: int32 = 0;
   while (i < 60) {
     print("{value()}\n");
+    if (value() == 2 && i < 58) {
+      i = 58;
+    }
     quiesce;
     thread_sleep_ms(100);
     i = i + 1;
@@ -425,8 +436,9 @@ fn main() -> int32 {
 EOF
 # the edit once the program prints (up to 8 s)
 ( n=0; while ! grep -qx 1 "$S/last.out" 2>/dev/null && [ $n -lt 160 ]; do sleep 0.05; n=$((n + 1)); done; sed -i 's/return 1;/return 2;/' src/main.mettle ) &
+edpid=$!
 timeout 8 "$MB" live >"$S/last.out" 2>&1
-wait
+wait $edpid
 check "live patches" has "Patch 1"
 printf '\nfn hook_post_build() -> int32 {\n  mb_say("post " + mb_built());\n  return 0;\n}\n' >> mbuild.mettle
 sed -i 's/i < 60/i < 1/' src/main.mettle
@@ -1046,17 +1058,15 @@ mb clean
 check "clean removes their state" sh -c 'grep -qF "Removed .mbuild/dep-bins" "$0/last.out" && [ ! -e .mbuild/dep-bins ]' "$S"
 
 echo "== bootstrap"
-B="$S/bootstrap"
-mkdir -p "$B"
-cp -r "$here/src" "$here/third_party" "$here/lib" "$here/cmd" "$here/mbuild.mettle" "$B/"
+wait $bootpid
+cp "$S/boot.out" "$S/last.out"; cp "$S/boot.code" "$S/last.code"
 cd "$B" || exit 1
-( "$METTLE" --build src/main.mettle -o mbuild0 && ./mbuild0 build -r -t host ) >"$S/last.out" 2>&1; echo $? >"$S/last.code"
 check "mettle builds mbuild0, mbuild0 builds mbuild" code_is 0
-./build/linux/release/mbuild version >"$S/last.out" 2>&1
-check "the release mbuild runs" has "mbuild 0.2.0"
-./build/linux/release/mbuild build -r -t host >"$S/last.out" 2>&1
-check "and sees itself Fresh" sh -c 'grep -qF "Fresh mbuild (linux, release)" "$0/last.out" && grep -qF "Fresh mbuild-shell (linux, release)" "$0/last.out"' "$S"
-./build/linux/release/mbuild help >"$S/last.out" 2>&1
+./build/linux/$bmode/mbuild version >"$S/last.out" 2>&1
+check "the $bmode mbuild runs" has "mbuild 0.2.0"
+./build/linux/$bmode/mbuild build $bflag -t host >"$S/last.out" 2>&1
+check "and sees itself Fresh" sh -c 'grep -qF "Fresh mbuild (linux, '$bmode')" "$0/last.out" && grep -qF "Fresh mbuild-shell (linux, '$bmode')" "$0/last.out"' "$S"
+./build/linux/$bmode/mbuild help >"$S/last.out" 2>&1
 check "its project commands" sh -c 'grep -q "^  install " "$0/last.out" && grep -q "^  selfcheck " "$0/last.out" && grep -q "^  dist " "$0/last.out"' "$S"
 
 if [ -n "${METTLE_WIN:-}" ] && [ "${SKIP_WINE:-0}" != 1 ]; then
