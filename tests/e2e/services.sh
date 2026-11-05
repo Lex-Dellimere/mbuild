@@ -23,11 +23,23 @@ code_is() { [ "$(cat "$S/last.code")" = "$1" ]; }
 mb() { "$MB" "$@" >"$S/last.out" 2>&1; echo $? >"$S/last.code"; }
 # gone PIDFILE: the process it names is not running
 gone() { [ -s "$1" ] && ! kill -0 "$(cat "$1")" 2>/dev/null; }
+# port_open PORT: something accepts on 127.0.0.1:PORT
+port_open() { python3 -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 0.5).close()' "$1" 2>/dev/null; }
 # order: the status lines of last.out, verbs and subjects only
 order() { sed -n 's/^ *\(Starting\|Ready\|Running\|Stopping\) \([a-z/]*\).*/\1 \2/p; s/^app got: .*/app/p' "$S/last.out" | tr '\n' ',' ; }
 
-base=$((20000 + $$ % 20000))
-P1=$base; P2=$((base + 1)); P3=$((base + 2)); P4=$((base + 3))
+# four free ports from the kernel, so parallel suites do not collide
+ports=$(python3 -c 'import socket
+ss = [socket.socket() for _ in range(4)]
+for s in ss: s.bind(("127.0.0.1", 0))
+print(" ".join(str(s.getsockname()[1]) for s in ss))' 2>/dev/null)
+if [ -n "$ports" ]; then
+  set -- $ports
+  P1=$1; P2=$2; P3=$3; P4=$4
+else
+  base=$((20000 + $$ % 20000))
+  P1=$base; P2=$((base + 1)); P3=$((base + 2)); P4=$((base + 3))
+fi
 
 # proj DIR SERVICES...: a project with bins app and srv; each extra arg is a line of fn project()
 proj() {
@@ -73,8 +85,7 @@ check "$mode: help run mentions services" sh -c 'grep -qF -- "--no-services" "$0
 cd "$W/ok"
 build/linux/debug/srv $P2 held.pid >/dev/null 2>&1 &
 n=0
-while ! [ -s held.pid ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
-sleep 0.2
+while ! { [ -s held.pid ] && port_open $P2; } && [ $n -lt 70 ]; do sleep 0.1; n=$((n + 1)); done
 mb run -- $P1 0
 kill "$(cat held.pid)"
 check "$mode: a port in use is an error" sh -c 'grep -qF "error: service cache: port '$P2' is already in use" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ] && grep -qF "Stopping db" "$0/last.out"' "$S"
