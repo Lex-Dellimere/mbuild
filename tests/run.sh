@@ -52,16 +52,21 @@ export MBTEST_TMP="$base"
 
 total=$(date +%s)
 start=$total
-# mbuild, mbuild-shell and every unit driver, each mode built once for all suites (tools/mcompile.sh)
+# mbuild, mbuild-shell and every unit driver, each mode built once for all suites (tools/mcompile.sh);
+# the suites start meanwhile and wait for a build they need (its .pending file)
 export MBTEST_PREBUILT="$base/prebuilt"
 rm -rf "$MBTEST_PREBUILT"
 mkdir -p "$MBTEST_PREBUILT"
 realpath "$METTLE" >"$MBTEST_PREBUILT/compiler"
-( cd "$here" && for m in $MBTEST_MODES; do
-    for e in src/main.mettle cmd/mbuild-shell/main.mettle tests/unit/*_test.mettle; do echo "$e $m"; done
-  done ) | sort -k2,2r | xargs -P $jobs -n 2 sh -c 'k=$(printf %s "${2%.mettle}" | sed "s|/|_|g"); o="$MBTEST_PREBUILT/$k.$3"
-    if [ $3 = release ]; then "$METTLE" --build --release "$1/$2" -o "$o"; else "$METTLE" --build "$1/$2" -o "$o"; fi >"$o.log" 2>&1 || rm -f "$o"' _ "$here"
-pre=$(($(date +%s) - start))
+( cd "$here" && for e in src/main.mettle cmd/mbuild-shell/main.mettle tests/unit/*_test.mettle; do
+    for m in $MBTEST_MODES; do echo "$e $m"; done
+  done ) | awk '{ print ($1 == "src/main.mettle" ? 0 : $2 == "debug" ? 1 : 2), $0 }' | sort -n | cut -d' ' -f2- >"$base/prebuild.list"
+while read -r e m; do : >"$MBTEST_PREBUILT/$(printf %s "${e%.mettle}" | sed 's|/|_|g').$m.pending"; done <"$base/prebuild.list"
+( xargs -P $jobs -n 2 sh -c 'k=$(printf %s "${2%.mettle}" | sed "s|/|_|g"); o="$MBTEST_PREBUILT/$k.$3"
+    if [ $3 = release ]; then "$METTLE" --build --release "$1/$2" -o "$o"; else "$METTLE" --build "$1/$2" -o "$o"; fi >"$o.log" 2>&1 || rm -f "$o"
+    rm -f "$o.pending"' _ "$here" <"$base/prebuild.list"
+  echo $(($(date +%s) - start)) >"$base/prebuild.secs" ) &
+prepid=$!
 
 suites="${*:-build config registry mreg deps api components init native toolchain platform services shell live}"
 # the slow ones first, so the pool ends together
@@ -71,6 +76,7 @@ for s in $slow; do case " $suites " in *" $s "*) first="$first $s" ;; esac; done
 rest=""
 for s in $suites; do case " $first " in *" $s "*) ;; *) rest="$rest $s" ;; esac; done
 printf '%s\n' $first mcheck $rest | xargs -P $jobs -I{} sh "$here/tests/run.sh" --one {}
+wait $prepid
 
 failed=0
 # line NAME: the suite's summary line, or its last line, and its time
@@ -85,7 +91,7 @@ line() {
     failed=$((failed + 1))
   fi
 }
-echo "prebuilt    mbuild, mbuild-shell, drivers ($MBTEST_MODES) (${pre}s)"
+echo "prebuilt    mbuild, mbuild-shell and the unit drivers, $MBTEST_MODES ($(cat "$base/prebuild.secs")s)"
 for s in mcheck $suites; do line "$s"; done
 
 skipped=$(cat "$logs"/*.log | grep -h '^note: .*skipped\|^\[windows\] skipped' | sort | uniq -c | sed 's/^ *//')
