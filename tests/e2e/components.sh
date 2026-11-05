@@ -307,7 +307,8 @@ gen=$(printf '%s\n' "$prep" | sed -n 1p)
 entry=$(printf '%s\n' "$prep" | sed -n 2p)
 ( cd "$W/static" && timeout 8 "$METTLE" live "$entry" -I "$gen" -o "$T/live-prog" > "$T/live.out" 2>&1 ) &
 lp=$!
-sleep 1.5
+n=0
+while ! grep -q '^stdout: tick' "$T/live.out" 2>/dev/null && [ $n -lt 160 ]; do sleep 0.05; n=$((n + 1)); done
 "$D-debug" "$W" use logger quiet > "$T/use.out" 2>&1
 wait $lp
 live=$(cat "$T/live.out")

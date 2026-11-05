@@ -423,7 +423,8 @@ fn main() -> int32 {
   return 0;
 }
 EOF
-( sleep 1.5; sed -i 's/return 1;/return 2;/' src/main.mettle ) &
+# the edit once the program prints (up to 8 s)
+( n=0; while ! grep -qx 1 "$S/last.out" 2>/dev/null && [ $n -lt 160 ]; do sleep 0.05; n=$((n + 1)); done; sed -i 's/return 1;/return 2;/' src/main.mettle ) &
 timeout 8 "$MB" live >"$S/last.out" 2>&1
 wait
 check "live patches" has "Patch 1"

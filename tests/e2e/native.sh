@@ -111,7 +111,10 @@ check "second prepare: same fingerprint" [ "$(grep '^fp' "$W/p1")" = "$(grep '^f
 
 OBJ="$APP/.mbuild/cache/linux/c/vecmath/csrc"
 before_extra=$(stat -c %y "$OBJ/extra.c.o")
-sleep 1
+# the touch lands in a later second than every object (up to 1 s)
+newest=$(stat -c %Y "$OBJ"/*.o | sort -n | tail -1)
+n=0
+while [ "$(date +%s)" -le "$newest" ] && [ $n -lt 40 ]; do sleep 0.05; n=$((n + 1)); done
 touch "$D/vecmath/csrc/include/vec.h"
 prepare "$APP" linux "$W/p3"
 check "touching vec.h (same content) compiles nothing" hasnt "$W/p3" "Compiling"
