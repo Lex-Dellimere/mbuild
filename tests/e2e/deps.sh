@@ -603,6 +603,46 @@ mb "$P" deps
 check "deps names the bins built here" has "$S/last.out" "[bins built here: render]"
 MBUILD_REGISTRY="$R"
 
+echo "== undeclared transitive dependencies"
+T="$S/tx"
+rm -rf "$T"
+mkdir -p "$T/cryptex/src" "$T/session/src" "$T/app/src"
+printf 'import "mbuild/api";\nfn project() {\n  mb_package("crypto", "v0.1.0");\n  mb_import_root("src");\n}\n' >"$T/cryptex/mbuild.mettle"
+printf 'export fn cr() -> int32 { return 1; }\n' >"$T/cryptex/src/crypto.mettle"
+printf 'export fn xx() -> int32 { return 0; }\n' >"$T/cryptex/src/extra.mettle"
+printf 'import "mbuild/api";\nfn project() {\n  mb_package("session", "v0.1.0");\n  mb_import_root("src");\n}\nfn deps() {\n  mb_dep_path("crypto", "../cryptex");\n}\n' >"$T/session/mbuild.mettle"
+printf 'import "crypto/crypto";\nexport fn se() -> int32 { return cr(); }\n' >"$T/session/src/session.mettle"
+printf 'import "mbuild/api";\nfn project() {\n  mb_package("raize_session", "v0.1.0");\n}\nfn deps() {\n  mb_dep_path("session", "../session");\n}\n' >"$T/app/mbuild.mettle"
+printf 'import "crypto/crypto";\nimport "session/session";\nfn main() -> int32 { return cr() + se() - 2; }\n' >"$T/app/src/main.mettle"
+mb "$T/app" check
+check "an undeclared transitive path package is an error" code_is 1
+check "... saying it is not a dependency" has "$S/last.out" "src/main.mettle:1: crypto is imported here but isn't a dependency of raize_session"
+check "... and how it got there" has "$S/last.out" "note: it reaches raize_session through session (path ../cryptex)"
+check "... and what to add" has "$S/last.out" 'help: add to fn deps(): mb_dep_path("crypto", "../cryptex");'
+check "... not a missing file" hasnt "$S/last.out" "has no file"
+mb "$T/app" tidy
+check "tidy adds the path dependency" has "$T/app/mbuild.mettle" 'mb_dep_path("crypto", "../cryptex");'
+mb "$T/app" check
+check "... and the project builds" code_is 0
+printf 'import "crypto/crpto";\nfn main() -> int32 { return 0; }\n' >"$T/app/src/main.mettle"
+mb "$T/app" check
+check "a missing file in a package with an import root" has "$S/last.out" "crypto (path $T/cryptex) has no file 'crpto.mettle'"
+check "... suggests a name from the import root" has "$S/last.out" "help: did you mean \`crypto/crypto\`?"
+check "... lists the files of the import root" has "$S/last.out" "note: the .mettle files there: crypto.mettle, extra.mettle"
+P="$S/txreg"
+MAIN='import "strutil/nope";
+fn main() -> int32 { return 0; }' proj "$P" <<'EOF2'
+mb_dep("vecmath", "v0.2.0");
+EOF2
+mb "$P" check
+check "an undeclared transitive registry package is an error" code_is 1
+check "... saying it is not a dependency" has "$S/last.out" "src/main.mettle:1: strutil is imported here but isn't a dependency of txreg"
+check "... and how it got there" has "$S/last.out" "note: it reaches txreg through vecmath (v1.1.0)"
+check "... and what to add" has "$S/last.out" 'help: add to fn deps(): mb_dep("strutil", "v1.1.0");'
+printf 'import "strutil/strutil";\nfn main() -> int32 { return 0; }\n' >"$P/src/main.mettle"
+mb "$P" tidy
+check "tidy adds the registry dependency" has "$P/mbuild.mettle" 'mb_dep("strutil", "v1.1.0");'
+
 echo
 echo "deps: $pass passed, $failed failed"
 [ "$failed" -eq 0 ]

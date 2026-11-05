@@ -1181,6 +1181,95 @@ fn bx_dir_is_empty(dir: string) -> bool {
   return empty;
 }
 
+// Whether the manifest m, or a package it requires (through ds), declares
+// the dependency target; seen guards cycles.
+fn bx_reaches(ds: DepState*, m: Manifest*, target: string, seen: StrList*) -> bool {
+  var i: int64 = 0;
+  while (i < m->ndeps) {
+    var d: DepSpec* = man_dep(m, i);
+    i = i + 1;
+    if (s_eq(d->key, target)) {
+      return true;
+    }
+    if (sl_has(seen, d->key)) {
+      continue;
+    }
+    sl_push(seen, d->key);
+    var k: int64 = 0;
+    while (k < ds->n) {
+      var dm: DepModule* = &ds->mods[k];
+      k = k + 1;
+      if (s_eq(dm->module, d->key) && dm->man != (Manifest*)0 && bx_reaches(ds, dm->man, target, seen)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// An import of a package that is in the resolved graph but that the importing
+// package (the project or one of its path packages) does not declare: says
+// how it got there and what to add. False when the case does not apply.
+fn bx_report_undeclared(s: BxSess*, loc: string, file: string, imp: string, dm: DepModule*) -> bool {
+  var ds: DepState* = s->ds;
+  var owner: string = s->p->man->name;
+  var owner_dir: string = s->p->root;
+  var owner_man: Manifest* = s->p->man;
+  var at: int64 = bx_dep_of_file(ds, file);
+  if (at >= 0) {
+    if (!ds->mods[at].is_path) {
+      return false;
+    }
+    owner = ds->mods[at].module;
+    owner_dir = ds->mods[at].dir;
+    owner_man = ds->mods[at].man;
+  } else if (!s->p->has_manifest) {
+    return false;
+  }
+  if (owner_man == (Manifest*)0 || s_eq(owner, dm->module) || man_dep_find(owner_man, dm->module) != (DepSpec*)0) {
+    return false;
+  }
+  if (slen(owner) == 0) {
+    owner = p_base(owner_dir);
+  }
+  var via: string = s_empty();
+  var i: int64 = 0;
+  while (i < owner_man->ndeps && slen(via) == 0) {
+    var d: DepSpec* = man_dep(owner_man, i);
+    i = i + 1;
+    var seen: StrList* = sl_new();
+    sl_push(seen, d->key);
+    var k: int64 = 0;
+    while (k < ds->n && slen(via) == 0) {
+      var vm: DepModule* = &ds->mods[k];
+      k = k + 1;
+      if (s_eq(vm->module, d->key) && vm->man != (Manifest*)0 && bx_reaches(ds, vm->man, dm->module, seen)) {
+        via = d->key;
+      }
+    }
+    free(seen);
+  }
+  var what: string = "";
+  var call: string = "";
+  if (dm->is_path || slen(dm->version) == 0) {
+    var rel: string = dx_rel(owner_dir, dm->dir);
+    if (s_starts(rel, "./")) {
+      rel = s_from(rel, 2);
+    }
+    what = "path " + rel;
+    call = "mb_dep_path(\"" + dm->module + "\", \"" + rel + "\");";
+  } else {
+    what = dm->version;
+    call = "mb_dep(\"" + dm->module + "\", \"" + dm->version + "\");";
+  }
+  error_msg(loc + ": " + dm->module + " is imported here but isn't a dependency of " + owner);
+  if (slen(via) > 0) {
+    err_line("  " + cyan("note") + ": it reaches " + owner + " through " + via + " (" + what + ")");
+  }
+  err_line("  " + cyan("help") + ": add to fn deps(): " + call);
+  return true;
+}
+
 // An import into a selected dependency that names no file: says what is
 // there instead.
 fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
@@ -1284,7 +1373,9 @@ fn bx_prepare(s: BxSess*, us: BxUnits*, bin_for_files: string) {
       var at: int64 = bx_dep_of_import(s->ds, imp);
       if (s_eq(sl_get(g->missing_kinds, k), "import") && at >= 0 && !sl_has(shown, loc + imp)) {
         sl_push(shown, loc + imp);
-        bx_report_bad_file(loc, imp, &s->ds->mods[at]);
+        if (!bx_report_undeclared(s, loc, sl_get(g->missing_from, k), imp, &s->ds->mods[at])) {
+          bx_report_bad_file(loc, imp, &s->ds->mods[at]);
+        }
         bad_files = bad_files + 1;
       }
       k = k + 1;

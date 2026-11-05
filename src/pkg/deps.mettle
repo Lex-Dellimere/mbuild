@@ -386,7 +386,7 @@ fn dx_vendor_dir(p: Project*) -> string {
 }
 
 // target relative to base ("./x", "../x"), or target when on another drive.
-fn dx_rel(base: string, target: string) -> string {
+export fn dx_rel(base: string, target: string) -> string {
   var b: string = p_clean(base);
   var t: string = p_clean(target);
   if (p_has_prefix_dir(t, b)) {
@@ -2733,6 +2733,26 @@ fn dx_needs_adding(cx: DxCx*, m: Manifest*, name: string) -> bool {
   return man_dep_find(m, name) == (DepSpec*)0 && !dx_is_local_module(cx, name) && man_comp_find(cx->p->man, name) == (CompSpec*)0;
 }
 
+// The local path package an import names that the manifest does not declare
+// (it reaches the project through another package): 0 when none.
+fn dx_undeclared_path(cx: DxCx*, m: Manifest*, name: string) -> DxPath* {
+  if (!man_is_package_name(name) || man_dep_find(m, name) != (DepSpec*)0 || man_comp_find(cx->p->man, name) != (CompSpec*)0) {
+    return (DxPath*)0;
+  }
+  if ((cx->p->has_manifest && s_eq(cx->p->man->name, name)) || dx_rpath_find(cx, name) != (DxRPath*)0) {
+    return (DxPath*)0;
+  }
+  var i: int64 = 0;
+  while (i < cx->paths->len) {
+    var pp: DxPath* = dx_path_at(cx, i);
+    if (s_eq(pp->key, name)) {
+      return pp;
+    }
+    i = i + 1;
+  }
+  return (DxPath*)0;
+}
+
 // Declares an imported package: at the version mbuild.lock already selects
 // (a direct import of a transitive package never moves it), else at the
 // newest stable version. False when no registry has it.
@@ -2966,16 +2986,35 @@ export fn deps_cmd_tidy(p: Project*, used_modules: StrList*) -> int32 {
   defer free(cx);
   dx_collect_paths(cx);
   var done: StrList* = sl_new();
+  var paths: StrList* = sl_new();
   i = 0;
   while (i < used_modules->len) {
     var name: string = sl_get(used_modules, i);
     i = i + 1;
-    if (!dx_needs_adding(cx, p->man, name) || sl_has(done, name)) {
+    if (sl_has(done, name)) {
+      continue;
+    }
+    var up: DxPath* = dx_undeclared_path(cx, p->man, name);
+    if (up != (DxPath*)0) {
+      sl_push(done, name);
+      var rel: string = dx_rel(p->root, up->dir);
+      if (s_starts(rel, "./")) {
+        rel = s_from(rel, 2);
+      }
+      dx_announce("Adding", name, "(path " + rel + ")", "path " + name);
+      sl_push(paths, name + "\n" + rel);
+      continue;
+    }
+    if (!dx_needs_adding(cx, p->man, name)) {
       continue;
     }
     sl_push(done, name);
     dx_add_import(cx, name);
   }
+  if (paths->len > 0) {
+    dx_add_path_deps(p, paths);
+  }
+  free(paths);
   dx_ensure(p, sl_new(), false);
   dx_disarm();
   dx_vendor_note(p);
