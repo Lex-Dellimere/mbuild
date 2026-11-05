@@ -87,11 +87,13 @@ fn main() -> int32 {
   return 4;
 }
 EOF
-# val on lines 1-3, then enough other functions that a patch takes a while (saves can land in it)
+# val on lines 1-3, then enough other functions that a patch takes a while (saves can land in it);
+# written beside it and moved in, so a watcher never reads half a file
 rules() {
   { printf 'export fn val() -> int64 {\n  return %s;\n}\n' "$1"
     awk 'BEGIN { for (i = 0; i < 1200; i++) printf "export fn f%d(a: int64) -> int64 {\n  var x: int64 = a + %d;\n  return x * 2;\n}\n", i, i }'
-  } >"$W/src/rules.mettle"
+  } >"$T/rules.tmp"
+  mv "$T/rules.tmp" "$W/src/rules.mettle"
 }
 RES='^ev (patched|built|patch-error)\|'
 
