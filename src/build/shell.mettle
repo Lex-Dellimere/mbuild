@@ -2406,7 +2406,7 @@ fn shx_read(ss: ShxSess*, eof: bool*) -> string {
 
 // The program in the background, its stdout and stderr into the FIFO, stderr
 // through a grep that drops the live runtime's "[live] patch N: ..." lines
-// (two per input).
+// (two per input) and its "[live] main moves to the current code".
 // A watcher stops it if mbuild dies first (Ctrl-C while waiting).
 fn shx_start(ss: ShxSess*) -> bool {
   var sb: ShellBuild* = ss->sb;
@@ -2430,7 +2430,7 @@ fn shx_start(ss: ShxSess*) -> bool {
     prog = prog + " " + sh_quote(sl_get(sb->p->opts->passthrough, i));
     i = i + 1;
   }
-  var drop: string = sh_quote("^\\[live\\] patch [0-9]+(: [0-9]+ functions?| undoes patch [0-9]+)$");
+  var drop: string = sh_quote("^\\[live\\] (patch [0-9]+(: [0-9]+ functions?| undoes patch [0-9]+)|[A-Za-z0-9_.]+ moves to the current code)$");
   var watch: string = "(while kill -0 $mb 2>/dev/null; do sleep 1; done; kill $p 2>/dev/null) >/dev/null 2>&1 &";
   var to: string = "3>&1";
   if (ss->fd >= 0) {
