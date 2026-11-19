@@ -132,7 +132,7 @@ export fn mii_start(argc: int32, argv: cstring*) {
   if (argc > 2) {
     mii_fp = mii_fopen(argv[2], mii_cstr("wb"));
   }
-  if (argc > 1 && mii_fp != (cstring)0 && mii_sandbox()) {
+  if (argc > 1 && mii_fp != (cstring)0 && mii_sandbox("init.rules")) {
     mii_phase = mii_str(argv[1]);
   }
 }

@@ -14,6 +14,7 @@ import "../core/proc";
 import "../model/toml";
 import "../model/manifest";
 import "../model/project";
+import "../build/scan";
 import "../build/graph";
 import "../build/toolchain";
 import "mbfile";
@@ -48,6 +49,8 @@ fn cfx_write_api(dir: string) {
   fs_write_if_changed(dir + "/api_windows.mettle", import_str "../mbapi/api_windows.mettle");
   fs_write_if_changed(dir + "/shell.mettle", import_str "../mbapi/shell.mettle");
   fs_write_if_changed(dir + "/live.mettle", import_str "../mbapi/live.mettle");
+  fs_write_if_changed(dir + "/init_linux.mettle", import_str "../mbapi/init_linux.mettle");
+  fs_write_if_changed(dir + "/init_windows.mettle", import_str "../mbapi/init_windows.mettle");
 }
 
 // A path as the user sees it from the working directory.
@@ -374,6 +377,104 @@ fn cfx_warn_misplaced(info: MbfInfo*, shown: string) {
   err_line("  " + cyan("help") + ": mbuild tidy moves it");
 }
 
+// A dependency's mbuild.mettle may only declare things: neither it nor a
+// file it imports may declare an extern fn or use syscall or asm, and it may
+// import no stdlib module that does (std/io, std/mem, ...). mbuild/api itself
+// is the one exception. On linux the driver then also runs sandboxed.
+fn cfx_dep_fail(p: Project*, f: string, line: string, what: string) {
+  var at: string = cfx_show(p, f);
+  if (slen(line) > 0) {
+    at = at + ":" + line;
+  }
+  fail(at + ": " + what + "; dependencies' mbuild.mettle may only declare things");
+}
+
+// "syscall" or "asm" and its line, in text; "" when neither is used.
+fn cfx_dep_raw(text: string) -> string {
+  var words: StrList* = sl_of("syscall");
+  defer free(words);
+  sl_push(words, "asm");
+  var uses: StrList* = scan_uses(text, words);
+  defer free(uses);
+  if (uses->len == 0) {
+    return s_empty();
+  }
+  return sl_get(uses, 0);
+}
+
+// True when entry's import graph has no extern, syscall or asm.
+fn cfx_dep_clean(c: GraphCtx*, entry: string) -> bool {
+  var g: Graph* = graph_build(c, entry);
+  defer free(g);
+  if (g->externs->len > 0) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < g->files->len) {
+    var r: FsRead = fs_read(sl_get(g->files, i));
+    if (r.ok && slen(cfx_dep_raw(r.data)) > 0) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn cfx_check_dep(p: Project*, file: string, state_dir: string) {
+  var std_dir: string = cfx_compiler(p)->stdlib_dir;
+  var c: GraphCtx* = graph_ctx_new(sys_os(), std_dir);
+  defer free(c);
+  c->cwd = p->root;
+  var api_dir: string = cfx_api_dir(p);
+  sl_push(c->includes, api_dir);
+  var api: string = graph_resolve(c, state_dir + "/driver.mettle", "mbuild/api");
+  var mine: string = s_replace_byte(sys_realpath(api_dir + "/mbuild/api.mettle"), 92, 47);
+  if (!s_eq(api, mine) && !s_ends(api, "/.mbuild/api/mbuild/api.mettle")) {
+    cfx_dep_fail(p, file, s_empty(), "mbuild/api resolves to " + api + ", which is not mbuild's API");
+  }
+  var std_real: string = s_replace_byte(sys_realpath(std_dir), 92, 47);
+  var todo: StrList* = sl_of(s_replace_byte(sys_realpath(file), 92, 47));
+  defer free(todo);
+  var at: int64 = 0;
+  while (at < todo->len) {
+    var f: string = sl_get(todo, at);
+    at = at + 1;
+    var r: FsRead = fs_read(f);
+    if (!r.ok) {
+      continue;
+    }
+    var sr: ScanResult* = scan_source(r.data);
+    if (sr->externs->len > 0) {
+      cfx_dep_fail(p, f, sl_get(sr->extern_lines, 0), "declares extern fn " + sl_get(sr->extern_names, 0));
+    }
+    var raw: string = cfx_dep_raw(r.data);
+    if (slen(raw) > 0) {
+      var sp: int64 = s_find_byte(raw, 32);
+      cfx_dep_fail(p, f, s_from(raw, sp + 1), "uses " + s_sub(raw, 0, sp));
+    }
+    var i: int64 = 0;
+    while (i < sr->nimports) {
+      var ir: ImportRef* = scan_import(sr, i);
+      i = i + 1;
+      if (!scan_guard_active(ir->guard, sys_os())) {
+        continue;
+      }
+      var res: string = graph_resolve(c, f, ir->path);
+      if (slen(res) == 0 || s_eq(res, api)) {
+        continue;
+      }
+      if (p_has_prefix_dir(res, std_real)) {
+        if (!cfx_dep_clean(c, res)) {
+          cfx_dep_fail(p, f, s_int(ir->line), "imports " + ir->path + ", which can do I/O");
+        }
+      } else if (!sl_has(todo, res)) {
+        sl_push(todo, res);
+      }
+    }
+    free(sr);
+  }
+}
+
 // Compiles and runs the driver for file (and local_file, "" = none) with its
 // state in state_dir; parses what it declares. fail() / exit on any error.
 fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, config_only: bool) -> Manifest* {
@@ -385,6 +486,9 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
     fail(cfx_relabel(info->err, "mbuild.mettle", shown));
   }
   cfx_warn_misplaced(info, shown);
+  if (config_only) {
+    cfx_check_dep(p, file, state_dir);
+  }
   var ltext: string = s_empty();
   var lshown: string = s_empty();
   if (slen(local_file) > 0) {

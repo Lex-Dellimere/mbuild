@@ -10,6 +10,8 @@ import "std/io";
 import "std/mem";
 import "api_linux" if linux;
 import "api_windows" if windows;
+import "init_linux" if linux;
+import "init_windows" if windows;
 
 extern fn mbi_c_strlen(s: cstring) -> int64 = "strlen";
 extern fn mbi_c_getenv(name: cstring) -> cstring = "getenv";
@@ -54,6 +56,8 @@ var g_mbi_argc: int32 = 0;
 var g_mbi_argv: cstring* = 0;
 var g_mbi_config: bool = false;
 var g_mbi_windows: int32 = -1;
+// A dependency's config driver: the output file, opened before the sandbox.
+var g_mbi_out: cstring = (cstring)0;
 // The TOML being built: section headers in order, then entries in parallel
 // lists (header, key literal, value literal, "1" for an accumulating list).
 var g_mbi_secs: MbiList* = 0;
@@ -332,6 +336,23 @@ export fn mbi_start(argc: int32, argv: cstring*) {
   g_mbi_pkg_version = "";
 }
 
+// Driver plumbing: a dependency's config driver calls this first. fn project()
+// and fn deps() then run sandboxed (linux: no file, process or network access
+// but writing the output file opened here), after mbuild's static check.
+export fn mbi_sandbox() {
+  if (!g_mbi_config) {
+    return;
+  }
+  var path: string = mbi_arg_at(2);
+  g_mbi_out = fopen(mbi_c(path), "wb");
+  if (g_mbi_out == (cstring)0) {
+    mbi_die("cannot write " + path, 1);
+  }
+  if (!mii_sandbox("a dependency's mbuild.mettle")) {
+    mbi_c_exit(1);
+  }
+}
+
 // argv[1]: "config", "cmd" or "hook".
 export fn mbi_mode(mode: string) -> bool {
   return mbi_arg_at(1) == mode;
@@ -418,7 +439,14 @@ export fn mbi_finish_config() -> int32 {
       mbi_die("cannot write " + lpath, 1);
     }
   }
-  if (!mbi_write(path, text)) {
+  var wrote: bool = false;
+  if (g_mbi_out != (cstring)0) {
+    var n: int64 = mbi_len(text);
+    wrote = (n == 0 || fwrite((cstring)text.chars, 1, n, g_mbi_out) == n) && fclose(g_mbi_out) == 0;
+  } else {
+    wrote = mbi_write(path, text);
+  }
+  if (!wrote) {
     mbi_die("cannot write " + path, 1);
   }
   return 0;
@@ -1182,6 +1210,7 @@ export fn mb_cmd_env(c: MbCmd*, kv: string) {
 
 // Runs it with stdio inherited and answers its exit code (127 = could not start).
 export fn mb_cmd_run(c: MbCmd*) -> int32 {
+  mbi_refuse("mb_cmd_run");
   if (mbi_len(c->cwd) == 0 && c->env->len == 0) {
     c->status = mbi_run_argv(c->program, c->args);
     return c->status;
@@ -1194,6 +1223,7 @@ export fn mb_cmd_run(c: MbCmd*) -> int32 {
 // Runs it and answers its stdout without one trailing newline; the exit code
 // is then mb_cmd_status(c).
 export fn mb_cmd_output(c: MbCmd*) -> string {
+  mbi_refuse("mb_cmd_output");
   mbi_flush();
   c->status = 127;
   var fp: cstring = mbi_c_popen(mbi_c(mbi_cmd_line(c)), "r");
@@ -1584,6 +1614,7 @@ export fn mb_spawn(c: MbCmd*) -> MbProc* {
 
 // True while it runs; once it has exited, mb_proc_code(p) is its exit code.
 export fn mb_proc_running(p: MbProc*) -> bool {
+  mbi_refuse("mb_proc_running");
   if (p->running) {
     var code: int32 = mbi_sys_poll(p->pid);
     if (code >= 0) {
@@ -1606,6 +1637,7 @@ export fn mb_proc_log(p: MbProc*) -> string {
 
 // Terminates it, then kills it after 2 s.
 export fn mb_stop(p: MbProc*) {
+  mbi_refuse("mb_stop");
   if (!mb_proc_running(p)) {
     return;
   }

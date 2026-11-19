@@ -195,7 +195,7 @@ import "init_linux";
 extern fn t_fopen(p: cstring, m: cstring) -> cstring = "fopen";
 extern fn t_system(c: cstring) -> int32 = "system";
 fn main() -> int32 {
-  if (!mii_sandbox()) { return 3; }
+  if (!mii_sandbox("t")) { return 3; }
   if (t_fopen("/etc/hostname", "r") != (cstring)0) { return 4; }
   var big: string = "xxxxxxxxxx";
   var i: int32 = 0;

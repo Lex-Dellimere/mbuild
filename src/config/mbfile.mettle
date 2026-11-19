@@ -1182,6 +1182,9 @@ export fn mbf_driver_local(info: MbfInfo*, file: string, local_file: string, con
   buf_line(b, "");
   buf_line(b, "fn main(argc: int32, argv: cstring*) -> int32 {{");
   buf_line(b, "  mbi_start(argc, argv);");
+  if (config_only) {
+    buf_line(b, "  mbi_sandbox();");
+  }
   var decl: string = "project(); ";
   if (info->has_deps) {
     decl = "project(); mbi_deps(); deps(); ";

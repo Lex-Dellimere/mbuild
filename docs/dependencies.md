@@ -83,6 +83,8 @@ dependencies, no C code, no bins. The name you give must match the
 package's `mb_package` name; the directory name doesn't matter. An absolute
 path stays absolute in `mettle.deps`.
 
+A dependency's `mbuild.mettle` may only declare things: mbuild refuses `extern`, `syscall`, `asm` and any import but `mbuild/api` and stdlib modules without I/O (naming the file and line), and on linux runs it under the seccomp filter of `init.rules`; your own project's is not restricted.
+
 ## Minimal version selection
 
 Each package's manifest lists its own dependencies. mbuild walks them from

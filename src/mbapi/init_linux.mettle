@@ -1,15 +1,16 @@
-// mbuild/init_linux: init.rules run under a seccomp filter. mbuild's check
-// keeps extern, syscall and asm out of the rules, but raw pointers could
-// still reach libc; the filter leaves only memory, writing the plan file
-// and exiting, so no file, process or network access is possible at all.
+// mbuild/init_linux: init.rules and a dependency's mbuild.mettle run under a
+// seccomp filter. mbuild's check keeps extern, syscall and asm out of them,
+// but raw pointers could still reach libc; the filter leaves only memory,
+// writing to already open files and exiting, so no file, process or network
+// access is possible at all.
 
 // One sock_filter (code, jt, jf, k) packed little-endian into a word.
 fn mii_bpf(code: uint64, jt: uint64, jf: uint64, k: uint64) -> uint64 {
   return code | (jt << 16) | (jf << 24) | (k << 32);
 }
 
-// True when the filter is in place.
-export fn mii_sandbox() -> bool {
+// True when the filter is in place; what names the sandboxed code in the error.
+export fn mii_sandbox(what: string) -> bool {
   var allow: int64[24];
   allow[0] = 0;     // read
   allow[1] = 1;     // write
@@ -56,7 +57,7 @@ export fn mii_sandbox() -> bool {
   if (syscall(157, 38, 1, 0, 0, 0) == 0 && syscall(157, 22, 2, &prog[0], 0, 0) == 0) { // no_new_privs, seccomp filter
     return true;
   }
-  var msg: string = "mbuild: cannot sandbox init.rules: this kernel refused a seccomp filter\n";
+  var msg: string = "mbuild: cannot sandbox " + what + ": this kernel refused a seccomp filter\n";
   syscall(1, 2, msg.chars, (int64)msg.length);
   return false;
 }

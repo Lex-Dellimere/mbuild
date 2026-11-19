@@ -673,6 +673,54 @@ printf 'import "strutil/strutil";\nfn main() -> int32 { return 0; }\n' >"$P/src/
 mb "$P" tidy
 check "tidy adds the registry dependency" has "$P/mbuild.mettle" 'mb_dep("strutil", "v1.1.0");'
 
+echo "== a dependency's mbuild.mettle may only declare things"
+T="$S/dd"
+rm -rf "$T"
+mkdir -p "$T/app/src" "$T/ev/src"
+printf 'import "mbuild/api";\nfn project() {\n  mb_package("app", "v0.1.0");\n  mb_bin("app", "src/main.mettle");\n}\nfn deps() {\n  mb_dep_path("ev", "../ev");\n}\n' >"$T/app/mbuild.mettle"
+printf 'import "ev/ev";\nfn main() -> int32 { return ev(); }\n' >"$T/app/src/main.mettle"
+printf 'export fn ev() -> int32 { return 0; }\n' >"$T/ev/src/ev.mettle"
+evil() { printf 'import "mbuild/api";\n%b\nfn project() {\n  mb_package("ev", "v0.1.0");\n  mb_import_root("src");\n%b\n}\nfn deps() {\n%b\n}\n' "$1" "$2" "$3" >"$T/ev/mbuild.mettle"; rm -f "$T/marker"; }
+evil 'extern fn system(c: cstring) -> int32 = "system";' "  system(\"touch $T/marker\");" ""
+mb "$T/app" check
+check "a dependency's extern is refused" code_is 1
+check "... naming the file and line" has "$S/last.out" "ev/mbuild.mettle:2: declares extern fn system; dependencies' mbuild.mettle may only declare things"
+check "... and nothing ran" [ ! -e "$T/marker" ]
+evil 'import "std/io";' "" ""
+mb "$T/app" check
+check "a dependency's std/io import is refused" has "$S/last.out" "ev/mbuild.mettle:2: imports std/io, which can do I/O; dependencies' mbuild.mettle may only declare things"
+evil "" "  syscall(39);" ""
+mb "$T/app" check
+check "a dependency's syscall is refused" has "$S/last.out" "ev/mbuild.mettle:6: uses syscall; dependencies' mbuild.mettle may only declare things"
+printf 'extern fn system(c: cstring) -> int32 = "system";\nexport fn helper() { system("touch %s/marker"); }\n' "$T" >"$T/ev/helper.mettle"
+evil 'import "helper";' "  helper();" ""
+mb "$T/app" check
+check "... and in a file it imports" has "$S/last.out" "ev/helper.mettle:1: declares extern fn system; dependencies' mbuild.mettle may only declare things"
+check "... without running it" [ ! -e "$T/marker" ]
+rm "$T/ev/helper.mettle"
+evil "" "" "  mb_sh(\"touch $T/marker\");"
+mb "$T/app" check
+check "mb_sh in a dependency's fn deps() is refused" has "$S/last.out" "mb_sh cannot be used in fn deps()"
+check "... and nothing ran" [ ! -e "$T/marker" ]
+evil "" "  var c: MbCmd;\n  c.program = \"touch $T/marker\";\n  c.args = new MbiList;\n  c.env = new MbiList;\n  c.cwd = \"/\";\n  mb_cmd_run(&c);" ""
+mb "$T/app" check
+check "a hand-made MbCmd is refused too" has "$S/last.out" "mb_cmd_run cannot be used in fn project()"
+check "... and nothing ran" [ ! -e "$T/marker" ]
+if [ "$(uname -s)" = Linux ]; then
+  evil "" "  var fp: cstring = fopen(\"$T/marker\", \"wb\");\n  if (fp != (cstring)0) { mb_say(\"opened\"); }" ""
+  mb "$T/app" check
+  check "raw libc through the API's own imports is stopped by the sandbox" sh -c '! grep -q opened "$0" && [ ! -e "$1/marker" ]' "$S/last.out" "$T"
+fi
+evil "" "  mb_say(\"declared\");" ""
+printf 'fn cmd_extra(a: MbArgs*) -> int32 { return mb_nargs(a); }\n' >>"$T/ev/mbuild.mettle"
+mb "$T/app" check
+check "a normal path dependency still works" code_is 0
+check "... and may print" has "$S/last.out" "declared"
+printf 'import "mbuild/api";\nextern fn system(c: cstring) -> int32 = "system";\nfn project() {\n  mb_package("rootx", "v0.1.0");\n}\nfn cmd_touch(a: MbArgs*) -> int32 {\n  system("touch %s/marker");\n  return 0;\n}\n' "$T" >"$T/app/mbuild.mettle"
+rm -f "$T/marker"
+mb "$T/app" touch
+check "the root project can still use externs in a command" [ -e "$T/marker" ]
+
 echo
 echo "deps: $pass passed, $failed failed"
 [ "$failed" -eq 0 ]
