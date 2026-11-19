@@ -677,6 +677,27 @@ fn natx_plural(n: int64, word: string) -> string {
   return s_int(n) + " " + word + "s";
 }
 
+// A C flag that makes the compiler run or load other programs (plugins,
+// -B tool dirs, wrappers, specs, response files) or write outside its
+// output: only the project itself may pass those.
+fn natx_unsafe_cflag(f: string) -> bool {
+  var l: string = s_lower(f);
+  return s_contains(l, "plugin") || s_starts(f, "-B") || s_starts(f, "@") || s_starts(l, "-wrapper") || s_starts(l, "-specs") || s_starts(l, "--specs")
+    || s_starts(f, "-Xclang") || s_eq(f, "-o") || s_starts(f, "-MF") || s_starts(f, "-save-temps") || s_starts(f, "-fdump");
+}
+
+fn natx_check_dep_cflags(c: NatCtx*, i: int64, cflags: StrList*) {
+  var k: int64 = 0;
+  while (k < cflags->len) {
+    var f: string = sl_get(cflags, k);
+    if (natx_unsafe_cflag(f)) {
+      var msg: string = "dependency " + c->pkgs[i].label + " passes the C flag `" + f + "` (from " + natx_manifest_file(c, i) + "), which could run programs while building; refusing it";
+      fail_hint(msg, "only your own project may pass such flags (mb_set_list(\"cflags\", ...) in a profile of mbuild.mettle)");
+    }
+    k = k + 1;
+  }
+}
+
 // Compiles package i's C code (what changed) and links its library.
 fn natx_build_c(c: NatCtx*, i: int64) {
   var pk: NatPkg* = &c->pkgs[i];
@@ -711,6 +732,9 @@ fn natx_build_c(c: NatCtx*, i: int64) {
   }
   natx_free_list(deps);
   var cflags: StrList* = natx_list(c, i, "c.cflags");
+  if (pk->mi >= 0) {
+    natx_check_dep_cflags(c, i, cflags);
+  }
   var pflags: StrList* = natx_profile_cflags(c);
   sl_extend(cflags, pflags);
   natx_free_list(pflags);

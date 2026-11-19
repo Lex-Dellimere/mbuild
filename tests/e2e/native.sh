@@ -128,6 +128,11 @@ sed -i 's/cflags = \["-O2"\]/cflags = ["-O1"]/' "$D/vecmath/manifest.toml"
 prepare "$APP" linux "$W/p5"
 check "a cflags change recompiles both files" has "$W/p5" "Compiling vecmath (C, 2 files)"
 check "fingerprint changed with the library" [ "$(grep '^fp' "$W/p4")" != "$(grep '^fp' "$W/p5")" ]
+for f in -fplugin=./x.so -B. -wrapper @flags -specs=x; do
+  sed -i "s|cflags = \[\"-O1\"\]|cflags = [\"-O1\", \"$f\"]|" "$D/vecmath/manifest.toml"
+  prepare "$APP" linux "$W/p5u" && bad "dependency C flag $f refused" || check "dependency C flag $f refused" has "$W/p5u" "passes the C flag \`$f\`.*refusing it"
+  sed -i "s|cflags = \[\"-O1\", \"$f\"\]|cflags = [\"-O1\"]|" "$D/vecmath/manifest.toml"
+done
 
 cp "$D/vecmath/csrc/extra.c" "$W/extra.c.bak"
 echo "this is not C" >> "$D/vecmath/csrc/extra.c"
