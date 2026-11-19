@@ -693,6 +693,12 @@ export fn mb_targets(csv: string) {
   mbi_put("build", "targets", mbi_csv_literal(csv));
 }
 
+// The targets `mbuild test --matrix` runs the tests on: "host, riscv64-linux,
+// riscv32-none:pico2" (a board target may name its board).
+export fn mb_test_targets(csv: string) {
+  mbi_put("build", "test-targets", mbi_csv_literal(csv));
+}
+
 // Raw compiler flags for every compile.
 export fn mb_flags(csv: string) {
   mbi_put("build", "flags", mbi_csv_literal(csv));

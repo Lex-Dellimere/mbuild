@@ -79,6 +79,7 @@ export struct Manifest {
   name: string;
   version: string;
   targets: StrList*;
+  test_targets: StrList*; // [build] test-targets: `mbuild test --matrix` (TARGET, host, TARGET:BOARD)
   flags: StrList*;
   prelude: bool;
   live_watch: StrList*;   // [live] watch: globs `mbuild live` / `mbuild shell` poll
@@ -553,7 +554,7 @@ export fn man_preview_side(s: string) -> bool {
 
 fn mnx_known_keys(section: string) -> StrList* {
   if (s_eq(section, "package")) { return mnx_list("name version mettle toolchain include description license repository authors import-root"); }
-  if (s_eq(section, "build")) { return mnx_list("targets flags prelude agents"); }
+  if (s_eq(section, "build")) { return mnx_list("targets test-targets flags prelude agents"); }
   // bound to locals: mnx_list keeps views into its argument
   if (s_starts(section, "profile.")) {
     var pw: string = "flags cflags inherits components " + mnx_typed_words();
@@ -606,6 +607,16 @@ export fn man_target_name(t: string) -> bool {
   var found: bool = sl_has(words, t);
   free(words);
   return found;
+}
+
+// An mb_test_targets entry: a target, host, all, or a board target with
+// its board ("riscv32-none:pico2").
+export fn man_test_target(t: string) -> bool {
+  if (s_eq(t, "host") || s_eq(t, "all") || man_target_name(t)) {
+    return true;
+  }
+  var colon: int64 = s_find_byte(t, 58);
+  return colon > 0 && slen(t) > colon + 1 && s_ends(s_sub(t, 0, colon), "-none") && man_target_name(s_sub(t, 0, colon));
 }
 
 // "head.NAME" with one non-empty NAME part.
@@ -1902,6 +1913,7 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->name = name;
   m->version = s_empty();
   m->targets = sl_new();
+  m->test_targets = sl_new();
   m->flags = sl_new();
   m->prelude = false;
   m->live_watch = sl_new();
@@ -1981,6 +1993,16 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
     var tg: string = sl_get(m->targets, t);
     if (!man_target_name(tg)) {
       mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected " + mnx_quoted(mnx_list(mnx_target_words())) + ")");
+      return m;
+    }
+    t = t + 1;
+  }
+  m->test_targets = mnx_strs(m, "build", "test-targets");
+  t = 0;
+  while (t < m->test_targets->len) {
+    var tt: string = sl_get(m->test_targets, t);
+    if (!man_test_target(tt)) {
+      mnx_error(m, toml_get(doc, "build", "test-targets")->line, "mb_test_targets: unknown target '" + tt + "' (expected host, all, " + mnx_quoted(mnx_list(mnx_target_words())) + ", or riscv32-none:BOARD)");
       return m;
     }
     t = t + 1;

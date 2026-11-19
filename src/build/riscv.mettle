@@ -39,6 +39,62 @@ fn rvx_qemu_user(target: string) -> Tool {
   return t;
 }
 
+// Why target's programs can't run here, "" when they can: the emulator is
+// missing, or the board has none (rv_image_cmd would fail).
+export fn rv_runner_missing(m: Mettle*, target: string, st: Settings*) -> string {
+  if (!target_is_bare(target)) {
+    var name: string = "qemu-riscv64";
+    if (s_starts(target, "riscv32")) {
+      name = "qemu-riscv32";
+    }
+    var dir: string = env_get("MBUILD_QEMU_USER_DIR");
+    if (slen(dir) > 0) {
+      if (fs_is_file(p_join(dir, name))) {
+        return s_empty();
+      }
+      return "MBUILD_QEMU_USER_DIR=" + dir + " has no " + name;
+    }
+    if (fs_is_file(sys_home() + "/.local/opt/qemu-user/bin/" + name) || tool_found(sys_find_tool(name))) {
+      return s_empty();
+    }
+    return "no " + name + " (QEMU's user mode)";
+  }
+  if (s_eq(st->board, "qemu-virt")) {
+    var q: string = "qemu-system-riscv64";
+    if (s_starts(target, "riscv32")) {
+      q = "qemu-system-riscv32";
+    }
+    if (tool_found(sys_find_tool(q))) {
+      return s_empty();
+    }
+    return "no " + q;
+  }
+  if (s_eq(st->board, "pico2")) {
+    var given: string = env_get("MBUILD_RVSIM");
+    if (slen(given) > 0) {
+      if (fs_is_file(given)) {
+        return s_empty();
+      }
+      return "MBUILD_RVSIM=" + given + " does not exist";
+    }
+    if (tool_found(sys_find_tool("rvsim")) || fs_is_file(fs_mbuild_home() + "/tools/rvsim" + sys_exe_ext())) {
+      return s_empty();
+    }
+    var tree: string = rvx_tree(env_get("METTLE"));
+    if (slen(tree) == 0) {
+      tree = rvx_tree(m->path);
+    }
+    if (slen(tree) == 0) {
+      return "no rvsim, and no Mettle checkout to build it from";
+    }
+    if (!tool_found(sys_find_tool("gcc"))) {
+      return "no rvsim, and no gcc to build it";
+    }
+    return s_empty();
+  }
+  return "board " + st->board + " has no emulator mbuild can run";
+}
+
 // The command that runs a riscv*-linux executable.
 export fn rv_program_cmd(target: string, exe: string) -> Cmd* {
   var c: Cmd* = cmd_new(rvx_qemu_user(target));
@@ -104,8 +160,39 @@ export fn rv_image_cmd(p: Project*, m: Mettle*, target: string, base: string, ou
     }
     return r;
   }
-  fail_hint("board " + board + " has no emulator mbuild can run", "write a project command that flashes or emulates it: fn cmd_flash in mbuild.mettle (docs/project.md)");
+  fail_hint("board " + board + " has no emulator mbuild can run", "write a project command that flashes or emulates it: fn cmd_upload in mbuild.mettle (docs/project.md)");
   return (Cmd*)0;
+}
+
+// Turns the console of a --pgo-gen board run into the profile, with
+// tools/riscv-pgo-capture.py of the Mettle checkout ($METTLE's or m's).
+export fn rv_pgo_capture(m: Mettle*, console: string, prof: string) {
+  var tree: string = rvx_tree(env_get("METTLE"));
+  if (slen(tree) == 0) {
+    tree = rvx_tree(m->path);
+  }
+  var script: string = tree + "/tools/riscv-pgo-capture.py";
+  if (slen(tree) == 0 || !fs_is_file(script)) {
+    var why: string = "the compiler is not in a Mettle checkout";
+    if (slen(tree) > 0) {
+      why = tree + " has no tools/riscv-pgo-capture.py";
+    }
+    fail_hint("a board prints its profile on the console, and turning that into the profile needs tools/riscv-pgo-capture.py: " + why, "use a compiler from a Mettle checkout with RISC-V --pgo-gen (set METTLE); the console is in " + console);
+  }
+  var py: Tool = proc_tool("python3", "MBUILD_PYTHON");
+  if (!tool_found(py)) {
+    fail_hint("turning the board's console into a profile needs python3", "install python3, or set MBUILD_PYTHON");
+  }
+  var c: Cmd* = cmd_new(py);
+  defer free(c);
+  cmd_path(c, script);
+  cmd_path(c, console);
+  cmd_path(c, prof);
+  var cap: Captured = proc_capture_all(c);
+  if (cap.code != 0) {
+    err_line(cap.out);
+    fail_hint("the run's console has no complete profile (mettle-profile-begin ... mettle-profile-end)", "main must return before the emulator stops: raise rvsim-until-ms or drop exit-on-uart for the training run");
+  }
 }
 
 // The Mettle checkout a compiler was built in ("" when it is not in one).

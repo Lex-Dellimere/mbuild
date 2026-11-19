@@ -1212,6 +1212,10 @@ export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, a
   return codes;
 }
 
+// Windows writes a removable drive through: nothing to wait for.
+export fn sys_sync() {
+}
+
 export fn sys_set_executable(p: string) {
   // Windows has no execute bit. Under wine the file lives on a Linux
   // filesystem, where a host program may need one.

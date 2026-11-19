@@ -1448,6 +1448,16 @@ fn bx_settings_of(p: Project*, prof: string, bin: string, target: string) -> Set
   q->bin = bin;
   q->target = target;
   q->sets = p->opts->sets;
+  var mode: string = bx_pgo_mode(p);
+  if (slen(mode) > 0) {
+    q->sets = sl_copy(p->opts->sets);
+    if (s_eq(mode, "gen")) {
+      sl_push(q->sets, "pgo=instrument");
+    } else {
+      sl_push(q->sets, "pgo=use");
+    }
+    sl_push(q->sets, "pgo-file=" + bx_pgo_file(p, bin, target));
+  }
   var st: Settings* = man_settings(p->man, q);
   free(q);
   if (slen(st->error) > 0) {
@@ -1466,6 +1476,46 @@ fn bx_settings_of(p: Project*, prof: string, bin: string, target: string) -> Set
     i = i + 1;
   }
   return st;
+}
+
+// --pgo-gen: "gen", --pgo-use[=FILE]: "use", else "".
+fn bx_pgo_mode(p: Project*) -> string {
+  var mode: string = s_empty();
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_eq(a, "--pgo-gen")) {
+      if (s_eq(mode, "use")) {
+        fail("--pgo-gen and --pgo-use don't go together: --pgo-gen builds the program that records the profile, --pgo-use the one that reads it");
+      }
+      mode = "gen";
+    } else if (s_eq(a, "--pgo-use") || s_starts(a, "--pgo-use=")) {
+      if (s_eq(mode, "gen")) {
+        fail("--pgo-gen and --pgo-use don't go together: --pgo-gen builds the program that records the profile, --pgo-use the one that reads it");
+      }
+      mode = "use";
+    }
+    i = i + 1;
+  }
+  return mode;
+}
+
+// The profile of a bin on a target: --pgo-use=FILE (from the working
+// directory), else .mbuild/pgo/<bin>-<target>.prof.
+fn bx_pgo_file(p: Project*, bin: string, target: string) -> string {
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_starts(a, "--pgo-use=") && slen(a) > 10) {
+      return p_clean(p_join(bx_cwd(), bx_slash(s_from(a, 10))));
+    }
+    i = i + 1;
+  }
+  var name: string = bin;
+  if (slen(name) == 0) {
+    name = p->man->name;
+  }
+  return p->state_dir + "/pgo/" + bx_safe_name(name) + "-" + target + ".prof";
 }
 
 // The typed key behind a flag that v0.17.0 lacks, "" for any other flag.
@@ -1686,7 +1736,7 @@ fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   }
   bx_check_support(s, u, st, flags, bin);
   if (s_eq(st->pgo, "use") && !fs_is_file(p_join(p->root, st->pgo_file))) {
-    fail("pgo-file = \"" + st->pgo_file + "\" does not exist: build with pgo = \"instrument\" and run the program (mbuild run -p " + s->profile + ") to record it");
+    fail_hint("pgo-file = \"" + bx_show(p_join(p->root, st->pgo_file)) + "\" does not exist", "record it: mbuild run -p " + s->profile + " --pgo-gen (or mbuild pgo does every step)");
   }
   if (p->man->prelude) {
     cmd_arg(c, "--prelude");
@@ -2699,17 +2749,28 @@ export fn build_cmd_run(p: Project*) -> int32 {
     fail_hint("cannot run a " + t->target + " program on this " + sys_os() + " host", "the binary is at " + bx_show(outp));
   }
   cmd_args(c, p->opts->passthrough);
-  var st: Settings* = bx_settings_of(p, s->profile, bs->items[0].name, t->target);
-  if (s_eq(st->pgo, "instrument") && slen(st->pgo_file) > 0 && !env_set("METTLE_PROFILE_OUT")) {
-    var prof_out: string = p_join(p->root, st->pgo_file);
+  var run_target: string = bx_run_target(&bs->items[0], t);
+  var board: bool = target_is_bare(run_target);
+  var st: Settings* = bx_settings_of(p, s->profile, bs->items[0].name, run_target);
+  // a --pgo-gen program records its profile: at exit into METTLE_PROFILE_OUT,
+  // on a board on its console, which tools/riscv-pgo-capture.py turns into one
+  var prof_out: string = s_empty();
+  if (s_eq(st->pgo, "instrument") && slen(st->pgo_file) > 0) {
+    prof_out = p_join(p->root, st->pgo_file);
+    if (env_set("METTLE_PROFILE_OUT") && !board) {
+      prof_out = env_get("METTLE_PROFILE_OUT");
+    }
     fs_mkdirs(p_dir(prof_out));
-    cmd_env(c, "METTLE_PROFILE_OUT", prof_out);
+    sys_remove_file(prof_out);
+    if (!board) {
+      cmd_env(c, "METTLE_PROFILE_OUT", prof_out);
+    }
   }
   free(st);
   if (services) {
     return svc_run(p, t->out_dir, target_exe_ext(t->target), svc_bins, c, bx_show(outp));
   }
-  var emu: bool = target_is_riscv(bx_run_target(&bs->items[0], t));
+  var emu: bool = target_is_riscv(run_target);
   var ms: int64 = bx_timeout_ms(p, emu);
   var how: string = s_empty();
   if (emu) {
@@ -2717,15 +2778,203 @@ export fn build_cmd_run(p: Project*) -> int32 {
   }
   var shown: string = bx_show(outp);
   status("Running", shown + how);
-  if (ms <= 0) {
-    return proc_run(c);
-  }
   var timed_out: bool = false;
-  var rc: int32 = proc_run_timeout(c, ms, &timed_out);
+  var rc: int32 = 0;
+  if (board && slen(prof_out) > 0) {
+    var cap: Captured;
+    if (ms > 0) {
+      cap = proc_capture_timeout(c, ms, &timed_out);
+    } else {
+      cap = proc_capture_all(c);
+    }
+    print(cap.out);
+    flush_out();
+    rc = cap.code;
+    if (!timed_out) {
+      var console: string = prof_out + ".console";
+      fs_write(console, cap.out);
+      rv_pgo_capture(bx_host_mettle(s), console, prof_out);
+    }
+  } else if (ms <= 0) {
+    rc = proc_run(c);
+  } else {
+    rc = proc_run_timeout(c, ms, &timed_out);
+  }
   if (timed_out) {
     error_msg(shown + " was stopped after " + bx_secs(ms) + " (--timeout " + s_int(ms / 1000) + ")");
   }
+  if (slen(prof_out) > 0 && !timed_out) {
+    if (!fs_is_file(prof_out)) {
+      fail_hint("the run wrote no profile to " + bx_show(prof_out), "a --pgo-gen program writes it when main returns; the compiler must count blocks on " + run_target);
+    }
+    status("Profiled", bx_show(prof_out) + "; build with --pgo-use to use it");
+  }
   return rc;
+}
+
+// mbuild pgo [collect] [BIN]: build counting (--pgo-gen), run it to record
+// the profile, then build with it (--pgo-use); collect stops after the run.
+// Both builds use one profile (release unless -p), so the blocks match.
+export fn build_cmd_pgo(p: Project*) -> int32 {
+  var rest: StrList* = sl_new();
+  var collect: bool = false;
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_eq(a, "collect") && !collect) {
+      collect = true;
+    } else if (s_eq(a, "--pgo-gen") || s_eq(a, "--pgo-use") || s_starts(a, "--pgo-use=")) {
+      fail("mbuild pgo passes --pgo-gen and --pgo-use itself");
+    } else {
+      sl_push(rest, a);
+    }
+    i = i + 1;
+  }
+  if (s_eq(p->opts->profile, "debug") && !p->opts->release) {
+    p->opts->release = true;
+  }
+  p->opts->rest = rest;
+  p->opts->targets = bx_run_targets(p);
+  p->opts->rest = sl_copy(rest);
+  sl_push(p->opts->rest, "--pgo-gen");
+  var rc: int32 = build_cmd_run(p);
+  if (collect) {
+    return rc;
+  }
+  if (rc != 0) {
+    note("the training run exited with {rc}; its profile is used");
+  }
+  p->opts->rest = sl_copy(rest);
+  sl_push(p->opts->rest, "--pgo-use");
+  p->opts->passthrough = sl_new();
+  return build_cmd_build(p);
+}
+
+// mbuild flash [BIN]: the bin's UF2 image, built and copied to the board's
+// drive (an RP2350 in BOOTSEL mode mounts as a drive named RP2350).
+export fn build_cmd_flash(p: Project*) -> int32 {
+  var bs: BinSet* = bx_run_bin(p, "flash");
+  var b: BinInfo* = &bs->items[0];
+  var target: string = bx_flash_target(p, b);
+  var st: Settings* = bx_settings_of(p, build_profile(p), b->name, target);
+  if (slen(st->board) == 0) {
+    fail_hint("bin " + b->name + ": mbuild flash needs a board, and " + target + " has none set", "mb_set(\"board\", \"pico2\") after mb_on(\"" + target + "\") in a profile, or after mb_for_bin");
+  }
+  if (!s_eq(st->board, "pico2")) {
+    fail_hint("board " + st->board + " has no UF2 drive mbuild can copy to (only pico2 has, today)", "write a project command that flashes it, such as fn cmd_upload in mbuild.mettle (docs/project.md), and run mbuild upload");
+  }
+  var outs: StrList* = bx_image_outputs(st);
+  if (!sl_has(outs, "uf2")) {
+    var with_uf2: string = sl_join(outs, ", ") + ", uf2";
+    p->opts->sets = sl_copy(p->opts->sets);
+    sl_push(p->opts->sets, "outputs=" + with_uf2);
+  }
+  free(outs);
+  free(st);
+  var drive: string = bx_flash_drive();
+  var s: BxSess* = bx_sess(p, sl_of(target));
+  g_bx_sess = s;
+  if (bx_build_all(s, bs) != 0) {
+    return 1;
+  }
+  var t: TargetCtx* = bx_targetctx(s, 0);
+  g_bx_t = t;
+  var dir: string = t->out_dir;
+  if (bx_rv_image_bin(b)) {
+    dir = p_dir(t->out_dir);
+    dir = p_dir(dir) + "/" + target + "/" + p_base(t->out_dir);
+  }
+  var image: string = dir + "/" + b->name + ".uf2";
+  var dest: string = drive + "/" + b->name + ".uf2";
+  status("Flashing", bx_show(image) + " to " + drive);
+  if (!fs_copy(image, dest)) {
+    fail_hint("could not copy " + bx_show(image) + " to " + dest, "is the drive still mounted and writable? hold BOOTSEL while plugging the board in, then run mbuild flash again");
+  }
+  sys_sync();
+  status("Flashed", b->name + " (" + s_int(sys_stat(image).size) + " bytes); the board restarts into it");
+  return 0;
+}
+
+// The board target `flash` builds: the bin's own triple, one -t, else the
+// first board target of mb_targets, else riscv32-none.
+fn bx_flash_target(p: Project*, b: BinInfo*) -> string {
+  if (bx_rv_image_bin(b)) {
+    return b->triple;
+  }
+  var l: StrList* = sl_new();
+  defer free(l);
+  var i: int64 = 0;
+  while (i < p->opts->targets->len) {
+    bx_add_target(p, l, sl_get(p->opts->targets, i));
+    i = i + 1;
+  }
+  if (l->len > 1) {
+    fail_hint("`mbuild flash` flashes one target", "pass one -t, such as -t riscv32-none");
+  }
+  if (l->len == 1) {
+    if (!target_is_bare(sl_get(l, 0))) {
+      fail_hint("mbuild flash writes a board image, and " + sl_get(l, 0) + " is not a board target", "use -t riscv32-none");
+    }
+    return sl_get(l, 0);
+  }
+  i = 0;
+  while (i < p->man->targets->len) {
+    if (target_is_bare(sl_get(p->man->targets, i))) {
+      return sl_get(p->man->targets, i);
+    }
+    i = i + 1;
+  }
+  return "riscv32-none";
+}
+
+// The mounted RP2350 drive: MBUILD_FLASH_DIR, else a directory named
+// RP2350 (or whose INFO_UF2.TXT names it) under /run/media/$USER,
+// /media/$USER or /mnt. Fails when there's none.
+fn bx_flash_drive() -> string {
+  var given: string = env_get("MBUILD_FLASH_DIR");
+  var looked: string = s_empty();
+  if (slen(given) > 0) {
+    if (fs_is_file(given + "/INFO_UF2.TXT")) {
+      return given;
+    }
+    looked = "MBUILD_FLASH_DIR=" + given + " has no INFO_UF2.TXT";
+  } else {
+    var user: string = env_get("USER");
+    var bases: StrList* = sl_new();
+    defer free(bases);
+    if (slen(user) > 0) {
+      sl_push(bases, "/run/media/" + user);
+      sl_push(bases, "/media/" + user);
+    }
+    sl_push(bases, "/mnt");
+    var i: int64 = 0;
+    while (i < bases->len) {
+      var base: string = sl_get(bases, i);
+      if (fs_is_file(base + "/RP2350/INFO_UF2.TXT")) {
+        return base + "/RP2350";
+      }
+      var files: StrList* = sl_new();
+      defer free(files);
+      var dirs: StrList* = sl_new();
+      defer free(dirs);
+      if (sys_list_dir(base, files, dirs)) {
+        sl_sort(dirs);
+        var k: int64 = 0;
+        while (k < dirs->len) {
+          var d: string = base + "/" + sl_get(dirs, k);
+          var rd: FsRead = fs_read(d + "/INFO_UF2.TXT");
+          if (rd.ok && s_contains(rd.data, "RP2350")) {
+            return d;
+          }
+          k = k + 1;
+        }
+      }
+      i = i + 1;
+    }
+    looked = "looked in " + sl_join(bases, ", ");
+  }
+  fail_hint("no RP2350 drive is mounted (" + looked + ")", "hold BOOTSEL while plugging the board in, then run mbuild flash again (or set MBUILD_FLASH_DIR to the drive)");
+  return s_empty();
 }
 
 // The target a bin runs as: its own riscv*-none triple, else the session's.
@@ -3280,6 +3529,7 @@ fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
         n->failed = n->failed + 1;
       } else {
         c->cwd = p->root;
+        var console_pass: string = bx_console_pass(s, j->b, j->t, c);
         var ms: int64 = bx_timeout_ms(p, target_is_riscv(bx_run_target(j->b, j->t)));
         var timed_out: bool = false;
         var cap: Captured;
@@ -3291,6 +3541,10 @@ fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
         if (timed_out) {
           bx_print_block(cap.out);
           say(red("FAILED") + " " + shown + " (stopped after " + bx_secs(ms) + ", --timeout)");
+          n->failed = n->failed + 1;
+        } else if (cap.code == 0 && slen(console_pass) > 0 && !s_contains(cap.out, "printed the --exit-on-uart string")) {
+          bx_print_block(cap.out);
+          say(red("FAILED") + " " + shown + " (no " + console_pass + " on the console)");
           n->failed = n->failed + 1;
         } else if (cap.code == 0) {
           if (g_verbose) {
@@ -3310,6 +3564,32 @@ fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
     flush_out();
     i = i + 1;
   }
+}
+
+// A pico2 program never exits: a test program passes when its console
+// prints exit-on-uart (default PASS), which stops rvsim. That string, after
+// adding it and a 10 s until-ms when unset to c; "" for other targets.
+fn bx_console_pass(s: BxSess*, b: BinInfo*, t: TargetCtx*, c: Cmd*) -> string {
+  var target: string = bx_run_target(b, t);
+  if (!target_is_bare(target)) {
+    return s_empty();
+  }
+  var st: Settings* = bx_settings_of(s->p, s->profile, b->name, target);
+  defer free(st);
+  if (!s_eq(st->board, "pico2")) {
+    return s_empty();
+  }
+  var want: string = st->exit_on_uart;
+  if (slen(want) == 0) {
+    want = "PASS";
+    cmd_arg(c, "--exit-on-uart");
+    cmd_arg(c, want);
+  }
+  if (slen(st->rvsim_until_ms) == 0) {
+    cmd_arg(c, "--until-ms");
+    cmd_arg(c, "10000");
+  }
+  return want;
 }
 
 fn bx_no_test_bins(p: Project*) -> BinSet* {
@@ -3338,6 +3618,184 @@ fn bx_filter_bins(p: Project*, all: BinSet*, s: string) -> BinSet* {
     return bx_no_test_bins(p);
   }
   return bx_select_from(p, all, names);
+}
+
+// One row of the test matrix.
+struct BxMxRow {
+  label: string;
+  passed: int64;
+  failed: int64;
+  skipped: int64;
+  why: string;
+}
+
+fn bx_mx_why(r: BxMxRow*, why: string) {
+  if (slen(r->why) > 0) {
+    r->why = r->why + "; " + why;
+  } else {
+    r->why = why;
+  }
+}
+
+// The matrix: -t, else mb_test_targets, else the host; all and host
+// expanded, TARGET:BOARD kept.
+fn bx_mx_entries(p: Project*) -> StrList* {
+  var src: StrList* = p->opts->targets;
+  if (src->len == 0) {
+    src = p->man->test_targets;
+  }
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < src->len) {
+    var e: string = sl_get(src, i);
+    var colon: int64 = s_find_byte(e, 58);
+    if (colon > 0) {
+      if (!man_test_target(e)) {
+        fail_hint("`" + e + "` is not a board target with its board", "a board target names its board after a colon: riscv32-none:pico2");
+      }
+      sl_add_uniq(l, e);
+    } else {
+      bx_add_target(p, l, e);
+    }
+    i = i + 1;
+  }
+  if (l->len == 0) {
+    sl_push(l, sys_os());
+  }
+  return l;
+}
+
+// One matrix row: the target's session, its @test files (hosted targets
+// only: the interpreter can't run a board's code) and test programs (when
+// something here runs them).
+fn bx_mx_run(p: Project*, entry: string, files: StrList*, progs: BinSet*, r: BxMxRow*) {
+  var target: string = entry;
+  var board: string = s_empty();
+  var colon: int64 = s_find_byte(entry, 58);
+  if (colon > 0) {
+    target = s_sub(entry, 0, colon);
+    board = s_from(entry, colon + 1);
+  }
+  r->label = target;
+  if (slen(board) > 0) {
+    r->label = target + " (" + board + ")";
+  }
+  r->passed = 0;
+  r->failed = 0;
+  r->skipped = 0;
+  r->why = s_empty();
+  if (!tc_available(p, target)) {
+    r->skipped = files->len + progs->n;
+    r->why = "no Mettle compiler for " + target;
+    return;
+  }
+  var saved: StrList* = p->opts->sets;
+  if (slen(board) > 0) {
+    p->opts->sets = sl_copy(saved);
+    sl_push(p->opts->sets, "board=" + board);
+  }
+  var run_files: StrList* = files;
+  var run_progs: BinSet* = progs;
+  if (target_is_bare(target) && files->len > 0) {
+    run_files = sl_new();
+    r->skipped = r->skipped + files->len;
+    bx_mx_why(r, "@test functions run on hosted targets");
+  }
+  var missing: string = s_empty();
+  if (progs->n > 0) {
+    if (target_is_riscv(target)) {
+      var q: SettingsQuery* = new SettingsQuery;
+      q->profile = build_profile(p);
+      q->bin = progs->items[0].name;
+      q->target = target;
+      q->sets = p->opts->sets;
+      var st: Settings* = man_settings(p->man, q);
+      free(q);
+      if (slen(st->error) > 0) {
+        missing = bx_unroot(p, st->error);
+      } else {
+        missing = rv_runner_missing(tc_select(p, target), target, st);
+      }
+      free(st);
+    } else if (!s_eq(target, sys_os()) && tc_run_program_cmd(target, "x") == (Cmd*)0) {
+      missing = "cannot run a " + target + " program on this " + sys_os() + " host";
+    }
+  }
+  if (slen(missing) > 0) {
+    run_progs = bx_no_test_bins(p);
+    r->skipped = r->skipped + progs->n;
+    bx_mx_why(r, missing);
+  }
+  if (run_files->len > 0 || run_progs->n > 0) {
+    status("Testing", r->label);
+    var s: BxSess* = bx_sess(p, sl_of(target));
+    g_bx_sess = s;
+    var n: BxTally;
+    n.passed = 0;
+    n.cached = 0;
+    n.failed = 0;
+    if (run_files->len > 0) {
+      bx_run_test_files(s, run_files, &n);
+    }
+    if (run_progs->n > 0) {
+      bx_run_test_bins(s, run_progs, &n);
+    }
+    r->passed = n.passed + n.cached;
+    r->failed = n.failed;
+  }
+  p->opts->sets = saved;
+}
+
+// mbuild test --matrix: the same tests on every matrix target, one table.
+fn bx_test_matrix(p: Project*, files: StrList*, progs: BinSet*, t0: int64) -> int32 {
+  var entries: StrList* = bx_mx_entries(p);
+  defer free(entries);
+  var rows: BxMxRow* = (BxMxRow*)malloc((entries->len + 1) * sizeof(BxMxRow));
+  var i: int64 = 0;
+  while (i < entries->len) {
+    bx_mx_run(p, sl_get(entries, i), files, progs, &rows[i]);
+    i = i + 1;
+  }
+  var w: int64 = 6;
+  i = 0;
+  while (i < entries->len) {
+    if (slen(rows[i].label) > w) {
+      w = slen(rows[i].label);
+    }
+    i = i + 1;
+  }
+  say("");
+  say(s_pad_right("target", w + 2) + "passed  failed  skipped");
+  var tp: int64 = 0;
+  var tf: int64 = 0;
+  var ts: int64 = 0;
+  i = 0;
+  while (i < entries->len) {
+    var r: BxMxRow* = &rows[i];
+    var line: string = s_pad_right(r->label, w + 2) + s_pad_left(s_int(r->passed), 6) + s_pad_left(s_int(r->failed), 8) + s_pad_left(s_int(r->skipped), 9);
+    if (slen(r->why) > 0) {
+      line = line + "  " + r->why;
+    }
+    say(line);
+    tp = tp + r->passed;
+    tf = tf + r->failed;
+    ts = ts + r->skipped;
+    i = i + 1;
+  }
+  var nt: int64 = entries->len;
+  var summary: string = "{tp} passed, {tf} failed, {ts} skipped on {nt} targets in " + bx_secs(sys_now_ms() - t0);
+  free(rows);
+  if (tf > 0) {
+    say("test result: " + red("FAILED") + ". " + summary);
+    return 1;
+  }
+  say("test result: " + green("ok") + ". " + summary);
+  return 0;
+}
+
+// --matrix, or mb_test_targets without -t.
+fn bx_matrix_on(p: Project*) -> bool {
+  return sl_has(p->opts->rest, "--matrix") || (p->man->test_targets->len > 0 && p->opts->targets->len == 0);
 }
 
 // mbuild test [NAME | FILE]...: @test files, then test programs, one summary.
@@ -3382,6 +3840,9 @@ export fn build_cmd_test(p: Project*) -> int32 {
   if (files->len == 0 && progs->n == 0) {
     status("Finished", "no tests (no function is marked @test and there are no test programs)");
     return 0;
+  }
+  if (bx_matrix_on(p)) {
+    return bx_test_matrix(p, files, progs, t0);
   }
   var s: BxSess* = bx_sess(p, bx_targets_or_host(p));
   g_bx_sess = s;
@@ -5173,6 +5634,7 @@ fn bx_init_cmds() {
   bx_fl("--use NAME=IMPL", "a component impl (repeatable)");
   bx_fl("--no-hooks", "skip hook_pre_build and hook_post_build");
   bx_fl("--force", "rebuild what's fresh too");
+  bx_fl("--pgo-gen, --pgo-use[=FILE]", "build counting, or with the recorded profile (default .mbuild/pgo/BIN-TARGET.prof; see mbuild help pgo)");
   bx_note("output goes to build/<target>/<profile>/.");
   bx_note("riscv64-none and riscv32-none need a board (mb_set(\"board\", ...) after mb_on); outputs picks the files: bin, uf2 (pico2), elf, hex.");
   bx_note("imports of packages that aren't dependencies yet get added, unless --locked or --offline.");
@@ -5187,6 +5649,7 @@ fn bx_init_cmds() {
   bx_fl("-r, -p NAME", "the release profile, or another one");
   bx_fl("--timeout SECS", "stop the program after SECS (default 30 under an emulator, else none)");
   bx_fl("--no-services", "don't start the mb_service processes");
+  bx_fl("--pgo-gen", "build counting and record .mbuild/pgo/BIN-TARGET.prof (see mbuild help pgo)");
   bx_note("the exit code is the program's; 124 when --timeout stopped it.");
   bx_note("riscv*-linux runs on qemu-riscv64 / qemu-riscv32 from MBUILD_QEMU_USER_DIR, ~/.local/opt/qemu-user/bin or PATH. board pico2 runs on rvsim (PATH, MBUILD_RVSIM, else built once into $MBUILD_HOME/tools from the compiler's Mettle checkout).");
   bx_note("mb_service processes start first, in order, each waited for on its port; they stop when the program exits. output in .mbuild/logs/NAME.log.");
@@ -5217,13 +5680,31 @@ fn bx_init_cmds() {
   bx_ex("mbuild test sodium", "only the test program sodium");
   bx_ex("mbuild test -r", "test programs built release");
   bx_ex("mbuild test -t riscv64-linux", "test programs under qemu-riscv64");
+  bx_ex("mbuild test --matrix -t host,riscv64-linux,riscv32-none:pico2", "the same tests on three targets, one table");
   bx_fl("--filter S", "only tests whose names contain S");
   bx_fl("-t T", "the target the test programs are built for; RISC-V ones run under an emulator, as mbuild run does");
   bx_fl("--timeout SECS", "stop each test program after SECS (default 30 under an emulator, else none)");
   bx_fl("--force", "run cached tests too");
+  bx_fl("--matrix", "run them on every target of -t or mb_test_targets, and sum up per target");
   bx_note("@test functions run in the compiler's interpreter, which can't call externs.");
   bx_note("test programs (mb_test_bin, else tests/NAME_test.mettle with fn main) are built like the bins, C code included, and pass on exit 0.");
   bx_note("passing tests are cached (`ok ... (cached)`) until their inputs change.");
+  bx_note("--matrix (or mb_test_targets in mbuild.mettle, without -t) runs the tests on every target of -t, else mb_test_targets, else the host, and ends with a table: target, passed, failed, skipped and why. @test functions run on hosted targets; test programs where something runs them (natively, wine, qemu, rvsim), else they count as skipped. riscv32-none:pico2 names a board target's board.");
+  bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
+  bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");
+  bx_ex("mbuild flash", "build the UF2 and copy it to the Pico 2's drive");
+  bx_ex("mbuild flash -r blink", "");
+  bx_fl("-t T", "the board target (default: the bin's triple, else mb_targets' board target, else riscv32-none)");
+  bx_note("for board pico2: hold BOOTSEL while plugging the board in; its drive (label RP2350) is found under /run/media/$USER, /media/$USER or /mnt, or MBUILD_FLASH_DIR names it. mbuild writes NAME.uf2 there and syncs; the board restarts into it.");
+  bx_note("other boards have no drive: flash them from a project command (fn cmd_upload).");
+  bx_def("pgo", "build with a profile of a real run", "mbuild pgo [collect] [BIN] [-t T] [-p PROFILE] [-- ARGS...]", "platforms.md");
+  bx_ex("mbuild pgo", "build counting, run it, build release with its profile");
+  bx_ex("mbuild pgo collect", "only build counting and run it");
+  bx_ex("mbuild pgo -t riscv64-linux -- input.txt", "under qemu-riscv64, with the program's arguments");
+  bx_fl("-t T", "one target (default: the host)");
+  bx_fl("-p NAME", "the profile of both builds (default release)");
+  bx_note("the steps by hand: mbuild build -r --pgo-gen; mbuild run -r --pgo-gen (records the profile); mbuild build -r --pgo-use (or --pgo-use=FILE).");
+  bx_note("the profile is .mbuild/pgo/BIN-TARGET.prof. a Linux program writes it at exit (METTLE_PROFILE_OUT); a board prints it on its console and mbuild turns the capture into it with tools/riscv-pgo-capture.py of the compiler's Mettle checkout (python3).");
   bx_def("check", "type-check without linking", "mbuild check [BINS...] [-t T]", "project.md");
   bx_ex("mbuild check", "");
   bx_ex("mbuild check -t all", "");

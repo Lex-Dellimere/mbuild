@@ -251,7 +251,7 @@ donerp2350: UART0 printed the --exit-on-uart string at 3.854 ms
 
 `build/riscv32-none/debug/blink.uf2` is the file for the board's drive.
 Other boards have no emulator here: `mbuild run` says so, and a project
-command (`fn cmd_flash`) can flash them.
+command (`fn cmd_upload`) can flash them.
 
 Under an emulator `run` and `test` stop the program after 30 seconds, or
 `--timeout SECS`; the status is then 124:
@@ -266,7 +266,100 @@ error: build/riscv64-linux/debug/spin was stopped after 1.0s (--timeout 1)
 ```
 
 `@test` functions run in the compiler's interpreter whatever the target;
-test programs run on the emulator.
+test programs run on the emulator. A Pico 2 program never exits, so a test
+program there passes when its console prints the `exit-on-uart` string
+(default `PASS`; call `pico2_init()` first) before `rvsim-until-ms`
+(default 10000 for a test) runs out.
+
+### Testing on several targets
+
+`mbuild test --matrix` runs the same tests on each target of `-t`, else of
+`mb_test_targets`, else the host; with `mb_test_targets` set, plain
+`mbuild test` does it too. A board target names its board after a colon:
+
+```mettle
+  mb_test_targets("host, riscv64-linux, riscv32-none:pico2");
+```
+
+```text
+$ mbuild test
+     Testing linux
+ok     src/main.mettle (1 passed)
+ok     pass (tests/pass.mettle)
+FAIL
+FAILED fail (tests/fail.mettle) (exit 1)
+     Testing riscv64-linux
+...
+     Testing riscv32-none (pico2)
+ok     pass (tests/pass.mettle)
+FAIL
+rp2350: stopped at --until-ms (300.000 ms of simulated time)
+FAILED fail (tests/fail.mettle) (no PASS on the console)
+
+target                passed  failed  skipped
+linux                      2       1        0
+riscv64-linux              2       1        0
+riscv32-none (pico2)       1       1        1  @test functions run on hosted targets
+test result: FAILED. 5 passed, 3 failed, 3 skipped on 3 targets in 0.6s
+```
+
+`@test` functions run for hosted targets (linux, windows, `riscv*-linux`),
+not for a board. Test programs run natively, through wine, under QEMU or on
+rvsim; when that program is missing, they count as skipped, with the
+reason, and don't fail the run. Code that differs per target can be a
+[component](components.md) picked with `mb_use` after `mb_on`.
+
+### Flashing a Pico 2
+
+`mbuild flash [BIN]` builds the bin's UF2 (adding `uf2` to `outputs` when
+it's missing) and copies it to the board. Hold BOOTSEL while plugging the
+board in: it mounts as a drive labelled RP2350, which mbuild looks for
+under `/run/media/$USER`, `/media/$USER` and `/mnt`, or takes from
+`MBUILD_FLASH_DIR`. It writes `NAME.uf2`, syncs, and the board restarts
+into the program:
+
+```text
+$ mbuild flash
+   Compiling blink (riscv32-none, debug)
+    Finished in 0.1s
+    Flashing build/riscv32-none/debug/blink.uf2 to /run/media/you/RP2350
+     Flashed blink (6656 bytes); the board restarts into it
+$ mbuild flash
+error: no RP2350 drive is mounted (looked in /run/media/you, /media/you, /mnt)
+  help: hold BOOTSEL while plugging the board in, then run mbuild flash again (or set MBUILD_FLASH_DIR to the drive)
+```
+
+The target is the bin's own triple, else `-t`, else the board target of
+`mb_targets`, else `riscv32-none`. Only `pico2` has a UF2 drive; for other
+boards `flash` says so and points to a project command.
+
+### Profile-guided builds
+
+A counting build (`--pgo-gen`) records how often each block runs; a build
+with `--pgo-use` optimizes with those counts. By hand:
+
+```text
+$ mbuild build -r --pgo-gen
+$ mbuild run -r --pgo-gen -- input.txt
+     Running build/linux/release/app
+    Profiled .mbuild/pgo/app-linux.prof; build with --pgo-use to use it
+$ mbuild build -r --pgo-use
+```
+
+`mbuild pgo [BIN]` does the three steps (release unless `-p`, the same
+profile for both builds so the blocks match); `mbuild pgo collect` stops
+after the run. `-t` picks the target as for `run`. The profile is
+`.mbuild/pgo/BIN-TARGET.prof`, or `--pgo-use=FILE`.
+
+A Linux program, `riscv*-linux` under QEMU included, writes the profile
+when `main` returns (mbuild sets `METTLE_PROFILE_OUT`). A board prints its
+counts on the console instead: mbuild captures the run's console into
+`.mbuild/pgo/BIN-TARGET.prof.console` and turns it into the profile with
+`tools/riscv-pgo-capture.py` of the compiler's Mettle checkout (python3, or
+`MBUILD_PYTHON`). `main` has to return before the emulator stops, so drop
+`exit-on-uart` and leave `rvsim-until-ms` room for the training run.
+RISC-V counting needs a compiler with RISC-V `--pgo-gen`; with an older one
+the run writes no profile and mbuild says so.
 
 Where the emulators come from:
 
@@ -305,6 +398,7 @@ script.
 | `MBUILD_MAKE`, `MBUILD_GIT` | `make` and `git` for `toolchain install --from` |
 | `MBUILD_QEMU_USER_DIR` | the directory of `qemu-riscv64` and `qemu-riscv32` |
 | `MBUILD_RVSIM` | the rvsim that runs `pico2` images |
+| `MBUILD_FLASH_DIR` | the mounted RP2350 drive `mbuild flash` copies to |
 
 ### Registries
 

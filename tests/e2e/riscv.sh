@@ -167,7 +167,9 @@ check "rvsim keys need pico2" has 'exit-on-uart sets up rvsim, which runs board 
 bad_proj '  mb_on("riscv32-none");
   mb_set("board", "esp32c3");'
 mb run -t riscv32-none
-check "a board with no emulator" sh -c 'grep -qF "error: board esp32c3 has no emulator mbuild can run" "$0/last.out" && grep -qF "fn cmd_flash" "$0/last.out" && [ -s build/riscv32-none/debug/bad.bin ]' "$S"
+check "a board with no emulator" sh -c 'grep -qF "error: board esp32c3 has no emulator mbuild can run" "$0/last.out" && grep -qF "fn cmd_upload" "$0/last.out" && [ -s build/riscv32-none/debug/bad.bin ]' "$S"
+mb flash -t riscv32-none
+check "flash: a board with no UF2 drive" sh -c 'grep -qF "error: board esp32c3 has no UF2 drive mbuild can copy to" "$0/last.out" && grep -qF "fn cmd_upload" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 bad_proj '  mb_bin("lib", "src/main.mettle");
   mb_bin_kind("lib", "shared", "");'
 mb build -t riscv64-linux
@@ -218,6 +220,106 @@ if [ $have_rvsim = 1 ]; then
 fi
 MBUILD_RVSIM="$W/nope" mb run quiet
 check "MBUILD_RVSIM missing" has "error: MBUILD_RVSIM=$W/nope does not exist"
+
+# --- flash: the UF2 to a fake RP2350 drive
+mkdir -p "$W/drive"
+MBUILD_FLASH_DIR="$W/drive" mb flash pico
+check "flash: not mounted" sh -c 'grep -qF "error: no RP2350 drive is mounted (MBUILD_FLASH_DIR=$1 has no INFO_UF2.TXT)" "$0/last.out" && grep -qF "hold BOOTSEL while plugging the board in" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S" "$W/drive"
+printf 'UF2 Bootloader v1.0\nModel: Raspberry Pi RP2350\nBoard-ID: RP2350\n' > "$W/drive/INFO_UF2.TXT"
+MBUILD_FLASH_DIR="$W/drive" mb flash pico
+check "flash: the UF2 on the drive" sh -c 'grep -qF "Flashing build/riscv32-none/debug/pico.uf2 to $1" "$0/last.out" && cmp -s "$1/pico.uf2" build/riscv32-none/debug/pico.uf2 && [ "$(cat "$0/last.code")" = 0 ]' "$S" "$W/drive"
+
+# --- the test matrix: host, riscv64-linux and pico2, a passing and a failing test program
+mkdir -p "$W/mx/src" "$W/mx/tests/plat" && cd "$W/mx" || exit 1
+cat > mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("mx", "0.1.0");
+  mb_test_targets("host, riscv64-linux, riscv32-none:pico2");
+  mb_test_bin("pass", "tests/pass.mettle");
+  mb_test_bin("fail", "tests/fail.mettle");
+  mb_component("plat", "tests/plat", "static", "host, pico");
+  mb_profile("debug");
+  mb_on("riscv32-none");
+  mb_use("plat", "pico");
+  mb_set("rvsim-until-ms", "300");
+  mb_on("");
+}
+EOF
+printf 'fn add(a: int64, b: int64) -> int64 { return a + b; }\n@test fn adds() { assert(add(1, 2) == 3); }\nfn main() -> int32 { return 0; }\n' > src/main.mettle
+printf 'export fn plat_init() {\n}\n' > tests/plat/host.mettle
+printf 'export fn plat_init() {\n  pico2_init();\n}\n' > tests/plat/pico.mettle
+printf 'import "std/io";\nimport "plat";\nfn main() -> int32 {\n  plat_init();\n  println("PASS");\n  return 0;\n}\n' > tests/pass.mettle
+printf 'import "std/io";\nimport "plat";\nfn main() -> int32 {\n  plat_init();\n  println("FAIL");\n  return 1;\n}\n' > tests/fail.mettle
+row() { grep -qE "^$1 +$2 +$3 +$4( |\$)" "$S/last.out"; }
+mb test
+check "matrix: mb_test_targets runs it, one table" sh -c 'grep -q "^target  *passed  failed  skipped$" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "matrix: host row" row linux 2 1 0
+[ $have_user = 1 ] && check "matrix: riscv64-linux row" row riscv64-linux 2 1 0
+if [ $have_rvsim = 1 ]; then
+  check "matrix: pico2 row, @test skipped with why" sh -c 'grep -qE "^riscv32-none \(pico2\) +1 +1 +1  @test functions run on hosted targets$" "$0/last.out" && grep -qF "FAILED fail (tests/fail.mettle) (no PASS on the console)" "$0/last.out"' "$S"
+fi
+MBUILD_QEMU_USER_DIR="$W" MBUILD_RVSIM="$W/nope" mb test --matrix -t host,riscv64-linux,riscv32-none:pico2 pass
+check "matrix: a missing emulator is skipped, not failed" sh -c 'grep -qE "^riscv64-linux +0 +0 +1  MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^riscv32-none \(pico2\) +0 +0 +1  MBUILD_RVSIM=.* does not exist$" "$0/last.out" && grep -qF "1 passed, 0 failed, 2 skipped on 3 targets" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb test --matrix -t riscv32-none:
+check "matrix: a board target without its board" has 'error: `riscv32-none:` is not a board target with its board'
+mb test -t linux pass
+check "-t without --matrix: no table" sh -c '! grep -q "^target " "$0/last.out" && grep -q "^ok .*pass" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+
+# --- pgo: build counting, run, build with the profile
+mkdir -p "$W/pg/src" && cd "$W/pg" || exit 1
+cat > mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("pg", "0.1.0");
+  mb_profile("release");
+  mb_on("riscv32-none");
+  mb_set("board", "pico2");
+  mb_set("rvsim-until-ms", "300");
+  mb_on("");
+}
+EOF
+printf 'import "std/io";\nfn sum(n: int64) -> int64 {\n  var s: int64 = 0;\n  var i: int64 = 0;\n  while (i < n) { s = s + i; i = i + 1; }\n  return s;\n}\nfn main() -> int32 {\n  println("sum {sum(1000)}");\n  return 0;\n}\n' > src/main.mettle
+mb pgo
+check "pgo on the host: profile, then the release build" sh -c 'grep -qF "Running build/linux/release/pg" "$0/last.out" && grep -qF "Profiled .mbuild/pgo/pg-linux.prof" "$0/last.out" && [ -s .mbuild/pgo/pg-linux.prof ] && [ "$(grep -c "Compiling pg (linux, release)" "$0/last.out")" = 2 ] && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb -v build -r --pgo-use --force
+check "--pgo-use reads .mbuild/pgo/BIN-TARGET.prof" has "--pgo-use=$W/pg/.mbuild/pgo/pg-linux.prof"
+mb build --pgo-use=missing.prof
+check "--pgo-use=FILE that is missing" has 'error: pgo-file = "missing.prof" does not exist'
+if [ $have_user = 1 ]; then
+  mb pgo -t riscv64-linux
+  if [ -s .mbuild/pgo/pg-riscv64-linux.prof ]; then
+    check "pgo on riscv64-linux" sh -c 'grep -qF "(qemu-riscv64)" "$0/last.out" && grep -qF "Profiled .mbuild/pgo/pg-riscv64-linux.prof" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+    mb -v build -r -t riscv64-linux --pgo-use --force
+    check "riscv64-linux --pgo-use" has "--pgo-use=$W/pg/.mbuild/pgo/pg-riscv64-linux.prof"
+  else
+    check "pgo on riscv64-linux: no profile is an error" has "error: the run wrote no profile to .mbuild/pgo/pg-riscv64-linux.prof"
+    [ $mode = debug ] && echo "note: riscv64-linux pgo round trip skipped (this compiler's --pgo-gen does not count on RISC-V)"
+  fi
+fi
+if [ $have_rvsim = 1 ]; then
+  # A board prints the counts on its console; the capture script of the compiler's checkout makes the
+  # profile. A stand-in checkout and a program that prints its own block run mbuild's part with any compiler.
+  mkdir -p "$W/fake/bin" "$W/fake/tools/riscv-sim"
+  : > "$W/fake/bin/mettle"
+  : > "$W/fake/tools/riscv-sim/rvsim.c"
+  cat > "$W/fake/tools/riscv-pgo-capture.py" <<'EOF'
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.findall(r"mettle-profile-begin (\d+)\s*\n(.*?)\nmettle-profile-end", text, re.S)
+if not m:
+    sys.exit(1)
+open(sys.argv[2], "w").write('{"version":1,"blocks":[%s]}\n' % ",".join(m[-1][1].split()))
+EOF
+  printf 'import "std/io";\nfn main() -> int32 {\n  pico2_init();\n  println("mettle-profile-begin 3");\n  println("4 5 6");\n  println("mettle-profile-end");\n  return 0;\n}\n' > src/main.mettle
+  MBUILD_METTLE_LINUX="$METTLE" METTLE="$W/fake/bin/mettle" MBUILD_RVSIM="$MBUILD_HOME/tools/rvsim" mb pgo collect -t riscv32-none
+  check "pgo collect on pico2: the console becomes the profile" sh -c 'grep -qF "(rvsim)" "$0/last.out" && grep -qF "Profiled .mbuild/pgo/pg-riscv32-none.prof" "$0/last.out" && grep -qF "\"blocks\":[4,5,6]" .mbuild/pgo/pg-riscv32-none.prof && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+  rm "$W/fake/tools/riscv-pgo-capture.py"
+  MBUILD_METTLE_LINUX="$METTLE" METTLE="$W/fake/bin/mettle" MBUILD_RVSIM="$MBUILD_HOME/tools/rvsim" mb run -r -t riscv32-none --pgo-gen
+  check "pgo on pico2 without the capture script" sh -c 'grep -qF "has no tools/riscv-pgo-capture.py" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+fi
 done
 
 echo

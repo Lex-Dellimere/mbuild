@@ -78,6 +78,7 @@ Per-OS settings go through `mb_on(os)`.
 | `mb_package(name, version)` | Required. `name` is `[a-z][a-z0-9_]*`, at most 64 characters; `std` and `mbuild` are reserved. |
 | `mb_meta(key, value)` | `description`, `license`, `repository` or `authors`. Shown to people who depend on the package. |
 | `mb_targets(csv)` | What `build`, `check` and `doctor` build without `-t`: `"linux"`, `"windows"`, a RISC-V target. Default: the host. |
+| `mb_test_targets(csv)` | The targets `mbuild test` runs on as a matrix: `"host, riscv64-linux, riscv32-none:pico2"` ([platforms](platforms.md#testing-on-several-targets)). |
 | `mb_flags(csv)` | Raw compiler flags for every compile. Prefer typed settings (below). |
 | `mb_prelude(on)` | Pass `--prelude`, so `std/prelude` is imported everywhere. |
 | `mb_agents(on)` | Keep the dependencies block in `AGENT.rules` ([packages](packages.md#agentrules)). Default `true`. |

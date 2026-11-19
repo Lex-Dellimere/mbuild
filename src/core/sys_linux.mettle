@@ -582,6 +582,11 @@ export fn sys_rename(from: string, to: string) -> bool {
   return lx_exec(args) == 0;
 }
 
+// Writes what the kernel holds back to the disks (before a drive is pulled).
+export fn sys_sync() {
+  lx_exec(sl_of("sync"));
+}
+
 export fn sys_set_executable(p: string) {
   var buf: uint8* = (uint8*)malloc(256);
   defer free(buf);

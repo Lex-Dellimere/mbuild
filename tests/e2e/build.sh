@@ -205,8 +205,8 @@ bcomp get zzz
 check "bash: get takes packages" empty_out
 bcomp help se
 check "bash: help takes commands" lines_are search services setup
-bcomp help fl
-check "bash: help flags" lines_are flags
+bcomp help fla
+check "bash: help flags" lines_are flash flags
 bcomp completion ""
 check "bash: completion takes shells" lines_are bash zsh fish
 bcomp toolchain us

@@ -198,6 +198,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     sl_push(c, "mb_meta|" + key + "|");
   } else if (s_eq(section, "build")) {
     if (s_eq(key, "targets")) { sl_push(c, "mb_targets||"); }
+    if (s_eq(key, "test-targets")) { sl_push(c, "mb_test_targets||"); }
     if (s_eq(key, "flags")) { sl_push(c, "mb_flags||"); }
     if (s_eq(key, "prelude")) { sl_push(c, "mb_prelude||"); }
     if (s_eq(key, "agents")) { sl_push(c, "mb_agents||"); }
