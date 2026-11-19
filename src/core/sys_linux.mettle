@@ -842,6 +842,64 @@ export fn sys_proc_start_piped(ctx: AlphCtx*, c: Cmd*, out_h: int64*, err_h: int
   return h;
 }
 
+const LX_TAG_TIMEOUT: int64 = 210;  // ALPH_TAG_USER + 110
+const LX_TIMED_OUT: int64 = 1000;   // the actor's halt code after a kill on time
+
+// sys_run_timeout's actor: the process, and a timer that kills it.
+struct LxTimed {
+  c: Cmd*;
+  log: string;
+  ms: int64;
+  proc: int64;
+  timer: int64;
+  timed_out: bool;
+}
+
+fn lx_timed(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
+  var s: LxTimed* = (LxTimed*)ctx->state;
+  if (m->tag == ALPH_TAG_INIT) {
+    alph_trap_exits(ctx, true);
+    s->proc = sys_proc_start(ctx, s->c, s->log, true);
+    if (s->proc <= 0) {
+      alph_halt(ctx, 127);
+      return ALPH_CONTINUE;
+    }
+    if (s->ms > 0) {
+      s->timer = alph_start_timer(ctx, s->ms, LX_TAG_TIMEOUT, 0);
+    }
+  } else if (m->tag == LX_TAG_TIMEOUT && m->ref == s->timer) {
+    s->timer = 0;
+    s->timed_out = true;
+    alph_proc_kill(ctx, s->proc, 9);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT && m->ref == s->proc) {
+    if (s->timer != 0) {
+      alph_cancel_timer(ctx, s->timer);
+    }
+    if (s->timed_out) {
+      alph_halt(ctx, LX_TIMED_OUT);
+    } else {
+      alph_halt(ctx, m->arg);
+    }
+  }
+  return ALPH_CONTINUE;
+}
+
+// Runs c (stdio inherited, or stdout and stderr to log), killed after ms
+// (0: no limit). The exit code; *timed_out when the limit killed it.
+export fn sys_run_timeout(c: Cmd*, log: string, ms: int64, timed_out: bool*) -> int32 {
+  var s: LxTimed;
+  memset((rawptr)&s, 0, (int64)sizeof(LxTimed));
+  s.c = c;
+  s.log = log;
+  s.ms = ms;
+  var code: int64 = sys_node_run((rawptr)&s, (int64)sizeof(LxTimed), 1, 0, &lx_timed);
+  *timed_out = code == LX_TIMED_OUT;
+  if (*timed_out) {
+    return 124;
+  }
+  return (int32)code;
+}
+
 // The pool's actor: asks the limiter for one permit at a time and starts the
 // next job when it is granted; a job's end gives its permit back.
 struct LxPool {

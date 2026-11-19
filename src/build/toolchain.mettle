@@ -559,8 +559,17 @@ fn tcx_fail_last() {
   fail(g_tcx_err);
 }
 
+// The OS whose compiler builds target: a RISC-V target is cross-compiled
+// by the host's.
+export fn tc_compiler_os(target: string) -> string {
+  if (target_is_riscv(target)) {
+    return sys_os();
+  }
+  return target;
+}
+
 export fn tc_select(p: Project*, target: string) -> Mettle* {
-  var m: Mettle* = tcx_pick(p, target);
+  var m: Mettle* = tcx_pick(p, tc_compiler_os(target));
   if (m == (Mettle*)0) {
     tcx_fail_last();
   }
@@ -570,7 +579,50 @@ export fn tc_select(p: Project*, target: string) -> Mettle* {
 
 // True when a compiler for target is there to be selected (tc_select would not fail).
 export fn tc_available(p: Project*, target: string) -> bool {
-  return tcx_pick(p, target) != (Mettle*)0;
+  return tcx_pick(p, tc_compiler_os(target)) != (Mettle*)0;
+}
+
+var g_tcx_boards_id: string;
+var g_tcx_boards: StrList*;
+
+// The RISC-V boards the compiler has, from `mettle help riscv` ("The boards:
+// a, b."); empty when it does not say.
+export fn tc_boards(m: Mettle*) -> StrList* {
+  if (g_tcx_boards != (StrList*)0 && s_eq(g_tcx_boards_id, m->id)) {
+    return g_tcx_boards;
+  }
+  var out: StrList* = sl_new();
+  var c: Cmd* = tc_cmd(m);
+  defer free(c);
+  cmd_arg(c, "help");
+  cmd_arg(c, "riscv");
+  var cap: Captured = proc_capture_all(c);
+  var lines: StrList* = s_lines(cap.out);
+  defer free(lines);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = s_trim(sl_get(lines, i));
+    if (s_starts(l, "The boards:")) {
+      var rest: string = s_trim(s_from(l, 11));
+      if (s_ends(rest, ".")) {
+        rest = s_sub(rest, 0, slen(rest) - 1);
+      }
+      var parts: StrList* = s_split(rest, 44);
+      defer free(parts);
+      var k: int64 = 0;
+      while (k < parts->len) {
+        var w: string = s_trim(sl_get(parts, k));
+        if (slen(w) > 0) {
+          sl_push(out, w);
+        }
+        k = k + 1;
+      }
+    }
+    i = i + 1;
+  }
+  g_tcx_boards = out;
+  g_tcx_boards_id = m->id;
+  return out;
 }
 
 export fn tc_cmd(m: Mettle*) -> Cmd* {

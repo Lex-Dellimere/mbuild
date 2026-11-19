@@ -140,5 +140,42 @@ export fn target_exe_ext(target: string) -> string {
 }
 
 export fn target_valid(target: string) -> bool {
-  return s_eq(target, "linux") || s_eq(target, "windows");
+  return s_eq(target, "linux") || s_eq(target, "windows") || target_is_riscv(target);
+}
+
+// riscv64-linux, riscv32-linux, riscv64-none, riscv32-none.
+export fn target_is_riscv(target: string) -> bool {
+  return s_eq(target, "riscv64-linux") || s_eq(target, "riscv32-linux") || s_eq(target, "riscv64-none") || s_eq(target, "riscv32-none");
+}
+
+// A board image target: riscv64-none, riscv32-none.
+export fn target_is_bare(target: string) -> bool {
+  return target_is_riscv(target) && s_ends(target, "-none");
+}
+
+// The OS import guards and [c] see: "linux" for riscv*-linux, "none" for a
+// board image.
+export fn target_os(target: string) -> string {
+  if (s_eq(target, "riscv64-linux") || s_eq(target, "riscv32-linux")) {
+    return "linux";
+  }
+  if (target_is_bare(target) || s_ends(target, "-none")) {
+    return "none";
+  }
+  return target;
+}
+
+// "rv32" or "rv64" for a RISC-V target, "" otherwise.
+export fn target_rv_width(target: string) -> string {
+  if (s_starts(target, "riscv32-")) {
+    return "rv32";
+  }
+  if (s_starts(target, "riscv64-")) {
+    return "rv64";
+  }
+  return s_empty();
+}
+
+export fn target_names() -> string {
+  return "linux windows riscv64-linux riscv32-linux riscv64-none riscv32-none";
 }

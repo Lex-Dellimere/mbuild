@@ -1342,6 +1342,23 @@ export fn sys_spawn_stop(j: Job*, grace_ms: int64) {
   sys_spawn_wait(j);
 }
 
+// Runs c (stdio inherited, or stdout and stderr to log), stopped after ms
+// (0: no limit). The exit code; *timed_out when the limit stopped it.
+export fn sys_run_timeout(c: Cmd*, log: string, ms: int64, timed_out: bool*) -> int32 {
+  *timed_out = false;
+  var j: Job* = sys_spawn(c, log, false);
+  var t0: int64 = sys_now_ms();
+  while (!sys_spawn_poll(j)) {
+    if (ms > 0 && sys_now_ms() - t0 >= ms) {
+      sys_spawn_stop(j, 0);
+      *timed_out = true;
+      return 124;
+    }
+    sys_sleep_ms(20);
+  }
+  return sys_spawn_wait(j);
+}
+
 export fn sys_catch_interrupt() {
 }
 

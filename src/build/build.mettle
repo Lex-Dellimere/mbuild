@@ -26,6 +26,7 @@ import "../config/init";
 import "../config/agents";
 import "native";
 import "toolchain";
+import "riscv";
 import "components";
 import "complete";
 import "services";
@@ -153,7 +154,7 @@ fn bx_compiler_output(text: string) -> string {
   while (i < lines->len) {
     var line: string = sl_get(lines, i);
     var plain: string = bx_strip_ansi(line);
-    if (!s_starts(plain, "Built executable") && !s_starts(plain, "Built object")) {
+    if (!s_starts(plain, "Built executable") && !s_starts(plain, "Built object") && !s_starts(plain, "Wrote flat image") && !s_starts(plain, "Wrote UF2 file") && !s_starts(plain, "Wrote Intel HEX file") && !s_starts(plain, "Wrote ELF file")) {
       buf_line(b, line);
     }
     i = i + 1;
@@ -587,18 +588,29 @@ fn bx_select_from(p: Project*, all: BinSet*, names: StrList*) -> BinSet* {
   return sel;
 }
 
-fn bx_add_target(l: StrList*, t: string) {
+// all: every target but the board images, which only mb_targets adds.
+fn bx_add_target(p: Project*, l: StrList*, t: string) {
   if (s_eq(t, "all")) {
     sl_add_uniq(l, "linux");
     sl_add_uniq(l, "windows");
+    sl_add_uniq(l, "riscv64-linux");
+    sl_add_uniq(l, "riscv32-linux");
+    var i: int64 = 0;
+    while (i < p->man->targets->len) {
+      if (target_is_bare(sl_get(p->man->targets, i))) {
+        sl_add_uniq(l, sl_get(p->man->targets, i));
+      }
+      i = i + 1;
+    }
   } else if (s_eq(t, "host")) {
     sl_add_uniq(l, sys_os());
   } else if (target_valid(t)) {
     sl_add_uniq(l, t);
   } else {
-    var opts: StrList* = s_split("linux windows all host", 32);
+    var names: string = target_names() + " all host";
+    var opts: StrList* = s_split(names, 32);
     defer free(opts);
-    var hint: string = "use -t linux, -t windows, -t all or -t host";
+    var hint: string = "the targets are " + sl_join(opts, ", ");
     var sug: string = man_suggest(t, opts);
     if (slen(sug) > 0) {
       hint = "did you mean `" + sug + "`? " + hint;
@@ -616,7 +628,7 @@ export fn build_targets(p: Project*) -> StrList* {
   }
   var i: int64 = 0;
   while (i < src->len) {
-    bx_add_target(l, sl_get(src, i));
+    bx_add_target(p, l, sl_get(src, i));
     i = i + 1;
   }
   if (l->len == 0) {
@@ -630,7 +642,7 @@ fn bx_targets_or_host(p: Project*) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
   while (i < p->opts->targets->len) {
-    bx_add_target(l, sl_get(p->opts->targets, i));
+    bx_add_target(p, l, sl_get(p->opts->targets, i));
     i = i + 1;
   }
   if (l->len == 0) {
@@ -853,6 +865,7 @@ fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
     while (bi < bs->n) {
       var b: BinInfo* = &bs->items[bi];
       if (!bx_freestanding(b)) {
+        bx_check_kind(b, sl_get(s->targets, ti));
         bx_unit_add(us, b, b->entry, ti, sl_get(s->targets, ti), s->mettles[ti]);
       }
       bi = bi + 1;
@@ -863,6 +876,7 @@ fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
   while (fi < bs->n) {
     var fb: BinInfo* = &bs->items[fi];
     if (bx_freestanding(fb)) {
+      bx_check_kind(fb, fb->triple);
       bx_unit_add(us, fb, fb->entry, -1, fb->triple, bx_host_mettle(s));
     }
     fi = fi + 1;
@@ -878,7 +892,7 @@ fn bx_check_bin(s: BxSess*, b: BinInfo*) {
     if (s_eq(spec->name, b->name)) {
       var os: string = sl_get(s->targets, 0);
       if (bx_freestanding(b)) {
-        os = "none";
+        os = b->triple;
       }
       var why: string = cmp_bin_problem(s->p, spec, bx_settings_of(s->p, s->profile, b->name, os));
       if (slen(why) > 0) {
@@ -917,7 +931,7 @@ fn bx_unit_cmp(s: BxSess*, u: BxUnit*, bin_for_files: string) {
     }
   }
   cb->entry = u->file;
-  cb->settings = bx_settings_of(s->p, s->profile, bx_unit_bin(u), bx_unit_os(u));
+  cb->settings = bx_settings_of(s->p, s->profile, bx_unit_bin(u), u->target);
   var co: CmpOut* = cmp_prepare(s->p, s->ds, cb);
   free(cb);
   if (!co->ok) {
@@ -937,12 +951,25 @@ fn bx_unit_bin(u: BxUnit*) -> string {
   return u->b->name;
 }
 
-// The OS a unit's settings and import guards see ("none" when freestanding).
+// The OS a unit's import guards see: "linux" for riscv*-linux, "none" for a
+// freestanding triple or a board image.
 fn bx_unit_os(u: BxUnit*) -> string {
-  if (u->ti < 0) {
-    return "none";
+  return target_os(u->target);
+}
+
+// A kind the target cannot build stops the command.
+fn bx_check_kind(b: BinInfo*, target: string) {
+  if (s_eq(b->kind, "shared") && target_is_riscv(target)) {
+    fail_hint("bin " + b->name + " is a shared library, and " + target + " builds static executables and objects only", "build it with -t linux or -t windows");
   }
-  return u->target;
+  if (s_eq(b->kind, "object") && target_is_bare(target)) {
+    fail_hint("bin " + b->name + " is an object, and " + target + " writes board images only", "build it with -t riscv32-linux or -t riscv64-linux, whose objects link the same way");
+  }
+}
+
+// A board image: an exe or flat bin for riscv32-none or riscv64-none.
+fn bx_is_image(u: BxUnit*) -> bool {
+  return u->b != (BinInfo*)0 && (s_eq(u->b->kind, "exe") || s_eq(u->b->kind, "flat")) && target_is_bare(u->target);
 }
 
 fn bx_unit_gen(u: BxUnit*) -> string {
@@ -1636,13 +1663,28 @@ fn bx_check_support(s: BxSess*, u: BxUnit*, st: Settings*, flags: StrList*, bin:
 fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   var p: Project* = s->p;
   var bin: string = bx_unit_bin(u);
-  var st: Settings* = bx_settings_of(p, s->profile, bin, bx_unit_os(u));
+  var st: Settings* = bx_settings_of(p, s->profile, bin, u->target);
   var flags: StrList* = man_settings_flags(st, u->target);
   sl_extend(flags, p->opts->flags);
   if (u->ti < 0) {
     var kept: StrList* = cmp_freestanding_flags(flags);
     free(flags);
     flags = kept;
+  } else if (target_is_riscv(u->target)) {
+    var rv_kept: StrList* = bx_riscv_flags(flags);
+    free(flags);
+    flags = rv_kept;
+  }
+  var unit_label: string = "bin " + bin;
+  if (slen(bin) == 0) {
+    unit_label = bx_rel(p, u->file);
+  }
+  var target_why: string = cmp_target_problem(unit_label, u->target, st);
+  if (slen(target_why) > 0) {
+    fail(target_why);
+  }
+  if (bx_is_image(u)) {
+    bx_check_board(p, u->m, unit_label, u->target, st);
   }
   bx_check_support(s, u, st, flags, bin);
   if (s_eq(st->pgo, "use") && !fs_is_file(p_join(p->root, st->pgo_file))) {
@@ -1654,6 +1696,43 @@ fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   cmd_args(c, flags);
   free(flags);
   return st;
+}
+
+// flags without -s (no crash report on RISC-V, the compiler notes it on
+// every compile) and --check-effects (refused: no runtime for the stack).
+fn bx_riscv_flags(flags: StrList*) -> StrList* {
+  var out: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < flags->len) {
+    var f: string = sl_get(flags, i);
+    if (s_eq(f, "-s") || s_eq(f, "--stack-trace") || s_eq(f, "--check-effects")) {
+      verbose("dropping " + f + " for a RISC-V target");
+    } else {
+      sl_push(out, f);
+    }
+    i = i + 1;
+  }
+  return out;
+}
+
+// A board image needs a board the compiler has.
+fn bx_check_board(p: Project*, m: Mettle*, label: string, target: string, st: Settings*) {
+  var boards: StrList* = tc_boards(m);
+  var choices: string = sl_join(boards, ", ");
+  if (boards->len == 0) {
+    choices = "see mettle help riscv";
+  }
+  if (slen(st->board) == 0) {
+    fail_hint(label + ": a " + target + " image needs a board (the compiler's boards: " + choices + ")", "mb_set(\"board\", \"qemu-virt\") after mb_on(\"" + target + "\") in a profile, or after mb_for_bin");
+  }
+  if (boards->len > 0 && !sl_has(boards, st->board)) {
+    var hint: string = "the compiler's boards: " + choices;
+    var sug: string = man_suggest(st->board, boards);
+    if (slen(sug) > 0) {
+      hint = "did you mean `" + sug + "`? " + hint;
+    }
+    fail_hint(label + ": board = \"" + st->board + "\" is not a board of this compiler (" + m->path + ")", hint);
+  }
 }
 
 // The recorded profile a pgo = "use" build reads is an input of it.
@@ -1778,7 +1857,7 @@ fn bx_out_name(b: BinInfo*, target: string) -> string {
     }
     return "lib" + b->name + ".so";
   }
-  if (s_eq(b->kind, "flat")) {
+  if (s_eq(b->kind, "flat") || (s_eq(b->kind, "exe") && target_is_bare(target))) {
     return b->name + ".bin";
   }
   if (s_eq(b->kind, "object") || s_ends(target, "-none")) {
@@ -1792,6 +1871,30 @@ fn bx_out_name(b: BinInfo*, target: string) -> string {
 
 fn bx_out_path(t: TargetCtx*, b: BinInfo*) -> string {
   return t->out_dir + "/" + bx_out_name(b, t->target);
+}
+
+// The files a board image writes, by extension: outputs, else bin and elf.
+fn bx_image_outputs(st: Settings*) -> StrList* {
+  if (slen(st->outputs) == 0) {
+    var dflt: StrList* = sl_of("bin");
+    sl_push(dflt, "elf");
+    return dflt;
+  }
+  return man_outputs(st->outputs);
+}
+
+// The image file the compiler writes first: the first output that is not elf.
+fn bx_image_main(st: Settings*) -> string {
+  var outs: StrList* = bx_image_outputs(st);
+  defer free(outs);
+  var i: int64 = 0;
+  while (i < outs->len) {
+    if (!s_eq(sl_get(outs, i), "elf")) {
+      return sl_get(outs, i);
+    }
+    i = i + 1;
+  }
+  return "bin";
 }
 
 fn bx_remove_intermediates(out: string) {
@@ -1842,6 +1945,8 @@ fn bx_test_pass_stamp(p: Project*, fp: string) -> string {
 
 // One (bin, target) compile.
 struct BxJob {
+  elf: string;      // a board image's ELF file, else ""
+  extra: StrList*;  // a board image's other flat files (uf2, hex)
   b: BinInfo*;
   t: TargetCtx*;
   nl: NatLink*;
@@ -1855,9 +1960,22 @@ struct BxJob {
 }
 
 // The compiler arguments that make the output of the unit's bin kind.
-fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, outp: string) {
+fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, j: BxJob*) {
   var b: BinInfo* = u->b;
+  var outp: string = j->outp;
   var file: string = bx_rel(p, u->entry);
+  if (bx_is_image(u)) {
+    cmd_path(c, file);
+    cmd_arg(c, "--target");
+    cmd_arg(c, u->target);
+    cmd_arg(c, "--emit-flat");
+    cmd_path(c, bx_rel(p, outp));
+    if (slen(j->elf) > 0) {
+      cmd_arg(c, "--emit-elf");
+      cmd_path(c, bx_rel(p, j->elf));
+    }
+    return;
+  }
   if (s_eq(b->kind, "flat")) {
     cmd_path(c, file);
     cmd_arg(c, "--target");
@@ -1871,6 +1989,9 @@ fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, outp: string) {
     if (slen(b->triple) > 0) {
       cmd_arg(c, "--target");
       cmd_arg(c, b->triple);
+    } else if (target_is_riscv(u->target)) {
+      cmd_arg(c, "--target");
+      cmd_arg(c, u->target);
     }
     cmd_arg(c, "-o");
     cmd_path(c, bx_rel(p, outp));
@@ -1883,8 +2004,53 @@ fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, outp: string) {
     cmd_arg(c, p_base(outp));
   }
   cmd_path(c, file);
+  if (target_is_riscv(u->target)) {
+    cmd_arg(c, "--target");
+    cmd_arg(c, u->target);
+  }
   cmd_arg(c, "-o");
   cmd_path(c, bx_rel(p, outp));
+}
+
+// c writing its flat image to outp instead, without --emit-elf.
+fn bx_cmd_reflat(c: Cmd*, outp: string) -> Cmd* {
+  var d: Cmd* = cmd_new(c->tool);
+  var i: int64 = 0;
+  while (i < c->args->len) {
+    var a: string = sl_get(c->args, i);
+    if (s_eq(a, "--emit-elf")) {
+      i = i + 2;
+    } else if (s_eq(a, "--emit-flat")) {
+      cmd_arg(d, a);
+      cmd_path(d, outp);
+      i = i + 2;
+    } else {
+      if (cmd_is_path(c, i)) {
+        cmd_path(d, a);
+      } else {
+        cmd_arg(d, a);
+      }
+      i = i + 1;
+    }
+  }
+  sl_extend(d->env, c->env);
+  d->cwd = c->cwd;
+  return d;
+}
+
+// Every file the job writes is there.
+fn bx_job_files(j: BxJob*) -> bool {
+  if (!fs_is_file(j->outp) || (slen(j->elf) > 0 && !fs_is_file(j->elf))) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < j->extra->len) {
+    if (!fs_is_file(sl_get(j->extra, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
 }
 
 // Prepares the compile of one unit; a Fresh output is reported and
@@ -1901,12 +2067,30 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   j->u = u;
   j->g = g;
   j->outp = bx_out_path(t, b);
+  j->elf = s_empty();
+  j->extra = sl_new();
   var c: Cmd* = tc_cmd(m);
   j->c = c;
   var st: Settings* = bx_add_flags(c, s, u);
+  if (bx_is_image(u)) {
+    var base: string = t->out_dir + "/" + b->name;
+    j->outp = base + "." + bx_image_main(st);
+    var outs: StrList* = bx_image_outputs(st);
+    var oi: int64 = 0;
+    while (oi < outs->len) {
+      var ext: string = sl_get(outs, oi);
+      if (s_eq(ext, "elf")) {
+        j->elf = base + ".elf";
+      } else if (!s_eq(base + "." + ext, j->outp)) {
+        sl_push(j->extra, base + "." + ext);
+      }
+      oi = oi + 1;
+    }
+    free(outs);
+  }
   bx_add_include(c, p, s->ds, bx_unit_gen(u));
   cmd_args(c, nl->mettle_args);
-  bx_kind_args(c, p, u, j->outp);
+  bx_kind_args(c, p, u, j);
   sl_extend(c->env, nl->env);
   bx_diag_env(c);
   c->cwd = p->root;
@@ -1921,6 +2105,11 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   h_str(&h, nl->fingerprint);
   bx_hash_pgo(&h, p, st);
   free(st);
+  var xh: int64 = 0;
+  while (xh < j->extra->len) {
+    h_str(&h, p_base(sl_get(j->extra, xh)));
+    xh = xh + 1;
+  }
   j->fp = h_hex(&h);
   var tag: string = "";
   if (s->tests) {
@@ -1932,7 +2121,7 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
     j->state = 3;
     return j;
   }
-  if (fs_is_file(j->outp) && bx_stamp_ok(p, j->stamp, j->fp)) {
+  if (bx_job_files(j) && bx_stamp_ok(p, j->stamp, j->fp)) {
     if (s->tests) {
       verbose("Fresh " + bx_label(s, b, t));
     } else {
@@ -1973,6 +2162,19 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
   if (!fs_is_file(j->outp)) {
     error_msg("the compiler succeeded but " + bx_show(j->outp) + " is missing");
     return 1;
+  }
+  var xi: int64 = 0;
+  while (xi < j->extra->len) {
+    var xp: string = sl_get(j->extra, xi);
+    var xc: Cmd* = bx_cmd_reflat(j->c, bx_rel(p, xp));
+    var xcap: Captured = proc_capture_all(xc);
+    free(xc);
+    bx_print_block(bx_compiler_output(xcap.out));
+    if (xcap.code != 0 || !fs_is_file(xp)) {
+      error_msg("could not write " + bx_show(xp) + " (" + t->target + ", " + t->profile + ")");
+      return 1;
+    }
+    xi = xi + 1;
   }
   bx_copy_beside(j->nl, t);
   fs_write(j->stamp, j->fp + "\n");
@@ -2106,6 +2308,43 @@ fn bx_unit_tctx(s: BxSess*, u: BxUnit*, ctxs: TargetCtx**, nls: NatLink**) -> in
   return k;
 }
 
+// C code and C libraries stop a RISC-V build: mbuild has no RISC-V C toolchain.
+fn bx_rv_no_native(s: BxSess*, target: string) {
+  var who: string = s_empty();
+  if (bx_has_native(s->p->man)) {
+    who = "this project";
+  }
+  var i: int64 = 0;
+  while (slen(who) == 0 && i < s->ds->n) {
+    if (s->ds->mods[i].man != (Manifest*)0 && bx_has_native(s->ds->mods[i].man)) {
+      who = "dependency " + s->ds->mods[i].module;
+    }
+    i = i + 1;
+  }
+  if (slen(who) > 0) {
+    fail_hint(who + " has C code or C libraries ([c], [link]), and mbuild builds C for linux and windows only, not " + target, "build it with -t linux or -t windows");
+  }
+}
+
+fn bx_has_native(m: Manifest*) -> bool {
+  var keys: StrList* = sl_of("c.sources");
+  defer free(keys);
+  sl_push(keys, "c.libs");
+  sl_push(keys, "link.libs");
+  sl_push(keys, "link.pkgconfig");
+  var i: int64 = 0;
+  while (i < keys->len) {
+    var l: StrList* = man_os_list(m, sl_get(keys, i), "linux");
+    var n: int64 = l->len;
+    free(l);
+    if (n > 0) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 // Builds every unit and the dependencies' bins (mb_dep_bin), then runs the
 // post-build hooks. 0 on success.
 fn bx_build_units(s: BxSess*, us: BxUnits*) -> int32 {
@@ -2141,7 +2380,12 @@ fn bx_compile_units(s: BxSess*, us: BxUnits*, built: StrList*) -> int32 {
   while (ti < s->targets->len) {
     ctxs[ti] = bx_targetctx(s, ti);
     s->cur_t = ctxs[ti];
-    nls[ti] = nat_prepare(s->p, s->ds, ctxs[ti]);
+    if (target_is_riscv(ctxs[ti]->target)) {
+      bx_rv_no_native(s, ctxs[ti]->target);
+      nls[ti] = natlink_empty();
+    } else {
+      nls[ti] = nat_prepare(s->p, s->ds, ctxs[ti]);
+    }
     s->cur_nl = nls[ti];
     ti = ti + 1;
   }
@@ -2338,7 +2582,12 @@ export fn build_cmd_build(p: Project*) -> int32 {
 }
 
 fn bx_runnable(b: BinInfo*) -> bool {
-  return s_eq(b->kind, "exe") && !bx_freestanding(b);
+  return (s_eq(b->kind, "exe") && !bx_freestanding(b)) || bx_rv_image_bin(b);
+}
+
+// A bin declared as a RISC-V board image (its own riscv*-none triple).
+fn bx_rv_image_bin(b: BinInfo*) -> bool {
+  return target_is_bare(b->triple) && (s_eq(b->kind, "exe") || s_eq(b->kind, "flat"));
 }
 
 // The one bin `run` / `live` starts: named, the only runnable one, or the
@@ -2380,10 +2629,10 @@ fn bx_run_bin(p: Project*, cmd: string) -> BinSet* {
   }
   var bs: BinSet* = bx_select_bins(p, pick);
   var b: BinInfo* = &bs->items[0];
-  if (bx_freestanding(b)) {
+  if (bx_freestanding(b) && !bx_rv_image_bin(b)) {
     fail_hint("bin " + b->name + " is freestanding (" + b->triple + "): mbuild cannot run it", "write a project command that starts your emulator: fn cmd_qemu");
   }
-  if (!s_eq(b->kind, "exe")) {
+  if (!s_eq(b->kind, "exe") && !bx_rv_image_bin(b)) {
     fail("bin " + b->name + " is a " + b->kind + " bin, not a program: mbuild " + cmd + " needs kind exe");
   }
   return bs;
@@ -2394,7 +2643,7 @@ fn bx_run_targets(p: Project*) -> StrList* {
   var targets: StrList* = build_targets(p);
   if (targets->len > 1) {
     if (p->opts->targets->len > 0) {
-      fail_hint("`mbuild run` runs one target", "pass -t linux or -t windows");
+      fail_hint("`mbuild run` runs one target", "pass one -t, such as -t linux or -t riscv64-linux");
     }
     var host: string = sys_os();
     if (!sl_has(targets, host)) {
@@ -2406,6 +2655,7 @@ fn bx_run_targets(p: Project*) -> StrList* {
 }
 
 export fn build_cmd_run(p: Project*) -> int32 {
+  bx_timeout_ms(p, false);
   var bs: BinSet* = bx_run_bin(p, "run");
   var services: bool = p->man->nservices > 0 && !sl_has(p->opts->rest, "--no-services");
   var svc_bins: StrList* = sl_new();
@@ -2443,7 +2693,10 @@ export fn build_cmd_run(p: Project*) -> int32 {
   var t: TargetCtx* = bx_targetctx(s, 0);
   g_bx_t = t;
   var outp: string = bx_out_path(t, &bs->items[0]);
-  var c: Cmd* = tc_run_program_cmd(t->target, outp);
+  var c: Cmd* = bx_emu_cmd(s, &bs->items[0], t, &outp);
+  if (c == (Cmd*)0) {
+    c = tc_run_program_cmd(t->target, outp);
+  }
   if (c == (Cmd*)0) {
     fail_hint("cannot run a " + t->target + " program on this " + sys_os() + " host", "the binary is at " + bx_show(outp));
   }
@@ -2458,8 +2711,80 @@ export fn build_cmd_run(p: Project*) -> int32 {
   if (services) {
     return svc_run(p, t->out_dir, target_exe_ext(t->target), svc_bins, c, bx_show(outp));
   }
-  status("Running", bx_show(outp));
-  return proc_run(c);
+  var emu: bool = target_is_riscv(bx_run_target(&bs->items[0], t));
+  var ms: int64 = bx_timeout_ms(p, emu);
+  var how: string = s_empty();
+  if (emu) {
+    how = " (" + p_base(c->tool.path) + ")";
+  }
+  var shown: string = bx_show(outp);
+  status("Running", shown + how);
+  if (ms <= 0) {
+    return proc_run(c);
+  }
+  var timed_out: bool = false;
+  var rc: int32 = proc_run_timeout(c, ms, &timed_out);
+  if (timed_out) {
+    error_msg(shown + " was stopped after " + bx_secs(ms) + " (--timeout " + s_int(ms / 1000) + ")");
+  }
+  return rc;
+}
+
+// The target a bin runs as: its own riscv*-none triple, else the session's.
+fn bx_run_target(b: BinInfo*, t: TargetCtx*) -> string {
+  if (bx_rv_image_bin(b)) {
+    return b->triple;
+  }
+  return t->target;
+}
+
+// --timeout SECS in ms; else 30 s for a program under an emulator, else 0 (none).
+fn bx_timeout_ms(p: Project*, emulated: bool) -> int64 {
+  var i: int64 = 0;
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_starts(a, "--timeout=")) {
+      var v: string = s_from(a, 10);
+      var n: int64 = s_to_int(v);
+      if (n <= 0 && !s_eq(v, "0")) {
+        fail("--timeout needs a number of seconds, not `" + v + "`");
+      }
+      return n * 1000;
+    }
+    i = i + 1;
+  }
+  if (emulated) {
+    return 30000;
+  }
+  return 0;
+}
+
+// The emulator command of a RISC-V bin, else 0 (it runs natively or through
+// wine). *outp becomes the file the emulator loads.
+fn bx_emu_cmd(s: BxSess*, b: BinInfo*, t: TargetCtx*, outp: string*) -> Cmd* {
+  var target: string = bx_run_target(b, t);
+  if (!target_is_riscv(target)) {
+    return (Cmd*)0;
+  }
+  if (!target_is_bare(target)) {
+    return rv_program_cmd(target, *outp);
+  }
+  var dir: string = t->out_dir;
+  if (bx_rv_image_bin(b)) {
+    dir = p_dir(t->out_dir);
+    dir = p_dir(dir) + "/" + target + "/" + p_base(t->out_dir);
+  }
+  var st: Settings* = bx_settings_of(s->p, s->profile, b->name, target);
+  defer free(st);
+  var outs: StrList* = bx_image_outputs(st);
+  defer free(outs);
+  var base: string = dir + "/" + b->name;
+  var c: Cmd* = rv_image_cmd(s->p, bx_host_mettle(s), target, base, outs, st);
+  *outp = base + "." + bx_image_main(st);
+  if (sl_has(outs, "bin")) {
+    *outp = base + ".bin";
+  }
+  return c;
 }
 
 // mbuild live [BIN] [-p PROFILE] [-- args]: `mettle live` with the build's
@@ -2850,6 +3175,10 @@ fn bx_run_test_files(s: BxSess*, files: StrList*, n: BxTally*) {
       bx_add_include(c, p, s->ds, bx_unit_gen(u));
       var st: Settings* = bx_add_flags(c, s, u);
       free(st);
+      if (target_is_riscv(target)) {
+        // the interpreter runs @test functions on the host
+        bx_drop_valued(c, "--board --isa --abi --objective");
+      }
       if (slen(p->opts->filter) > 0) {
         cmd_arg(c, "--filter=" + p->opts->filter);
       }
@@ -2894,6 +3223,28 @@ fn bx_run_test_files(s: BxSess*, files: StrList*, n: BxTally*) {
   }
 }
 
+// c without the flags in names (space-separated) and their values.
+fn bx_drop_valued(c: Cmd*, names: string) {
+  var drop: StrList* = s_split(names, 32);
+  defer free(drop);
+  var args: StrList* = c->args;
+  var kinds: StrList* = c->kinds;
+  c->args = sl_new();
+  c->kinds = sl_new();
+  var i: int64 = 0;
+  while (i < args->len) {
+    if (sl_has(drop, sl_get(args, i))) {
+      i = i + 2;
+    } else {
+      sl_push(c->args, sl_get(args, i));
+      sl_push(c->kinds, sl_get(kinds, i));
+      i = i + 1;
+    }
+  }
+  free(args);
+  free(kinds);
+}
+
 // The test programs: built like the bins (into .mbuild/test-bins/), then run
 // from the root. One that passed with the same compile fingerprint is cached.
 fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
@@ -2921,14 +3272,29 @@ fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
       say(green("ok") + "     " + shown + " " + dim("(cached)"));
       n->cached = n->cached + 1;
     } else {
-      var c: Cmd* = tc_run_program_cmd(j->t->target, j->outp);
+      var run_at: string = j->outp;
+      var c: Cmd* = bx_emu_cmd(s, j->b, j->t, &run_at);
+      if (c == (Cmd*)0) {
+        c = tc_run_program_cmd(j->t->target, j->outp);
+      }
       if (c == (Cmd*)0) {
         say(red("FAILED") + " " + shown + ": cannot run a " + j->t->target + " program on this " + sys_os() + " host");
         n->failed = n->failed + 1;
       } else {
         c->cwd = p->root;
-        var cap: Captured = proc_capture_all(c);
-        if (cap.code == 0) {
+        var ms: int64 = bx_timeout_ms(p, target_is_riscv(bx_run_target(j->b, j->t)));
+        var timed_out: bool = false;
+        var cap: Captured;
+        if (ms > 0) {
+          cap = proc_capture_timeout(c, ms, &timed_out);
+        } else {
+          cap = proc_capture_all(c);
+        }
+        if (timed_out) {
+          bx_print_block(cap.out);
+          say(red("FAILED") + " " + shown + " (stopped after " + bx_secs(ms) + ", --timeout)");
+          n->failed = n->failed + 1;
+        } else if (cap.code == 0) {
           if (g_verbose) {
             bx_print_block(cap.out);
           }
@@ -2979,6 +3345,7 @@ fn bx_filter_bins(p: Project*, all: BinSet*, s: string) -> BinSet* {
 // mbuild test [NAME | FILE]...: @test files, then test programs, one summary.
 export fn build_cmd_test(p: Project*) -> int32 {
   var t0: int64 = sys_now_ms();
+  bx_timeout_ms(p, false);
   var all_progs: BinSet* = bx_test_bins(p);
   var prog_names: StrList* = bx_bin_names(all_progs);
   defer free(prog_names);
@@ -3050,17 +3417,27 @@ export fn build_cmd_check(p: Project*) -> int32 {
   return bx_check_set(p, bx_select_bins(p, bx_positional(p->opts->rest)));
 }
 
+// --target and the output of a compile only checked: an object, or for a
+// board target the flat image it can only write.
+fn bx_scratch_out(c: Cmd*, p: Project*, u: BxUnit*, out: string) {
+  if (u->ti < 0 || target_is_riscv(u->target)) {
+    cmd_arg(c, "--target");
+    cmd_arg(c, u->target);
+  }
+  if (target_is_bare(u->target)) {
+    cmd_arg(c, "--emit-flat");
+  } else {
+    cmd_arg(c, "-o");
+  }
+  cmd_path(c, bx_rel(p, out));
+}
+
 // The compiler's check of u's entry: an object at obj (to be deleted).
 fn bx_check_cmd(s: BxSess*, u: BxUnit*, obj: string) -> Cmd* {
   var p: Project* = s->p;
   var c: Cmd* = tc_cmd(u->m);
   cmd_path(c, bx_rel(p, u->entry));
-  if (u->ti < 0) {
-    cmd_arg(c, "--target");
-    cmd_arg(c, u->b->triple);
-  }
-  cmd_arg(c, "-o");
-  cmd_path(c, bx_rel(p, obj));
+  bx_scratch_out(c, p, u, obj);
   bx_add_include(c, p, s->ds, bx_unit_gen(u));
   var st: Settings* = bx_add_flags(c, s, u);
   free(st);
@@ -3970,12 +4347,8 @@ fn bx_verify(p: Project*, with_test: bool) -> BxVerify* {
     var stem: string = tmp + "/verify-" + u->target + "-" + s_replace_byte(u->b->name, 47, 95);
     var c: Cmd* = tc_cmd(u->m);
     cmd_path(c, bx_rel(p, u->entry));
-    if (u->ti < 0) {
-      cmd_arg(c, "--target");
-      cmd_arg(c, u->b->triple);
-    }
-    cmd_arg(c, "-o");
-    cmd_path(c, bx_rel(p, stem + ".o"));
+    var vobj: string = stem + ".o";
+    bx_scratch_out(c, p, u, vobj);
     bx_add_include(c, p, s->ds, bx_unit_gen(u));
     var st: Settings* = bx_add_flags(c, s, u);
     free(st);
@@ -4792,9 +5165,10 @@ fn bx_init_cmds() {
   bx_def("build", "build the programs", "mbuild build [BINS...] [-t T] [-r | -p PROFILE]", "project.md");
   bx_ex("mbuild build", "");
   bx_ex("mbuild build -r", "release");
-  bx_ex("mbuild build -t all", "linux and windows");
+  bx_ex("mbuild build -t all", "linux, windows, riscv64-linux and riscv32-linux");
+  bx_ex("mbuild build -t riscv32-none", "a board image: build/riscv32-none/debug/NAME.bin and .elf");
   bx_ex("mbuild build server", "one bin");
-  bx_fl("-t T", "linux, windows, all or host (repeatable)");
+  bx_fl("-t T", "linux, windows, riscv64-linux, riscv32-linux, riscv64-none, riscv32-none, all or host (repeatable)");
   bx_fl("-r, -p NAME", "the release profile, or another one");
   bx_fl("--set KEY=VALUE", "a typed build setting (repeatable)");
   bx_fl("--flag ARG", "a raw compiler flag (repeatable)");
@@ -4802,16 +5176,21 @@ fn bx_init_cmds() {
   bx_fl("--no-hooks", "skip hook_pre_build and hook_post_build");
   bx_fl("--force", "rebuild what's fresh too");
   bx_note("output goes to build/<target>/<profile>/.");
+  bx_note("riscv64-none and riscv32-none need a board (mb_set(\"board\", ...) after mb_on); outputs picks the files: bin, uf2 (pico2), elf, hex. -t all adds them only when mb_targets lists them.");
   bx_note("imports of packages that aren't dependencies yet get added, unless --locked or --offline.");
   bx_note("a package with no bins (a library) is type-checked instead.");
   bx_def("run", "build and run a program", "mbuild run [BIN] [-t T] [-r | -p PROFILE] [-- ARGS...]", "project.md");
   bx_ex("mbuild run", "");
   bx_ex("mbuild run -- --port 8080", "args after -- go to the program");
   bx_ex("mbuild run -t windows", "through wine");
+  bx_ex("mbuild run -t riscv64-linux", "under qemu-riscv64");
+  bx_ex("mbuild run -t riscv32-none", "a board image: qemu-virt on qemu-system, pico2 on rvsim");
   bx_fl("-t T", "one target (default: the host)");
   bx_fl("-r, -p NAME", "the release profile, or another one");
+  bx_fl("--timeout SECS", "stop the program after SECS (default 30 under an emulator, else none)");
   bx_fl("--no-services", "don't start the mb_service processes");
-  bx_note("the exit code is the program's.");
+  bx_note("the exit code is the program's; 124 when --timeout stopped it.");
+  bx_note("riscv*-linux runs on qemu-riscv64 / qemu-riscv32 from MBUILD_QEMU_USER_DIR, ~/.local/opt/qemu-user/bin or PATH. board pico2 runs on rvsim (PATH, MBUILD_RVSIM, else built once into $MBUILD_HOME/tools from the compiler's Mettle checkout).");
   bx_note("mb_service processes start first, in order, each waited for on its port; they stop when the program exits. output in .mbuild/logs/NAME.log.");
   bx_def("live", "run a program and patch it as you edit", "mbuild live [BIN] [-p PROFILE] [--preview SIDE] [-- ARGS...]", "project.md");
   bx_ex("mbuild live", "");
@@ -4839,7 +5218,10 @@ fn bx_init_cmds() {
   bx_ex("mbuild test src/lex.mettle", "");
   bx_ex("mbuild test sodium", "only the test program sodium");
   bx_ex("mbuild test -r", "test programs built release");
+  bx_ex("mbuild test -t riscv64-linux", "test programs under qemu-riscv64");
   bx_fl("--filter S", "only tests whose names contain S");
+  bx_fl("-t T", "the target the test programs are built for; RISC-V ones run under an emulator, as mbuild run does");
+  bx_fl("--timeout SECS", "stop each test program after SECS (default 30 under an emulator, else none)");
   bx_fl("--force", "run cached tests too");
   bx_note("@test functions run in the compiler's interpreter, which can't call externs.");
   bx_note("test programs (mb_test_bin, else tests/NAME_test.mettle with fn main) are built like the bins, C code included, and pass on exit 0.");
@@ -5024,7 +5406,7 @@ fn bx_global_rows(l: StrList*, r: StrList*) {
   sl_push(l, "-v, --verbose");   sl_push(r, "print every command mbuild runs");
   sl_push(l, "-q, --quiet");     sl_push(r, "only errors and program output");
   sl_push(l, "--color WHEN");    sl_push(r, "auto (default), always or never");
-  sl_push(l, "-t, --target T");  sl_push(r, "linux, windows, all or host (repeatable)");
+  sl_push(l, "-t, --target T");  sl_push(r, "linux, windows, riscv64-linux, riscv32-linux, riscv64-none, riscv32-none, all or host (repeatable)");
   sl_push(l, "-r, --release");   sl_push(r, "the release profile");
   sl_push(l, "-p, --profile NAME"); sl_push(r, "another profile");
   sl_push(l, "-j, --jobs N");    sl_push(r, "parallel compiles");
@@ -5380,6 +5762,10 @@ fn bx_complete_kind(p: Project*, kind: string, out: StrList*) {
   if (s_eq(kind, "targets")) {
     sl_push(out, "linux");
     sl_push(out, "windows");
+    sl_push(out, "riscv64-linux");
+    sl_push(out, "riscv32-linux");
+    sl_push(out, "riscv64-none");
+    sl_push(out, "riscv32-none");
     sl_push(out, "all");
     sl_push(out, "host");
     return;

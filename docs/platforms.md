@@ -1,7 +1,8 @@
 # Platforms
 
-mbuild runs on Linux and on Windows, and builds for two targets: `linux`
-(ELF executables) and `windows` (PE `.exe` files), both x86-64. The Mettle
+mbuild runs on Linux and on Windows, and builds for `linux` (ELF
+executables) and `windows` (PE `.exe` files), both x86-64, and for
+[RISC-V](#risc-v). The Mettle
 compiler only links executables for the OS it runs on, so each target has
 its own compiler, and mbuild starts each where it can run.
 
@@ -25,8 +26,10 @@ Starting wine costs a second or two per compile; Fresh builds start nothing.
 
 Which targets a command builds:
 
-- `-t linux`, `-t windows`, `-t all` or `-t host`. Repeat it or separate with
-  commas: `-t linux,windows`.
+- `-t linux`, `-t windows`, a [RISC-V](#risc-v) target, `-t all` or
+  `-t host`. Repeat it or separate with commas: `-t linux,windows`. `all` is
+  linux, windows, riscv64-linux and riscv32-linux, plus the board targets
+  `mb_targets` lists.
 - Without `-t`, `build`, `check` and `doctor` use `mb_targets`, else the
   host.
 - `run`, `test`, `live` and `mettle` use the host. `run` takes one target:
@@ -152,6 +155,127 @@ target is `windows`.
 Linux mbuild and wine mbuild see the compilers under different paths, so
 switching between them rebuilds once ([incremental builds](incremental.md)).
 
+## RISC-V
+
+| `-t` | Builds | `mbuild run` / `test` runs it on |
+|---|---|---|
+| `riscv64-linux`, `riscv32-linux` | a static ELF executable | `qemu-riscv64` / `qemu-riscv32` |
+| `riscv64-none`, `riscv32-none` | a board image | board `qemu-virt`: `qemu-system-riscv64` / `-riscv32`; `pico2`: rvsim |
+
+The host's compiler builds them all; output goes to
+`build/<target>/<profile>/` as for linux. C code (`[c]`, `[link]`) and
+shared bins are refused for RISC-V.
+
+```text
+$ mbuild run -t riscv64-linux
+   Compiling hello (riscv64-linux, debug)
+    Finished in 0.0s
+     Running build/riscv64-linux/debug/hello (qemu-riscv64)
+Hello from hello!
+$ echo $?
+3
+```
+
+A board target needs a board. Set it, and the other per-target settings,
+after `mb_on(TARGET)` in a profile, or for the bin:
+
+```text
+$ mbuild build -t riscv32-none
+error: bin hello: a riscv32-none image needs a board (the compiler's boards: esp32c3, esp32c6, esp32h2, esp32p4, pico2, qemu-virt, sifive-e)
+  help: mb_set("board", "qemu-virt") after mb_on("riscv32-none") in a profile, or after mb_for_bin
+```
+
+```mettle
+  mb_profile("debug");
+  mb_on("riscv32-none");
+  mb_set("board", "qemu-virt");
+  mb_on("");
+```
+
+```text
+$ mbuild run -t riscv32-none
+   Compiling hello (riscv32-none, debug)
+    Finished in 0.0s
+     Running build/riscv32-none/debug/hello.bin (qemu-system-riscv32)
+Hello from hello!
+```
+
+The image exits through QEMU's test device, so the exit status is what
+`main` returned (3 here).
+
+| Setting | Values | |
+|---|---|---|
+| `board` | a board of the compiler (`mettle help riscv`) | board targets only |
+| `outputs` | `bin`, `uf2`, `elf`, `hex` (default `bin, elf`) | `NAME.bin` raw, `NAME.uf2` (pico2 only), `NAME.elf` for a debugger (with `-g`: `debug-info = true`), `NAME.hex` Intel HEX |
+| `objective` | `balanced`, `size`, `speed` | what `--release` optimizes for |
+| `isa` | e.g. `rv32imac_zba_zbb_zbs_zcb_zcmp` | starts with the target's `rv32` / `rv64` |
+| `abi` | `ilp32`, `ilp32e`, `ilp32f`, `ilp32d`, `lp64`, `lp64f`, `lp64d` | of the target's width; the compiler has no `lp64e` |
+
+`optimize` and `debug-info` work as on linux; `stack-trace` and
+`check-effects` are left out (a RISC-V program has no crash report and no
+effect runtime). The compiler has no position-independent executables: a
+`riscv*-linux` program is static. A setting on the wrong target stops the
+build and says where it goes:
+
+```text
+error: bin hello: board = "qemu-virt" is for a board image (riscv32-none or riscv64-none), and this is "linux"; set it after mb_on("riscv32-none") in a profile, or for that bin only
+```
+
+A Pico 2 image runs on rvsim, the Mettle project's RP2350 simulator.
+`rvsim-until-ms`, `exit-on-uart`, `uart-script` (bytes for the console's
+input) and `pins` set it up; the console is its output:
+
+```mettle
+fn project() {
+  mb_package("blink", "0.1.0");
+  mb_targets("riscv32-none");
+  mb_for_bin("blink");
+  mb_set("board", "pico2");
+  mb_set("outputs", "uf2, bin, elf");
+  mb_set("rvsim-until-ms", "1000");
+  mb_set("exit-on-uart", "done");
+}
+```
+
+```text
+$ mbuild run
+   Compiling blink (riscv32-none, debug)
+    Finished in 1.0s
+    Building rvsim from /home/you/Mettle/tools/riscv-sim
+     Running build/riscv32-none/debug/blink.bin (rvsim)
+blink 0
+blink 1
+blink 2
+donerp2350: UART0 printed the --exit-on-uart string at 3.854 ms
+```
+
+`build/riscv32-none/debug/blink.uf2` is the file for the board's drive.
+Other boards have no emulator here: `mbuild run` says so, and a project
+command (`fn cmd_flash`) can flash them.
+
+Under an emulator `run` and `test` stop the program after 30 seconds, or
+`--timeout SECS`; the status is then 124:
+
+```text
+$ mbuild run spin -t riscv64-linux --timeout 1
+   Compiling spin (riscv64-linux, debug)
+    Finished in 0.0s
+     Running build/riscv64-linux/debug/spin (qemu-riscv64)
+spinning
+error: build/riscv64-linux/debug/spin was stopped after 1.0s (--timeout 1)
+```
+
+`@test` functions run in the compiler's interpreter whatever the target;
+test programs run on the emulator.
+
+Where the emulators come from:
+
+| Program | Found as |
+|---|---|
+| `qemu-riscv64`, `qemu-riscv32` | in `MBUILD_QEMU_USER_DIR`, else `~/.local/opt/qemu-user/bin`, else PATH |
+| `qemu-system-riscv64`, `qemu-system-riscv32` | PATH (Debian: `qemu-system-misc`) |
+| `rvsim` | `MBUILD_RVSIM`, PATH, `$MBUILD_HOME/tools/rvsim`; else built there once with gcc from `tools/riscv-sim/rvsim.c` of the Mettle checkout `$METTLE` or the compiler comes from |
+
 ## Windows programs and batch files
 
 A program name without an extension is tried with `.com`, `.exe`, `.bat` and
@@ -179,6 +303,8 @@ script.
 | `METTLE` | the compiler for the host target |
 | `MBUILD_METTLE_API` | the release API `mbuild toolchain install` asks (default `https://api.github.com/repos/The-Mettle-Project/Mettle`) |
 | `MBUILD_MAKE`, `MBUILD_GIT` | `make` and `git` for `toolchain install --from` |
+| `MBUILD_QEMU_USER_DIR` | the directory of `qemu-riscv64` and `qemu-riscv32` |
+| `MBUILD_RVSIM` | the rvsim that runs `pico2` images |
 
 ### Registries
 

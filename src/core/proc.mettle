@@ -52,6 +52,27 @@ export fn proc_capture_all(c: Cmd*) -> Captured {
   return sys_capture(c, true);
 }
 
+// proc_run stopped after ms (0: no limit); *timed_out when it was.
+export fn proc_run_timeout(c: Cmd*, ms: int64, timed_out: bool*) -> int32 {
+  verbose(cmd_display(c));
+  return sys_run_timeout(c, s_empty(), ms, timed_out);
+}
+
+// proc_capture_all stopped after ms (0: no limit), stdin from /dev/null.
+export fn proc_capture_timeout(c: Cmd*, ms: int64, timed_out: bool*) -> Captured {
+  verbose(cmd_display(c));
+  var log: string = fs_temp_dir() + "/run-" + hash_string(sys_cwd() + "{sys_now_ms()}") + ".log";
+  var r: Captured;
+  r.code = sys_run_timeout(c, log, ms, timed_out);
+  r.out = s_empty();
+  var rd: FsRead = fs_read(log);
+  if (rd.ok) {
+    r.out = rd.data;
+  }
+  sys_remove_file(log);
+  return r;
+}
+
 export fn proc_jobs() -> int64 {
   var n: int64 = s_to_int(s_trim(env_get("MBUILD_JOBS")));
   if (n > 0) {

@@ -139,7 +139,7 @@ cd "$W/noproj"
 mb __complete commands
 check "__complete commands outside a project: the help table's commands" sh -c '[ "$("$1" help | awk "/^run .mbuild help/ {exit} /^  [a-z]/ {print \$1}")" = "$(cat "$0/last.out")" ]' "$S" "$MB"
 mb __complete targets
-check "__complete targets" lines_are linux windows all host
+check "__complete targets" lines_are linux windows riscv64-linux riscv32-linux riscv64-none riscv32-none all host
 mb __complete targets w
 check "__complete takes a prefix" lines_are windows
 for kind in bins tests deps components profiles; do
@@ -149,7 +149,7 @@ done
 bcomp build ""
 check "bash: bins outside a project: nothing" empty_out
 bcomp -t ""
-check "bash: targets outside a project" lines_are linux windows all host
+check "bash: targets outside a project" lines_are linux windows riscv64-linux riscv32-linux riscv64-none riscv32-none all host
 bcomp ge
 check "bash: commands outside a project" lines_are get
 cd "$W/comp"
@@ -216,7 +216,7 @@ check "bash: -p takes profiles" lines_are debug release fast
 bcomp build --profile = f
 check "bash: --profile=NAME" lines_are fast
 bcomp build -t ""
-check "bash: -t takes targets" lines_are linux windows all host
+check "bash: -t takes targets" lines_are linux windows riscv64-linux riscv32-linux riscv64-none riscv32-none all host
 bcomp -t windows bu
 check "bash: a flag's value is not the command" lines_are build
 bcomp -j 2 run a
@@ -399,8 +399,28 @@ fn project() {
   mb_bin_kind("boot", "flat", "x86_64-none");
   mb_for_bin("boot");
   mb_set("image-base", "0x100000");
+  mb_bin("obj", "src/lib.mettle");
+  mb_bin_kind("obj", "object", "");
+  mb_bin("rv", "src/boot.mettle");
+  mb_bin_kind("rv", "flat", "riscv32-none");
+  mb_for_bin("rv");
+  mb_set("image-base", "0x80000000");
+  mb_set("board", "qemu-virt");
+  mb_set("objective", "size");
   mb_profile("release");
   mb_set("crash-report", "false");
+}
+
+// outs: mb_out of every bin, and whether that file exists
+fn cmd_outs(a: MbArgs*) -> int32 {
+  var bins: string[4] = ["lib", "boot", "obj", "rv"];
+  var i: int32 = 0;
+  while (i < 4) {
+    var path: string = mb_out(bins[i], "linux", "debug");
+    if (mb_exists(path)) { mb_say("exists " + path); } else { mb_say("missing " + path); }
+    i = i + 1;
+  }
+  return 0;
 }
 EOF
 printf 'export fn add(a: int32, b: int32) -> int32 { return a + b; }\n' > src/lib.mettle
@@ -408,6 +428,14 @@ printf 'fn main() -> int32 { return 7; }\n' > src/boot.mettle
 mb build
 check "shared bin is an ELF shared object" sh -c 'file build/linux/debug/liblib.so | grep -q "shared object"'
 check "flat bin" test -f build/x86_64-none/debug/boot.bin
+check "riscv flat bin" test -f build/riscv32-none/debug/rv.bin
+mb profiles
+check "board and objective" has "--image-base 0x80000000 --board qemu-virt --objective size"
+mb outs
+check "mb_out: shared" has "exists $W/kinds/build/linux/debug/liblib.so"
+check "mb_out: flat" has "exists $W/kinds/build/x86_64-none/debug/boot.bin"
+check "mb_out: object" has "exists $W/kinds/build/linux/debug/obj.o"
+check "mb_out: riscv flat" has "exists $W/kinds/build/riscv32-none/debug/rv.bin"
 mb build -r -v lib
 check "crash-report = false" has "--no-crash-report"
 

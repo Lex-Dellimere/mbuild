@@ -1,0 +1,176 @@
+// riscv: running RISC-V programs under emulators. riscv*-linux runs on
+// QEMU's user mode, a board = "qemu-virt" image on qemu-system, a board =
+// "pico2" image on rvsim (the Mettle project's simulator, built once into
+// $MBUILD_HOME/tools when it is not on PATH).
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/proc";
+import "../model/manifest";
+import "../model/project";
+import "toolchain";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+// qemu-riscv64 / qemu-riscv32: MBUILD_QEMU_USER_DIR, ~/.local/opt/qemu-user/bin, PATH.
+fn rvx_qemu_user(target: string) -> Tool {
+  var name: string = "qemu-riscv64";
+  if (s_starts(target, "riscv32")) {
+    name = "qemu-riscv32";
+  }
+  var dir: string = env_get("MBUILD_QEMU_USER_DIR");
+  if (slen(dir) > 0) {
+    var at: string = p_join(dir, name);
+    if (!fs_is_file(at)) {
+      fail_hint("MBUILD_QEMU_USER_DIR=" + dir + " has no " + name + " (needed to run a " + target + " program)", "point MBUILD_QEMU_USER_DIR at the directory that holds " + name + ", or unset it");
+    }
+    return sys_find_tool(at);
+  }
+  var local: string = sys_home() + "/.local/opt/qemu-user/bin/" + name;
+  if (fs_is_file(local)) {
+    return sys_find_tool(local);
+  }
+  var t: Tool = sys_find_tool(name);
+  if (!tool_found(t)) {
+    fail_hint("running a " + target + " program needs " + name + " (QEMU's user mode), and it is not on PATH", "install QEMU's user mode (Debian: apt install qemu-user), put it in ~/.local/opt/qemu-user/bin, or set MBUILD_QEMU_USER_DIR to its directory");
+  }
+  return t;
+}
+
+// The command that runs a riscv*-linux executable.
+export fn rv_program_cmd(target: string, exe: string) -> Cmd* {
+  var c: Cmd* = cmd_new(rvx_qemu_user(target));
+  cmd_path(c, exe);
+  return c;
+}
+
+// The command that runs a board image: base is the image's path without
+// its extension, outs the files the build wrote (bin, elf, ...).
+export fn rv_image_cmd(p: Project*, m: Mettle*, target: string, base: string, outs: StrList*, st: Settings*) -> Cmd* {
+  var board: string = st->board;
+  if (s_eq(board, "qemu-virt")) {
+    var image: string = base + ".bin";
+    if (!sl_has(outs, "bin")) {
+      image = base + ".elf";
+      if (!sl_has(outs, "elf")) {
+        fail_hint("running a qemu-virt image needs its .bin or .elf, and outputs = \"" + st->outputs + "\" has neither", "add \"bin\" to outputs");
+      }
+    }
+    var name: string = "qemu-system-riscv64";
+    if (s_starts(target, "riscv32")) {
+      name = "qemu-system-riscv32";
+    }
+    var q: Tool = sys_find_tool(name);
+    if (!tool_found(q)) {
+      fail_hint("running a qemu-virt image needs " + name + ", and it is not on PATH", "install QEMU's system emulators (Debian: apt install qemu-system-misc)");
+    }
+    var c: Cmd* = cmd_new(q);
+    cmd_arg(c, "-M");
+    cmd_arg(c, "virt");
+    cmd_arg(c, "-bios");
+    cmd_arg(c, "none");
+    cmd_arg(c, "-nographic");
+    cmd_arg(c, "-kernel");
+    cmd_path(c, image);
+    return c;
+  }
+  if (s_eq(board, "pico2")) {
+    if (!sl_has(outs, "bin")) {
+      fail_hint("rvsim loads the raw image, and outputs = \"" + st->outputs + "\" has no bin", "add \"bin\" to outputs");
+    }
+    var r: Cmd* = cmd_new(rvx_rvsim(m));
+    var raw: string = base + ".bin";
+    cmd_arg(r, "--machine");
+    cmd_arg(r, "rp2350");
+    cmd_arg(r, "--load");
+    cmd_path(r, raw);
+    if (slen(st->rvsim_until_ms) > 0) {
+      cmd_arg(r, "--until-ms");
+      cmd_arg(r, st->rvsim_until_ms);
+    }
+    if (slen(st->exit_on_uart) > 0) {
+      cmd_arg(r, "--exit-on-uart");
+      cmd_arg(r, st->exit_on_uart);
+    }
+    if (slen(st->uart_script) > 0) {
+      cmd_arg(r, "--uart-in");
+      cmd_path(r, p_join(p->root, st->uart_script));
+    }
+    if (slen(st->pins) > 0) {
+      cmd_arg(r, "--pins");
+      cmd_path(r, p_join(p->root, st->pins));
+    }
+    return r;
+  }
+  fail_hint("board " + board + " has no emulator mbuild can run", "write a project command that flashes or emulates it: fn cmd_flash in mbuild.mettle (docs/project.md)");
+  return (Cmd*)0;
+}
+
+// The Mettle checkout a compiler was built in ("" when it is not in one).
+fn rvx_tree(compiler: string) -> string {
+  if (slen(compiler) == 0) {
+    return s_empty();
+  }
+  var real: string = sys_realpath(compiler);
+  if (slen(real) == 0) {
+    real = compiler;
+  }
+  var dir: string = p_dir(p_dir(real));
+  if (fs_is_file(dir + "/tools/riscv-sim/rvsim.c")) {
+    return dir;
+  }
+  return s_empty();
+}
+
+// rvsim: MBUILD_RVSIM, PATH, $MBUILD_HOME/tools, else built there from the
+// Mettle checkout of $METTLE or of the selected compiler.
+fn rvx_rvsim(m: Mettle*) -> Tool {
+  var given: string = env_get("MBUILD_RVSIM");
+  if (slen(given) > 0) {
+    if (!fs_is_file(given)) {
+      fail_hint("MBUILD_RVSIM=" + given + " does not exist", "point MBUILD_RVSIM at a built rvsim, or unset it");
+    }
+    return sys_find_tool(given);
+  }
+  var t: Tool = sys_find_tool("rvsim");
+  if (tool_found(t)) {
+    return t;
+  }
+  var tools: string = fs_mbuild_home() + "/tools";
+  var exe: string = tools + "/rvsim" + sys_exe_ext();
+  if (fs_is_file(exe)) {
+    return sys_find_tool(exe);
+  }
+  var tree: string = rvx_tree(env_get("METTLE"));
+  if (slen(tree) == 0) {
+    tree = rvx_tree(m->path);
+  }
+  if (slen(tree) == 0) {
+    fail_hint("board pico2 runs on rvsim, the Mettle project's simulator, and mbuild finds neither rvsim nor its source", "put rvsim on PATH, set MBUILD_RVSIM to it, or set METTLE to the compiler of a Mettle checkout (it has tools/riscv-sim/rvsim.c)");
+  }
+  var gcc: Tool = sys_find_tool("gcc");
+  if (!tool_found(gcc)) {
+    fail_hint("building rvsim from " + tree + " needs gcc", "install gcc, or set MBUILD_RVSIM to a built rvsim");
+  }
+  fs_mkdirs(tools);
+  var tmp: string = exe + ".tmp";
+  status("Building", "rvsim from " + tree + "/tools/riscv-sim");
+  var c: Cmd* = cmd_new(gcc);
+  defer free(c);
+  cmd_arg(c, "-std=c99");
+  cmd_arg(c, "-O2");
+  cmd_arg(c, "-o");
+  cmd_path(c, tmp);
+  cmd_path(c, "tools/riscv-sim/rvsim.c");
+  cmd_arg(c, "-lm");
+  c->cwd = tree;
+  var cap: Captured = proc_capture_all(c);
+  if (cap.code != 0 || !fs_is_file(tmp)) {
+    err_line(cap.out);
+    fail("could not build rvsim (gcc exited with " + s_int((int64)cap.code) + ")");
+  }
+  sys_rename(tmp, exe);
+  return sys_find_tool(exe);
+}
