@@ -587,6 +587,11 @@ export fn sys_sync() {
   lx_exec(sl_of("sync"));
 }
 
+// Owner-only access to the directory p (0700).
+export fn sys_make_private(p: string) {
+  lx_chmod(s_c(p), (uint32)448);
+}
+
 export fn sys_set_executable(p: string) {
   var buf: uint8* = (uint8*)malloc(256);
   defer free(buf);

@@ -96,6 +96,7 @@ EOF
 timeout 60 "$MB" shell --stream <"$T/in1" >"$T/s1.out" 2>&1
 code=$?
 [ $code -eq 0 ] && ok "quits with 0" || bad "quits with 0 (got $code)" "$(cat "$T/s1.out")"
+[ "$(stat -c %a "$W/.mbuild/shell")" = 700 ] && ok "session state is owner-only" || bad "session state is owner-only" "$(ls -ld "$W/.mbuild/shell")"
 has "builds with --live" "$T/s1.out" '^ +Compiling live_demo \(linux, debug\)$'
 has "--stream: status line" "$T/s1.out" '^ +Running build/.*/live_demo; its output streams above the prompt'
 if grep -q 'new lines\? held' "$T/s1.out"; then bad "--stream holds nothing" "$(cat "$T/s1.out")"; else ok "--stream holds nothing"; fi

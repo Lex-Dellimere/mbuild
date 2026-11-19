@@ -85,7 +85,7 @@ export fn lv_open(p: Project*, bin: string) -> LiveSess* {
   var lv: LiveSess* = new LiveSess;
   lv->root = p->root;
   lv->preview = lv_preview(p);
-  fs_mkdirs(p->state_dir + "/live");
+  fs_mkdirs_private(p->state_dir + "/live");
   lv->events = p->state_dir + "/live/" + bin + ".events";
   fs_write(lv->events, s_empty());
   lv->globs = sl_new();

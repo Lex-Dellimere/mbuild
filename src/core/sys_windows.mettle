@@ -1216,6 +1216,10 @@ export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, a
 export fn sys_sync() {
 }
 
+// A directory under the user's profile is already the user's own.
+export fn sys_make_private(p: string) {
+}
+
 export fn sys_set_executable(p: string) {
   // Windows has no execute bit. Under wine the file lives on a Linux
   // filesystem, where a host program may need one.

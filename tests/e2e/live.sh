@@ -115,6 +115,7 @@ for kind in ${MBTEST_MODES:-debug release}; do
   "$MB" live >"$O" 2>&1 &
   pid=$!
   waitfor "$kind: the program sees the events file and mb_preview" "$O" '^active true preview=right$' || { kill $pid; continue; }
+  [ "$(stat -c %a .mbuild/live)" = 700 ] && ok "$kind: live state is owner-only" || bad "$kind: live state is owner-only" "$(ls -ld .mbuild/live)"
   echo a2 >shaders/a.glsl
   waitfor "$kind: changed" "$O" '^ev changed\|shaders/a.glsl\|$'
   rm shaders/b.glsl

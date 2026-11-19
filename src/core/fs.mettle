@@ -87,6 +87,16 @@ export fn fs_mkdirs(p: string) -> bool {
   return sys_mkdir(c);
 }
 
+// fs_mkdirs, then p itself made owner-only (0700 on Linux): session state,
+// FIFOs and logs that other users have no business reading.
+export fn fs_mkdirs_private(p: string) -> bool {
+  if (!fs_mkdirs(p)) {
+    return false;
+  }
+  sys_make_private(p_clean(p));
+  return true;
+}
+
 // Takes the lock named by the directory dir (its parent is created when
 // missing): creating a directory is atomic on both systems, so exactly one
 // process succeeds. Retries until timeout_ms has passed (once when it is 0 or
@@ -325,6 +335,6 @@ export fn fs_home_origin() -> string {
 
 export fn fs_temp_dir() -> string {
   var d: string = fs_mbuild_home() + "/tmp";
-  fs_mkdirs(d);
+  fs_mkdirs_private(d);
   return d;
 }
