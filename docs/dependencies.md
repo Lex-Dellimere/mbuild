@@ -511,10 +511,13 @@ error: greet v1.1.0 breaks the API of v1.0.0 (inside line v1, which should not b
 ```
 
 What gets packed: `mb_publish_include(csv)` when given, else every file
-except `build/`, `.mbuild/`, `vendor/`, `dist/`, dot-files, `mbuild.lock`,
+except `build/`, `.mbuild/`, `vendor/`, `dist/`, `reports/`, dot-files, `mbuild.lock`,
 `mbuild.local.mettle`, `mettle.deps` and subdirectories with their own
 `mbuild.mettle` (nested packages publish on their own). `mbuild.mettle`, `init.rules` and
-`AGENT.rules` (when there is one) always go in. Links and files over 16 MB are refused.
+`AGENT.rules` (when there is one) always go in. Links, files over 16 MB, keys
+(`*.pem`, `*.key`, `*.p12`, `id_rsa`, ...) and files outside the package are
+refused, and so are dot-files, `reports/` and `mbuild.local.mettle` even when
+`mb_publish_include` names them.
 
 A published version can't be deleted, because locks name it. Yank it
 instead (`--undo` takes it back):

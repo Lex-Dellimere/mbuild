@@ -498,12 +498,34 @@ mkdir -p libs/inner libs/kept
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("inner", "0.1.0");\n}\n' > libs/inner/mbuild.mettle
 printf 'export fn inner_x() -> int32 { return 1; }\n' > libs/inner/x.mettle
 printf 'export fn kept_k() -> int32 { return 1; }\n' > libs/kept/k.mettle
+printf 'TOKEN=x\n' > .env
+mkdir -p reports && printf 'notes\n' > reports/notes.md
+printf 'fn local() {\n}\n' > mbuild.local.mettle
+mkdir -p certs && printf 'k\n' > certs/server.pem
+mb publish --to "$S/reg-$mode" --dry-run
+check "publish refuses a key file" has "certs/server.pem looks like a key or certificate; packages never hold keys"
+rm -r certs
+cp mbuild.mettle "$S/mbuild.mettle.keep"
+sed -i 's|^  mb_package("strx", "1.0.0");|&\n  mb_publish_include("strx.mettle, .env");|' mbuild.mettle
+mb publish --to "$S/reg-$mode" --dry-run
+check "publish refuses an included dotfile" has ".env is a dotfile or inside a dot directory"
+sed -i 's|mb_publish_include("strx.mettle, .env");|mb_publish_include("strx.mettle, reports/notes.md");|' mbuild.mettle
+mb publish --to "$S/reg-$mode" --dry-run
+check "publish refuses included reports/" has "reports/notes.md is under reports/, which is never published"
+sed -i 's|mb_publish_include("strx.mettle, reports/notes.md");|mb_publish_include("strx.mettle, ../outside.txt");|' mbuild.mettle
+printf 'secret\n' > ../outside.txt
+mb publish --to "$S/reg-$mode" --dry-run
+check "publish refuses a file outside the package" has "../outside.txt is outside the package"
+rm ../outside.txt
+cp "$S/mbuild.mettle.keep" mbuild.mettle
 mb publish --to "$S/reg-$mode"
 check "publish transcript" sh -c 'grep -qF "Packaging strx v1.0.0" "$0/last.out" && grep -qF "Published strx v1.0.0 to" "$0/last.out" && grep -qF "next: upload" "$0/last.out"' "$S"
 mkdir -p "$S/unpack-$mode" && tar -xzf "$S/reg-$mode/pkg/strx/strx-v1.0.0.tar.gz" -C "$S/unpack-$mode"
 check "published AGENT.rules has no block" sh -c '! grep -q ">>> mbuild" "$0/unpack-'$mode'/AGENT.rules"' "$S"
 check "nested package left out" [ ! -e "$S/unpack-$mode/libs/inner" ]
 check "plain subdir packed" [ -f "$S/unpack-$mode/libs/kept/k.mettle" ]
+check "dotfiles, reports/ and mbuild.local.mettle left out" sh -c '[ ! -e "$0/.env" ] && [ ! -e "$0/reports" ] && [ ! -e "$0/mbuild.local.mettle" ]' "$S/unpack-$mode"
+rm -r .env reports mbuild.local.mettle
 sed -i 's/1.0.0/1.1.0/' mbuild.mettle
 printf 'export fn strx_a() -> int32 { return 1; }\n' > strx.mettle
 mb publish --to "$S/reg-$mode"

@@ -6435,7 +6435,7 @@ fn bx_pub_walk(root: string, rel: string, out: StrList*) {
       if (s_starts(d, ".")) {
         continue;
       }
-      if (slen(rel) == 0 && (s_eq(d, "build") || s_eq(d, "vendor") || s_eq(d, "dist"))) {
+      if (slen(rel) == 0 && (s_eq(d, "build") || s_eq(d, "vendor") || s_eq(d, "dist") || s_eq(d, "reports"))) {
         continue;
       }
       var sub: string = d;
@@ -6452,6 +6452,34 @@ fn bx_pub_walk(root: string, rel: string, out: StrList*) {
   }
   free(files);
   free(dirs);
+}
+
+// "" when rel (relative to the root) may be packed, else why it never is.
+fn bx_pub_refusal(rel: string) -> string {
+  if (p_is_abs(rel) || s_eq(rel, "..") || s_starts(rel, "../")) {
+    return "is outside the package";
+  }
+  var parts: StrList* = s_split(rel, 47);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    if (s_starts(sl_get(parts, i), ".")) {
+      return "is a dotfile or inside a dot directory (.env, .git, ...); those are never published";
+    }
+    i = i + 1;
+  }
+  if (s_eq(sl_get(parts, 0), "reports")) {
+    return "is under reports/, which is never published";
+  }
+  var base: string = s_lower(sl_get(parts, parts->len - 1));
+  if (s_eq(base, "mbuild.local.mettle")) {
+    return "is this machine's settings, which are never published";
+  }
+  if (s_ends(base, ".pem") || s_ends(base, ".key") || s_ends(base, ".p12") || s_ends(base, ".pfx") || s_ends(base, ".jks") || s_ends(base, ".keystore")
+      || s_starts(base, "id_rsa") || s_starts(base, "id_dsa") || s_starts(base, "id_ecdsa") || s_starts(base, "id_ed25519")) {
+    return "looks like a key or certificate; packages never hold keys (move it out of the package)";
+  }
+  return s_empty();
 }
 
 // The files a publish packs (14.7 step 6), sorted, relative to the root.
@@ -6493,6 +6521,11 @@ fn bx_pub_files(p: Project*) -> StrList* {
   }
   var j: int64 = 0;
   while (j < out->len) {
+    var why: string = bx_pub_refusal(sl_get(out, j));
+    if (slen(why) > 0) {
+      var msg: string = sl_get(out, j) + " " + why;
+      fail_hint(msg, "leave it out of mb_publish_include, or move it out of the package");
+    }
     var f: string = p->root + "/" + sl_get(out, j);
     if (sys_is_link(f)) {
       fail(sl_get(out, j) + " is a link; packages hold regular files only");
