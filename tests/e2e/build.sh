@@ -841,7 +841,7 @@ mb test
 check "library test" code_is 0
 printf 'extern fn mbx_answer() -> int32 = "mbx_answer";\n@test fn answer() -> int32 {\n  if (mbx_answer() != 42) { return 1; }\n  return 0;\n}\n' > e_test.mettle
 mb test e_test.mettle
-check "a test that calls C is skipped" sh -c 'grep -qF "test e_test.mettle (debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "a test that calls C runs natively: an undefined extern fails its build" sh -c 'grep -qF "test e_test.mettle (debug) ... FAILED" "$0/last.out" && grep -qF -- "---- e_test.mettle (linux/debug): natively: did not compile" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 
 echo "== prelude, nested projects, colour"
 proj "$W/tflags" <<'EOF'

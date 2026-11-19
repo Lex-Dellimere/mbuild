@@ -1,0 +1,97 @@
+// testrun_test: what mbuild test reads from runs (testrun), the native
+// copy of an @test file (testnative).
+//
+//   tools/mcheck.sh tests/unit/testrun_test.mettle --run
+
+import "std/io";
+import "../../src/core/base";
+import "../../src/build/testrun";
+import "../../src/build/testnative";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+fn test_outputs() {
+  var compiled: string = "-- tests/w_test.mettle:2:7 -----\nwarning[W0001]: unused variable 'x'\n\n-- src/a.mettle:9:1 ---\nwarning[M0107]: leaks\nwarning[E0003]: leaked\n";
+  var w: StrList* = trn_warnings(compiled);
+  defer free(w);
+  t_eq("warnings: code and place, E0003 left out", sl_join(w, ","), "W0001 at tests/w_test.mettle:2,M0107 at src/a.mettle:9");
+  t_eq("denied: allow", trn_denied(w, "allow"), "");
+  t_eq("denied: error", trn_denied(w, "error"), "warning W0001 at tests/w_test.mettle:2");
+  t_eq("denied: by prefix", trn_denied(w, "error:M01"), "warning M0107 at src/a.mettle:9");
+  t_eq("denied: other codes", trn_denied(w, "error:E99, X"), "");
+  t_eq("checks: prefix", s_int(trn_checks("PASS a\nok\nPASS b\n", "PASS")), "2");
+  t_eq("checks: none", s_int(trn_checks("PASS a\n", "")), "0");
+  t_eq("checks: mbuild-checks sets it", s_int(trn_checks("PASS a\nmbuild-checks: 40\n", "PASS")), "40");
+  var sk: StrList* = sl_new();
+  defer free(sk);
+  var n: int64 = trn_interp("running 3 tests\ntest a ... ok\ntest b ... skipped (calls C function 'f'; ...)\ntest c ... ok\n\n2 passed, 1 skipped (x.mettle)\n", sk);
+  t_eq("interp: passed and skipped", s_int(n) + " " + sl_join(sk, ","), "2 b");
+  t_eq("secs", trn_secs(1049) + " " + trn_secs(30000) + " " + trn_secs(0), "1.0s 30.0s 0.0s");
+  t_eq("tail", trn_tail("a\nb\nc\n", 2, "  "), "  ... (1 lines before)\n  b\n  c\n");
+  var r: TrnRun* = trn_run_new(0, 0, 1);
+  r->cmd = cmd_new(tool_none());
+  r->code = 0;
+  t_eq("why: passed", trn_exit_why(r), "");
+  r->code = 3;
+  t_eq("why: exit", trn_exit_why(r), "exit 3");
+  r->code = 139;
+  t_eq("why: signal", trn_exit_why(r), "signal 11");
+  r->timed_out = true;
+  r->timeout_ms = 30000;
+  t_eq("why: timeout", trn_exit_why(r), "timeout 30.0s");
+  r->timed_out = false;
+  r->code = 0;
+  r->console = "PASS";
+  t_eq("why: no console line", trn_exit_why(r), "no PASS on the console");
+}
+
+fn test_native() {
+  var src: string = "import \"calc\";\n@test fn adds() -> int32 {{\n  return 0;\n}\n// @test fn not_one() -> int32 {{\n@test\nfn plain() {{\n  assert(true);\n}\n  @test fn spaced(  ) ->int32 {{ return 0; }\nfn main() -> int32 {{\n  return 0;\n}\n";
+  var all: StrList* = tnv_tests(src);
+  defer free(all);
+  t_eq("tests: in order, returning or not", sl_join(all, ","), "adds\t1,plain\t0,spaced\t1");
+  var pick: StrList* = sl_of("spaced");
+  defer free(pick);
+  sl_push(pick, "adds");
+  var sel: StrList* = tnv_pick(all, pick);
+  defer free(sel);
+  t_eq("pick: source order", sl_join(sel, ","), "adds\t1,spaced\t1");
+  var out: string = tnv_source(src, sel);
+  var lines: StrList* = s_lines(out);
+  defer free(lines);
+  t_eq("source: line 1 imports std/io", sl_get(lines, 0), "import \"std/io\"; import \"calc\";");
+  t_eq("source: main renamed in place", sl_get(lines, 10), "fn mbt_orig_main() -> int32 {{");
+  t_eq("source: lines kept", sl_get(lines, 7), "  assert(true);");
+  t_eq("source: the generated main calls them", s_int((int64)s_contains(out, "  print(\"test adds ... \");\n  mbt_failed = mbt_failed + mbt_ran(adds());\n  print(\"test spaced ... \");")), "1");
+  t_eq("source: a test without a value", s_int((int64)s_contains(tnv_source(src, sl_of("plain\t0")), "  plain();\n  println(\"ok\");\n")), "1");
+  t_eq("passed lines", s_int(tnv_passed("test a ... ok\ntest b ... FAILED (returned 2)\ntest c ... ok\n")), "2");
+}
+
+fn run_all() -> int64 {
+  test_outputs();
+  test_native();
+  say("");
+  say("testrun_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  flush_out();
+  return g_fail;
+}
+
+fn main() -> int32 {
+  if (run_all() > 0) {
+    return 1;
+  }
+  return 0;
+}

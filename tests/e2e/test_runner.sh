@@ -31,6 +31,12 @@ proj() {
 # prog FILE CODE [LINE]: a test program printing LINE (default PASS one) and returning CODE
 prog() { printf 'import "std/io";\nfn main() -> int32 {\n  println("%s");\n  return %s;\n}\n' "${3:-PASS one}" "$2" > "$1"; }
 
+# unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
+unit() { if out=$(METTLE="$METTLE" TMPDIR="$S" sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
+
+echo "== unit tests"
+unit testrun_test
+
 for mode in ${MBTEST_MODES:-debug release}; do
 flag=""
 [ $mode = release ] && flag="--release"
@@ -142,6 +148,32 @@ mb test warn --deny-warnings
 check "--deny-warnings fails a warning" code_is 1
 mb test nope
 check "an unknown test lists them" has "help: the tests are: both, count, flaky, hang, nobuild, warn, iso1, iso2, solo, intmp; or name an @test file"
+
+# --- @test files natively: what the interpreter skips, native=always and never
+proj "$W/native" <<'EOF2'
+  mb_test_set("lib/always.mettle", "native", "always");
+  mb_test_set("lib/never.mettle", "native", "never");
+  mb_on("linux");
+  mb_link_libs("c");
+  mb_on("");
+EOF2
+cd "$W/native" || exit 1
+mkdir -p lib
+printf 'export fn add(a: int32, b: int32) -> int32 {\n  return a + b;\n}\n' > lib/calc.mettle
+printf 'hello' > lib/data.txt
+printf 'import "calc";\nextern fn c_getpid() -> int32 = "getpid";\nfn data() -> string {\n  return import_str "data.txt";\n}\n@test fn adds() -> int32 {\n  if (add(1, 2) != 3) { return 1; }\n  return 0;\n}\n@test fn pid() -> int32 {\n  if (c_getpid() > 0 && data() == "hello") { return 0; }\n  return 1;\n}\nfn main() -> int32 {\n  return 0;\n}\n' > lib/cc.mettle
+printf 'import "calc";\n@test fn adds() -> int32 {\n  if (add(1, 2) != 3) { return 1; }\n  return 0;\n}\n@test fn two() {\n  assert(add(1, 1) == 2);\n}\n@test fn wrong() -> int32 {\n  return add(1, 1);\n}\n' > lib/always.mettle
+printf 'extern fn c_getpid() -> int32 = "getpid";\n@test fn pid() -> int32 {\n  if (c_getpid() > 0) { return 0; }\n  return 1;\n}\n' > lib/never.mettle
+mb test
+check "native: a skipped test runs natively, with fn main, a relative import and import_str" sh -c 'grep -q "^test lib/cc.mettle (debug) ... ok .*  2 checks$" "$0/last.out" && grep -qF "Compiling test lib_cc__mbt (linux, debug)" "$0/last.out"' "$S"
+check "native: the copy keeps the original's lines" sh -c '[ "$(sed -n 1p .mbuild/test-native/lib/lib_cc__mbt.mettle)" = "import \"std/io\"; import \"calc\";" ] && [ "$(sed -n 14p .mbuild/test-native/lib/lib_cc__mbt.mettle)" = "fn mbt_orig_main() -> int32 {" ] && [ "$(sed -n 10p .mbuild/test-native/lib/lib_cc__mbt.mettle)" = "$(sed -n 10p lib/cc.mettle)" ]' 
+check "native=always: every test natively, a failure named" sh -c 'grep -qF "test lib/always.mettle (debug) ... FAILED" "$0/last.out" && grep -qF -- "---- lib/always.mettle (linux/debug): natively: exit 1" "$0/last.out" && grep -qF "  test two ... ok" "$0/last.out" && grep -qF "  test wrong ... FAILED (returned 2)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "native=never: the interpreter's verdict" sh -c 'grep -qF "test lib/never.mettle (debug) ... ok" "$0/last.out" && ! grep -q "lib_never__mbt" "$0/last.out"' "$S"
+mb test lib/cc.mettle
+check "native: a passing file is cached, its native run too" line "test lib/cc.mettle (debug) ... ok (cached)"
+printf '@test fn more() -> int32 {\n  if (c_getpid() < 0) { return 1; }\n  return 0;\n}\n' >> lib/cc.mettle
+mb test lib/cc.mettle --matrix=debug,release
+check "native: in every cell" sh -c 'grep -qF "Compiling test lib_cc__mbt (linux, release)" "$0/last.out" && grep -q "^test lib/cc.mettle (debug, release) ... ok" "$0/last.out"' "$S"
 
 done
 echo "test_runner: $pass passed, $failed failed"

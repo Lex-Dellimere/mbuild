@@ -29,6 +29,7 @@ export struct TrnRun {
   timeout_ms: int64;  // 0 = none
   serial: bool;
   console: string;    // a pico2 run passes on this console line
+  native: bool;       // an @test file run as a program (testnative)
   svcs: TrnSvc*;
   nsvcs: int64;
   nsvcs_up: int64;    // started so far

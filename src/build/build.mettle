@@ -36,6 +36,7 @@ import "live";
 import "live_linux" if linux;
 import "live_windows" if windows;
 import "testrun";
+import "testnative";
 import "testrun_linux" if linux;
 import "testrun_windows" if windows;
 import "../core/sys_linux" if linux;
@@ -2142,6 +2143,10 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
     free(outs);
   }
   bx_add_include(c, p, s->ds, bx_unit_gen(u));
+  if (s->tests) {
+    // a native @test copy: -I the original's directory
+    cmd_args(c, b->flags);
+  }
   cmd_args(c, nl->mettle_args);
   bx_kind_args(c, p, u, j);
   sl_extend(c->env, nl->env);
@@ -3551,6 +3556,8 @@ struct BtTest {
   runs: int64;        // planned, and ended so far
   ended: int64;
   printed: bool;
+  hold: bool;         // an @test file whose native runs are not planned yet
+  native: string;     // its native setting
 }
 
 // One (test, cell).
@@ -3575,6 +3582,7 @@ struct BtCell {
   why: string;
   checks: int64;
   ms: int64;
+  native_all: bool;   // an @test file with native=always: no interpreter run
 }
 
 struct BtPlan {
@@ -3591,6 +3599,8 @@ struct BtPlan {
   excluded: int64;
   filter: string;
   nspecs: int64;
+  run_base: int64;    // trn_exec's run 0 is runs[run_base]
+  native_from: int64; // runs from here on are native @test runs
 }
 
 // Names a cached test program's pass stamp includes: "name\tkey" (0 = no cache).
@@ -4060,7 +4070,12 @@ fn bt_spec(pl: BtPlan*, spec: string) {
     if (t2->kind == BT_FILE) {
       var at: int64 = bt_unit_at(fcells, pl, c2);
       bt_file_cell(s, fus->items[at], c2, t2->name);
-      bt_cache(pl, c2);
+      if (s_eq(t2->native, "always")) {
+        c2->native_all = true;
+        c2->cmd = (Cmd*)0;
+      } else {
+        bt_cache(pl, c2);
+      }
       continue;
     }
     if (slen(why_run) > 0) {
@@ -4242,6 +4257,13 @@ fn bt_judge(pl: BtPlan*, r: TrnRun*, checks: int64*) -> string {
   var p: Project* = pl->p;
   var t: BtTest* = pl->tests[r->test];
   var why: string = trn_exit_why(r);
+  if (t->kind == BT_FILE && r->native) {
+    *checks = tnv_passed(r->out);
+    if (slen(why) > 0) {
+      why = "natively: " + why;
+    }
+    return why;
+  }
   if (t->kind == BT_FILE) {
     var skipped: StrList* = sl_new();
     *checks = trn_interp(r->out + r->err, skipped);
@@ -4382,7 +4404,7 @@ fn bt_print_skips(pl: BtPlan*, t: BtTest*, skipped: int64) {
 fn bt_print_ready(pl: BtPlan*) {
   while (pl->next_print < pl->nt) {
     var t: BtTest* = pl->tests[pl->next_print];
-    if (t->ended < t->runs) {
+    if (t->ended < t->runs || t->hold) {
       return;
     }
     bt_print(pl, t);
@@ -4393,13 +4415,17 @@ fn bt_print_ready(pl: BtPlan*) {
 
 fn bt_ended(arg: rawptr, i: int64) -> bool {
   var pl: BtPlan* = (BtPlan*)arg;
-  var r: TrnRun* = pl->runs[i];
+  var r: TrnRun* = pl->runs[pl->run_base + i];
   var c: BtCell* = pl->cells[r->cell];
   var t: BtTest* = pl->tests[r->test];
   var checks: int64 = 0;
   var why: string = bt_judge(pl, r, &checks);
   c->ms = c->ms + r->ms;
-  if (c->checks == 0) {
+  if (pl->native_from > 0 && pl->run_base + i >= pl->native_from) {
+    if (r->k == 1) {
+      c->checks = c->checks + checks;
+    }
+  } else if (c->checks == 0) {
     c->checks = checks;
   }
   if (slen(why) > 0) {
@@ -4503,6 +4529,7 @@ fn bt_clean_stale(p: Project*) {
   i = 0;
   while (i < files->len) {
     sl_push(safe, bx_safe_name(bx_rel(p, sl_get(files, i))));
+    sl_push(names, bt_native_name(bx_rel(p, sl_get(files, i))));
     i = i + 1;
   }
   free(files);
@@ -4594,6 +4621,205 @@ fn bt_clean_stale(p: Project*) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// @test files natively (testnative): what the interpreter skipped, or every
+// test with native=always, as a program per file and cell
+// ---------------------------------------------------------------------------
+
+fn bt_native_name(rel: string) -> string {
+  var stem: string = rel;
+  if (s_ends(stem, ".mettle")) {
+    stem = s_sub(stem, 0, slen(stem) - 7);
+  }
+  return bx_safe_name(stem) + "__mbt";
+}
+
+// The tests a file cell runs natively: "name\t1" entries, none when it
+// needs no native run.
+fn bt_native_tests(pl: BtPlan*, c: BtCell*, text: string) -> StrList* {
+  var t: BtTest* = pl->tests[c->t];
+  var all: StrList* = tnv_tests(text);
+  if (c->native_all) {
+    if (slen(pl->filter) == 0) {
+      return all;
+    }
+    var keep: StrList* = sl_new();
+    var i: int64 = 0;
+    while (i < all->len) {
+      if (s_contains(sl_get(all, i), pl->filter)) {
+        sl_push(keep, sl_get(all, i));
+      }
+      i = i + 1;
+    }
+    free(all);
+    return keep;
+  }
+  var skipped: StrList* = sl_new();
+  defer free(skipped);
+  if (!s_eq(t->native, "never")) {
+    var k: int64 = 0;
+    while (k < pl->nr) {
+      var r: TrnRun* = pl->runs[k];
+      if (r->cell >= 0 && pl->cells[r->cell] == c && r->k == 1 && !r->native) {
+        trn_interp(r->out + r->err, skipped);
+        break;
+      }
+      k = k + 1;
+    }
+  }
+  var picked: StrList* = tnv_pick(all, skipped);
+  free(all);
+  return picked;
+}
+
+// Writes the copies of one spec's file cells, builds them, adds their runs.
+fn bt_native_spec(pl: BtPlan*, spec: string) {
+  var p: Project* = pl->p;
+  var cells: StrList* = sl_new();
+  defer free(cells);
+  var bs: BinSet* = bx_no_test_bins(p);
+  var first: BtCell* = (BtCell*)0;
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    var c: BtCell* = pl->cells[i];
+    var t: BtTest* = pl->tests[c->t];
+    i = i + 1;
+    if (t->kind != BT_FILE || !s_eq(c->spec, spec) || slen(c->skip) > 0 || slen(c->pre) > 0 || c->cached) {
+      continue;
+    }
+    var rd: FsRead = fs_read(t->file);
+    var tests: StrList* = bt_native_tests(pl, c, rd.data);
+    if (tests->len == 0) {
+      free(tests);
+      continue;
+    }
+    var name: string = bt_native_name(t->name);
+    var rel: string = ".mbuild/test-native/" + p_dir(t->name);
+    if (s_eq(p_dir(t->name), ".") || slen(p_dir(t->name)) == 0) {
+      rel = ".mbuild/test-native";
+    }
+    var main: string = rel + "/" + p_base(name) + ".mettle";
+    fs_mkdirs(p->root + "/" + rel);
+    fs_write_if_changed(p->root + "/" + main, tnv_source(rd.data, tests));
+    free(tests);
+    bx_binset_push(bs, name, main);
+    var b: BinInfo* = &bs->items[bs->n - 1];
+    sl_push(b->flags, "-I");
+    sl_push(b->flags, bx_rel(p, p_dir(t->file)));
+    sl_push(cells, s_int(i - 1));
+    if (first == (BtCell*)0) {
+      first = c;
+    }
+  }
+  if (cells->len == 0) {
+    return;
+  }
+  var saved_sets: StrList* = p->opts->sets;
+  var saved_prof: string = p->opts->profile;
+  var saved_rel: bool = p->opts->release;
+  p->opts->profile = first->profile;
+  p->opts->release = false;
+  if (slen(first->board) > 0) {
+    p->opts->sets = sl_copy(saved_sets);
+    sl_push(p->opts->sets, "board=" + first->board);
+  }
+  var s: BxSess* = bx_sess(p, sl_of(first->target));
+  g_bx_sess = s;
+  s->tests = true;
+  var us: BxUnits* = bx_bin_units(s, bs);
+  g_bx_units = us;
+  bx_prepare(s, us, s_empty());
+  // the copy's graph misses its relative imports: always rebuilt
+  i = 0;
+  while (i < bs->n) {
+    sys_remove_file(p->state_dir + "/stamps/test-bin-" + first->target + "-" + first->profile + "-" + bs->items[i].name + ".stamp");
+    i = i + 1;
+  }
+  var built: StrList* = sl_new();
+  defer free(built);
+  bx_compile_units(s, us, built);
+  i = 0;
+  while (i < cells->len) {
+    var c2: BtCell* = pl->cells[s_to_int(sl_get(cells, i))];
+    var t2: BtTest* = pl->tests[c2->t];
+    var u: BxUnit* = bt_unit_of(us, bs->items[i].name);
+    i = i + 1;
+    if (u == (BxUnit*)0 || u->job == (BxJob*)0 || !u->job->ok) {
+      c2->pre = "natively: did not compile";
+      continue;
+    }
+    var j: BxJob* = u->job;
+    var run_at: string = j->outp;
+    var cmd: Cmd* = bx_emu_cmd(s, j->b, j->t, &run_at);
+    if (cmd == (Cmd*)0) {
+      cmd = tc_run_program_cmd(j->t->target, j->outp);
+    }
+    if (cmd == (Cmd*)0) {
+      c2->skip = "cannot run a " + j->t->target + " program on this " + sys_os() + " host";
+      continue;
+    }
+    var env: StrList* = man_test_env(p->man, t2->name);
+    var cwd_tmp: bool = s_eq(bt_get(p, t2->name, "cwd"), "tmp");
+    var k: int64 = 1;
+    while (k <= t2->repeat) {
+      var r: TrnRun* = trn_run_new(c2->t, s_to_int(sl_get(cells, i - 1)), k);
+      var rc: Cmd* = cmd_new(cmd->tool);
+      cmd_args(rc, cmd->args);
+      sl_extend(rc->env, cmd->env);
+      r->cmd = rc;
+      r->native = true;
+      r->dir = bt_run_dir(p, c2, t2->name, k) + "-native";
+      r->timeout_ms = bt_timeout_ms(p, t2->name, false);
+      r->serial = s_eq(bt_get(p, t2->name, "serial"), "true");
+      trn_prepare(r, p->root, t2->name, c2->spec, cwd_tmp, env);
+      if (k == 1) {
+        verbose(cmd_display(rc));
+      }
+      pl->runs = (TrnRun**)realloc(pl->runs, (pl->nr + 1) * 8);
+      pl->runs[pl->nr] = r;
+      pl->nr = pl->nr + 1;
+      c2->runs = c2->runs + 1;
+      t2->runs = t2->runs + 1;
+      k = k + 1;
+    }
+    free(env);
+  }
+  p->opts->sets = saved_sets;
+  p->opts->profile = saved_prof;
+  p->opts->release = saved_rel;
+}
+
+// After the interpreter's runs: the native ones. trn_exec's code.
+fn bt_native(pl: BtPlan*) -> int32 {
+  var from: int64 = pl->nr;
+  var specs: StrList* = sl_new();
+  defer free(specs);
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    if (pl->tests[pl->cells[i]->t]->kind == BT_FILE) {
+      sl_add_uniq(specs, pl->cells[i]->spec);
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < specs->len) {
+    bt_native_spec(pl, sl_get(specs, i));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < pl->nt) {
+    pl->tests[i]->hold = false;
+    i = i + 1;
+  }
+  if (pl->nr == from) {
+    return 0;
+  }
+  pl->native_from = from;
+  pl->run_base = from;
+  return trn_exec(&pl->runs[from], pl->nr - from, bx_parallel(pl->p), (rawptr)pl, &bt_ended);
+}
+
 // mbuild test [NAME | FILE]...: every test in every cell of its matrix,
 // repeated, in parallel; a line per test, the failures, one result.
 export fn build_cmd_test(p: Project*) -> int32 {
@@ -4629,6 +4855,8 @@ export fn build_cmd_test(p: Project*) -> int32 {
   while (i < pl->nt) {
     var t: BtTest* = pl->tests[i];
     t->repeat = s_to_int(bt_get(p, t->name, "repeat"));
+    t->native = bt_get(p, t->name, "native");
+    t->hold = t->kind == BT_FILE && !s_eq(t->native, "never");
     var cells: StrList* = bt_cells_of(p, t->name, dflt);
     t->c0 = pl->ncells;
     t->nc = cells->len;
@@ -4659,6 +4887,9 @@ export fn build_cmd_test(p: Project*) -> int32 {
   }
   bt_runs(pl);
   var rc: int32 = trn_exec(pl->runs, pl->nr, bx_parallel(p), (rawptr)pl, &bt_ended);
+  if (rc != 130) {
+    rc = bt_native(pl);
+  }
   bt_print_ready(pl);
   if (rc == 130) {
     say("test result: " + red("INTERRUPTED"));
