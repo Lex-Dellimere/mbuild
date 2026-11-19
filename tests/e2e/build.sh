@@ -450,10 +450,10 @@ fn value() -> int32 { return 1; }
 
 fn main() -> int32 {
   var i: int32 = 0;
-  while (i < 60) {
+  while (i < 200) {
     print("{value()}\n");
-    if (value() == 2 && i < 58) {
-      i = 58;
+    if (value() == 2 && i < 198) {
+      i = 198;
     }
     quiesce;
     thread_sleep_ms(100);
@@ -462,15 +462,17 @@ fn main() -> int32 {
   return 0;
 }
 EOF
-# the edit once the program prints (up to 8 s)
-( n=0; while ! grep -qx 1 "$S/last.out" 2>/dev/null && [ $n -lt 160 ]; do sleep 0.05; n=$((n + 1)); done; sed -i 's/return 1;/return 2;/' src/main.mettle ) &
+# the edit once mettle live has started the program and taken its baseline of the file mtimes
+# (the "[live] running" line; it scans after the spawn, so an edit as soon as the program prints can land in the baseline and never patch)
+: >"$S/last.out"
+( n=0; while ! grep -q '^\[live\] running' "$S/last.out" 2>/dev/null && [ $n -lt 800 ]; do sleep 0.05; n=$((n + 1)); done; sed -i 's/return 1;/return 2;/' src/main.mettle ) &
 edpid=$!
-timeout 8 "$MB" live >"$S/last.out" 2>&1
+timeout 60 "$MB" live >"$S/last.out" 2>&1
 wait $edpid
 check "live patches" has "Patch 1"
 printf '\nfn hook_post_build() -> int32 {\n  mb_say("post " + mb_built());\n  return 0;\n}\n' >> mbuild.mettle
-sed -i 's/i < 60/i < 1/' src/main.mettle
-timeout 8 "$MB" live >"$S/last.out" 2>&1
+sed -i 's/i < 200/i < 1/' src/main.mettle
+timeout 60 "$MB" live >"$S/last.out" 2>&1
 check "live runs the post-build hook before the program" sh -c 'grep -qx "post live" "$0/last.out" && [ "$(grep -n "^post live" "$0/last.out" | cut -d: -f1)" -lt "$(grep -n "^2$" "$0/last.out" | cut -d: -f1)" ]' "$S"
 
 # --- publish, yank, registry (14.7)
