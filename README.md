@@ -192,7 +192,7 @@ this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_W
 | `mbuild services` | list the processes `mbuild run` starts |
 | `mbuild live` | run the program and patch it as you save |
 | `mbuild shell` | a prompt inside the running program: read and set its state, redefine functions |
-| `mbuild test` | run `@test` functions, cached |
+| `mbuild test` | run the tests (`@test`, test programs, command tests) in every cell of their matrix, cached |
 | `mbuild check` | type check without linking |
 | `mbuild clean` | remove build output |
 | `mbuild search [TEXT]` | find packages in the registries by name, description or function |

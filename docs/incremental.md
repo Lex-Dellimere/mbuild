@@ -74,34 +74,26 @@ $ mbuild build
 
 ## Tests
 
-`mbuild test` caches like `go test`: a test file that passed isn't run again
-until it, anything it imports, the compiler, the target or the `mettle test`
-arguments (including `--filter`) change. Failing files are never cached.
+`mbuild test` caches like `go test`: a (test, cell) that passed isn't run
+again until its build inputs (the file, anything it imports, the compiler,
+the target, the flags), its test settings or its golden files change.
+Failures are never cached; `--force`, `--bless` and `--repeat` above 1 run
+everything.
 
 ```text
 $ mbuild test
-ok     src/shout.mettle (1 passed)
-test result: ok. 1 passed, 0 cached, 0 failed in 0.0s
+test src/shout.mettle (debug) ... ok  0.0s  1 check
+test result: ok. 1 passed, 0 failed, 1 check (0.0s)
 $ mbuild test
-ok     src/shout.mettle (cached)
-test result: ok. 0 passed, 1 cached, 0 failed in 0.0s
+test src/shout.mettle (debug) ... ok (cached)
+test result: ok. 1 passed, 0 failed, 1 cached (0.0s)
 ```
 
 Test files are your project's `.mettle` files with an `@test` function.
 mbuild skips dot directories, `build/` directories, path packages and nested
 projects (a subdirectory with its own `mbuild.mettle`); run `mbuild test`
-inside a nested project to test it.
-
-Test programs ([project](project.md#test-programs)) are cached the same way,
-by their build inputs.
-
-`mettle test` runs tests in the compiler's interpreter, which can't call C.
-When a test that reaches an `extern` fails, mbuild says so:
-
-```text
-FAILED src/e_test.mettle
-note: `mettle test` runs tests in the compiler's interpreter, which cannot call C functions: the externs this file reaches (say_c) give an undefined result there. Test code that needs them in a test program (mb_test_bin, docs/project.md).
-```
+inside a nested project to test it. Test programs and the rest:
+[project](project.md#tests).
 
 ## Dependencies
 

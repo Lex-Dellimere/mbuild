@@ -297,6 +297,6 @@ and types as the C header. See
 **Double-precision libm is not in the runtime.** `sqrt`, `sin`, `cos`, `pow`
 and friends need `-lm`. Use `std/math` instead.
 
-**Tests can't call C.** `mbuild test` runs `@test` functions in the
-compiler's interpreter, which can't call C ([incremental](incremental.md#tests)).
-Test that code through a built program.
+**Tests and C.** `mbuild test` runs `@test` functions in the compiler's
+interpreter, which can't call C; the ones it skips run again as a built
+program, linked like the bins ([project](project.md#tests)).

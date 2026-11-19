@@ -273,9 +273,10 @@ program there passes when its console prints the `exit-on-uart` string
 
 ### Testing on several targets
 
-`mbuild test --matrix` runs the same tests on each target of `-t`, else of
-`mb_test_targets`, else the host; with `mb_test_targets` set, plain
-`mbuild test` does it too. A board target names its board after a colon:
+`mbuild test` runs each test in every cell of its matrix
+([project](project.md#tests)); a cell without a target runs on each target
+of `-t`, else of `mb_test_targets`, else the host. A board target names its
+board after a colon:
 
 ```mettle
   mb_test_targets("host, riscv64-linux, riscv32-none:pico2");
@@ -283,31 +284,43 @@ program there passes when its console prints the `exit-on-uart` string
 
 ```text
 $ mbuild test
-     Testing linux
-ok     src/main.mettle (1 passed)
-ok     pass (tests/pass.mettle)
-FAIL
-FAILED fail (tests/fail.mettle) (exit 1)
-     Testing riscv64-linux
-...
-     Testing riscv32-none (pico2)
-ok     pass (tests/pass.mettle)
-FAIL
-rp2350: stopped at --until-ms (300.000 ms of simulated time)
-FAILED fail (tests/fail.mettle) (no PASS on the console)
+     Testing linux/debug
+     Testing riscv64-linux/debug
+     Testing riscv32-none:pico2/debug
+test src/main.mettle (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... ok  0.0s  1 check
+    riscv32-none:pico2/debug skipped: @test functions run on hosted targets
+test pass (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... ok  0.1s
+test fail (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... FAILED
 
-target                passed  failed  skipped
-linux                      2       1        0
-riscv64-linux              2       1        0
-riscv32-none (pico2)       1       1        1  @test functions run on hosted targets
-test result: FAILED. 5 passed, 3 failed, 3 skipped on 3 targets in 0.6s
+failures:
+
+---- fail (linux/debug): exit 1
+stdout:
+  FAIL
+kept: .mbuild/test-run/linux-debug/fail/1
+
+---- fail (riscv64-linux/debug): exit 1
+stdout:
+  FAIL
+kept: .mbuild/test-run/riscv64-linux-debug/fail/1
+
+---- fail (riscv32-none:pico2/debug): no PASS on the console
+stdout:
+  FAIL
+stderr:
+  rp2350: stopped at --until-ms (300.000 ms of simulated time)
+kept: .mbuild/test-run/riscv32-none-pico2-debug/fail/1
+
+test result: FAILED. 2 passed, 1 failed, 1 skipped, 1 check (0.8s)
 ```
 
 `@test` functions run for hosted targets (linux, windows, `riscv*-linux`),
 not for a board. Test programs run natively, through wine, under QEMU or on
 rvsim; when that program is missing, they count as skipped, with the
-reason, and don't fail the run. Code that differs per target can be a
-[component](components.md) picked with `mb_use` after `mb_on`.
+reason, and don't fail the run. `--matrix=CELLS` replaces the cells for
+one run: `mbuild test --matrix=linux/release,riscv64-linux/debug`. Code
+that differs per target can be a [component](components.md) picked with
+`mb_use` after `mb_on`.
 
 ### Flashing a Pico 2
 

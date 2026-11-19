@@ -163,48 +163,156 @@ A package without bins is a library: `mbuild build` and `mbuild check`
 type-check its `.mettle` files at the top and in `src/`, `mbuild test`
 works, `mbuild run` says there's nothing to run.
 
-### Test programs
+### Tests
 
-`@test` functions run in the compiler's interpreter, which can't call C. A
-test that needs the package's C code or a C library is a test program:
+`mbuild test` runs three kinds of test, each passing on exit 0:
+
+- an `@test` file: any project file with an `@test` function, run in the
+  compiler's interpreter; the tests it skips (they call C) run again as a
+  program (below);
+- a test program: every `tests/<name>_test.mettle` with `fn main`, or the
+  `mb_test_bin` ones, plus each main file an `mb_test_glob` matches. They
+  build like the bins (settings, C code, link libraries) into
+  `.mbuild/test-bins/`; `mbuild build` never builds them;
+- a command test (`mb_test_cmd`): a script or checker. A first word naming
+  a test program or a bin is built for the cell and run from there.
 
 | Call | Meaning |
 |---|---|
-| `mb_test_bin(name, main)` | A program `mbuild test` builds and runs (`""` = `tests/<name>_test.mettle`). |
+| `mb_test_bin(name, main)` | A test program (`""` = `tests/<name>_test.mettle`); with one, the `tests/` scan is off. |
 | `mb_test_glob(glob)` | Every main file matching it is a test program named by its stem: `"examples/*.mettle"`. |
-| `mb_test_exclude(csv)` | Tests left out of the default set (programs by name, `@test` files by path); naming one still runs it. |
-| `mb_test_cmd(name, cmdline)` | A command test: words as for `mb_service`; exit 0 passes. |
-| `mb_test_set(name, key, value)` | A test setting; `"*"` sets the default (see below). |
-| `mb_test_env(name, "K=V")` | A variable in a test's environment (`"*"` = every test). |
+| `mb_test_cmd(name, cmdline)` | A command test, split into words like `mb_service`. |
+| `mb_test_exclude(csv)` | Left out of the default set (`@test` files by path); naming one still runs it. |
+| `mb_test_set(name, key, value)` | A setting below; name `"*"` sets the default, a test's own value wins. |
+| `mb_test_env(name, "K=V")` | A variable in its runs (`"*"` = every test). |
 
-Without any `mb_test_bin`, every `tests/<name>_test.mettle` with `fn main`
-is a test program named `<name>`. They build like the bins (settings, C
-code, link libraries; `-r` for release) into `.mbuild/test-bins/`, run from
-the project root, and pass on exit code 0; a failing one shows its output.
-`mbuild build`, `mbuild run` and dependents never build them, and
-`mb_dep_bin` can't name them. A test program's main file is never run as an
-`@test` file.
+| Key | Default | Meaning |
+|---|---|---|
+| `matrix` | `debug` | the cells: `PROFILE` or `TARGET/PROFILE`, comma-separated; a cell without a target runs on each of `-t`, else `mb_test_targets`, else the host |
+| `timeout` | `600` | seconds per run (30 under an emulator), `0` = none |
+| `repeat` | `1` | runs per cell; it passes when all of them do |
+| `serial` | `false` | runs alone, after the rest |
+| `cwd` | `root` | `root`, or `tmp` (the run's own directory) |
+| `warnings` | `allow` | `error`, or `error:M01,W0001`: a build warning (by code prefix) fails it |
+| `checks` | | stdout lines starting with this count as checks (`mbuild-checks: N` sets the count) |
+| `services` | | `mb_service` names started around each run (fixtures) |
+| `args` | | words passed to a test program |
+| `run` | `true` | `false`: build only |
+| `native` | `skipped` | `@test` files: also run natively what the interpreter `skipped`, `always`, or `never` |
+| `golden`, `golden-dir`, `golden-cross`, `png-tolerance` | | see golden files below |
+| `ports` | `20000-29999` | `"*"` only: the pool of free ports |
 
-`mbuild test` runs the `@test` files, then the test programs, with one
-summary. One that passed is cached until its compile inputs change.
+Each (test, cell) runs `repeat` times, at most `-j` at once, every run in
+`.mbuild/test-run/<cell>/<name>/<run>/`: `tmp/` (its `TMPDIR`, also
+`MBUILD_TEST_TMP`), `out/` (`MBUILD_TEST_OUT`), `stdout`, `stderr`. A run
+also gets `MBUILD_ROOT`, `MBUILD_TEST_NAME`, `MBUILD_TEST_CELL` and
+`MBUILD_TEST_RUN`, stdin from `/dev/null`, and a process group of its own:
+a timeout stops it and whatever it forked. Passing runs are removed
+(`--keep` keeps them); failing ones are kept. A passing (test, cell) is
+cached until its build, settings or golden files change; `--force`, `--bless`
+and `--repeat` above 1 run everything. Outputs of tests that are gone are
+removed. The line per test, then each failure once:
+
+```mettle
+fn project() {
+  mb_package("demo", "0.1.0");
+  mb_test_set("*", "matrix", "debug, release");
+  mb_test_set("parse", "checks", "PASS");
+  mb_test_set("stress", "repeat", "20");
+  mb_test_cmd("plot", "sh tests/plot.sh");
+}
+```
 
 ```text
 $ mbuild test
-ok     src/adder.mettle (1 passed)
-   Compiling adder (C, 1 file)
-   Compiling test add (linux, debug)
-   Compiling test bad (linux, debug)
-ok     add (tests/add_test.mettle)
-expected 4, got 5
-FAILED bad (tests/bad_test.mettle) (exit 3)
-test result: FAILED. 2 passed, 0 cached, 1 failed in 0.0s
-$ mbuild test add
-ok     add (tests/add_test.mettle) (cached)
-test result: ok. 0 passed, 1 cached, 0 failed in 0.0s
+     Testing linux/debug
+   Compiling test parse (linux, debug)
+   Compiling test stress (linux, debug)
+     Testing linux/release
+   Compiling test parse (linux, release)
+   Compiling test stress (linux, release)
+test src/calc.mettle (debug, release) ... ok  0.0s  1 check
+test parse (debug, release) ... ok  0.0s  3 checks
+test stress (debug, release) ... FAILED 2/40
+test plot (debug, release) ... ok  0.0s
+
+failures:
+
+---- stress (linux/debug, run 7): exit 1
+stdout:
+  lost an update on run 7
+kept: .mbuild/test-run/linux-debug/stress/7
+
+---- stress (linux/release, run 7): exit 1
+stdout:
+  lost an update on run 7
+kept: .mbuild/test-run/linux-release/stress/7
+
+test result: FAILED. 3 passed, 1 failed, 4 checks (0.3s)
 ```
 
-`mbuild test NAME` runs that test program, `mbuild test FILE` that `@test`
-file; `--filter S` also picks the test programs whose names contain `S`.
+`mbuild test NAME...` runs those (a test program, command test or `@test`
+file); `--filter S` the ones whose names contain `S`; `--matrix=CELLS`,
+`-r` and `-p P` replace the cells, `--repeat N` and `--timeout S` override
+for one run, `--deny-warnings` fails every warning, `-q` shows failures
+only (`mbuild help test`).
+
+**`@test` natively.** The interpreter can't call C. With `native=skipped`
+the tests it skipped run again: mbuild writes a copy of the file to
+`.mbuild/test-native/` (same lines, `fn main` renamed, a generated `main`
+calling those tests), builds it as a test program in each cell with `-I`
+the original's directory, and its result counts. `native=always` runs every
+`@test` of the file that way, in every cell.
+
+**Fixtures** are `mb_service`s named in `services`, started for each run as
+`mbuild run` starts them, with cwd the run's `tmp/`, and stopped after it
+(on timeout too). `mb_service_port(name, 0)` gives each run a free port, so
+parallel runs don't collide:
+
+```mettle
+  mb_service("db", "meodb --data $MBUILD_TEST_TMP/db --port $MBUILD_PORT_DB");
+  mb_service_port("db", 0);
+  mb_test_set("live_meodb", "services", "db");
+```
+
+**Golden files.** When `tests/golden/<name>/` (`golden-dir`) exists, what a
+run writes to `out/` must match it file for file: byte for byte, `.png`
+files pixel for pixel. `png-tolerance` `C` or `C,F,H` (default `0`): a pixel
+fails when a channel is off by more than `C`, the image when more than a
+fraction `F` of pixels fail or any channel is off by more than `H`; a
+failing image leaves `NAME.diff.png` (red where it failed) beside it.
+`golden = files,stdout` compares stdout too (golden file `stdout`); `off`
+skips it. With `golden-cross` (default) every cell's outputs must also
+match the first cell's (debug == release, linux == wine). `--bless` writes
+the first cell's outputs as the goldens and removes the ones no longer
+written; `--only S` limits it to paths containing `S`:
+
+```text
+$ mbuild test plot
+     Testing linux/debug
+     Testing linux/release
+test plot (debug, release) ... FAILED
+
+failures:
+
+---- plot (linux/debug): golden out/line.csv differs at line 4
+  expected: 2,9
+  written:  2,8
+kept: .mbuild/test-run/linux-debug/plot/1
+
+---- plot (linux/release): golden out/line.csv differs at line 4
+  expected: 2,9
+  written:  2,8
+kept: .mbuild/test-run/linux-release/plot/1
+
+test result: FAILED. 0 passed, 1 failed (0.0s)
+$ mbuild test plot --bless
+     Testing linux/debug
+     Testing linux/release
+test plot (debug, release) ... ok  0.0s
+    Blessing tests/golden/plot/line.csv
+test result: ok. 1 passed, 0 failed (0.0s)
+```
 
 ### Services
 
