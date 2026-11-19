@@ -224,6 +224,56 @@ sed -i 's|srv $MBUILD_PORT_DB db.pid 0 quiet|srv $MBUILD_PORT_DB db.pid 100|' mb
 mb run app -- 1 0 500
 check "run: port 0 takes one from the pool, \$MBUILD_PORT_DB names it" sh -c 'port=$(sed -n "s/^ *Ready db on :\([0-9]*\) .*/\1/p" "$0/last.out"); [ -n "$port" ] && grep -qF "Starting note (sh -c '"'"'echo $port > " "$0/last.out" && [ -z "$(ls "$0/home/tmp/ports")" ]' "$S"
 
+# --- golden files: compare, bless, cross-cell
+proj "$W/gold" <<'EOF2'
+  mb_test_cmd("gen", "sh tests/gen.sh");
+  mb_test_cmd("say", "sh -c 'echo hello; echo $MBUILD_TEST_CELL > $MBUILD_TEST_OUT/cell.txt'");
+  mb_test_set("say", "golden", "files,stdout");
+  mb_test_set("say", "matrix", "debug, release");
+  mb_test_set("say", "golden-cross", "false");
+  mb_test_cmd("both", "sh tests/both.sh");
+  mb_test_set("both", "matrix", "debug, release");
+EOF2
+cd "$W/gold" || exit 1
+cat > tests/gen.sh <<'EOF2'
+printf 'line 1\nline 2\nline 3\n' > "$MBUILD_TEST_OUT/a.txt"
+mkdir -p "$MBUILD_TEST_OUT/sub"
+printf 'x\000y' > "$MBUILD_TEST_OUT/sub/b.bin"
+EOF2
+printf 'echo same > "$MBUILD_TEST_OUT/x.txt"\n' > tests/both.sh
+mb test gen say --bless
+check "bless: writes the first cell's outputs" sh -c 'grep -qxF "    Blessing tests/golden/gen/a.txt" "$0/last.out" && grep -qxF "    Blessing tests/golden/gen/sub/b.bin" "$0/last.out" && grep -qxF "    Blessing tests/golden/say/stdout" "$0/last.out" && [ "$(cat tests/golden/say/cell.txt)" = linux/debug ] && [ "$(cat tests/golden/say/stdout)" = hello ] && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb test gen say
+check "golden: a match" sh -c 'grep -qF "test gen (debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "golden: each cell against it" has "---- say (linux/release): golden out/cell.txt differs at line 1"
+sed -i 's/line 2/line two/' tests/gen.sh
+mb test gen
+check "golden: a text mismatch names the line" sh -c 'grep -qxF -- "---- gen (linux/debug): golden out/a.txt differs at line 2" "$0/last.out" && grep -qxF "  expected: line 2" "$0/last.out" && grep -qxF "  written:  line two" "$0/last.out"' "$S"
+sed -i 's/line two/line 2/; s/x\\000y/x\\000z/' tests/gen.sh
+mb test gen
+check "golden: a binary mismatch names the byte" has "---- gen (linux/debug): golden out/sub/b.bin differs at byte 2 (3 bytes expected, 3 written)"
+sed -i 's/x\\000z/x\\000y/' tests/gen.sh
+echo extra >> tests/gen.sh
+printf 'echo extra > "$MBUILD_TEST_OUT/extra.txt"\n' >> tests/gen.sh
+mb test gen
+check "golden: an extra output" has "---- gen (linux/debug): out/extra.txt has no golden file (tests/golden/gen/extra.txt; mbuild test --bless writes it)"
+sed -i '/extra/d; /sub/d' tests/gen.sh
+mb test gen
+check "golden: a missing output" has "---- gen (linux/debug): golden tests/golden/gen/sub/b.bin: out/sub/b.bin was not written"
+mb test gen --bless --only a.txt
+check "bless --only: other paths left alone" sh -c '[ -f tests/golden/gen/sub/b.bin ] && ! grep -q Blessing "$0/last.out"' "$S"
+mb test gen --bless
+check "bless: removes what is no longer written" sh -c 'grep -qxF "    Removing tests/golden/gen/sub/b.bin" "$0/last.out" && [ ! -e tests/golden/gen/sub/b.bin ]' "$S"
+printf 'echo $MBUILD_TEST_CELL > "$MBUILD_TEST_OUT/x.txt"\n' > tests/both.sh
+mb test both
+check "golden-cross: cells must agree" sh -c 'grep -qF "test both (debug, release) ... FAILED" "$0/last.out" && grep -qF -- "---- both (linux/release): not as in linux/debug: out/x.txt differs at line 1" "$0/last.out"' "$S"
+sed -i 's/^printf.*with_stdout.*//' tests/both.sh
+printf 'echo same > "$MBUILD_TEST_OUT/x.txt"\n' > tests/both.sh
+mb test both
+check "golden-cross: agreeing cells pass" line "test both (debug, release) ... ok  0.0s"
+mb test gen --only x
+check "--only needs --bless" has "error: --only goes with --bless"
+
 done
 echo "test_runner: $pass passed, $failed failed"
 [ $failed = 0 ]

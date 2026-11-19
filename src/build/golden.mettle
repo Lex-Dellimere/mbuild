@@ -1,0 +1,247 @@
+// golden: a test's outputs against its golden files (16.2). Every file
+// under the golden directory must exist under the run's out/ and match, and
+// out/ holds nothing else; "stdout" stands for the captured stdout when the
+// test's golden setting includes it. Text mismatches name the first
+// differing line, binary ones the first differing byte.
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+fn gld_walk(root: string, rel: string, out: StrList*) {
+  var dir: string = root;
+  if (slen(rel) > 0) {
+    dir = root + "/" + rel;
+  }
+  var files: StrList* = sl_new();
+  defer free(files);
+  var dirs: StrList* = sl_new();
+  defer free(dirs);
+  if (!sys_list_dir(dir, files, dirs)) {
+    return;
+  }
+  var i: int64 = 0;
+  while (i < files->len) {
+    sl_push(out, p_join(rel, sl_get(files, i)));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < dirs->len) {
+    gld_walk(root, p_join(rel, sl_get(dirs, i)), out);
+    i = i + 1;
+  }
+}
+
+// The files below root, relative, '/' separated, sorted.
+export fn gld_files(root: string) -> StrList* {
+  var l: StrList* = sl_new();
+  gld_walk(root, s_empty(), l);
+  sl_sort(l);
+  return l;
+}
+
+// A hash of every file below dir (names and bytes), "" when there is none.
+export fn gld_hash(dir: string) -> string {
+  if (!fs_is_dir(dir)) {
+    return s_empty();
+  }
+  var files: StrList* = gld_files(dir);
+  defer free(files);
+  var h: Hasher = h_new();
+  var i: int64 = 0;
+  while (i < files->len) {
+    var f: string = sl_get(files, i);
+    var rd: FsRead = fs_read(dir + "/" + f);
+    h_str(&h, f);
+    h_str(&h, rd.data);
+    i = i + 1;
+  }
+  return h_hex(&h);
+}
+
+fn gld_binary(s: string) -> bool {
+  var n: int64 = slen(s);
+  if (n > 8192) {
+    n = 8192;
+  }
+  var i: int64 = 0;
+  while (i < n) {
+    if (s_byte(s, i) == 0) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn gld_clip(s: string) -> string {
+  if (slen(s) > 160) {
+    return s_sub(s, 0, 160) + "...";
+  }
+  return s;
+}
+
+// Where got differs from want ("" when equal): "at line N" with both lines,
+// or "at byte N".
+export fn gld_diff(want: string, got: string) -> string {
+  if (s_eq(want, got)) {
+    return s_empty();
+  }
+  if (gld_binary(want) || gld_binary(got)) {
+    var n: int64 = slen(want);
+    if (slen(got) < n) {
+      n = slen(got);
+    }
+    var i: int64 = 0;
+    while (i < n && s_byte(want, i) == s_byte(got, i)) {
+      i = i + 1;
+    }
+    return "at byte " + s_int(i) + " (" + s_int(slen(want)) + " bytes expected, " + s_int(slen(got)) + " written)";
+  }
+  var a: StrList* = s_lines(want);
+  defer free(a);
+  var b: StrList* = s_lines(got);
+  defer free(b);
+  var k: int64 = 0;
+  while (k < a->len && k < b->len && s_eq(sl_get(a, k), sl_get(b, k))) {
+    k = k + 1;
+  }
+  var wl: string = "(end of file)";
+  var gl: string = "(end of file)";
+  if (k < a->len) {
+    wl = gld_clip(sl_get(a, k));
+  }
+  if (k < b->len) {
+    gl = gld_clip(sl_get(b, k));
+  }
+  if (s_eq(wl, gl)) {
+    // the same lines, a newline more or less at the end
+    return "at the end (a final newline)";
+  }
+  return "at line " + s_int(k + 1) + "\n  expected: " + wl + "\n  written:  " + gl;
+}
+
+// Why a run's outputs do not match the golden directory gdir (shown as
+// gshown), "" when they do. out_dir: the run's out/; stdout: its captured
+// stdout, compared when with_stdout; tol: the png-tolerance setting.
+export fn gld_compare(gdir: string, gshown: string, out_dir: string, stdout_text: string, with_stdout: bool, tol: string) -> string {
+  var want: StrList* = gld_files(gdir);
+  defer free(want);
+  var got: StrList* = gld_files(out_dir);
+  defer free(got);
+  var i: int64 = 0;
+  while (i < want->len) {
+    var f: string = sl_get(want, i);
+    i = i + 1;
+    var wr: FsRead = fs_read(gdir + "/" + f);
+    if (with_stdout && s_eq(f, "stdout")) {
+      var sd: string = gld_diff(wr.data, stdout_text);
+      if (slen(sd) > 0) {
+        return "golden stdout differs " + sd;
+      }
+      continue;
+    }
+    if (!sl_has(got, f)) {
+      return "golden " + gshown + "/" + f + ": out/" + f + " was not written";
+    }
+    var outp: string = out_dir + "/" + f;
+    var gr: FsRead = fs_read(outp);
+    if (s_eq(wr.data, gr.data)) {
+      continue;
+    }
+    return "golden out/" + f + " differs " + gld_diff(wr.data, gr.data);
+  }
+  i = 0;
+  while (i < got->len) {
+    var g: string = sl_get(got, i);
+    if (!sl_has(want, g) && !s_ends(g, ".diff.png")) {
+      return "out/" + g + " has no golden file (" + gshown + "/" + g + "; mbuild test --bless writes it)";
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// Why two runs' outputs differ ("" when byte-identical): out/ files, and
+// stdout when with_stdout.
+export fn gld_cross(a_out: string, a_stdout: string, b_out: string, b_stdout: string, with_stdout: bool) -> string {
+  var fa: StrList* = gld_files(a_out);
+  defer free(fa);
+  var fb: StrList* = gld_files(b_out);
+  defer free(fb);
+  var i: int64 = 0;
+  while (i < fa->len) {
+    var f: string = sl_get(fa, i);
+    i = i + 1;
+    if (!sl_has(fb, f)) {
+      return "out/" + f + " was not written";
+    }
+    var ra: FsRead = fs_read(a_out + "/" + f);
+    var rb: FsRead = fs_read(b_out + "/" + f);
+    var d: string = gld_diff(ra.data, rb.data);
+    if (slen(d) > 0) {
+      return "out/" + f + " differs " + d;
+    }
+  }
+  i = 0;
+  while (i < fb->len) {
+    if (!sl_has(fa, sl_get(fb, i))) {
+      return "out/" + sl_get(fb, i) + " was written here only";
+    }
+    i = i + 1;
+  }
+  if (with_stdout) {
+    var sd: string = gld_diff(a_stdout, b_stdout);
+    if (slen(sd) > 0) {
+      return "stdout differs " + sd;
+    }
+  }
+  return s_empty();
+}
+
+// Copies a run's outputs into gdir: new and changed files, and removes the
+// golden files it no longer writes; only paths containing only ("" = all).
+// Each change is said as "Blessing PATH" / "Removing PATH" (gshown/f).
+export fn gld_bless(gdir: string, gshown: string, out_dir: string, stdout_text: string, with_stdout: bool, only: string) -> int64 {
+  var got: StrList* = gld_files(out_dir);
+  defer free(got);
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (i < got->len) {
+    var f: string = sl_get(got, i);
+    i = i + 1;
+    if (s_ends(f, ".diff.png") || (slen(only) > 0 && !s_contains(f, only))) {
+      continue;
+    }
+    var rd: FsRead = fs_read(out_dir + "/" + f);
+    fs_mkdirs(p_dir(gdir + "/" + f));
+    if (fs_write_if_changed(gdir + "/" + f, rd.data)) {
+      status("Blessing", gshown + "/" + f);
+      n = n + 1;
+    }
+  }
+  if (with_stdout && (slen(only) == 0 || s_contains("stdout", only))) {
+    fs_mkdirs(gdir);
+    if (fs_write_if_changed(gdir + "/stdout", stdout_text)) {
+      status("Blessing", gshown + "/stdout");
+      n = n + 1;
+    }
+  }
+  var want: StrList* = gld_files(gdir);
+  defer free(want);
+  i = 0;
+  while (i < want->len) {
+    var w: string = sl_get(want, i);
+    i = i + 1;
+    if (sl_has(got, w) || (with_stdout && s_eq(w, "stdout")) || (slen(only) > 0 && !s_contains(w, only))) {
+      continue;
+    }
+    sys_remove_file(gdir + "/" + w);
+    status("Removing", gshown + "/" + w);
+    n = n + 1;
+  }
+  return n;
+}

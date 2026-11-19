@@ -37,6 +37,7 @@ import "live_linux" if linux;
 import "live_windows" if windows;
 import "testrun";
 import "testnative";
+import "golden";
 import "testrun_linux" if linux;
 import "testrun_windows" if windows;
 import "../core/sys_linux" if linux;
@@ -3556,8 +3557,12 @@ struct BtTest {
   runs: int64;        // planned, and ended so far
   ended: int64;
   printed: bool;
-  hold: bool;         // an @test file whose native runs are not planned yet
+  hold: bool;         // printed later: native runs, cross-cell check, bless
   native: string;     // its native setting
+  golden: string;     // its golden setting: files, files,stdout, off
+  gdir: string;       // its golden directory, absolute, and as shown
+  gshown: string;
+  keep_first: bool;   // each cell's first run is kept for the cross check or bless
 }
 
 // One (test, cell).
@@ -3601,6 +3606,8 @@ struct BtPlan {
   nspecs: int64;
   run_base: int64;    // trn_exec's run 0 is runs[run_base]
   native_from: int64; // runs from here on are native @test runs
+  bless: bool;        // --bless: write the golden files instead of comparing
+  only: string;       // --only S
 }
 
 // Names a cached test program's pass stamp includes: "name\tkey" (0 = no cache).
@@ -3647,7 +3654,17 @@ fn bt_settings_key(p: Project*, name: string) -> string {
   var env: StrList* = man_test_env(p->man, name);
   h_str(&h, sl_join(env, "\n"));
   free(env);
+  h_str(&h, gld_hash(p_join(p->root, bt_golden_dir(p, name))));
   return h_hex(&h);
+}
+
+// A test's golden directory, from the root.
+fn bt_golden_dir(p: Project*, name: string) -> string {
+  var d: string = bt_get(p, name, "golden-dir");
+  if (slen(d) == 0) {
+    d = "tests/golden/" + name;
+  }
+  return d;
 }
 
 // The cells of a test: --matrix=CSV, else -r / -p, else its matrix
@@ -4388,9 +4405,12 @@ fn bt_judge(pl: BtPlan*, r: TrnRun*, checks: int64*) -> string {
       why = trn_denied(w, bt_get(p, t->name, "warnings"));
       free(w);
     }
-    return why;
+  } else {
+    *checks = trn_checks(r->out, bt_get(p, t->name, "checks"));
   }
-  *checks = trn_checks(r->out, bt_get(p, t->name, "checks"));
+  if (slen(why) == 0 && !pl->bless && !s_eq(t->golden, "off") && fs_is_dir(t->gdir)) {
+    why = gld_compare(t->gdir, t->gshown, r->dir + "/out", r->out, s_contains(t->golden, "stdout"), bt_get(p, t->name, "png-tolerance"));
+  }
   return why;
 }
 
@@ -4552,7 +4572,7 @@ fn bt_ended(arg: rawptr, i: int64) -> bool {
       c->first = r;
       c->why = why;
     }
-  } else if (!pl->keep) {
+  } else if (!pl->keep && !(t->keep_first && r->k == 1 && !r->native)) {
     sys_remove_tree(r->dir);
   }
   var q: int64 = 0;
@@ -4937,7 +4957,9 @@ fn bt_native(pl: BtPlan*) -> int32 {
   }
   i = 0;
   while (i < pl->nt) {
-    pl->tests[i]->hold = false;
+    if (!pl->tests[i]->keep_first) {
+      pl->tests[i]->hold = false;
+    }
     i = i + 1;
   }
   if (pl->nr == from) {
@@ -4946,6 +4968,91 @@ fn bt_native(pl: BtPlan*) -> int32 {
   pl->native_from = from;
   pl->run_base = from;
   return trn_exec(&pl->runs[from], pl->nr - from, bx_parallel(pl->p), (rawptr)pl, &bt_ended);
+}
+
+// The first run of cell ci (not a native one), 0 when it did not run.
+fn bt_first_run(pl: BtPlan*, ci: int64) -> TrnRun* {
+  var i: int64 = 0;
+  while (i < pl->nr) {
+    var r: TrnRun* = pl->runs[i];
+    if (r->cell == ci && r->k == 1 && !r->native) {
+      return r;
+    }
+    i = i + 1;
+  }
+  return (TrnRun*)0;
+}
+
+// Whether every cell of t that ran passed.
+fn bt_all_passed(pl: BtPlan*, t: BtTest*) -> bool {
+  var k: int64 = 0;
+  while (k < t->nc) {
+    var c: BtCell* = pl->cells[t->c0 + k];
+    if (slen(c->pre) > 0 || c->failed > 0) {
+      return false;
+    }
+    k = k + 1;
+  }
+  return true;
+}
+
+// golden-cross: once every cell passed, each cell's outputs byte-identical
+// to the first cell's.
+fn bt_cross(pl: BtPlan*) {
+  var i: int64 = 0;
+  while (i < pl->nt) {
+    var t: BtTest* = pl->tests[i];
+    i = i + 1;
+    if (!t->keep_first || t->nc < 2 || !s_eq(bt_get(pl->p, t->name, "golden-cross"), "true") || !bt_all_passed(pl, t)) {
+      continue;
+    }
+    var base: TrnRun* = (TrnRun*)0;
+    var base_spec: string = s_empty();
+    var k: int64 = 0;
+    while (k < t->nc) {
+      var r: TrnRun* = bt_first_run(pl, t->c0 + k);
+      var c: BtCell* = pl->cells[t->c0 + k];
+      k = k + 1;
+      if (r == (TrnRun*)0) {
+        continue;
+      }
+      if (base == (TrnRun*)0) {
+        base = r;
+        base_spec = c->spec;
+        continue;
+      }
+      var d: string = gld_cross(base->dir + "/out", base->out, r->dir + "/out", r->out, s_contains(t->golden, "stdout"));
+      if (slen(d) > 0) {
+        c->failed = c->failed + 1;
+        c->first = r;
+        c->why = "not as in " + base_spec + ": " + d;
+      }
+    }
+  }
+}
+
+// --bless: each test that passed gets its first cell's outputs as goldens.
+fn bt_bless(pl: BtPlan*) {
+  if (!pl->bless) {
+    return;
+  }
+  var i: int64 = 0;
+  while (i < pl->nt) {
+    var t: BtTest* = pl->tests[i];
+    i = i + 1;
+    if (s_eq(t->golden, "off") || !bt_all_passed(pl, t)) {
+      continue;
+    }
+    var k: int64 = 0;
+    while (k < t->nc) {
+      var r: TrnRun* = bt_first_run(pl, t->c0 + k);
+      k = k + 1;
+      if (r != (TrnRun*)0) {
+        gld_bless(t->gdir, t->gshown, r->dir + "/out", r->out, s_contains(t->golden, "stdout"), pl->only);
+        break;
+      }
+    }
+  }
 }
 
 // mbuild test [NAME | FILE]...: every test in every cell of its matrix,
@@ -4958,6 +5065,11 @@ export fn build_cmd_test(p: Project*) -> int32 {
   g_bt_plan = pl;
   pl->p = p;
   pl->keep = sl_has(p->opts->rest, "--keep");
+  pl->bless = sl_has(p->opts->rest, "--bless");
+  pl->only = bt_rest_value(p, "--only");
+  if (slen(pl->only) > 0 && !pl->bless) {
+    fail("--only goes with --bless: mbuild test NAME --bless --only S");
+  }
   pl->filter = p->opts->filter;
   var mx: string = bt_rest_value(p, "--matrix");
   if (slen(mx) > 0) {
@@ -4977,7 +5089,7 @@ export fn build_cmd_test(p: Project*) -> int32 {
   }
   var dflt: StrList* = bx_mx_entries(p);
   defer free(dflt);
-  pl->nocache = p->opts->force;
+  pl->nocache = p->opts->force || pl->bless;
   g_bt_keys = sl_new();
   var i: int64 = 0;
   while (i < pl->nt) {
@@ -4985,6 +5097,9 @@ export fn build_cmd_test(p: Project*) -> int32 {
     t->repeat = s_to_int(bt_get(p, t->name, "repeat"));
     t->native = bt_get(p, t->name, "native");
     t->hold = t->kind == BT_FILE && !s_eq(t->native, "never");
+    t->golden = bt_get(p, t->name, "golden");
+    t->gshown = bt_golden_dir(p, t->name);
+    t->gdir = p_join(p->root, t->gshown);
     var cells: StrList* = bt_cells_of(p, t->name, dflt);
     t->c0 = pl->ncells;
     t->nc = cells->len;
@@ -4994,7 +5109,11 @@ export fn build_cmd_test(p: Project*) -> int32 {
       k = k + 1;
     }
     free(cells);
-    if (t->kind == BT_PROG && !p->opts->force && t->repeat == 1) {
+    t->keep_first = !s_eq(t->golden, "off") && (pl->bless || (t->nc > 1 && s_eq(bt_get(p, t->name, "golden-cross"), "true")));
+    if (t->keep_first) {
+      t->hold = true;
+    }
+    if (t->kind == BT_PROG && !p->opts->force && !pl->bless && t->repeat == 1) {
       sl_push(g_bt_keys, t->name + "\t" + bt_settings_key(p, t->name));
     }
     i = i + 1;
@@ -5019,7 +5138,18 @@ export fn build_cmd_test(p: Project*) -> int32 {
     rc = bt_native(pl);
   }
   svc_ports_release_all();
+  if (rc != 130) {
+    bt_cross(pl);
+  }
+  var u: int64 = 0;
+  while (u < pl->nt) {
+    pl->tests[u]->hold = false;
+    u = u + 1;
+  }
   bt_print_ready(pl);
+  if (rc != 130) {
+    bt_bless(pl);
+  }
   if (rc == 130) {
     say("test result: " + red("INTERRUPTED"));
     return 130;
@@ -6924,7 +7054,7 @@ fn bx_init_cmds() {
   bx_note("inputs: an expression prints its value, a statement runs, `fn NAME(...) {{...}` redefines NAME; `edit NAME`, `undo [NAME]`, `r`, `pause`, `resume`, `step`, `pause when EXPR`, `watch EXPR`, `status`, `h NAME`, `i EXPR`, `:log`, `:q`. type `help` at the prompt.");
   bx_note("it writes the same events as mbuild live (paused and resumed too) for mbuild/live.");
   bx_note("a pause holds the thread calling shell_point(), between ticks; inputs and patches still run. other threads keep running. globals and functions are in scope, locals are not. Linux only.");
-  bx_def("test", "run the tests: @test files, test programs, command tests", "mbuild test [NAMES | FILES...] [--matrix=CELLS] [--repeat N]", "project.md");
+  bx_def("test", "run the tests: @test files, test programs, command tests", "mbuild test [NAMES | FILES...] [--matrix=CELLS] [--repeat N] [--bless [--only S]]", "project.md");
   bx_ex("mbuild test", "every test in every cell of its matrix (default: debug on the host)");
   bx_ex("mbuild test parse --repeat 50", "one test 50 times; it passes when every run does");
   bx_ex("mbuild test --matrix=debug,release", "every test built and run both ways");
@@ -6941,8 +7071,11 @@ fn bx_init_cmds() {
   bx_fl("-q", "show failed tests only");
   bx_fl("--keep", "keep the run directories of passing runs too (.mbuild/test-run/CELL/NAME/K)");
   bx_fl("--force", "run cached tests too");
+  bx_fl("--bless", "write each passing test's outputs (out/, stdout with golden = files,stdout) as its golden files");
+  bx_fl("--only S", "with --bless: only golden paths containing S");
   bx_note("a test is an @test file (run in the compiler's interpreter), a test program (mb_test_bin, tests/NAME_test.mettle with fn main, mb_test_glob) or a command test (mb_test_cmd); it passes on exit 0. mb_test_set(name, key, value) sets matrix, timeout, repeat, serial, cwd, warnings, checks, args, run and more (docs/project.md).");
   bx_note("each run gets its own directory: TMPDIR (MBUILD_TEST_TMP), MBUILD_TEST_OUT, stdout and stderr; it runs in a process group of its own, which a timeout stops whole.");
+  bx_note("golden files: what a run writes to $MBUILD_TEST_OUT must match tests/golden/NAME (the golden-dir setting) byte for byte; with several cells, each cell's outputs must match the first's (golden-cross).");
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
   bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");

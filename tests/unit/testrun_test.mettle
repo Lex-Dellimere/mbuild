@@ -8,6 +8,7 @@ import "../../src/core/base";
 import "../../src/build/testrun";
 import "../../src/build/testnative";
 import "../../src/build/services";
+import "../../src/build/golden";
 
 var g_pass: int64 = 0;
 var g_fail: int64 = 0;
@@ -90,8 +91,19 @@ fn test_services() {
   t_eq("port variable", svc_port_var("db") + " " + svc_port_var("my-cache.2"), "MBUILD_PORT_DB MBUILD_PORT_MY_CACHE_2");
 }
 
+fn test_golden() {
+  t_eq("diff: equal", gld_diff("a\nb\n", "a\nb\n"), "");
+  t_eq("diff: a line", gld_diff("a\nb\nc\n", "a\nB\nc\n"), "at line 2\n  expected: b\n  written:  B");
+  t_eq("diff: shorter", gld_diff("a\nb\n", "a\n"), "at line 2\n  expected: b\n  written:  (end of file)");
+  t_eq("diff: final newline", gld_diff("a\nb\n", "a\nb"), "at the end (a final newline)");
+  var bin: string = "x" + s_view((uint8*)"\0", 1) + "yz";
+  var bin2: string = "x" + s_view((uint8*)"\0", 1) + "yy";
+  t_eq("diff: binary", gld_diff(bin, bin2), "at byte 3 (4 bytes expected, 4 written)");
+}
+
 fn run_all() -> int64 {
   test_outputs();
+  test_golden();
   test_services();
   test_native();
   say("");
