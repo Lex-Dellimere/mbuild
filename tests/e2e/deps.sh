@@ -369,6 +369,36 @@ drv "$P" ensure
 MBUILD_REGISTRY="$R"
 check "registry manifest under another name exits 1" code_is 1
 check "registry manifest under another name" has "$S/last.out" 'textfmt v0.1.0 is package `strutil`, not `textfmt`'
+P="$S/strutil"
+proj "$P" <<'EOF'
+mb_dep("strutil", "v1.0.0");
+EOF
+drv "$P" ensure
+check "a package depending on its own name exits 1" code_is 1
+check "... says so" has "$S/last.out" "error: package strutil depends on a package named strutil (itself)"
+check "... help says to rename" has "$S/last.out" "help: rename one of them"
+proj "$P" <<'EOF'
+mb_dep_path("strutil", "../raize_web");
+EOF
+drv "$P" ensure
+check "a path dependency with its own name exits 1" code_is 1
+check "... says so" has "$S/last.out" "error: package strutil depends on a package named strutil (itself)"
+proj "$P" <<'EOF'
+mb_dep("vecmath", "v0.2.0");
+EOF
+drv "$P" ensure
+check "a registry dependency leading back to it exits 1" code_is 1
+check "... names the chain" has "$S/last.out" "error: package strutil depends on a package named strutil (itself), through mbuild.mettle -> vecmath v0.2.0 -> strutil"
+proj "$S/mid" <<'EOF'
+mb_dep_path("strutil", "../strutil");
+EOF
+sed -i 's/"mid"/"loop"/' "$S/mid/mbuild.mettle"
+proj "$P" <<'EOF'
+mb_dep_path("loop", "../mid");
+EOF
+drv "$P" ensure
+check "a path dependency leading back to it exits 1" code_is 1
+check "... names the chain" has "$S/last.out" "error: package strutil depends on a package named strutil (itself), through strutil -> loop -> strutil"
 P="$S/edit"
 proj "$P" <<'EOF'
 mb_dep("apilib", "v1.0.0");
