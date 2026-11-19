@@ -175,6 +175,16 @@ check "no shared libraries" has "error: bin lib is a shared library, and riscv64
 mb build -t riscv8-linux
 check "an unknown target lists them" has "the targets are linux, windows, riscv64-linux, riscv32-linux, riscv64-none, riscv32-none, all, host"
 
+# --- -t all: the declared targets, else linux and windows (never RISC-V unasked)
+mkdir -p "$W/all/src" && cd "$W/all"
+printf 'import "std/io";\nimport "std/file";\nfn main() -> int32 {\n  print("all\\n");\n  return 0;\n}\n' > src/main.mettle
+printf 'import "mbuild/api";\nfn project() {\n  mb_package("all", "0.1.0");\n}\n' > mbuild.mettle
+( unset MBUILD_METTLE_WINDOWS; mb build -t all )
+check "-t all without mb_targets: linux and windows only" sh -c 'grep -qF "no Mettle compiler for windows" "$0/last.out" && ! grep -q riscv "$0/last.out" && [ ! -d build/riscv32-linux ]' "$S"
+printf 'import "mbuild/api";\nfn project() {\n  mb_package("all", "0.1.0");\n  mb_targets("linux, riscv64-linux");\n}\n' > mbuild.mettle
+mb build -t all
+check "-t all is mb_targets" sh -c '[ "$(cat "$0/last.code")" = 0 ] && [ -x build/linux/debug/all ] && [ -f build/riscv64-linux/debug/all ] && [ ! -d build/riscv32-linux ] && [ ! -d build/windows ]' "$S"
+
 # --- pico2 on rvsim: every output, until-ms, exit-on-uart
 mkdir -p "$W/pico/src" && cd "$W/pico"
 cat > mbuild.mettle <<'EOF'

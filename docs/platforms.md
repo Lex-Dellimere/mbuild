@@ -28,8 +28,8 @@ Which targets a command builds:
 
 - `-t linux`, `-t windows`, a [RISC-V](#risc-v) target, `-t all` or
   `-t host`. Repeat it or separate with commas: `-t linux,windows`. `all` is
-  linux, windows, riscv64-linux and riscv32-linux, plus the board targets
-  `mb_targets` lists.
+  the targets `mb_targets` lists, else linux and windows: a RISC-V target
+  is built only when it is declared or named.
 - Without `-t`, `build`, `check` and `doctor` use `mb_targets`, else the
   host.
 - `run`, `test`, `live` and `mettle` use the host. `run` takes one target:

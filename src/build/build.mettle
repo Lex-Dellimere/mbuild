@@ -588,18 +588,16 @@ fn bx_select_from(p: Project*, all: BinSet*, names: StrList*) -> BinSet* {
   return sel;
 }
 
-// all: every target but the board images, which only mb_targets adds.
+// all: the targets mb_targets declares, else linux and windows.
 fn bx_add_target(p: Project*, l: StrList*, t: string) {
   if (s_eq(t, "all")) {
-    sl_add_uniq(l, "linux");
-    sl_add_uniq(l, "windows");
-    sl_add_uniq(l, "riscv64-linux");
-    sl_add_uniq(l, "riscv32-linux");
+    if (p->man->targets->len == 0) {
+      sl_add_uniq(l, "linux");
+      sl_add_uniq(l, "windows");
+    }
     var i: int64 = 0;
     while (i < p->man->targets->len) {
-      if (target_is_bare(sl_get(p->man->targets, i))) {
-        sl_add_uniq(l, sl_get(p->man->targets, i));
-      }
+      sl_add_uniq(l, sl_get(p->man->targets, i));
       i = i + 1;
     }
   } else if (s_eq(t, "host")) {
@@ -5165,7 +5163,7 @@ fn bx_init_cmds() {
   bx_def("build", "build the programs", "mbuild build [BINS...] [-t T] [-r | -p PROFILE]", "project.md");
   bx_ex("mbuild build", "");
   bx_ex("mbuild build -r", "release");
-  bx_ex("mbuild build -t all", "linux, windows, riscv64-linux and riscv32-linux");
+  bx_ex("mbuild build -t all", "the mb_targets targets, else linux and windows");
   bx_ex("mbuild build -t riscv32-none", "a board image: build/riscv32-none/debug/NAME.bin and .elf");
   bx_ex("mbuild build server", "one bin");
   bx_fl("-t T", "linux, windows, riscv64-linux, riscv32-linux, riscv64-none, riscv32-none, all or host (repeatable)");
@@ -5176,7 +5174,7 @@ fn bx_init_cmds() {
   bx_fl("--no-hooks", "skip hook_pre_build and hook_post_build");
   bx_fl("--force", "rebuild what's fresh too");
   bx_note("output goes to build/<target>/<profile>/.");
-  bx_note("riscv64-none and riscv32-none need a board (mb_set(\"board\", ...) after mb_on); outputs picks the files: bin, uf2 (pico2), elf, hex. -t all adds them only when mb_targets lists them.");
+  bx_note("riscv64-none and riscv32-none need a board (mb_set(\"board\", ...) after mb_on); outputs picks the files: bin, uf2 (pico2), elf, hex.");
   bx_note("imports of packages that aren't dependencies yet get added, unless --locked or --offline.");
   bx_note("a package with no bins (a library) is type-checked instead.");
   bx_def("run", "build and run a program", "mbuild run [BIN] [-t T] [-r | -p PROFILE] [-- ARGS...]", "project.md");
