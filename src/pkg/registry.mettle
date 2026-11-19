@@ -414,12 +414,28 @@ fn rgx_index_fail(ix: RegIndex*) -> RegIndex* {
   return ix;
 }
 
+// A registry version: semver made only of [0-9A-Za-z.+-] (it becomes part of paths).
+fn rgx_version_ok(v: string) -> bool {
+  if (slen(v) == 0 || slen(v) > 64 || !sv_is(v)) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(v)) {
+    var c: int32 = s_byte(v, i);
+    if (!(is_alpha_b(c) || is_digit_b(c) || c == 46 || c == 43 || c == 45)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
 fn rgx_parse_index(ix: RegIndex*, text: string) {
   var lines: StrList* = s_lines(text);
   var i: int64 = 0;
   while (i < lines->len) {
     var f: StrList* = s_fields(sl_get(lines, i));
-    if (f->len > 0 && !s_starts(sl_get(f, 0), "#") && sv_is(sl_get(f, 0))) {
+    if (f->len > 0 && !s_starts(sl_get(f, 0), "#") && rgx_version_ok(sl_get(f, 0))) {
       var v: RegVersion;
       v.version = sl_get(f, 0);
       v.sha = s_empty();
@@ -470,6 +486,11 @@ export fn reg_index_dir(p: Project*, dir: string, name: string, refresh: bool) -
 
 fn rgx_index(p: Project*, registry: string, url: string, name: string, refresh: bool) -> RegIndex* {
   var ix: RegIndex* = rgx_index_new(name, registry, url);
+  if (!pkg_name_ok(name)) {
+    var why: string = "`" + name + "` is not a valid package name (1 to 64 letters, digits, _ . -, not starting with . or -)";
+    rgx_set("other", why);
+    return rgx_index_fail(ix);
+  }
   if (g_rgx_fetched == (StrList*)0) {
     g_rgx_fetched = sl_new();
   }
@@ -1099,7 +1120,7 @@ fn rgx_json_fill(ix: RegIndex*, pk: RgjVal*) {
     var e: RgjVal* = vers->vals[k];
     k = k + 1;
     var vs: string = "v" + rgj_str(e, "version");
-    if (!sv_is(vs)) {
+    if (!rgx_version_ok(vs)) {
       continue;
     }
     var v: RegVersion;

@@ -102,6 +102,10 @@ suite() { # MODE
   run index "$T/app" default nope; check "missing package, path ($mode)" eval 'code_is 0 && has "ok=1 found=0" && has "kind missing"'
   MBUILD_REGISTRY="file://$REG" run index "$T/app" default nope; check "missing package, file:// ($mode)" eval 'has "ok=1 found=0" && has "kind missing"'
   run index "$T/app" default yanky; check "yanked flag ($mode)" eval 'has "v1.0.1 " && has " yanked"'
+  for bad in ../strutil .hidden -x "a..b"; do
+    run index "$T/app" default "$bad"
+    check "package name $bad is refused ($mode)" eval 'has "ok=0" && has "is not a valid package name"'
+  done
   if [ -n "$port" ]; then
     H="http://127.0.0.1:$port"
     MBUILD_REGISTRY="$H" run index "$T/app" default strutil

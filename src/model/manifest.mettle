@@ -1798,8 +1798,8 @@ fn mnx_test_bins(m: Manifest*) {
   while (i < names->len && slen(m->error) == 0) {
     var nm: string = sl_get(names, i);
     i = i + 1;
-    if (!mnx_name_ok(nm)) {
-      mnx_error(m, toml_get(m->doc, "test-bins", nm)->line, "test program name '" + nm + "' may only hold letters, digits, '_', '-' and '.'");
+    if (!pkg_name_ok(nm)) {
+      mnx_error(m, toml_get(m->doc, "test-bins", nm)->line, "test program name '" + nm + "' " + MNX_NAME_RULE);
       break;
     }
     var mainp: string = mnx_str(m, "test-bins", nm);
@@ -1868,6 +1868,17 @@ fn mnx_add_profile_sections(names: StrList*, doc: Toml*) {
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
+
+const MNX_NAME_RULE: string = "may only hold letters, digits, '_', '-' and '.' (at most 64, not starting with '.' or '-', no '..')";
+
+// A package name: 1 to 64 of [A-Za-z0-9_.-], not starting with . or -,
+// without "..". Names become paths in caches and registries.
+export fn pkg_name_ok(s: string) -> bool {
+  if (slen(s) == 0 || slen(s) > 64 || s_byte(s, 0) == 46 || s_byte(s, 0) == 45 || s_contains(s, "..")) {
+    return false;
+  }
+  return mnx_name_ok(s);
+}
 
 fn mnx_name_ok(s: string) -> bool {
   if (slen(s) == 0) {
@@ -1961,8 +1972,8 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
     mnx_error(m, mnx_section_line(doc, "package"), "[package] name is required");
     return m;
   }
-  if (!mnx_name_ok(m->name)) {
-    mnx_error(m, toml_get(doc, "package", "name")->line, "package name '" + m->name + "' may only hold letters, digits, '_', '-' and '.'");
+  if (!pkg_name_ok(m->name)) {
+    mnx_error(m, toml_get(doc, "package", "name")->line, "package name '" + m->name + "' " + MNX_NAME_RULE);
     return m;
   }
   if (slen(m->version) > 0 && !sv_is(m->version)) {
@@ -2038,8 +2049,8 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
       if (slen(m->error) > 0) {
         return m;
       }
-      if (!mnx_name_ok(bname)) {
-        mnx_error(m, mnx_section_line(doc, sec), "bin name '" + bname + "' may only hold letters, digits, '_', '-' and '.'");
+      if (!pkg_name_ok(bname)) {
+        mnx_error(m, mnx_section_line(doc, sec), "bin name '" + bname + "' " + MNX_NAME_RULE);
         return m;
       }
       mnx_push_bin(m, b);
