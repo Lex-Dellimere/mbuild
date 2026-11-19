@@ -1395,3 +1395,13 @@ export fn sys_port_open(port: int64) -> bool {
   w_closesocket(fd);
   return r == 0;
 }
+
+// This process's id.
+export fn sys_pid() -> int64 {
+  return (int64)w_GetCurrentProcessId();
+}
+
+// Whether nothing accepts on 127.0.0.1:port.
+export fn sys_port_free(port: int64) -> bool {
+  return !sys_port_open(port);
+}

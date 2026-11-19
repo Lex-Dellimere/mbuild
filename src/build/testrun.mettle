@@ -1,0 +1,257 @@
+// testrun: the runs of `mbuild test` (16.1). One TrnRun per test, cell and
+// repeat: its directory and environment, what its output says, the cause of
+// a failure. trn_exec (testrun_linux, testrun_windows) runs them.
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/sys_linux" if linux;
+import "../core/sys_windows" if windows;
+
+// A fixture of one run: a service started before the test, stopped after.
+export struct TrnSvc {
+  name: string;
+  cmd: Cmd*;          // 0 when its program was not found
+  prog: string;
+  port: int64;        // 0: no port to wait for
+  check_port: bool;   // a fixed port: fail when something already listens
+  wait_ms: int64;
+  log: string;
+}
+
+export struct TrnRun {
+  test: int64;        // the caller's indexes
+  cell: int64;
+  k: int64;           // 1-based repeat
+  cmd: Cmd*;
+  dir: string;        // .mbuild/test-run/<cell>/<name>/<k>
+  timeout_ms: int64;  // 0 = none
+  serial: bool;
+  console: string;    // a pico2 run passes on this console line
+  svcs: TrnSvc*;
+  nsvcs: int64;
+  nsvcs_up: int64;    // started so far
+  // the outcome
+  code: int64;
+  timed_out: bool;
+  ms: int64;
+  out: string;
+  err: string;
+  svc_why: string;    // a fixture that did not come up
+}
+
+export fn trn_run_new(test: int64, cell: int64, k: int64) -> TrnRun* {
+  var r: TrnRun* = new TrnRun;
+  memset((rawptr)r, 0, (int64)sizeof(TrnRun));
+  r->test = test;
+  r->cell = cell;
+  r->k = k;
+  r->dir = s_empty();
+  r->console = s_empty();
+  r->out = s_empty();
+  r->err = s_empty();
+  r->svc_why = s_empty();
+  r->code = -1;
+  return r;
+}
+
+// An empty run directory (tmp/, out/) and the run's environment and cwd.
+export fn trn_prepare(r: TrnRun*, root: string, name: string, cell: string, cwd_tmp: bool, env: StrList*) {
+  sys_remove_tree(r->dir);
+  var tmp: string = r->dir + "/tmp";
+  var out: string = r->dir + "/out";
+  fs_mkdirs(tmp);
+  fs_mkdirs(out);
+  var c: Cmd* = r->cmd;
+  sl_push(c->env, "MBUILD_ROOT=" + root);
+  sl_push(c->env, "MBUILD_TEST_NAME=" + name);
+  sl_push(c->env, "MBUILD_TEST_CELL=" + cell);
+  sl_push(c->env, "MBUILD_TEST_RUN=" + s_int(r->k));
+  sl_push(c->env, "MBUILD_TEST_TMP=" + tmp);
+  sl_push(c->env, "MBUILD_TEST_OUT=" + out);
+  if (s_eq(sys_os(), "windows")) {
+    sl_push(c->env, "TMP=" + tmp);
+    sl_push(c->env, "TEMP=" + tmp);
+  } else {
+    sl_push(c->env, "TMPDIR=" + tmp);
+  }
+  sl_extend(c->env, env);
+  if (cwd_tmp) {
+    c->cwd = tmp;
+  } else {
+    c->cwd = root;
+  }
+}
+
+// What the run printed, into its directory.
+export fn trn_save(r: TrnRun*) {
+  fs_write(r->dir + "/stdout", r->out);
+  fs_write(r->dir + "/stderr", r->err);
+}
+
+// Seconds with one decimal: "0.3s".
+export fn trn_secs(ms: int64) -> string {
+  var tenths: int64 = (ms + 50) / 100;
+  return s_int(tenths / 10) + "." + s_int(tenths % 10) + "s";
+}
+
+// Why a run that ended failed by its exit alone; "" when it passed.
+export fn trn_exit_why(r: TrnRun*) -> string {
+  if (slen(r->svc_why) > 0) {
+    return r->svc_why;
+  }
+  if (r->timed_out) {
+    return "timeout " + trn_secs(r->timeout_ms);
+  }
+  if (r->code == 127 && slen(r->out) == 0 && slen(r->err) == 0) {
+    return "could not start " + r->cmd->tool.path;
+  }
+  if (r->code > 128 && r->code < 128 + 65 && !s_eq(sys_os(), "windows")) {
+    return "signal " + s_int(r->code - 128);
+  }
+  if (r->code != 0) {
+    return "exit " + s_int(r->code);
+  }
+  if (slen(r->console) > 0 && !s_contains(r->out + r->err, "printed the --exit-on-uart string")) {
+    return "no " + r->console + " on the console";
+  }
+  return s_empty();
+}
+
+// The checks a run reports: a line "mbuild-checks: N" sets it, else the
+// stdout lines starting with prefix ("" = none).
+export fn trn_checks(out: string, prefix: string) -> int64 {
+  var lines: StrList* = s_lines(out);
+  defer free(lines);
+  var n: int64 = 0;
+  var set: int64 = -1;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = sl_get(lines, i);
+    if (s_starts(l, "mbuild-checks: ")) {
+      set = s_to_int(s_trim(s_from(l, 15)));
+    } else if (slen(prefix) > 0 && s_starts(l, prefix)) {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  if (set >= 0) {
+    return set;
+  }
+  return n;
+}
+
+// The compiler's warnings in output: "CODE at FILE:LINE" each, the
+// interpreter's leak reports (E0003) left out.
+export fn trn_warnings(output: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var lines: StrList* = s_lines(output);
+  defer free(lines);
+  var at: string = s_empty();
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var ln: string = sl_get(lines, i);
+    if (s_starts(ln, "-- ")) {
+      var rest: string = s_trim(s_from(ln, 3));
+      var sp: int64 = s_find_byte(rest, 32);
+      if (sp > 0) {
+        rest = s_sub(rest, 0, sp);
+      }
+      var c2: int64 = s_rfind_byte(rest, 58);
+      if (c2 > 0) {
+        rest = s_sub(rest, 0, c2);
+      }
+      at = rest;
+    } else if (s_starts(ln, "warning[")) {
+      var close: int64 = s_find_byte(ln, 93);
+      if (close > 8) {
+        var code: string = s_sub(ln, 8, close);
+        if (!s_eq(code, "E0003")) {
+          var w: string = code;
+          if (slen(at) > 0) {
+            w = code + " at " + at;
+          }
+          sl_push(l, w);
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return l;
+}
+
+// The first warning the setting denies ("error", "error:M01,W0001"), "".
+export fn trn_denied(warns: StrList*, setting: string) -> string {
+  if (!s_starts(setting, "error")) {
+    return s_empty();
+  }
+  var codes: StrList* = sl_new();
+  defer free(codes);
+  if (s_starts(setting, "error:")) {
+    var parts: StrList* = s_split(s_from(setting, 6), 44);
+    var i: int64 = 0;
+    while (i < parts->len) {
+      var c: string = s_trim(sl_get(parts, i));
+      if (slen(c) > 0) {
+        sl_push(codes, c);
+      }
+      i = i + 1;
+    }
+    free(parts);
+  }
+  var k: int64 = 0;
+  while (k < warns->len) {
+    var w: string = sl_get(warns, k);
+    if (codes->len == 0) {
+      return "warning " + w;
+    }
+    var j: int64 = 0;
+    while (j < codes->len) {
+      if (s_starts(w, sl_get(codes, j))) {
+        return "warning " + w;
+      }
+      j = j + 1;
+    }
+    k = k + 1;
+  }
+  return s_empty();
+}
+
+// From `mettle test` output: the passed count, and the names of the tests it
+// skipped (they call C) into skipped.
+export fn trn_interp(out: string, skipped: StrList*) -> int64 {
+  var lines: StrList* = s_lines(out);
+  defer free(lines);
+  var passed: int64 = 0;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = s_trim(sl_get(lines, i));
+    if (s_starts(l, "test ") && s_contains(l, " ... skipped")) {
+      sl_push(skipped, s_sub(l, 5, s_find(l, " ... ")));
+    } else if (slen(l) > 0 && is_digit_b(s_byte(l, 0)) && s_contains(l, " passed")) {
+      passed = s_to_int(s_sub(l, 0, s_find_byte(l, 32)));
+    }
+    i = i + 1;
+  }
+  return passed;
+}
+
+// The last n lines of text, each indented.
+export fn trn_tail(text: string, n: int64, indent: string) -> string {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var from: int64 = lines->len - n;
+  var b: Buf* = buf_new();
+  if (from > 0) {
+    buf_line(b, indent + "... (" + s_int(from) + " lines before)");
+  } else {
+    from = 0;
+  }
+  var i: int64 = from;
+  while (i < lines->len) {
+    buf_line(b, indent + sl_get(lines, i));
+    i = i + 1;
+  }
+  return buf_take(b);
+}

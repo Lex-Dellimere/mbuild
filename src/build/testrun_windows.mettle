@@ -1,0 +1,77 @@
+// testrun_windows: trn_exec on Windows, one run at a time; stdout and stderr
+// go to one file. Fixtures start and stop around each run.
+
+import "std/mem";
+import "../core/base";
+import "../core/fs";
+import "testrun";
+import "../core/sys_windows" if windows;
+
+// Starts the run's services in order, each waited for; why one failed, "".
+fn trw_start(r: TrnRun*, jobs: Job**) -> string {
+  var i: int64 = 0;
+  while (i < r->nsvcs) {
+    var sv: TrnSvc* = &r->svcs[i];
+    if (sv->cmd == (Cmd*)0) {
+      return "service " + sv->name + ": cannot find `" + sv->prog + "`";
+    }
+    if (sv->check_port && sv->port > 0 && sys_port_open(sv->port)) {
+      return "service " + sv->name + ": port " + s_int(sv->port) + " is already in use";
+    }
+    jobs[i] = sys_spawn(sv->cmd, sv->log, true);
+    r->nsvcs_up = i + 1;
+    var t0: int64 = sys_now_ms();
+    while (sv->port > 0 && !sys_port_open(sv->port)) {
+      if (sys_spawn_poll(jobs[i])) {
+        return "service " + sv->name + " exited (code " + s_int(jobs[i]->code) + ") before port " + s_int(sv->port) + " opened";
+      }
+      if (sys_now_ms() - t0 >= sv->wait_ms) {
+        return "service " + sv->name + ": port " + s_int(sv->port) + " not open after " + trn_secs(sv->wait_ms);
+      }
+      sys_sleep_ms(20);
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+export fn trn_exec(runs: TrnRun**, n: int64, parallel: int64, arg: rawptr,
+                   ev: fn(rawptr, int64) -> bool with alloc, syscall, asm) -> int32 {
+  var pass: int64 = 0;
+  while (pass < 2) {
+    var i: int64 = 0;
+    while (i < n) {
+      var r: TrnRun* = runs[i];
+      if (r->serial == (pass == 1)) {
+        var jobs: Job** = (Job**)malloc((r->nsvcs + 1) * 8);
+        r->nsvcs_up = 0;
+        var t0: int64 = sys_now_ms();
+        r->svc_why = trw_start(r, jobs);
+        if (slen(r->svc_why) == 0) {
+          var to: bool = false;
+          var log: string = r->dir + "/stdout";
+          r->code = (int64)sys_run_timeout(r->cmd, log, r->timeout_ms, &to);
+          r->timed_out = to;
+          var rd: FsRead = fs_read(log);
+          r->out = rd.data;
+        } else {
+          r->code = 1;
+        }
+        r->ms = sys_now_ms() - t0;
+        var k: int64 = r->nsvcs_up - 1;
+        while (k >= 0) {
+          sys_spawn_stop(jobs[k], 2000);
+          k = k - 1;
+        }
+        free(jobs);
+        trn_save(r);
+        if (!ev(arg, i)) {
+          return 0;
+        }
+      }
+      i = i + 1;
+    }
+    pass = pass + 1;
+  }
+  return 0;
+}

@@ -704,18 +704,18 @@ export fn add(a: int32, b: int32) -> int32 {
 }
 EOF
 mb test
-check "test passes" sh -c 'grep -qF "ok     src/calc.mettle (2 passed)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "test passes" sh -c 'grep -q "^test src/calc.mettle (debug) ... ok .* 2 checks$" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 mb test
-check "test is cached" has "src/calc.mettle (cached)"
+check "test is cached" has "test src/calc.mettle (debug) ... ok (cached)"
 mb test --filter zero
-check "test --filter runs a subset" has "(1 passed)"
+check "test --filter runs a subset" has "  1 check"
 mb test --force
 check "test --force ignores the cache" hasnt "(cached)"
 printf '@test fn fails() -> int32 {\n  return 7;\n}\n' > src/broken_test.mettle
 mb test
 check "a failing test exits 1" code_is 1
-check "the failing test is named" has "FAILED src/broken_test.mettle"
-check "the passing file stays cached" has "src/calc.mettle (cached)"
+check "the failing test is named" sh -c 'grep -qF "test src/broken_test.mettle (debug) ... FAILED" "$0/last.out" && grep -qF "test fails ... FAILED (returned 7" "$0/last.out"' "$S"
+check "the passing file stays cached" has "test src/calc.mettle (debug) ... ok (cached)"
 check "test summary" has "test result: FAILED"
 mb test src/calc.mettle
 check "test with an explicit file" code_is 0
@@ -731,22 +731,22 @@ printf 'int ad_add(int a, int b) { return a + b; }\n' > csrc/add.c
 printf 'export extern fn ad_add(a: int32, b: int32) -> int32 = "ad_add";\n\n@test fn pure() -> int32 {\n  return 0;\n}\n' > src/adder.mettle
 printf 'import "adder/src/adder";\nfn main() -> int32 {\n  return ad_add(2, 3) - 5;\n}\n' > tests/add_test.mettle
 mb test
-check "a test program calls the package's C code" sh -c 'grep -qF "ok     add (tests/add_test.mettle)" "$0/last.out" && grep -qF "ok     src/adder.mettle (1 passed)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
-check "... after the @test files, one summary" sh -c 'grep "^ok" "$0/last.out" | head -1 | grep -q adder.mettle && [ "$(grep -c "^test result: ok. 2 passed, 0 cached, 0 failed" "$0/last.out")" = 1 ]' "$S"
+check "a test program calls the package's C code" sh -c 'grep -qF "test add (debug) ... ok" "$0/last.out" && grep -qF "test src/adder.mettle (debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "... after the @test files, one summary" sh -c 'grep "^test " "$0/last.out" | head -1 | grep -q adder.mettle && [ "$(grep -c "^test result: ok. 2 passed, 0 failed" "$0/last.out")" = 1 ]' "$S"
 check "... built into .mbuild/test-bins" test -x .mbuild/test-bins/linux/debug/add
 mb test
-check "a passing test program is cached" has "ok     add (tests/add_test.mettle) (cached)"
+check "a passing test program is cached" has "test add (debug) ... ok (cached)"
 check "... and not rebuilt" hasnt "Compiling test add"
 printf 'import "std/io";\nfn main() -> int32 {\n  println("expected 4, got 5");\n  return 3;\n}\n' > tests/bad_test.mettle
 mb test
 check "a failing test program fails the run" code_is 1
-check "... with its output" sh -c 'grep -qxF "expected 4, got 5" "$0/last.out" && grep -qF "FAILED bad (tests/bad_test.mettle) (exit 3)" "$0/last.out"' "$S"
+check "... with its output" sh -c 'grep -qxF "  expected 4, got 5" "$0/last.out" && grep -qF "test bad (debug) ... FAILED" "$0/last.out" && grep -qF -- "---- bad (linux/debug): exit 3" "$0/last.out" && grep -qF "kept: .mbuild/test-run/linux-debug/bad/1" "$0/last.out" && [ -f .mbuild/test-run/linux-debug/bad/1/stdout ]' "$S"
 mb test
-check "a failing test program is never cached" has "FAILED bad"
+check "a failing test program is never cached" has "test bad (debug) ... FAILED"
 mb test add
-check "test NAME runs one test program" sh -c 'grep -qF "ok     add" "$0/last.out" && ! grep -q "bad\|adder.mettle" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "test NAME runs one test program" sh -c 'grep -qF "test add (debug) ... ok" "$0/last.out" && ! grep -q "bad\|adder.mettle" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 mb test nope
-check "an unknown test program lists them" has "help: the test programs are: add, bad"
+check "an unknown test program lists them" has "help: the tests are: add, bad; or name an @test file"
 mb test -r add
 check "test -r builds release" sh -c 'grep -qF "Compiling test add (linux, release)" "$0/last.out" && [ -x .mbuild/test-bins/linux/release/add ]' "$S"
 mb build
@@ -754,11 +754,12 @@ check "build skips test programs" sh -c '! grep -q "test add\|test bad" "$0/last
 rm tests/bad_test.mettle
 printf '@test fn also() -> int32 {\n  return 9;\n}\n' >> tests/add_test.mettle
 mb test
-check "a test program's main file is no @test file" sh -c 'grep -qF "ok     add (tests/add_test.mettle)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "a test program's main file is no @test file" sh -c 'grep -qF "test add (debug) ... ok" "$0/last.out" && ! grep -q "test tests/add_test.mettle" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 sed -i 's|  mb_c_sources("csrc");|&\n  mb_test_bin("sum", "tests/add_test.mettle");|' mbuild.mettle
 printf 'fn main() -> int32 {\n  return 1;\n}\n' > tests/bad_test.mettle
 mb test
-check "mb_test_bin replaces the detected ones" sh -c 'grep -qF "ok     sum (tests/add_test.mettle)" "$0/last.out" && ! grep -q "bad" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "mb_test_bin replaces the detected ones" sh -c 'grep -qF "test sum (debug) ... ok" "$0/last.out" && ! grep -q "bad" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "... and a gone test program's outputs are removed" sh -c '[ ! -e .mbuild/test-bins/linux/debug/add ] && [ ! -e .mbuild/test-bins/linux/release/add ] && ! ls .mbuild/stamps | grep -q "^test-bin-.*-add.stamp" && [ ! -e .mbuild/test-run/linux-debug/bad ]' "$S"
 cd "$W/app" || exit 1
 
 echo "== check, clean"
@@ -840,7 +841,7 @@ mb test
 check "library test" code_is 0
 printf 'extern fn mbx_answer() -> int32 = "mbx_answer";\n@test fn answer() -> int32 {\n  if (mbx_answer() != 42) { return 1; }\n  return 0;\n}\n' > e_test.mettle
 mb test e_test.mettle
-check "a test that calls C is skipped" sh -c 'grep -qF "(0 passed, 1 skipped)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "a test that calls C is skipped" sh -c 'grep -qF "test e_test.mettle (debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 
 echo "== prelude, nested projects, colour"
 proj "$W/tflags" <<'EOF'
@@ -851,7 +852,7 @@ mkdir -p nested/src deep/x/build
 printf 'fn main() -> int32 {\n  println("prelude main");\n  return 0;\n}\n' > src/main.mettle
 printf '@test fn uses_prelude() -> int32 {\n  println("no import needed");\n  return 0;\n}\n' > src/p_test.mettle
 mb test
-check "test with mb_prelude(true)" has "ok     src/p_test.mettle"
+check "test with mb_prelude(true)" has "test src/p_test.mettle (debug) ... ok"
 mb -v test --force
 check "test passes --prelude" has "--prelude"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("nested", "0.1.0");\n}\n' > nested/mbuild.mettle

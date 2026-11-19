@@ -35,6 +35,9 @@ import "services_windows" if windows;
 import "live";
 import "live_linux" if linux;
 import "live_windows" if windows;
+import "testrun";
+import "testrun_linux" if linux;
+import "testrun_windows" if windows;
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -2005,6 +2008,8 @@ struct BxJob {
   fp: string;
   state: int32;     // 0 = to compile, 1 = fresh, 2 = cannot start, 3 = test passed before
   g: Graph*;
+  ok: bool;         // built (or fresh)
+  pass: string;     // a test program's pass stamp, "" when not cached
 }
 
 // The compiler arguments that make the output of the unit's bin kind.
@@ -2165,11 +2170,24 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   }
   j->stamp = p->state_dir + "/stamps/" + tag + t->target + "-" + t->profile + "-" + b->name + ".stamp";
 
-  if (s->tests && fs_is_file(j->outp) && bx_stamp_ok(p, bx_test_pass_stamp(p, j->fp), j->fp)) {
+  j->ok = false;
+  j->pass = s_empty();
+  if (s->tests) {
+    var key: string = bt_key_of(b->name);
+    if (slen(key) > 0) {
+      var hp: Hasher = h_new();
+      h_str(&hp, j->fp);
+      h_str(&hp, key);
+      j->pass = bx_test_pass_stamp(p, h_hex(&hp));
+    }
+  }
+  if (slen(j->pass) > 0 && fs_is_file(j->outp) && bx_stamp_ok(p, j->pass, j->fp)) {
     j->state = 3;
+    j->ok = true;
     return j;
   }
   if (bx_job_files(j) && bx_stamp_ok(p, j->stamp, j->fp)) {
+    j->ok = true;
     if (s->tests) {
       verbose("Fresh " + bx_label(s, b, t));
     } else {
@@ -2225,7 +2243,13 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
     xi = xi + 1;
   }
   bx_copy_beside(j->nl, t);
+  if (s->tests) {
+    var warns: StrList* = trn_warnings(bx_strip_ansi(output));
+    fs_write(j->outp + ".warnings", sl_join(warns, "\n"));
+    free(warns);
+  }
   fs_write(j->stamp, j->fp + "\n");
+  j->ok = true;
   return 0;
 }
 
@@ -3355,26 +3379,6 @@ fn bx_test_files(p: Project*, progs: BinSet*, files: StrList*) {
   }
 }
 
-// "3 passed" from the compiler's summary line ("3 passed (x.mettle)").
-fn bx_test_summary(text: string) -> string {
-  var lines: StrList* = s_lines(bx_strip_ansi(text));
-  var found: string = "";
-  var i: int64 = 0;
-  while (i < lines->len) {
-    var line: string = s_trim(sl_get(lines, i));
-    if (s_contains(line, " passed") && is_digit_b(s_byte(line, 0))) {
-      found = line;
-      var paren: int64 = s_find(found, " (");
-      if (paren > 0) {
-        found = s_sub(found, 0, paren);
-      }
-    }
-    i = i + 1;
-  }
-  free(lines);
-  return found;
-}
-
 // The bin whose main file is `file`, 0 when none.
 fn bx_bin_of_entry(bs: BinSet*, file: string) -> BinInfo* {
   var i: int64 = 0;
@@ -3385,127 +3389,6 @@ fn bx_bin_of_entry(bs: BinSet*, file: string) -> BinInfo* {
     i = i + 1;
   }
   return (BinInfo*)0;
-}
-
-// `mettle test` runs in the compiler's interpreter, which cannot call C: an
-// extern the test reaches answers an undefined value. Says so after a failure.
-fn bx_note_test_externs(g: Graph*, stdlib_dir: string) {
-  var names: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < g->externs->len) {
-    var f: string = sl_get(g->extern_files, i);
-    if (slen(stdlib_dir) == 0 || !p_has_prefix_dir(f, stdlib_dir)) {
-      sl_add_uniq(names, sl_get(g->externs, i));
-    }
-    i = i + 1;
-  }
-  if (names->len > 0) {
-    var shown: string = "";
-    var k: int64 = 0;
-    while (k < names->len && k < 6) {
-      if (k > 0) {
-        shown = shown + ", ";
-      }
-      shown = shown + sl_get(names, k);
-      k = k + 1;
-    }
-    if (names->len > 6) {
-      shown = shown + ", ...";
-    }
-    note("`mettle test` runs tests in the compiler's interpreter, which cannot call C functions: the externs this file reaches (" + shown + ") give an undefined result there. Test code that needs them in a test program (mb_test_bin, docs/project.md).");
-  }
-  free(names);
-}
-
-struct BxTally {
-  passed: int64;
-  cached: int64;
-  failed: int64;
-}
-
-// The @test files: one `mettle test` each, cached by their fingerprint.
-fn bx_run_test_files(s: BxSess*, files: StrList*, n: BxTally*) {
-  var p: Project* = s->p;
-  var bins: BinSet* = build_bins(p);
-  var us: BxUnits* = bx_units_new();
-  g_bx_units = us;
-  var ui: int64 = 0;
-  while (ui < s->targets->len) {
-    var uf: int64 = 0;
-    while (uf < files->len) {
-      bx_unit_add(us, bx_bin_of_entry(bins, sl_get(files, uf)), sl_get(files, uf), ui, sl_get(s->targets, ui), s->mettles[ui]);
-      uf = uf + 1;
-    }
-    ui = ui + 1;
-  }
-  bx_prepare(s, us, "test");
-  var ti: int64 = 0;
-  while (ti < s->targets->len) {
-    var target: string = sl_get(s->targets, ti);
-    var m: Mettle* = s->mettles[ti];
-    var suffix: string = "";
-    if (s->targets->len > 1) {
-      suffix = " [" + target + "]";
-    }
-    var fi: int64 = 0;
-    while (fi < files->len) {
-      var file: string = sl_get(files, fi);
-      var u: BxUnit* = us->items[ti * files->len + fi];
-      // The test gen dir is shared by every file: write this file's wrapper.
-      bx_unit_cmp(s, u, "test");
-      var c: Cmd* = tc_cmd(m);
-      defer free(c);
-      cmd_arg(c, "test");
-      cmd_path(c, bx_rel(p, u->entry));
-      bx_add_include(c, p, s->ds, bx_unit_gen(u));
-      var st: Settings* = bx_add_flags(c, s, u);
-      free(st);
-      if (target_is_riscv(target)) {
-        // the interpreter runs @test functions on the host
-        bx_drop_valued(c, "--board --isa --abi --objective");
-      }
-      if (slen(p->opts->filter) > 0) {
-        cmd_arg(c, "--filter=" + p->opts->filter);
-      }
-      bx_diag_env(c);
-      c->cwd = p->root;
-      var g: Graph* = u->g;
-      var h: Hasher = h_new();
-      h_str(&h, "mbuild-test-v3");
-      bx_hash_cmd(&h, p, m, c);
-      h_str(&h, target);
-      graph_fingerprint(g, &h);
-      var fp: string = h_hex(&h);
-      var stamp: string = p->state_dir + "/stamps/test-" + fp;
-      var shown: string = bx_show(file) + suffix;
-      if (bx_stamp_ok(p, stamp, fp)) {
-        say(green("ok") + "     " + shown + " " + dim("(cached)"));
-        n->cached = n->cached + 1;
-      } else {
-        var cap: Captured = proc_capture_all(c);
-        if (cap.code == 0) {
-          if (g_verbose) {
-            bx_print_block(cap.out);
-          }
-          fs_write(stamp, fp + "\n");
-          var summ: string = bx_test_summary(cap.out);
-          if (slen(summ) > 0) {
-            summ = " (" + summ + ")";
-          }
-          say(green("ok") + "     " + shown + summ);
-          n->passed = n->passed + 1;
-        } else {
-          bx_print_block(cap.out);
-          say(red("FAILED") + " " + shown);
-          bx_note_test_externs(g, m->stdlib_dir);
-          n->failed = n->failed + 1;
-        }
-      }
-      flush_out();
-      fi = fi + 1;
-    }
-    ti = ti + 1;
-  }
 }
 
 // c without the flags in names (space-separated) and their values.
@@ -3528,80 +3411,6 @@ fn bx_drop_valued(c: Cmd*, names: string) {
   }
   free(args);
   free(kinds);
-}
-
-// The test programs: built like the bins (into .mbuild/test-bins/), then run
-// from the root. One that passed with the same compile fingerprint is cached.
-fn bx_run_test_bins(s: BxSess*, progs: BinSet*, n: BxTally*) {
-  var p: Project* = s->p;
-  s->tests = true;
-  var us: BxUnits* = bx_bin_units(s, progs);
-  g_bx_units = us;
-  bx_prepare(s, us, s_empty());
-  var built: StrList* = sl_new();
-  defer free(built);
-  if (bx_compile_units(s, us, built) != 0) {
-    error_msg("could not build the test programs");
-    n->failed = n->failed + 1;
-    return;
-  }
-  var i: int64 = 0;
-  while (i < us->n) {
-    var j: BxJob* = us->items[i]->job;
-    var shown: string = j->b->name + " (" + j->b->main + ")";
-    if (s->targets->len > 1) {
-      shown = shown + " [" + j->t->target + "]";
-    }
-    var pass_stamp: string = bx_test_pass_stamp(p, j->fp);
-    if (j->state == 3) {
-      say(green("ok") + "     " + shown + " " + dim("(cached)"));
-      n->cached = n->cached + 1;
-    } else {
-      var run_at: string = j->outp;
-      var c: Cmd* = bx_emu_cmd(s, j->b, j->t, &run_at);
-      if (c == (Cmd*)0) {
-        c = tc_run_program_cmd(j->t->target, j->outp);
-      }
-      if (c == (Cmd*)0) {
-        say(red("FAILED") + " " + shown + ": cannot run a " + j->t->target + " program on this " + sys_os() + " host");
-        n->failed = n->failed + 1;
-      } else {
-        c->cwd = p->root;
-        var console_pass: string = bx_console_pass(s, j->b, j->t, c);
-        var ms: int64 = bx_timeout_ms(p, target_is_riscv(bx_run_target(j->b, j->t)));
-        var timed_out: bool = false;
-        var cap: Captured;
-        if (ms > 0) {
-          cap = proc_capture_timeout(c, ms, &timed_out);
-        } else {
-          cap = proc_capture_all(c);
-        }
-        if (timed_out) {
-          bx_print_block(cap.out);
-          say(red("FAILED") + " " + shown + " (stopped after " + bx_secs(ms) + ", --timeout)");
-          n->failed = n->failed + 1;
-        } else if (cap.code == 0 && slen(console_pass) > 0 && !s_contains(cap.out, "printed the --exit-on-uart string")) {
-          bx_print_block(cap.out);
-          say(red("FAILED") + " " + shown + " (no " + console_pass + " on the console)");
-          n->failed = n->failed + 1;
-        } else if (cap.code == 0) {
-          if (g_verbose) {
-            bx_print_block(cap.out);
-          }
-          fs_write(pass_stamp, j->fp + "\n");
-          say(green("ok") + "     " + shown);
-          n->passed = n->passed + 1;
-        } else {
-          bx_print_block(cap.out);
-          say(red("FAILED") + " " + shown + " (exit {cap.code})");
-          n->failed = n->failed + 1;
-        }
-        free(c);
-      }
-    }
-    flush_out();
-    i = i + 1;
-  }
 }
 
 // A pico2 program never exits: a test program passes when its console
@@ -3694,23 +3503,6 @@ fn bx_drop_excluded(p: Project*, progs: BinSet*, files: StrList*) -> BinSet* {
   return bx_select_from(p, progs, names);
 }
 
-// One row of the test matrix.
-struct BxMxRow {
-  label: string;
-  passed: int64;
-  failed: int64;
-  skipped: int64;
-  why: string;
-}
-
-fn bx_mx_why(r: BxMxRow*, why: string) {
-  if (slen(r->why) > 0) {
-    r->why = r->why + "; " + why;
-  } else {
-    r->why = why;
-  }
-}
-
 // The matrix: -t, else mb_test_targets, else the host; all and host
 // expanded, TARGET:BOARD kept.
 fn bx_mx_entries(p: Project*) -> StrList* {
@@ -3739,208 +3531,1232 @@ fn bx_mx_entries(p: Project*) -> StrList* {
   return l;
 }
 
-// One matrix row: the target's session, its @test files (hosted targets
-// only: the interpreter can't run a board's code) and test programs (when
-// something here runs them).
-fn bx_mx_run(p: Project*, entry: string, files: StrList*, progs: BinSet*, r: BxMxRow*) {
-  var target: string = entry;
-  var board: string = s_empty();
-  var colon: int64 = s_find_byte(entry, 58);
-  if (colon > 0) {
-    target = s_sub(entry, 0, colon);
-    board = s_from(entry, colon + 1);
-  }
-  r->label = target;
-  if (slen(board) > 0) {
-    r->label = target + " (" + board + ")";
-  }
-  r->passed = 0;
-  r->failed = 0;
-  r->skipped = 0;
-  r->why = s_empty();
-  if (!tc_available(p, target)) {
-    r->skipped = files->len + progs->n;
-    r->why = "no Mettle compiler for " + target;
-    return;
-  }
-  var saved: StrList* = p->opts->sets;
-  if (slen(board) > 0) {
-    p->opts->sets = sl_copy(saved);
-    sl_push(p->opts->sets, "board=" + board);
-  }
-  var run_files: StrList* = files;
-  var run_progs: BinSet* = progs;
-  if (target_is_bare(target) && files->len > 0) {
-    run_files = sl_new();
-    r->skipped = r->skipped + files->len;
-    bx_mx_why(r, "@test functions run on hosted targets");
-  }
-  var missing: string = s_empty();
-  if (progs->n > 0) {
-    if (target_is_riscv(target)) {
-      var q: SettingsQuery* = new SettingsQuery;
-      q->profile = build_profile(p);
-      q->bin = progs->items[0].name;
-      q->target = target;
-      q->sets = p->opts->sets;
-      var st: Settings* = man_settings(p->man, q);
-      free(q);
-      if (slen(st->error) > 0) {
-        missing = bx_unroot(p, st->error);
-      } else {
-        missing = rv_runner_missing(tc_select(p, target), target, st);
-      }
-      free(st);
-    } else if (!s_eq(target, sys_os()) && tc_run_program_cmd(target, "x") == (Cmd*)0) {
-      missing = "cannot run a " + target + " program on this " + sys_os() + " host";
-    }
-  }
-  if (slen(missing) > 0) {
-    run_progs = bx_no_test_bins(p);
-    r->skipped = r->skipped + progs->n;
-    bx_mx_why(r, missing);
-  }
-  if (run_files->len > 0 || run_progs->n > 0) {
-    status("Testing", r->label);
-    var s: BxSess* = bx_sess(p, sl_of(target));
-    g_bx_sess = s;
-    var n: BxTally;
-    n.passed = 0;
-    n.cached = 0;
-    n.failed = 0;
-    if (run_files->len > 0) {
-      bx_run_test_files(s, run_files, &n);
-    }
-    if (run_progs->n > 0) {
-      bx_run_test_bins(s, run_progs, &n);
-    }
-    r->passed = n.passed + n.cached;
-    r->failed = n.failed;
-  }
-  p->opts->sets = saved;
+// ---------------------------------------------------------------------------
+// mbuild test (16.1): a plan of tests x cells x repeats, run by trn_exec
+// ---------------------------------------------------------------------------
+
+const BT_FILE: int32 = 0;   // an @test file, in the interpreter
+const BT_PROG: int32 = 1;   // a test program
+const BT_CMD: int32 = 2;    // a command test
+
+struct BtTest {
+  name: string;
+  kind: int32;
+  file: string;       // BT_FILE: absolute
+  b: BinInfo*;        // BT_PROG
+  cmdline: string;    // BT_CMD
+  c0: int64;          // its cells: plan cells [c0, c0 + nc)
+  nc: int64;
+  repeat: int64;
+  runs: int64;        // planned, and ended so far
+  ended: int64;
+  printed: bool;
 }
 
-// mbuild test --matrix: the same tests on every matrix target, one table.
-fn bx_test_matrix(p: Project*, files: StrList*, progs: BinSet*, t0: int64) -> int32 {
-  var entries: StrList* = bx_mx_entries(p);
-  defer free(entries);
-  var rows: BxMxRow* = (BxMxRow*)malloc((entries->len + 1) * sizeof(BxMxRow));
+// One (test, cell).
+struct BtCell {
+  t: int64;
+  spec: string;       // "linux/debug", "riscv32-none:pico2/release"
+  target: string;
+  board: string;
+  profile: string;
+  skip: string;       // why it cannot run here
+  pre: string;        // why it failed before running (compile, warning)
+  cmd: Cmd*;          // what each run runs, 0 when nothing runs
+  console: string;
+  emulated: bool;
+  stamp: string;      // its pass stamp, "" when it is not cached
+  fp: string;
+  cached: bool;
+  runs: int64;
+  failed: int64;
+  timeouts: int64;
+  first: TrnRun*;     // its first failed run, and why
+  why: string;
+  checks: int64;
+  ms: int64;
+}
+
+struct BtPlan {
+  p: Project*;
+  tests: BtTest**;
+  nt: int64;
+  cells: BtCell**;
+  ncells: int64;
+  runs: TrnRun**;
+  nr: int64;
+  next_print: int64;
+  nocache: bool;
+  keep: bool;
+  excluded: int64;
+  filter: string;
+  nspecs: int64;
+}
+
+// Names a cached test program's pass stamp includes: "name\tkey" (0 = no cache).
+var g_bt_keys: StrList* = (StrList*)0;
+var g_bt_plan: BtPlan* = (BtPlan*)0;
+
+fn bt_rest_value(p: Project*, flag: string) -> string {
   var i: int64 = 0;
-  while (i < entries->len) {
-    bx_mx_run(p, sl_get(entries, i), files, progs, &rows[i]);
-    i = i + 1;
-  }
-  var w: int64 = 6;
-  i = 0;
-  while (i < entries->len) {
-    if (slen(rows[i].label) > w) {
-      w = slen(rows[i].label);
+  while (i < p->opts->rest->len) {
+    var a: string = sl_get(p->opts->rest, i);
+    if (s_starts(a, flag + "=")) {
+      return s_from(a, slen(flag) + 1);
     }
     i = i + 1;
   }
-  say("");
-  say(s_pad_right("target", w + 2) + "passed  failed  skipped");
-  var tp: int64 = 0;
-  var tf: int64 = 0;
-  var ts: int64 = 0;
-  i = 0;
-  while (i < entries->len) {
-    var r: BxMxRow* = &rows[i];
-    var line: string = s_pad_right(r->label, w + 2) + s_pad_left(s_int(r->passed), 6) + s_pad_left(s_int(r->failed), 8) + s_pad_left(s_int(r->skipped), 9);
-    if (slen(r->why) > 0) {
-      line = line + "  " + r->why;
+  return s_empty();
+}
+
+// A test's setting with the command line's overrides.
+fn bt_get(p: Project*, name: string, key: string) -> string {
+  if (s_eq(key, "warnings") && sl_has(p->opts->rest, "--deny-warnings")) {
+    return "error";
+  }
+  if (s_eq(key, "repeat")) {
+    var r: string = bt_rest_value(p, "--repeat");
+    if (slen(r) > 0) {
+      return r;
     }
-    say(line);
-    tp = tp + r->passed;
-    tf = tf + r->failed;
-    ts = ts + r->skipped;
+  }
+  return man_test_get(p->man, name, key);
+}
+
+// Every setting of the test and its environment, for its pass stamp.
+fn bt_settings_key(p: Project*, name: string) -> string {
+  var h: Hasher = h_new();
+  h_str(&h, "mbuild-test-v4");
+  var keys: StrList* = man_test_keys();
+  defer free(keys);
+  var i: int64 = 0;
+  while (i < keys->len) {
+    h_str(&h, sl_get(keys, i) + "=" + bt_get(p, name, sl_get(keys, i)));
     i = i + 1;
   }
-  var nt: int64 = entries->len;
-  var summary: string = "{tp} passed, {tf} failed, {ts} skipped on {nt} targets in " + bx_secs(sys_now_ms() - t0);
-  free(rows);
-  if (tf > 0) {
-    say("test result: " + red("FAILED") + ". " + summary);
-    return 1;
+  var env: StrList* = man_test_env(p->man, name);
+  h_str(&h, sl_join(env, "\n"));
+  free(env);
+  return h_hex(&h);
+}
+
+// The cells of a test: --matrix=CSV, else -r / -p, else its matrix
+// setting; a cell without a target runs on each default target (-t, else
+// mb_test_targets, else the host).
+fn bt_cells_of(p: Project*, name: string, dflt_targets: StrList*) -> StrList* {
+  var spec: string = bt_rest_value(p, "--matrix");
+  if (slen(spec) == 0 && p->opts->release) {
+    spec = "release";
+  } else if (slen(spec) == 0 && !s_eq(p->opts->profile, "debug") && slen(p->opts->profile) > 0) {
+    spec = p->opts->profile;
+  } else if (slen(spec) == 0) {
+    spec = man_test_get(p->man, name, "matrix");
   }
-  say("test result: " + green("ok") + ". " + summary);
+  var out: StrList* = sl_new();
+  var parts: StrList* = s_split(spec, 44);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var cell: string = s_trim(sl_get(parts, i));
+    i = i + 1;
+    if (slen(cell) == 0) {
+      continue;
+    }
+    var slash: int64 = s_find_byte(cell, 47);
+    if (slash >= 0) {
+      var tg: string = s_sub(cell, 0, slash);
+      if (s_eq(tg, "host")) {
+        tg = sys_os();
+      }
+      sl_add_uniq(out, tg + "/" + s_from(cell, slash + 1));
+    } else {
+      var k: int64 = 0;
+      while (k < dflt_targets->len) {
+        sl_add_uniq(out, sl_get(dflt_targets, k) + "/" + cell);
+        k = k + 1;
+      }
+    }
+  }
+  return out;
+}
+
+fn bt_add_test(pl: BtPlan*, name: string, kind: int32) -> BtTest* {
+  var t: BtTest* = new BtTest;
+  t->name = name;
+  t->kind = kind;
+  t->file = s_empty();
+  t->b = (BinInfo*)0;
+  t->cmdline = s_empty();
+  t->c0 = 0;
+  t->nc = 0;
+  t->repeat = 1;
+  t->runs = 0;
+  t->ended = 0;
+  t->printed = false;
+  pl->tests = (BtTest**)realloc(pl->tests, (pl->nt + 1) * 8);
+  pl->tests[pl->nt] = t;
+  pl->nt = pl->nt + 1;
+  return t;
+}
+
+// The tests to run: the names given (test programs, command tests, @test
+// files), else every test but the excluded ones, --filter applied.
+fn bt_select(pl: BtPlan*) {
+  var p: Project* = pl->p;
+  var progs: BinSet* = bx_test_bins(p);
+  var prog_names: StrList* = bx_bin_names(progs);
+  defer free(prog_names);
+  var cmd_names: StrList* = sl_new();
+  defer free(cmd_names);
+  var i: int64 = 0;
+  while (i < p->man->test_cmds->len) {
+    var e: string = sl_get(p->man->test_cmds, i);
+    sl_push(cmd_names, s_sub(e, 0, s_find_byte(e, 61)));
+    i = i + 1;
+  }
+  var given: StrList* = bx_positional(p->opts->rest);
+  defer free(given);
+  if (given->len > 0) {
+    var cwd: string = bx_cwd();
+    i = 0;
+    while (i < given->len) {
+      var arg: string = sl_get(given, i);
+      i = i + 1;
+      var a: string = p_clean(p_join(cwd, bx_slash(arg)));
+      if (sl_has(prog_names, arg)) {
+        var t: BtTest* = bt_add_test(pl, arg, BT_PROG);
+        t->b = &progs->items[sl_index(prog_names, arg)];
+      } else if (sl_has(cmd_names, arg)) {
+        var ct: BtTest* = bt_add_test(pl, arg, BT_CMD);
+        var ce: string = sl_get(p->man->test_cmds, sl_index(cmd_names, arg));
+        ct->cmdline = s_from(ce, s_find_byte(ce, 61) + 1);
+      } else if (fs_is_file(a)) {
+        var ft: BtTest* = bt_add_test(pl, bx_rel(p, a), BT_FILE);
+        ft->file = a;
+      } else {
+        var all: StrList* = sl_copy(prog_names);
+        defer free(all);
+        sl_extend(all, cmd_names);
+        if (all->len > 0) {
+          fail_hint("no test `" + arg + "`", "the tests are: " + sl_join(all, ", ") + "; or name an @test file");
+        }
+        fail("no such test file: " + arg);
+      }
+    }
+    return;
+  }
+  var ex: StrList* = p->man->test_exclude;
+  var f: string = p->opts->filter;
+  var files: StrList* = sl_new();
+  defer free(files);
+  bx_test_files(p, progs, files);
+  i = 0;
+  while (i < files->len) {
+    var rel: string = bx_rel(p, sl_get(files, i));
+    if (sl_has(ex, rel)) {
+      pl->excluded = pl->excluded + 1;
+    } else {
+      var ft2: BtTest* = bt_add_test(pl, rel, BT_FILE);
+      ft2->file = sl_get(files, i);
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < progs->n) {
+    var nm: string = progs->items[i].name;
+    if (sl_has(ex, nm)) {
+      pl->excluded = pl->excluded + 1;
+    } else if (slen(f) == 0 || s_contains(nm, f)) {
+      var pt: BtTest* = bt_add_test(pl, nm, BT_PROG);
+      pt->b = &progs->items[i];
+    }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < cmd_names->len) {
+    var cn: string = sl_get(cmd_names, i);
+    if (sl_has(ex, cn)) {
+      pl->excluded = pl->excluded + 1;
+    } else if (slen(f) == 0 || s_contains(cn, f)) {
+      var ct2: BtTest* = bt_add_test(pl, cn, BT_CMD);
+      var ce2: string = sl_get(p->man->test_cmds, i);
+      ct2->cmdline = s_from(ce2, s_find_byte(ce2, 61) + 1);
+    }
+    i = i + 1;
+  }
+  var named: StrList* = man_test_named(p->man);
+  i = 0;
+  while (i < named->len) {
+    var w: string = sl_get(named, i);
+    if (!sl_has(prog_names, w) && !sl_has(cmd_names, w) && !fs_is_file(p->root + "/" + w)) {
+      warn("mb_test_set names no test `" + w + "`");
+    }
+    i = i + 1;
+  }
+  free(named);
+}
+
+fn bt_add_cell(pl: BtPlan*, t: int64, spec: string) {
+  var c: BtCell* = new BtCell;
+  memset((rawptr)c, 0, (int64)sizeof(BtCell));
+  c->t = t;
+  c->spec = spec;
+  var slash: int64 = s_rfind_byte(spec, 47);
+  c->target = s_sub(spec, 0, slash);
+  c->profile = s_from(spec, slash + 1);
+  c->board = s_empty();
+  var colon: int64 = s_find_byte(c->target, 58);
+  if (colon > 0) {
+    c->board = s_from(c->target, colon + 1);
+    c->target = s_sub(c->target, 0, colon);
+  }
+  c->skip = s_empty();
+  c->pre = s_empty();
+  c->console = s_empty();
+  c->stamp = s_empty();
+  c->fp = s_empty();
+  c->why = s_empty();
+  pl->cells = (BtCell**)realloc(pl->cells, (pl->ncells + 1) * 8);
+  pl->cells[pl->ncells] = c;
+  pl->ncells = pl->ncells + 1;
+}
+
+// Why the cell's target cannot run a test program here, "" when it can.
+fn bt_cannot_run(p: Project*, target: string, prog: string) -> string {
+  if (target_is_riscv(target)) {
+    var q: SettingsQuery* = new SettingsQuery;
+    q->profile = build_profile(p);
+    q->bin = prog;
+    q->target = target;
+    q->sets = p->opts->sets;
+    var st: Settings* = man_settings(p->man, q);
+    free(q);
+    var why: string = s_empty();
+    if (slen(st->error) > 0) {
+      why = bx_unroot(p, st->error);
+    } else {
+      why = rv_runner_missing(tc_select(p, target), target, st);
+    }
+    free(st);
+    return why;
+  }
+  if (!s_eq(target, sys_os()) && tc_run_program_cmd(target, "x") == (Cmd*)0) {
+    return "cannot run a " + target + " program on this " + sys_os() + " host";
+  }
+  return s_empty();
+}
+
+// The interpreter command of an @test file in the cell's session.
+fn bt_file_cell(s: BxSess*, u: BxUnit*, c: BtCell*, name: string) {
+  var p: Project* = s->p;
+  bx_unit_cmp(s, u, "test-" + bx_safe_name(name));
+  var cmd: Cmd* = tc_cmd(u->m);
+  cmd_arg(cmd, "test");
+  cmd_path(cmd, bx_rel(p, u->entry));
+  bx_add_include(cmd, p, s->ds, bx_unit_gen(u));
+  var st: Settings* = bx_add_flags(cmd, s, u);
+  free(st);
+  if (target_is_riscv(c->target)) {
+    // the interpreter runs @test functions on the host
+    bx_drop_valued(cmd, "--board --isa --abi --objective");
+  }
+  if (slen(p->opts->filter) > 0) {
+    cmd_arg(cmd, "--filter=" + p->opts->filter);
+  }
+  bx_diag_env(cmd);
+  var h: Hasher = h_new();
+  h_str(&h, "mbuild-test-v4");
+  bx_hash_cmd(&h, p, u->m, cmd);
+  h_str(&h, c->spec);
+  graph_fingerprint(u->g, &h);
+  h_str(&h, bt_settings_key(p, name));
+  c->fp = h_hex(&h);
+  c->cmd = cmd;
+}
+
+// A command test's words: the first resolved against the cell's test
+// programs and bins (out dirs), then a path or PATH.
+fn bt_cmd_cell(p: Project*, c: BtCell*, cmdline: string, progs_dir: string, bins_dir: string, progs: StrList*, bins: StrList*) {
+  var w: SvcWords = svc_split(cmdline);
+  if (!w.ok || w.words->len == 0) {
+    c->pre = "cannot split `" + cmdline + "` into words";
+    return;
+  }
+  var prog: string = sl_get(w.words, 0);
+  var t: Tool = tool_none();
+  var ext: string = target_exe_ext(c->target);
+  if (sl_has(progs, prog)) {
+    t.path = progs_dir + "/" + prog + ext;
+  } else if (sl_has(bins, prog)) {
+    t.path = bins_dir + "/" + prog + ext;
+  } else if (s_find_byte(prog, 47) >= 0 || s_find_byte(prog, 92) >= 0) {
+    t.path = p_join(p->root, prog);
+  } else {
+    t = sys_find_tool(prog);
+  }
+  if (!tool_found(t)) {
+    c->pre = "cannot find `" + prog + "`";
+    return;
+  }
+  var cmd: Cmd* = cmd_new(t);
+  var k: int64 = 1;
+  while (k < w.words->len) {
+    cmd_arg(cmd, sl_get(w.words, k));
+    k = k + 1;
+  }
+  c->cmd = cmd;
+}
+
+// The prefix of a test program's pass stamp, so bx_plan can skip one that
+// passed with the same build and settings ("" = no cache).
+fn bt_key_of(name: string) -> string {
+  if (g_bt_keys == (StrList*)0) {
+    return s_empty();
+  }
+  var i: int64 = 0;
+  while (i < g_bt_keys->len) {
+    var e: string = sl_get(g_bt_keys, i);
+    var tab: int64 = s_find_byte(e, 9);
+    if (s_eq(s_sub(e, 0, tab), name)) {
+      return s_from(e, tab + 1);
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+// Builds what the cells with this spec need and sets their commands.
+fn bt_spec(pl: BtPlan*, spec: string) {
+  var p: Project* = pl->p;
+  var mine: StrList* = sl_new();      // indexes of the cells, as text
+  defer free(mine);
+  var first: BtCell* = (BtCell*)0;
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    if (s_eq(pl->cells[i]->spec, spec)) {
+      sl_push(mine, s_int(i));
+      if (first == (BtCell*)0) {
+        first = pl->cells[i];
+      }
+    }
+    i = i + 1;
+  }
+  var target: string = first->target;
+  if (!target_valid(target)) {
+    var dummy: StrList* = sl_new();
+    bx_add_target(p, dummy, target);
+    free(dummy);
+  }
+  if (!tc_available(p, target)) {
+    bt_skip_all(pl, mine, "no Mettle compiler for " + target);
+    return;
+  }
+  var saved_sets: StrList* = p->opts->sets;
+  var saved_prof: string = p->opts->profile;
+  var saved_rel: bool = p->opts->release;
+  p->opts->profile = first->profile;
+  p->opts->release = false;
+  if (slen(first->board) > 0) {
+    p->opts->sets = sl_copy(saved_sets);
+    sl_push(p->opts->sets, "board=" + first->board);
+  }
+  if (pl->nspecs > 1) {
+    status("Testing", spec);
+  }
+  // the programs this spec builds: test programs, and those command tests start
+  var prog_names: StrList* = sl_new();
+  defer free(prog_names);
+  var bin_names: StrList* = sl_new();
+  defer free(bin_names);
+  var proj_bins: StrList* = bx_bin_names(build_bins(p));
+  defer free(proj_bins);
+  var dep_bins: StrList* = sl_new();
+  defer free(dep_bins);
+  var di: int64 = 0;
+  while (di < p->man->dep_bins->len) {
+    var de: string = sl_get(p->man->dep_bins, di);
+    sl_push(dep_bins, s_from(de, s_find_byte(de, 61) + 1));
+    di = di + 1;
+  }
+  var all_progs: BinSet* = bx_test_bins(p);
+  var all_prog_names: StrList* = bx_bin_names(all_progs);
+  defer free(all_prog_names);
+  var why_run: string = s_empty();
+  i = 0;
+  while (i < mine->len) {
+    var c: BtCell* = pl->cells[s_to_int(sl_get(mine, i))];
+    var t: BtTest* = pl->tests[c->t];
+    if (t->kind == BT_FILE && target_is_bare(target)) {
+      c->skip = "@test functions run on hosted targets";
+    } else if (t->kind == BT_PROG) {
+      sl_add_uniq(prog_names, t->name);
+    } else if (t->kind == BT_CMD) {
+      var w: SvcWords = svc_split(t->cmdline);
+      if (w.ok && w.words->len > 0) {
+        var w0: string = sl_get(w.words, 0);
+        if (sl_has(all_prog_names, w0)) {
+          sl_add_uniq(prog_names, w0);
+        } else if (sl_has(proj_bins, w0) || sl_has(dep_bins, w0)) {
+          sl_add_uniq(bin_names, w0);
+        }
+      }
+    }
+    i = i + 1;
+  }
+  if (prog_names->len > 0) {
+    why_run = bt_cannot_run(p, target, sl_get(prog_names, 0));
+  } else if (bin_names->len > 0) {
+    why_run = bt_cannot_run(p, target, sl_get(bin_names, 0));
+  }
+  var progs_dir: string = p->state_dir + "/test-bins/" + target + "/" + first->profile;
+  var bins_dir: string = p->root + "/build/" + target + "/" + first->profile;
+  var built: StrList* = sl_new();
+  defer free(built);
+  var s: BxSess* = bx_sess(p, sl_of(target));
+  g_bx_sess = s;
+  // project bins a command test starts: a normal build
+  if (bin_names->len > 0 && slen(why_run) == 0) {
+    var bus: BxUnits* = bx_bin_units(s, bx_select_bins(p, bin_names));
+    g_bx_units = bus;
+    if (bx_build_units(s, bus) != 0) {
+      bt_pre_all(pl, mine, "its programs did not build");
+    }
+  }
+  s->tests = true;
+  var us: BxUnits* = (BxUnits*)0;
+  if (prog_names->len > 0 && slen(why_run) == 0) {
+    us = bx_bin_units(s, bx_select_from(p, all_progs, prog_names));
+    g_bx_units = us;
+    bx_prepare(s, us, s_empty());
+    bx_compile_units(s, us, built);
+  }
+  // @test files: one unit each, prepared together
+  var fus: BxUnits* = bx_units_new();
+  var fcells: StrList* = sl_new();
+  defer free(fcells);
+  var bins: BinSet* = build_bins(p);
+  i = 0;
+  while (i < mine->len) {
+    var fc: BtCell* = pl->cells[s_to_int(sl_get(mine, i))];
+    var ft: BtTest* = pl->tests[fc->t];
+    if (ft->kind == BT_FILE && slen(fc->skip) == 0) {
+      bx_unit_add(fus, bx_bin_of_entry(bins, ft->file), ft->file, 0, target, s->mettles[0]);
+      sl_push(fcells, sl_get(mine, i));
+    }
+    i = i + 1;
+  }
+  if (fus->n > 0) {
+    g_bx_units = fus;
+    bx_prepare(s, fus, "test");
+  }
+  i = 0;
+  while (i < mine->len) {
+    var c2: BtCell* = pl->cells[s_to_int(sl_get(mine, i))];
+    var t2: BtTest* = pl->tests[c2->t];
+    i = i + 1;
+    if (slen(c2->skip) > 0 || slen(c2->pre) > 0) {
+      continue;
+    }
+    if (t2->kind == BT_FILE) {
+      var at: int64 = bt_unit_at(fcells, pl, c2);
+      bt_file_cell(s, fus->items[at], c2, t2->name);
+      bt_cache(pl, c2);
+      continue;
+    }
+    if (slen(why_run) > 0) {
+      c2->skip = why_run;
+      continue;
+    }
+    if (t2->kind == BT_PROG) {
+      bt_prog_cell(pl, s, us, c2, t2);
+    } else {
+      bt_cmd_cell(p, c2, t2->cmdline, progs_dir, bins_dir, all_prog_names, bin_names);
+      var w2: SvcWords = svc_split(t2->cmdline);
+      if (slen(c2->pre) == 0 && w2.ok && sl_has(prog_names, sl_get(w2.words, 0)) && us != (BxUnits*)0 && !bt_unit_ok(us, sl_get(w2.words, 0))) {
+        c2->pre = sl_get(w2.words, 0) + " did not compile";
+      }
+    }
+  }
+  p->opts->sets = saved_sets;
+  p->opts->profile = saved_prof;
+  p->opts->release = saved_rel;
+}
+
+// The unit of an @test file cell, by its place in fcells.
+fn bt_unit_at(fcells: StrList*, pl: BtPlan*, c: BtCell*) -> int64 {
+  var i: int64 = 0;
+  while (i < fcells->len) {
+    if (pl->cells[s_to_int(sl_get(fcells, i))] == c) {
+      return i;
+    }
+    i = i + 1;
+  }
   return 0;
 }
 
-// --matrix, or mb_test_targets without -t.
-fn bx_matrix_on(p: Project*) -> bool {
-  return sl_has(p->opts->rest, "--matrix") || (p->man->test_targets->len > 0 && p->opts->targets->len == 0);
+fn bt_unit_of(us: BxUnits*, name: string) -> BxUnit* {
+  var i: int64 = 0;
+  while (i < us->n) {
+    if (s_eq(us->items[i]->b->name, name)) {
+      return us->items[i];
+    }
+    i = i + 1;
+  }
+  return (BxUnit*)0;
 }
 
-// mbuild test [NAME | FILE]...: @test files, then test programs, one summary.
+fn bt_unit_ok(us: BxUnits*, name: string) -> bool {
+  var u: BxUnit* = bt_unit_of(us, name);
+  return u != (BxUnit*)0 && u->job != (BxJob*)0 && u->job->ok;
+}
+
+fn bt_skip_all(pl: BtPlan*, mine: StrList*, why: string) {
+  var i: int64 = 0;
+  while (i < mine->len) {
+    pl->cells[s_to_int(sl_get(mine, i))]->skip = why;
+    i = i + 1;
+  }
+}
+
+fn bt_pre_all(pl: BtPlan*, mine: StrList*, why: string) {
+  var i: int64 = 0;
+  while (i < mine->len) {
+    var c: BtCell* = pl->cells[s_to_int(sl_get(mine, i))];
+    if (pl->tests[c->t]->kind == BT_CMD) {
+      c->pre = why;
+    }
+    i = i + 1;
+  }
+}
+
+// A cell's pass stamp, and whether it holds.
+fn bt_cache(pl: BtPlan*, c: BtCell*) {
+  if (pl->nocache || pl->tests[c->t]->kind == BT_CMD || slen(c->fp) == 0) {
+    return;
+  }
+  c->stamp = pl->p->state_dir + "/stamps/test-" + c->fp;
+  c->cached = bx_stamp_ok(pl->p, c->stamp, c->fp);
+}
+
+// A test program's cell: compiled, warnings allowed, its command.
+fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
+  var p: Project* = pl->p;
+  var u: BxUnit* = bt_unit_of(us, t->name);
+  if (u == (BxUnit*)0 || u->job == (BxJob*)0 || !u->job->ok) {
+    c->pre = "did not compile";
+    return;
+  }
+  var j: BxJob* = u->job;
+  var wr: FsRead = fs_read(j->outp + ".warnings");
+  var warns: StrList* = s_lines(wr.data);
+  c->pre = trn_denied(warns, bt_get(p, t->name, "warnings"));
+  free(warns);
+  if (slen(c->pre) > 0) {
+    return;
+  }
+  c->stamp = j->pass;
+  c->fp = j->fp;
+  c->cached = j->state == 3;
+  if (s_eq(bt_get(p, t->name, "run"), "false")) {
+    return;
+  }
+  var run_at: string = j->outp;
+  var cmd: Cmd* = bx_emu_cmd(s, j->b, j->t, &run_at);
+  c->emulated = cmd != (Cmd*)0;
+  if (cmd == (Cmd*)0) {
+    cmd = tc_run_program_cmd(j->t->target, j->outp);
+  }
+  if (cmd == (Cmd*)0) {
+    c->skip = "cannot run a " + j->t->target + " program on this " + sys_os() + " host";
+    return;
+  }
+  c->console = bx_console_pass(s, j->b, j->t, cmd);
+  c->cmd = cmd;
+}
+
+// The per-run timeout: --timeout, else the test's setting, else 30 s
+// under an emulator, else 600 s.
+fn bt_timeout_ms(p: Project*, name: string, emulated: bool) -> int64 {
+  var cli: string = bt_rest_value(p, "--timeout");
+  if (slen(cli) > 0) {
+    return bx_timeout_ms(p, emulated);
+  }
+  if (!man_test_has(p->man, name, "timeout") && emulated) {
+    return 30000;
+  }
+  return s_to_int(man_test_get(p->man, name, "timeout")) * 1000;
+}
+
+fn bt_run_dir(p: Project*, c: BtCell*, name: string, k: int64) -> string {
+  var cell: string = s_replace_byte(s_replace_byte(c->spec, 47, 45), 58, 45);
+  return p->state_dir + "/test-run/" + cell + "/" + bx_safe_name(name) + "/" + s_int(k);
+}
+
+// The runs of every cell that runs.
+fn bt_runs(pl: BtPlan*) {
+  var p: Project* = pl->p;
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    var c: BtCell* = pl->cells[i];
+    var t: BtTest* = pl->tests[c->t];
+    i = i + 1;
+    if (slen(c->skip) > 0 || slen(c->pre) > 0 || c->cached || c->cmd == (Cmd*)0) {
+      continue;
+    }
+    var args: SvcWords = svc_split(bt_get(p, t->name, "args"));
+    var serial: bool = s_eq(bt_get(p, t->name, "serial"), "true");
+    var cwd_tmp: bool = s_eq(bt_get(p, t->name, "cwd"), "tmp");
+    var env: StrList* = man_test_env(p->man, t->name);
+    defer free(env);
+    var ms: int64 = bt_timeout_ms(p, t->name, c->emulated);
+    var k: int64 = 1;
+    while (k <= t->repeat) {
+      var r: TrnRun* = trn_run_new(c->t, i - 1, k);
+      var cmd: Cmd* = cmd_new(c->cmd->tool);
+      cmd_args(cmd, c->cmd->args);
+      if (t->kind == BT_PROG && args.ok) {
+        cmd_args(cmd, args.words);
+      }
+      sl_extend(cmd->env, c->cmd->env);
+      r->cmd = cmd;
+      r->dir = bt_run_dir(p, c, t->name, k);
+      r->timeout_ms = ms;
+      r->serial = serial;
+      r->console = c->console;
+      trn_prepare(r, p->root, t->name, c->spec, cwd_tmp, env);
+      if (k == 1) {
+        verbose(cmd_display(cmd));
+      }
+      pl->runs = (TrnRun**)realloc(pl->runs, (pl->nr + 1) * 8);
+      pl->runs[pl->nr] = r;
+      pl->nr = pl->nr + 1;
+      c->runs = c->runs + 1;
+      t->runs = t->runs + 1;
+      k = k + 1;
+    }
+  }
+}
+
+// Why a run failed, "" when it passed; its checks.
+fn bt_judge(pl: BtPlan*, r: TrnRun*, checks: int64*) -> string {
+  var p: Project* = pl->p;
+  var t: BtTest* = pl->tests[r->test];
+  var why: string = trn_exit_why(r);
+  if (t->kind == BT_FILE) {
+    var skipped: StrList* = sl_new();
+    *checks = trn_interp(r->out + r->err, skipped);
+    free(skipped);
+    if (slen(why) == 0) {
+      var w: StrList* = trn_warnings(r->out + r->err);
+      why = trn_denied(w, bt_get(p, t->name, "warnings"));
+      free(w);
+    }
+    return why;
+  }
+  *checks = trn_checks(r->out, bt_get(p, t->name, "checks"));
+  return why;
+}
+
+// The cells of a test as its line shows them: profiles alone when every
+// cell is on the host.
+fn bt_cells_label(pl: BtPlan*, t: BtTest*) -> string {
+  var host: bool = true;
+  var k: int64 = 0;
+  while (k < t->nc) {
+    var c: BtCell* = pl->cells[t->c0 + k];
+    if (!s_eq(c->target, sys_os()) || slen(c->board) > 0) {
+      host = false;
+    }
+    k = k + 1;
+  }
+  var l: StrList* = sl_new();
+  defer free(l);
+  k = 0;
+  while (k < t->nc) {
+    var c2: BtCell* = pl->cells[t->c0 + k];
+    if (host) {
+      sl_push(l, c2->profile);
+    } else {
+      sl_push(l, c2->spec);
+    }
+    k = k + 1;
+  }
+  return sl_join(l, ", ");
+}
+
+fn bt_checks_text(n: int64) -> string {
+  if (n == 1) {
+    return "1 check";
+  }
+  return s_int(n) + " checks";
+}
+
+// "test NAME (CELLS) ... ok  0.3s  42 checks"
+fn bt_print(pl: BtPlan*, t: BtTest*) {
+  t->printed = true;
+  var runs: int64 = 0;
+  var failed: int64 = 0;
+  var timeouts: int64 = 0;
+  var cached: int64 = 0;
+  var skipped: int64 = 0;
+  var checks: int64 = 0;
+  var ms: int64 = 0;
+  var skip_why: string = s_empty();
+  var to_ms: int64 = 0;
+  var k: int64 = 0;
+  while (k < t->nc) {
+    var c: BtCell* = pl->cells[t->c0 + k];
+    k = k + 1;
+    if (slen(c->skip) > 0) {
+      skipped = skipped + 1;
+      skip_why = c->skip;
+      continue;
+    }
+    if (slen(c->pre) > 0) {
+      failed = failed + 1;
+      runs = runs + 1;
+      continue;
+    }
+    if (c->cached) {
+      cached = cached + 1;
+    }
+    runs = runs + c->runs;
+    failed = failed + c->failed;
+    timeouts = timeouts + c->timeouts;
+    ms = ms + c->ms;
+    if (checks == 0) {
+      checks = c->checks;
+    }
+    if (c->timeouts > 0 && c->first != (TrnRun*)0) {
+      to_ms = c->first->timeout_ms;
+    }
+  }
+  var head: string = "test " + t->name + " (" + bt_cells_label(pl, t) + ") ... ";
+  if (skipped == t->nc) {
+    say(head + yellow("skipped") + " (" + skip_why + ")");
+    return;
+  }
+  if (failed > 0) {
+    var word: string = red("FAILED");
+    if (timeouts == failed) {
+      word = red("TIMEOUT") + " " + trn_secs(to_ms);
+    } else if (t->repeat > 1) {
+      word = word + " " + s_int(failed) + "/" + s_int(runs);
+    }
+    say(head + word);
+    bt_print_skips(pl, t, skipped);
+    return;
+  }
+  if (g_quiet) {
+    return;
+  }
+  var line: string = head + green("ok");
+  if (cached == t->nc - skipped) {
+    line = line + " " + dim("(cached)");
+  } else {
+    line = line + "  " + trn_secs(ms);
+  }
+  if (checks > 0) {
+    line = line + "  " + bt_checks_text(checks);
+  }
+  say(line);
+  bt_print_skips(pl, t, skipped);
+}
+
+// "    riscv64-linux/debug skipped: why" under a test that ran elsewhere.
+fn bt_print_skips(pl: BtPlan*, t: BtTest*, skipped: int64) {
+  if (skipped == 0 || skipped == t->nc) {
+    return;
+  }
+  var k: int64 = 0;
+  while (k < t->nc) {
+    var c: BtCell* = pl->cells[t->c0 + k];
+    if (slen(c->skip) > 0) {
+      say("    " + c->spec + " " + yellow("skipped") + ": " + c->skip);
+    }
+    k = k + 1;
+  }
+}
+
+// Prints the tests whose runs all ended, in plan order.
+fn bt_print_ready(pl: BtPlan*) {
+  while (pl->next_print < pl->nt) {
+    var t: BtTest* = pl->tests[pl->next_print];
+    if (t->ended < t->runs) {
+      return;
+    }
+    bt_print(pl, t);
+    flush_out();
+    pl->next_print = pl->next_print + 1;
+  }
+}
+
+fn bt_ended(arg: rawptr, i: int64) -> bool {
+  var pl: BtPlan* = (BtPlan*)arg;
+  var r: TrnRun* = pl->runs[i];
+  var c: BtCell* = pl->cells[r->cell];
+  var t: BtTest* = pl->tests[r->test];
+  var checks: int64 = 0;
+  var why: string = bt_judge(pl, r, &checks);
+  c->ms = c->ms + r->ms;
+  if (c->checks == 0) {
+    c->checks = checks;
+  }
+  if (slen(why) > 0) {
+    c->failed = c->failed + 1;
+    if (r->timed_out) {
+      c->timeouts = c->timeouts + 1;
+    }
+    if (c->first == (TrnRun*)0) {
+      c->first = r;
+      c->why = why;
+    }
+  } else if (!pl->keep) {
+    sys_remove_tree(r->dir);
+  }
+  t->ended = t->ended + 1;
+  bt_print_ready(pl);
+  return true;
+}
+
+// Each failed cell once: why, the end of its output, the kept directory.
+fn bt_failures(pl: BtPlan*) {
+  var p: Project* = pl->p;
+  var n: int64 = 0;
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    var c: BtCell* = pl->cells[i];
+    var t: BtTest* = pl->tests[c->t];
+    i = i + 1;
+    if (slen(c->pre) == 0 && c->first == (TrnRun*)0) {
+      continue;
+    }
+    if (n == 0) {
+      say("");
+      say("failures:");
+    }
+    n = n + 1;
+    say("");
+    if (slen(c->pre) > 0) {
+      say("---- " + t->name + " (" + c->spec + "): " + c->pre);
+      continue;
+    }
+    var r: TrnRun* = c->first;
+    var head: string = "---- " + t->name + " (" + c->spec;
+    if (t->repeat > 1) {
+      head = head + ", run " + s_int(r->k);
+    }
+    head = head + "): " + c->why;
+    if (c->failed > 1) {
+      head = head + " (" + s_int(c->failed) + " of " + s_int(c->runs) + " runs failed)";
+    }
+    say(head);
+    if (slen(s_trim(r->out)) > 0) {
+      say("stdout:");
+      print(trn_tail(r->out, 40, "  "));
+    }
+    if (slen(s_trim(r->err)) > 0) {
+      say("stderr:");
+      print(trn_tail(r->err, 40, "  "));
+    }
+    say("kept: " + bx_show(r->dir));
+  }
+  flush_out();
+}
+
+// Stamps the cells that passed and could be cached.
+fn bt_stamp(pl: BtPlan*) {
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    var c: BtCell* = pl->cells[i];
+    i = i + 1;
+    if (c->failed == 0 && c->runs > 0 && !pl->keep) {
+      sys_remove_tree(p_dir(bt_run_dir(pl->p, c, pl->tests[c->t]->name, 1)));
+    }
+    if (!pl->nocache && slen(c->stamp) > 0 && !c->cached && slen(c->skip) == 0 && slen(c->pre) == 0 && c->failed == 0) {
+      fs_mkdirs(p_dir(c->stamp));
+      fs_write(c->stamp, c->fp + "\n");
+    }
+  }
+}
+
+// Outputs of tests that are gone: test-bins files and stamps, run dirs.
+fn bt_clean_stale(p: Project*) {
+  var names: StrList* = bx_bin_names(bx_test_bins(p));
+  defer free(names);
+  var safe: StrList* = sl_new();
+  defer free(safe);
+  var i: int64 = 0;
+  while (i < names->len) {
+    sl_push(safe, bx_safe_name(sl_get(names, i)));
+    i = i + 1;
+  }
+  var cmds: StrList* = p->man->test_cmds;
+  i = 0;
+  while (i < cmds->len) {
+    var e: string = sl_get(cmds, i);
+    sl_push(safe, s_sub(e, 0, s_find_byte(e, 61)));
+    i = i + 1;
+  }
+  var files: StrList* = sl_new();
+  bx_test_files(p, bx_test_bins(p), files);
+  i = 0;
+  while (i < files->len) {
+    sl_push(safe, bx_safe_name(bx_rel(p, sl_get(files, i))));
+    i = i + 1;
+  }
+  free(files);
+  // .mbuild/test-bins/<target>/<profile>/<name>[.exe, .warnings, ...]
+  var tb: string = p->state_dir + "/test-bins";
+  var tf: StrList* = sl_new();
+  defer free(tf);
+  var tds: StrList* = sl_new();
+  defer free(tds);
+  sys_list_dir(tb, tf, tds);
+  var a: int64 = 0;
+  while (a < tds->len) {
+    var pf: StrList* = sl_new();
+    defer free(pf);
+    var pds: StrList* = sl_new();
+    defer free(pds);
+    sys_list_dir(tb + "/" + sl_get(tds, a), pf, pds);
+    var b: int64 = 0;
+    while (b < pds->len) {
+      var dir: string = tb + "/" + sl_get(tds, a) + "/" + sl_get(pds, b);
+      var fl: StrList* = sl_new();
+      defer free(fl);
+      var dl: StrList* = sl_new();
+      defer free(dl);
+      sys_list_dir(dir, fl, dl);
+      var f: int64 = 0;
+      while (f < fl->len) {
+        var fname: string = sl_get(fl, f);
+        var dot: int64 = s_find_byte(fname, 46);
+        var stem: string = fname;
+        if (dot > 0) {
+          stem = s_sub(fname, 0, dot);
+        }
+        if (!sl_has(names, stem) && !sl_has(names, fname) && !s_starts(fname, "lib")) {
+          sys_remove_file(dir + "/" + fname);
+        }
+        f = f + 1;
+      }
+      b = b + 1;
+    }
+    a = a + 1;
+  }
+  // .mbuild/stamps/test-bin-<target>-<profile>-<name>.stamp
+  var sf: StrList* = sl_new();
+  defer free(sf);
+  var sd: StrList* = sl_new();
+  defer free(sd);
+  sys_list_dir(p->state_dir + "/stamps", sf, sd);
+  i = 0;
+  while (i < sf->len) {
+    var st: string = sl_get(sf, i);
+    i = i + 1;
+    if (!s_starts(st, "test-bin-") || !s_ends(st, ".stamp")) {
+      continue;
+    }
+    var mid: string = s_sub(st, 9, slen(st) - 6);
+    var keep: bool = false;
+    var q: int64 = 0;
+    while (q < names->len && !keep) {
+      keep = s_ends(mid, "-" + sl_get(names, q));
+      q = q + 1;
+    }
+    if (!keep) {
+      sys_remove_file(p->state_dir + "/stamps/" + st);
+    }
+  }
+  // .mbuild/test-run/<cell>/<name>/
+  var rf: StrList* = sl_new();
+  defer free(rf);
+  var rd: StrList* = sl_new();
+  defer free(rd);
+  sys_list_dir(p->state_dir + "/test-run", rf, rd);
+  i = 0;
+  while (i < rd->len) {
+    var cd: string = p->state_dir + "/test-run/" + sl_get(rd, i);
+    var nf: StrList* = sl_new();
+    defer free(nf);
+    var nd: StrList* = sl_new();
+    defer free(nd);
+    sys_list_dir(cd, nf, nd);
+    var j: int64 = 0;
+    while (j < nd->len) {
+      if (!sl_has(safe, sl_get(nd, j))) {
+        sys_remove_tree(cd + "/" + sl_get(nd, j));
+      }
+      j = j + 1;
+    }
+    i = i + 1;
+  }
+}
+
+// mbuild test [NAME | FILE]...: every test in every cell of its matrix,
+// repeated, in parallel; a line per test, the failures, one result.
 export fn build_cmd_test(p: Project*) -> int32 {
   var t0: int64 = sys_now_ms();
   bx_timeout_ms(p, false);
-  var all_progs: BinSet* = bx_test_bins(p);
-  var prog_names: StrList* = bx_bin_names(all_progs);
-  defer free(prog_names);
-  var given: StrList* = bx_positional(p->opts->rest);
-  defer free(given);
-  var files: StrList* = sl_new();
-  defer free(files);
-  var progs: BinSet* = all_progs;
-  if (given->len > 0) {
-    var picked: StrList* = sl_new();
-    defer free(picked);
-    var cwd: string = bx_cwd();
-    var i: int64 = 0;
-    while (i < given->len) {
-      var arg: string = sl_get(given, i);
-      var a: string = p_clean(p_join(cwd, bx_slash(arg)));
-      if (sl_has(prog_names, arg)) {
-        sl_add_uniq(picked, arg);
-      } else if (fs_is_file(a)) {
-        sl_push(files, a);
-      } else if (prog_names->len > 0) {
-        fail_hint("no test program or test file `" + arg + "`", "the test programs are: " + sl_join(prog_names, ", "));
-      } else {
-        fail("no such test file: " + arg);
-      }
-      i = i + 1;
+  var pl: BtPlan* = new BtPlan;
+  memset((rawptr)pl, 0, (int64)sizeof(BtPlan));
+  g_bt_plan = pl;
+  pl->p = p;
+  pl->keep = sl_has(p->opts->rest, "--keep");
+  pl->filter = p->opts->filter;
+  var mx: string = bt_rest_value(p, "--matrix");
+  if (slen(mx) > 0) {
+    var why: string = man_test_check("*", "matrix", mx);
+    if (slen(why) > 0) {
+      fail("--matrix=" + mx + ": " + why);
     }
-    progs = bx_no_test_bins(p);
-    if (picked->len > 0) {
-      progs = bx_select_from(p, all_progs, picked);
-    }
-  } else {
-    bx_test_files(p, all_progs, files);
-    progs = bx_filter_bins(p, all_progs, p->opts->filter);
-    progs = bx_drop_excluded(p, progs, files);
   }
-  if (files->len == 0 && progs->n == 0) {
+  var rep: string = bt_rest_value(p, "--repeat");
+  if (slen(rep) > 0 && slen(man_test_check("*", "repeat", rep)) > 0) {
+    fail("--repeat needs a count from 1 to 100000, not `" + rep + "`");
+  }
+  bt_select(pl);
+  if (pl->nt == 0) {
     status("Finished", "no tests (no function is marked @test and there are no test programs)");
     return 0;
   }
-  if (bx_matrix_on(p)) {
-    return bx_test_matrix(p, files, progs, t0);
+  var dflt: StrList* = bx_mx_entries(p);
+  defer free(dflt);
+  pl->nocache = p->opts->force;
+  g_bt_keys = sl_new();
+  var i: int64 = 0;
+  while (i < pl->nt) {
+    var t: BtTest* = pl->tests[i];
+    t->repeat = s_to_int(bt_get(p, t->name, "repeat"));
+    var cells: StrList* = bt_cells_of(p, t->name, dflt);
+    t->c0 = pl->ncells;
+    t->nc = cells->len;
+    var k: int64 = 0;
+    while (k < cells->len) {
+      bt_add_cell(pl, i, sl_get(cells, k));
+      k = k + 1;
+    }
+    free(cells);
+    if (t->kind == BT_PROG && !p->opts->force && t->repeat == 1) {
+      sl_push(g_bt_keys, t->name + "\t" + bt_settings_key(p, t->name));
+    }
+    i = i + 1;
   }
-  var s: BxSess* = bx_sess(p, bx_targets_or_host(p));
-  g_bx_sess = s;
-  var n: BxTally;
-  n.passed = 0;
-  n.cached = 0;
-  n.failed = 0;
-  if (files->len > 0) {
-    bx_run_test_files(s, files, &n);
+  // build, cell spec by cell spec, in the order they first appear
+  var specs: StrList* = sl_new();
+  defer free(specs);
+  i = 0;
+  while (i < pl->ncells) {
+    sl_add_uniq(specs, pl->cells[i]->spec);
+    i = i + 1;
   }
-  if (progs->n > 0) {
-    bx_run_test_bins(s, progs, &n);
+  pl->nspecs = specs->len;
+  i = 0;
+  while (i < specs->len) {
+    bt_spec(pl, sl_get(specs, i));
+    i = i + 1;
   }
-  var np: int64 = n.passed;
-  var nc: int64 = n.cached;
-  var nf: int64 = n.failed;
-  var line: string = "{np} passed, {nc} cached, {nf} failed in " + bx_secs(sys_now_ms() - t0);
-  if (nf > 0) {
+  bt_runs(pl);
+  var rc: int32 = trn_exec(pl->runs, pl->nr, bx_parallel(p), (rawptr)pl, &bt_ended);
+  bt_print_ready(pl);
+  if (rc == 130) {
+    say("test result: " + red("INTERRUPTED"));
+    return 130;
+  }
+  bt_stamp(pl);
+  bt_failures(pl);
+  var passed: int64 = 0;
+  var cached: int64 = 0;
+  var skipped: int64 = 0;
+  var checks: int64 = 0;
+  i = 0;
+  while (i < pl->nt) {
+    var t2: BtTest* = pl->tests[i];
+    var ok: bool = true;
+    var all_skip: bool = true;
+    var all_cached: bool = true;
+    var k2: int64 = 0;
+    while (k2 < t2->nc) {
+      var c: BtCell* = pl->cells[t2->c0 + k2];
+      if (slen(c->skip) > 0) {
+        skipped = skipped + 1;
+      } else {
+        all_skip = false;
+        if (slen(c->pre) > 0 || c->failed > 0) {
+          ok = false;
+        }
+        if (!c->cached) {
+          all_cached = false;
+        }
+      }
+      k2 = k2 + 1;
+    }
+    k2 = 0;
+    while (k2 < t2->nc) {
+      if (pl->cells[t2->c0 + k2]->checks > 0) {
+        checks = checks + pl->cells[t2->c0 + k2]->checks;
+        break;
+      }
+      k2 = k2 + 1;
+    }
+    if (ok && !all_skip) {
+      passed = passed + 1;
+      if (all_cached) {
+        cached = cached + 1;
+      }
+    }
+    i = i + 1;
+  }
+  var failed: int64 = 0;
+  i = 0;
+  while (i < pl->nt) {
+    var t3: BtTest* = pl->tests[i];
+    var k3: int64 = 0;
+    var bad: bool = false;
+    while (k3 < t3->nc) {
+      var c3: BtCell* = pl->cells[t3->c0 + k3];
+      if (slen(c3->skip) == 0 && (slen(c3->pre) > 0 || c3->failed > 0)) {
+        bad = true;
+      }
+      k3 = k3 + 1;
+    }
+    if (bad) {
+      failed = failed + 1;
+    }
+    i = i + 1;
+  }
+  var line: string = s_int(passed) + " passed, " + s_int(failed) + " failed";
+  if (cached > 0) {
+    line = line + ", " + s_int(cached) + " cached";
+  }
+  if (skipped > 0) {
+    line = line + ", " + s_int(skipped) + " skipped";
+  }
+  if (pl->excluded > 0) {
+    line = line + ", " + s_int(pl->excluded) + " excluded";
+  }
+  if (checks > 0) {
+    line = line + ", " + bt_checks_text(checks);
+  }
+  line = line + " (" + trn_secs(sys_now_ms() - t0) + ")";
+  if (bt_no_names(p)) {
+    bt_clean_stale(p);
+  }
+  if (failed > 0) {
+    say("");
     say("test result: " + red("FAILED") + ". " + line);
     return 1;
   }
   say("test result: " + green("ok") + ". " + line);
   return 0;
+}
+
+fn bt_no_names(p: Project*) -> bool {
+  var l: StrList* = bx_positional(p->opts->rest);
+  var none: bool = l->len == 0;
+  free(l);
+  return none;
 }
 
 export fn build_cmd_check(p: Project*) -> int32 {
@@ -5748,23 +6564,26 @@ fn bx_init_cmds() {
   bx_note("inputs: an expression prints its value, a statement runs, `fn NAME(...) {{...}` redefines NAME; `edit NAME`, `undo [NAME]`, `r`, `pause`, `resume`, `step`, `pause when EXPR`, `watch EXPR`, `status`, `h NAME`, `i EXPR`, `:log`, `:q`. type `help` at the prompt.");
   bx_note("it writes the same events as mbuild live (paused and resumed too) for mbuild/live.");
   bx_note("a pause holds the thread calling shell_point(), between ticks; inputs and patches still run. other threads keep running. globals and functions are in scope, locals are not. Linux only.");
-  bx_def("test", "run @test functions and test programs", "mbuild test [NAMES | FILES...] [--filter S] [-r]", "project.md");
-  bx_ex("mbuild test", "every file with an @test, then every test program");
-  bx_ex("mbuild test --filter parse", "tests and test programs whose names contain parse");
-  bx_ex("mbuild test src/lex.mettle", "");
-  bx_ex("mbuild test sodium", "only the test program sodium");
-  bx_ex("mbuild test -r", "test programs built release");
-  bx_ex("mbuild test -t riscv64-linux", "test programs under qemu-riscv64");
-  bx_ex("mbuild test --matrix -t host,riscv64-linux,riscv32-none:pico2", "the same tests on three targets, one table");
+  bx_def("test", "run the tests: @test files, test programs, command tests", "mbuild test [NAMES | FILES...] [--matrix=CELLS] [--repeat N]", "project.md");
+  bx_ex("mbuild test", "every test in every cell of its matrix (default: debug on the host)");
+  bx_ex("mbuild test parse --repeat 50", "one test 50 times; it passes when every run does");
+  bx_ex("mbuild test --matrix=debug,release", "every test built and run both ways");
+  bx_ex("mbuild test -t host,riscv64-linux,riscv32-none:pico2", "the same tests on three targets");
+  bx_ex("mbuild test src/lex.mettle", "one @test file");
+  bx_fl("--matrix=CELLS", "the cells instead of each test's matrix setting: PROFILE or TARGET/PROFILE, comma-separated");
+  bx_fl("-r, -p P", "short for --matrix=release, --matrix=P");
+  bx_fl("-t T", "the targets a cell without one runs on (default: mb_test_targets, else the host)");
+  bx_fl("--repeat N", "runs per cell; a test passes when all of them do");
+  bx_fl("--timeout SECS", "per run (default: the timeout setting, 600; 30 under an emulator)");
+  bx_fl("--deny-warnings", "fail a test whose build warns (the warnings setting = error)");
   bx_fl("--filter S", "only tests whose names contain S");
-  bx_fl("-t T", "the target the test programs are built for; RISC-V ones run under an emulator, as mbuild run does");
-  bx_fl("--timeout SECS", "stop each test program after SECS (default 30 under an emulator, else none)");
+  bx_fl("-j N", "N runs at once (serial tests run alone, after the rest)");
+  bx_fl("-q", "show failed tests only");
+  bx_fl("--keep", "keep the run directories of passing runs too (.mbuild/test-run/CELL/NAME/K)");
   bx_fl("--force", "run cached tests too");
-  bx_fl("--matrix", "run them on every target of -t or mb_test_targets, and sum up per target");
-  bx_note("@test functions run in the compiler's interpreter, which can't call externs.");
-  bx_note("test programs (mb_test_bin, else tests/NAME_test.mettle with fn main) are built like the bins, C code included, and pass on exit 0.");
-  bx_note("passing tests are cached (`ok ... (cached)`) until their inputs change.");
-  bx_note("--matrix (or mb_test_targets in mbuild.mettle, without -t) runs the tests on every target of -t, else mb_test_targets, else the host, and ends with a table: target, passed, failed, skipped and why. @test functions run on hosted targets; test programs where something runs them (natively, wine, qemu, rvsim), else they count as skipped. riscv32-none:pico2 names a board target's board.");
+  bx_note("a test is an @test file (run in the compiler's interpreter), a test program (mb_test_bin, tests/NAME_test.mettle with fn main, mb_test_glob) or a command test (mb_test_cmd); it passes on exit 0. mb_test_set(name, key, value) sets matrix, timeout, repeat, serial, cwd, warnings, checks, args, run and more (docs/project.md).");
+  bx_note("each run gets its own directory: TMPDIR (MBUILD_TEST_TMP), MBUILD_TEST_OUT, stdout and stderr; it runs in a process group of its own, which a timeout stops whole.");
+  bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
   bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");
   bx_ex("mbuild flash", "build the UF2 and copy it to the Pico 2's drive");

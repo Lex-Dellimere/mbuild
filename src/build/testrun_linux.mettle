@@ -1,0 +1,240 @@
+// testrun_linux: trn_exec as alph actors. A pool starts one worker per run,
+// at most `parallel` at once, the serial runs alone after the rest; a worker
+// runs its test in a process group of its own, stdout and stderr captured,
+// and on timeout stops the whole group (SIGTERM, SIGKILL after 2 s).
+
+import "std/mem";
+import "../core/base";
+import "testrun";
+import "../core/sys_linux" if linux;
+import "../../third_party/alph/sys/linux" if linux;
+import "../../third_party/alph/core/node" if linux;
+
+const TRL_TAG_DONE: int64 = 220;     // a worker ended: arg = its run
+const TRL_TAG_SIGINT: int64 = 221;
+const TRL_TAG_TIMEOUT: int64 = 222;
+const TRL_TAG_KILL: int64 = 223;
+
+struct TrlPool {
+  runs: TrnRun**;
+  n: int64;
+  parallel: int64;
+  ev: fn(rawptr, int64) -> bool with alloc, syscall, asm;
+  arg: rawptr;
+  next: int64;
+  serial: bool;       // the serial runs' turn
+  running: int64;
+  started: int64;
+  workers: int64*;    // the worker of each run while it runs, else 0
+  stop: bool;         // no new runs (Ctrl-C)
+}
+
+struct TrlWork {
+  r: TrnRun*;
+  index: int64;
+  h: int64;
+  pid: int64;
+  out_h: int64;
+  err_h: int64;
+  out: Buf*;
+  err: Buf*;
+  buf: uint8*;
+  timer: int64;
+  t0: int64;
+}
+
+// What h has now into b; false at its end (h closed).
+fn trl_take(ctx: AlphCtx*, w: TrlWork*, h: int64, b: Buf*) -> bool {
+  while (true) {
+    var n: int64 = alph_io_read(ctx, h, (rawptr)w->buf, 8192);
+    if (n == ALPH_IO_AGAIN) {
+      alph_io_arm(ctx, h, ALPH_IO_IN);
+      return true;
+    }
+    if (n <= 0) {
+      alph_io_close(ctx, h);
+      return false;
+    }
+    buf_add(b, s_view(w->buf, n));
+  }
+  return true;
+}
+
+fn trl_io(ctx: AlphCtx*, w: TrlWork*, h: int64) {
+  if (h == w->out_h && w->out_h != 0) {
+    if (!trl_take(ctx, w, h, w->out)) {
+      w->out_h = 0;
+    }
+  } else if (h == w->err_h && w->err_h != 0) {
+    if (!trl_take(ctx, w, h, w->err)) {
+      w->err_h = 0;
+    }
+  }
+}
+
+// The run is over: its outcome into the run, the pool told.
+fn trl_end(ctx: AlphCtx*, w: TrlWork*, code: int64) -> int64 {
+  var r: TrnRun* = w->r;
+  if (w->timer != 0) {
+    alph_cancel_timer(ctx, w->timer);
+    w->timer = 0;
+  }
+  if (w->out_h != 0) {
+    trl_io(ctx, w, w->out_h);
+    if (w->out_h != 0) {
+      alph_io_close(ctx, w->out_h);
+    }
+  }
+  if (w->err_h != 0) {
+    trl_io(ctx, w, w->err_h);
+    if (w->err_h != 0) {
+      alph_io_close(ctx, w->err_h);
+    }
+  }
+  if (w->pid > 0) {
+    // what the test forked and left behind
+    syscall(ALPH_SYS_KILL, 0 - w->pid, ALPH_SIGKILL);
+  }
+  r->code = code;
+  r->ms = sys_now_ms() - w->t0;
+  r->out = buf_take(w->out);
+  r->err = buf_take(w->err);
+  trn_save(r);
+  free(w->buf);
+  alph_send(ctx, alph_parent(ctx), TRL_TAG_DONE, w->index);
+  return alph_stop(ctx, ALPH_NORMAL);
+}
+
+fn trl_work(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
+  var w: TrlWork* = (TrlWork*)ctx->state;
+  var r: TrnRun* = w->r;
+  if (m->tag == ALPH_TAG_INIT) {
+    w->out = buf_new();
+    w->err = buf_new();
+    w->buf = (uint8*)malloc(8192);
+    w->t0 = sys_now_ms();
+    w->h = sys_proc_start_captured(ctx, r->cmd, &w->out_h, &w->err_h);
+    if (w->h <= 0) {
+      w->out_h = 0;
+      w->err_h = 0;
+      return trl_end(ctx, w, 127);
+    }
+    w->pid = alph_proc_os_pid(ctx, w->h);
+    alph_io_arm(ctx, w->out_h, ALPH_IO_IN);
+    alph_io_arm(ctx, w->err_h, ALPH_IO_IN);
+    if (r->timeout_ms > 0) {
+      w->timer = alph_start_timer(ctx, r->timeout_ms, TRL_TAG_TIMEOUT, 0);
+    }
+  } else if (m->tag == ALPH_TAG_IO) {
+    trl_io(ctx, w, m->ref);
+  } else if (m->tag == TRL_TAG_TIMEOUT && m->ref == w->timer) {
+    r->timed_out = true;
+    syscall(ALPH_SYS_KILL, 0 - w->pid, ALPH_SIGTERM);
+    w->timer = alph_start_timer(ctx, 2000, TRL_TAG_KILL, 0);
+  } else if (m->tag == TRL_TAG_KILL && m->ref == w->timer) {
+    w->timer = 0;
+    syscall(ALPH_SYS_KILL, 0 - w->pid, ALPH_SIGKILL);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT && m->ref == w->h) {
+    return trl_end(ctx, w, m->arg);
+  }
+  return ALPH_CONTINUE;
+}
+
+fn trl_start(ctx: AlphCtx*, s: TrlPool*, i: int64) {
+  var w: TrlWork;
+  memset((rawptr)&w, 0, (int64)sizeof(TrlWork));
+  w.r = s->runs[i];
+  w.index = i;
+  var pid: int64 = alph_spawn_bytes(ctx, 0, (rawptr)&w, (int64)sizeof(TrlWork), &trl_work);
+  if (pid == 0) {
+    w.r->code = 127;
+    w.r->err = "mbuild: no room for another test run";
+    s->ev(s->arg, i);
+    return;
+  }
+  s->workers[i] = pid;
+  s->running = s->running + 1;
+}
+
+// Starts what may start now; halts once everything ended.
+fn trl_fill(ctx: AlphCtx*, s: TrlPool*) {
+  while (!s->stop) {
+    var i: int64 = s->next;
+    while (i < s->n && s->runs[i]->serial != s->serial) {
+      i = i + 1;
+    }
+    if (i >= s->n) {
+      if (s->serial) {
+        break;
+      }
+      s->serial = true;
+      s->next = 0;
+      continue;
+    }
+    if ((s->serial && s->running > 0) || s->running >= s->parallel) {
+      break;
+    }
+    s->next = i + 1;
+    s->started = s->started + 1;
+    trl_start(ctx, s, i);
+  }
+  if (s->running == 0 && (s->stop || s->started == s->n)) {
+    alph_halt(ctx, 0);
+  }
+}
+
+fn trl_pool(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
+  var s: TrlPool* = (TrlPool*)ctx->state;
+  if (m->tag == ALPH_TAG_INIT) {
+    trl_fill(ctx, s);
+  } else if (m->tag == TRL_TAG_DONE) {
+    var i: int64 = m->arg;
+    s->workers[i] = 0;
+    s->running = s->running - 1;
+    if (!s->ev(s->arg, i)) {
+      s->stop = true;
+    }
+    trl_fill(ctx, s);
+  } else if (m->tag == TRL_TAG_SIGINT) {
+    // a worker killed takes its process group with it
+    s->stop = true;
+    var k: int64 = 0;
+    while (k < s->n) {
+      if (s->workers[k] != 0) {
+        alph_exit_signal(ctx, s->workers[k], ALPH_KILL);
+      }
+      k = k + 1;
+    }
+    alph_halt(ctx, 130);
+  }
+  return ALPH_CONTINUE;
+}
+
+// Runs runs[0..n): at most parallel at once, the serial ones alone after
+// the rest; ev(arg, i) as run i ends, and false from it starts no more.
+// 130 after Ctrl-C, else 0.
+export fn trn_exec(runs: TrnRun**, n: int64, parallel: int64, arg: rawptr,
+                   ev: fn(rawptr, int64) -> bool with alloc, syscall, asm) -> int32 {
+  if (n == 0) {
+    return 0;
+  }
+  var s: TrlPool;
+  memset((rawptr)&s, 0, (int64)sizeof(TrlPool));
+  s.runs = runs;
+  s.n = n;
+  s.parallel = parallel;
+  if (s.parallel < 1) {
+    s.parallel = 1;
+  }
+  if (s.parallel > 40) {
+    s.parallel = 40;  // sys_node_run's actors
+  }
+  s.ev = ev;
+  s.arg = arg;
+  s.workers = (int64*)malloc((n + 1) * 8);
+  memset((rawptr)s.workers, 0, (n + 1) * 8);
+  var handles: int64 = s.parallel * 4 + 8;
+  var code: int64 = sys_node_run((rawptr)&s, (int64)sizeof(TrlPool), handles, TRL_TAG_SIGINT, &trl_pool);
+  free(s.workers);
+  return (int32)code;
+}

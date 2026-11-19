@@ -64,6 +64,85 @@ sed -i 's|examples/\*.mettle|examples/**/*.mettle|' mbuild.mettle
 mb test
 check "globs: two equal stems" has "error: two test programs are named demo: examples/demo.mettle and examples/more/demo.mettle"
 
+# --- the runner: pass, fail, timeout, process groups, repeat, warnings, cache, parallel isolation
+proj "$W/run" <<'EOF2'
+  mb_test_set("*", "timeout", "20");
+  mb_test_set("hang", "timeout", "1");
+  mb_test_set("flaky", "repeat", "4");
+  mb_test_set("count", "checks", "PASS");
+  mb_test_set("warn", "warnings", "error");
+  mb_test_set("both", "matrix", "debug, release");
+  mb_test_set("solo", "serial", "true");
+  mb_test_set("intmp", "cwd", "tmp");
+  mb_test_set("nobuild", "run", "false");
+  mb_test_cmd("iso1", "sh tests/iso.sh one");
+  mb_test_cmd("iso2", "sh tests/iso.sh two");
+  mb_test_cmd("solo", "sh tests/solo.sh");
+  mb_test_cmd("intmp", "sh -c 'test \"$(pwd)\" = \"$MBUILD_TEST_TMP\" && test -d \"$MBUILD_TEST_OUT\"'");
+  mb_test_env("iso1", "WHO=first");
+  mb_test_env("*", "ALL=yes");
+  mb_on("linux");
+  mb_link_libs("c");
+  mb_on("");
+EOF2
+cd "$W/run" || exit 1
+printf 'import "std/io";\nfn main() -> int32 {\n  println("PASS a");\n  println("PASS b");\n  println("PASS c");\n  return 0;\n}\n' > tests/count_test.mettle
+prog tests/both_test.mettle 0
+prog tests/nobuild_test.mettle 1
+printf 'import "std/io";\nimport "std/env";\nfn main() -> int32 {\n  var k: string = env_get_or("MBUILD_TEST_RUN", "0");\n  println("run " + k);\n  if (k == "3") {\n    return 1;\n  }\n  return 0;\n}\n' > tests/flaky_test.mettle
+printf 'extern fn c_sleep(s: uint32) -> uint32 = "sleep";\nextern fn c_fork() -> int32 = "fork";\nfn main() -> int32 {\n  c_fork();\n  c_sleep(60);\n  return 0;\n}\n' > tests/hang_test.mettle
+printf 'fn main() -> int32 {\n  var unused: int32 = 3;\n  return 0;\n}\n' > tests/warn_test.mettle
+cat > tests/iso.sh <<'EOF2'
+echo "$1" > "$TMPDIR/f"
+sleep 0.3
+[ "$(cat "$TMPDIR/f")" = "$1" ] || { echo "TMPDIR shared"; exit 1; }
+[ "$(pwd)" = "$MBUILD_ROOT" ] || { echo "cwd $(pwd)"; exit 1; }
+[ "$ALL" = yes ] || exit 1
+[ "$1" = two ] || [ "$WHO" = first ] || exit 1
+[ "$MBUILD_TEST_CELL" = linux/debug ] || exit 1
+echo "end $MBUILD_TEST_NAME" >> order.log
+EOF2
+printf 'echo solo >> order.log\n' > tests/solo.sh
+mb test -j 4
+check "runner: a line per test" sh -c 'grep -q "^test count (debug) ... ok .*  3 checks$" "$0/last.out" && grep -qF "test both (debug, release) ... ok" "$0/last.out" && grep -qF "test iso1 (debug) ... ok" "$0/last.out" && grep -qF "test iso2 (debug) ... ok" "$0/last.out" && grep -qF "test intmp (debug) ... ok" "$0/last.out"' "$S"
+check "runner: run=false only builds" sh -c 'grep -qF "test nobuild (debug) ... ok" "$0/last.out" && grep -qF "Compiling test nobuild (linux, debug)" "$0/last.out"' "$S"
+check "runner: timeout" line "test hang (debug) ... TIMEOUT 1.0s"
+check "runner: the timeout reaches what the test forked" sh -c '! ps -eo args | grep -v grep | grep -q "$0/run/.mbuild/test-bins/linux/debug/hang"' "$W"
+check "runner: repeat counts failed runs" line "test flaky (debug) ... FAILED 1/4"
+check "runner: the failed run, once" sh -c 'grep -qxF -- "---- flaky (linux/debug, run 3): exit 1" "$0/last.out" && grep -qxF "  run 3" "$0/last.out" && [ -d .mbuild/test-run/linux-debug/flaky/3 ] && [ ! -e .mbuild/test-run/linux-debug/flaky/2 ]' "$S"
+check "runner: a denied warning fails without running" sh -c 'grep -qF "test warn (debug) ... FAILED" "$0/last.out" && grep -qF -- "---- warn (linux/debug): warning W0001 at tests/warn_test.mettle:2" "$0/last.out"' "$S"
+check "runner: the serial test runs after the rest" sh -c '[ "$(tail -1 order.log)" = solo ] && grep -q "end iso1" order.log && grep -q "end iso2" order.log'
+check "runner: summary" sh -c 'grep -q "^test result: FAILED. 7 passed, 3 failed, 3 checks (" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "runner: passing runs leave nothing" sh -c '[ ! -e .mbuild/test-run/linux-debug/count ] && [ ! -e .mbuild/test-run/linux-release/both ]'
+mb test count both nobuild
+check "cache: a hit" sh -c 'grep -qF "test count (debug) ... ok (cached)" "$0/last.out" && grep -qF "test both (debug, release) ... ok (cached)" "$0/last.out" && grep -qF "3 passed, 0 failed, 3 cached" "$0/last.out" && ! grep -q Compiling "$0/last.out"' "$S"
+sed -i 's|"count", "checks", "PASS"|"count", "checks", "PASS b"|' mbuild.mettle
+mb test count
+check "cache: a changed setting runs it again" sh -c 'grep -q "^test count (debug) ... ok .*  1 check$" "$0/last.out" && ! grep -q Compiling "$0/last.out"' "$S"
+printf '\n' >> tests/count_test.mettle
+mb test count
+check "cache: a changed source builds and runs it again" sh -c 'grep -qF "Compiling test count (linux, debug)" "$0/last.out" && ! grep -qF "(cached)" "$0/last.out"' "$S"
+mb test count --force
+check "cache: --force" sh -c 'grep -qF "Compiling test count" "$0/last.out" && ! grep -qF "(cached)" "$0/last.out"' "$S"
+mb test count --repeat=3
+check "cache: --repeat is never cached" sh -c '! grep -qF "(cached)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+mb test count both --matrix=release
+check "--matrix=CSV replaces the cells" sh -c 'grep -qF "test count (release) ... ok" "$0/last.out" && grep -qF "test both (release) ... ok" "$0/last.out"' "$S"
+mb test -r count
+check "-r is --matrix=release" line "test count (release) ... ok (cached)"
+mb test --matrix=mars/debug
+check "--matrix=CSV is checked" has "error: --matrix=mars/debug: unknown target 'mars'"
+mb test -q
+check "-q: failures only" sh -c '! grep -q "\.\.\. ok" "$0/last.out" && grep -qF "test hang (debug) ... TIMEOUT" "$0/last.out" && grep -q "^test result: FAILED" "$0/last.out"' "$S"
+mb test both --keep --force
+check "--keep keeps passing runs" sh -c '[ -f .mbuild/test-run/linux-debug/both/1/stdout ] && [ -d .mbuild/test-run/linux-release/both/1/tmp ] && grep -qx "PASS one" .mbuild/test-run/linux-debug/both/1/stdout'
+mb test count --deny-warnings
+check "--deny-warnings" code_is 0
+mb test warn --deny-warnings
+check "--deny-warnings fails a warning" code_is 1
+mb test nope
+check "an unknown test lists them" has "help: the tests are: both, count, flaky, hang, nobuild, warn, iso1, iso2, solo, intmp; or name an @test file"
+
 done
 echo "test_runner: $pass passed, $failed failed"
 [ $failed = 0 ]

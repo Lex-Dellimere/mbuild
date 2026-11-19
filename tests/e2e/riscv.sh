@@ -109,7 +109,7 @@ if [ $have_user = 1 ]; then
   mb run spin -t riscv64-linux --timeout 1
   check "--timeout stops it" sh -c 'grep -qF "spinning" "$0/last.out" && grep -qF "error: build/riscv64-linux/debug/spin was stopped after 1.0s (--timeout 1)" "$0/last.out" && [ "$(cat "$0/last.code")" = 124 ]' "$S"
   mb test -t riscv64-linux
-  check "test programs under qemu-riscv64" sh -c 'grep -q "^ok .*pass (tests/pass.mettle)" "$0/last.out" && grep -qF "failing" "$0/last.out" && grep -qF "FAILED fail (tests/fail.mettle) (exit 2)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+  check "test programs under qemu-riscv64" sh -c 'grep -qF "test pass (riscv64-linux/debug) ... ok" "$0/last.out" && grep -qF "failing" "$0/last.out" && grep -qF -- "---- fail (riscv64-linux/debug): exit 2" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
   MBUILD_QEMU_USER_DIR="$W" mb run hello -t riscv64-linux
   check "MBUILD_QEMU_USER_DIR without qemu" has "MBUILD_QEMU_USER_DIR=$W has no qemu-riscv64"
 fi
@@ -122,7 +122,7 @@ if [ $have_sys = 1 ]; then
   mb run hello -t riscv64-none
   check "run -t riscv64-none on qemu-virt" sh -c 'grep -qF "(qemu-system-riscv64)" "$0/last.out" && grep -qF "Hello from hello!" "$0/last.out" && [ "$(cat "$0/last.code")" = 3 ]' "$S"
   mb test -t riscv32-none pass
-  check "a test program on qemu-virt" sh -c 'grep -q "^ok .*pass" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+  check "a test program on qemu-virt" sh -c 'grep -qF "test pass (riscv32-none/debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 fi
 
 # --- settings that do not fit
@@ -252,20 +252,19 @@ printf 'export fn plat_init() {\n}\n' > tests/plat/host.mettle
 printf 'export fn plat_init() {\n  pico2_init();\n}\n' > tests/plat/pico.mettle
 printf 'import "std/io";\nimport "plat";\nfn main() -> int32 {\n  plat_init();\n  println("PASS");\n  return 0;\n}\n' > tests/pass.mettle
 printf 'import "std/io";\nimport "plat";\nfn main() -> int32 {\n  plat_init();\n  println("FAIL");\n  return 1;\n}\n' > tests/fail.mettle
-row() { grep -qE "^$1 +$2 +$3 +$4( |\$)" "$S/last.out"; }
 mb test
-check "matrix: mb_test_targets runs it, one table" sh -c 'grep -q "^target  *passed  failed  skipped$" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
-check "matrix: host row" row linux 2 1 0
-[ $have_user = 1 ] && check "matrix: riscv64-linux row" row riscv64-linux 2 1 0
+check "matrix: mb_test_targets gives the cells" sh -c 'grep -qF "test pass (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... " "$0/last.out" && grep -qF "test fail (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... FAILED" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "matrix: the host cell fails" has "---- fail (linux/debug): exit 1"
+[ $have_user = 1 ] && check "matrix: the riscv64-linux cell fails" has "---- fail (riscv64-linux/debug): exit 1"
 if [ $have_rvsim = 1 ]; then
-  check "matrix: pico2 row, @test skipped with why" sh -c 'grep -qE "^riscv32-none \(pico2\) +1 +1 +1  @test functions run on hosted targets$" "$0/last.out" && grep -qF "FAILED fail (tests/fail.mettle) (no PASS on the console)" "$0/last.out"' "$S"
+  check "matrix: pico2 cell, @test skipped with why" sh -c 'grep -qF "    riscv32-none:pico2/debug skipped: @test functions run on hosted targets" "$0/last.out" && grep -qF -- "---- fail (riscv32-none:pico2/debug): no PASS on the console" "$0/last.out"' "$S"
 fi
 MBUILD_QEMU_USER_DIR="$W" MBUILD_RVSIM="$W/nope" mb test --matrix -t host,riscv64-linux,riscv32-none:pico2 pass
-check "matrix: a missing emulator is skipped, not failed" sh -c 'grep -qE "^riscv64-linux +0 +0 +1  MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^riscv32-none \(pico2\) +0 +0 +1  MBUILD_RVSIM=.* does not exist$" "$0/last.out" && grep -qF "1 passed, 0 failed, 2 skipped on 3 targets" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "matrix: a missing emulator is skipped, not failed" sh -c 'grep -qE "^    riscv64-linux/debug skipped: MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^    riscv32-none:pico2/debug skipped: MBUILD_RVSIM=.* does not exist$" "$0/last.out" && grep -qE "1 passed, 0 failed.*, 2 skipped" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 mb test --matrix -t riscv32-none:
 check "matrix: a board target without its board" has 'error: `riscv32-none:` is not a board target with its board'
 mb test -t linux pass
-check "-t without --matrix: no table" sh -c '! grep -q "^target " "$0/last.out" && grep -q "^ok .*pass" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+check "-t linux: the host cell only" sh -c 'grep -qF "test pass (debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 
 # --- pgo: build counting, run, build with the profile
 mkdir -p "$W/pg/src" && cd "$W/pg" || exit 1
