@@ -1201,11 +1201,84 @@ export fn cmp_freestanding(b: BinSpec*) -> bool {
   return s_ends(b->triple, "-none");
 }
 
+// "" or why the RISC-V settings do not fit a unit compiled for target (a
+// target name or a bin's triple): board, outputs and the rvsim keys need a
+// board image (riscv32-none, riscv64-none), objective, isa and abi a RISC-V
+// target of their width.
+export fn cmp_target_problem(label: string, target: string, st: Settings*) -> string {
+  if (st == (Settings*)0) {
+    return s_empty();
+  }
+  var rv: bool = s_starts(target, "riscv");
+  var bare: bool = rv && s_ends(target, "-none");
+  var shown: string = toml_quote(target);
+  var only: string = "set it after mb_on(\"riscv32-none\") in a profile, or for that bin only";
+  if (slen(st->board) > 0 && !bare) {
+    return label + ": board = " + toml_quote(st->board) + " is for a board image (riscv32-none or riscv64-none), and this is " + shown + "; " + only;
+  }
+  var bare_keys: StrList* = sl_new();
+  defer free(bare_keys);
+  if (slen(st->outputs) > 0) { sl_push(bare_keys, "outputs"); }
+  if (slen(st->rvsim_until_ms) > 0) { sl_push(bare_keys, "rvsim-until-ms"); }
+  if (slen(st->exit_on_uart) > 0) { sl_push(bare_keys, "exit-on-uart"); }
+  if (slen(st->uart_script) > 0) { sl_push(bare_keys, "uart-script"); }
+  if (slen(st->pins) > 0) { sl_push(bare_keys, "pins"); }
+  if (bare_keys->len > 0 && !bare) {
+    return label + ": " + sl_get(bare_keys, 0) + " is for a board image (riscv32-none or riscv64-none), and this is " + shown + "; " + only;
+  }
+  if (bare && bare_keys->len > 0 && !s_eq(st->board, "pico2")) {
+    var k: int64 = 0;
+    while (k < bare_keys->len) {
+      if (!s_eq(sl_get(bare_keys, k), "outputs")) {
+        return label + ": " + sl_get(bare_keys, k) + " sets up rvsim, which runs board = \"pico2\" only, and this board is " + toml_quote(st->board);
+      }
+      k = k + 1;
+    }
+  }
+  if (bare && slen(st->outputs) > 0 && !s_eq(st->board, "pico2") && sl_has(man_outputs(st->outputs), "uf2")) {
+    return label + ": outputs = " + toml_quote(st->outputs) + ": only board = \"pico2\" writes UF2, and this board is " + toml_quote(st->board) + "; use \"bin\" or \"hex\"";
+  }
+  var rv_keys: StrList* = sl_new();
+  defer free(rv_keys);
+  if (slen(st->objective) > 0) { sl_push(rv_keys, "objective"); }
+  if (slen(st->isa) > 0) { sl_push(rv_keys, "isa"); }
+  if (slen(st->abi) > 0) { sl_push(rv_keys, "abi"); }
+  if (rv_keys->len > 0 && !rv) {
+    var key: string = sl_get(rv_keys, 0);
+    return label + ": " + key + " is for a RISC-V target, and this is " + shown + "; set it after mb_on(\"riscv64-linux\") (or another RISC-V target) in a profile, or for that bin only";
+  }
+  if (!rv) {
+    return s_empty();
+  }
+  var width: string = "rv64";
+  var family: string = "lp64";
+  var abis: string = "\"lp64\", \"lp64f\" or \"lp64d\"";
+  if (s_starts(target, "riscv32")) {
+    width = "rv32";
+    family = "ilp32";
+    abis = "\"ilp32\", \"ilp32e\", \"ilp32f\" or \"ilp32d\"";
+  }
+  if (slen(st->isa) > 0 && !s_starts(st->isa, width)) {
+    return label + ": isa = " + toml_quote(st->isa) + " does not fit " + shown + ": its ISA string starts with " + width;
+  }
+  if (slen(st->abi) > 0 && !s_starts(st->abi, family)) {
+    return label + ": abi = " + toml_quote(st->abi) + " does not fit " + shown + "; use " + abis;
+  }
+  return s_empty();
+}
+
 // "" or why the bin cannot be built as declared.
 export fn cmp_bin_problem(p: Project*, b: BinSpec*, st: Settings*) -> string {
   var label: string = "bin " + b->name;
-  if (s_eq(b->kind, "flat") && (!cmp_freestanding(b) || st == (Settings*)0 || slen(st->image_base) == 0)) {
-    return label + ": kind = \"flat\" needs a freestanding triple (triple = \"x86_64-none\") and image-base = \"0x100000\"";
+  var rv_bare: bool = s_eq(b->triple, "riscv32-none") || s_eq(b->triple, "riscv64-none");
+  if (s_eq(b->kind, "flat") && !rv_bare && (!cmp_freestanding(b) || st == (Settings*)0 || slen(st->image_base) == 0)) {
+    return label + ": kind = \"flat\" needs a freestanding triple (triple = \"x86_64-none\") and image-base = \"0x100000\", or a RISC-V board image (triple = \"riscv32-none\" with a board)";
+  }
+  if (slen(b->triple) > 0) {
+    var target_why: string = cmp_target_problem(label, b->triple, st);
+    if (slen(target_why) > 0) {
+      return target_why;
+    }
   }
   if (cmp_freestanding(b)) {
     var c: StrList* = man_os_list(p->man, "c.sources", "linux");

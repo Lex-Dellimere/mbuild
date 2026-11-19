@@ -143,7 +143,23 @@ fn cfx_driver_cmd(p: Project*, exe: string) -> Cmd* {
   cmd_env(c, "MBUILD_VERSION", p->man->version);
   cmd_env(c, "MBUILD_VERBOSE", s_int((int64)g_verbose));
   cmd_env(c, "MBUILD_QUIET", s_int((int64)g_quiet));
+  cmd_env(c, "MBUILD_BIN_KINDS", cfx_bin_kinds(p));
   return c;
+}
+
+// "name=kind=triple" for every declared bin, ";" between, so mb_out can
+// name the file each kind writes.
+fn cfx_bin_kinds(p: Project*) -> string {
+  var parts: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < p->man->nbins) {
+    var b: BinSpec* = man_bin(p->man, i);
+    sl_push(parts, b->name + "=" + b->kind + "=" + b->triple);
+    i = i + 1;
+  }
+  var out: string = sl_join(parts, ";");
+  free(parts);
+  return out;
 }
 
 fn cfx_mbfile(p: Project*) -> string {

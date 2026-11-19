@@ -139,6 +139,15 @@ export struct Settings {
   check_tasks: bool;
   profile_runtime: bool;
   image_base: string;
+  board: string;
+  objective: string;
+  isa: string;
+  abi: string;
+  outputs: string;        // "" = bin, elf
+  rvsim_until_ms: string;
+  exit_on_uart: string;
+  uart_script: string;
+  pins: string;
   components: StrList*;   // "name=impl" in layering order
   flags: StrList*;
   cflags: StrList*;
@@ -584,7 +593,19 @@ fn mnx_is_os_profile(section: string) -> bool {
     return false;
   }
   var os: string = s_from(rest, dot + 1);
-  return s_eq(os, "linux") || s_eq(os, "windows");
+  return man_target_name(os);
+}
+
+fn mnx_target_words() -> string {
+  return "linux windows riscv64-linux riscv32-linux riscv64-none riscv32-none";
+}
+
+// A target -t and mb_targets take (not all or host).
+export fn man_target_name(t: string) -> bool {
+  var words: StrList* = mnx_list(mnx_target_words());
+  var found: bool = sl_has(words, t);
+  free(words);
+  return found;
 }
 
 // "head.NAME" with one non-empty NAME part.
@@ -712,7 +733,7 @@ fn mnx_unknown_keys(m: Manifest*, sec: string) {
 // ---------------------------------------------------------------------------
 
 fn mnx_typed_words() -> string {
-  return "optimize safe stack-trace debug-info crash-report native-heap check-overflow check-proofs check-effects check-deadlines check-tasks assume-no-signed-overflow pgo pgo-file verify ml-opt subsystem profile-runtime image-base";
+  return "optimize safe stack-trace debug-info crash-report native-heap check-overflow check-proofs check-effects check-deadlines check-tasks assume-no-signed-overflow pgo pgo-file verify ml-opt subsystem profile-runtime image-base board objective isa abi outputs rvsim-until-ms exit-on-uart uart-script pins";
 }
 
 fn mnx_enum_words(key: string) -> string {
@@ -720,6 +741,8 @@ fn mnx_enum_words(key: string) -> string {
   if (s_eq(key, "pgo")) { return "off auto instrument use"; }
   if (s_eq(key, "ml-opt")) { return "off on speculative"; }
   if (s_eq(key, "subsystem")) { return "console windows"; }
+  if (s_eq(key, "objective")) { return "balanced size speed"; }
+  if (s_eq(key, "abi")) { return "ilp32 ilp32e ilp32f ilp32d lp64 lp64f lp64d"; }
   return s_empty();
 }
 
@@ -767,6 +790,9 @@ fn mnx_base(file: string) -> string {
 
 // What is wrong with a settings value (typed key, flags, cflags, inherits); "" when nothing.
 fn mnx_setting_problem(key: string, v: TomlValue*) -> string {
+  if (s_eq(key, "abi") && v->kind == 1 && s_eq(v->text, "lp64e")) {
+    return "abi = \"lp64e\": the Mettle compiler does not support RV64E and lp64e yet; use \"lp64\", \"lp64f\" or \"lp64d\"";
+  }
   var ew: string = mnx_enum_words(key);
   if (slen(ew) > 0) {
     var words: StrList* = mnx_list(ew);
@@ -799,6 +825,33 @@ fn mnx_setting_problem(key: string, v: TomlValue*) -> string {
   if (s_eq(key, "image-base")) {
     if (v->kind != 1 || !mnx_is_hex_addr(v->text)) {
       return "`image-base` must be a hex address string such as \"0x500000\"";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "board")) {
+    if (v->kind != 1 || !mnx_is_board_name(v->text)) {
+      return "`board` must be a board name such as \"qemu-virt\" (lowercase letters, digits and dashes)";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "isa")) {
+    if (v->kind != 1 || !mnx_is_isa(v->text)) {
+      return "`isa` must be an ISA string such as \"rv32imac_zba_zbb\" (rv32 or rv64, then the extensions)";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "outputs")) {
+    return mnx_outputs_problem(v);
+  }
+  if (s_eq(key, "rvsim-until-ms")) {
+    if (!((v->kind == 1 && mnx_is_digits(v->text)) || (v->kind == 2 && !s_starts(v->text, "-")))) {
+      return "`rvsim-until-ms` must be a number of milliseconds such as \"500\"";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "exit-on-uart") || s_eq(key, "uart-script") || s_eq(key, "pins")) {
+    if (v->kind != 1 || slen(v->text) == 0) {
+      return "`" + key + "` must be a non-empty string";
     }
     return s_empty();
   }
@@ -847,6 +900,103 @@ fn mnx_is_hex_addr(s: string) -> bool {
   return true;
 }
 
+// rv32 or rv64, then letters, digits and underscores.
+fn mnx_is_isa(s: string) -> bool {
+  var l: string = s_lower(s);
+  if (slen(l) < 5 || !(s_starts(l, "rv32") || s_starts(l, "rv64"))) {
+    return false;
+  }
+  var i: int64 = 4;
+  while (i < slen(l)) {
+    var c: int32 = s_byte(l, i);
+    if (!((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn mnx_is_digits(s: string) -> bool {
+  if (slen(s) == 0) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c < 48 || c > 57) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+// The files a board image writes: "bin, elf" (a string) or ["uf2", "elf"].
+export fn man_outputs(text: string) -> StrList* {
+  var out: StrList* = sl_new();
+  var parts: StrList* = s_split(text, 44);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var w: string = s_trim(sl_get(parts, i));
+    if (slen(w) > 0) {
+      sl_add_uniq(out, w);
+    }
+    i = i + 1;
+  }
+  free(parts);
+  return out;
+}
+
+fn mnx_outputs_problem(v: TomlValue*) -> string {
+  var choices: string = "\"bin\", \"uf2\", \"elf\", \"hex\"";
+  var text: string = v->text;
+  if (v->kind == 4 && !sl_has(v->item_kinds, "2") && !sl_has(v->item_kinds, "3")) {
+    text = sl_join(v->items, ",");
+  } else if (v->kind != 1) {
+    return "`outputs` must list the files a board image writes: " + choices;
+  }
+  var ws: StrList* = man_outputs(text);
+  defer free(ws);
+  if (ws->len == 0) {
+    return "`outputs` must name at least one of " + choices;
+  }
+  var known: StrList* = mnx_list("bin uf2 elf hex");
+  defer free(known);
+  var i: int64 = 0;
+  while (i < ws->len) {
+    if (!sl_has(known, sl_get(ws, i))) {
+      var msg: string = "outputs: " + toml_quote(sl_get(ws, i)) + " is not one of " + choices;
+      var sug: string = mnx_suggest_value(sl_get(ws, i), known);
+      if (slen(sug) > 0) {
+        msg = msg + " (did you mean " + toml_quote(sug) + "?)";
+      }
+      return msg;
+    }
+    i = i + 1;
+  }
+  if (ws->len == 1 && s_eq(sl_get(ws, 0), "elf")) {
+    return "outputs = \"elf\": the compiler writes the ELF file beside an image; add \"bin\", \"uf2\" or \"hex\"";
+  }
+  return s_empty();
+}
+
+// A board module's name: lowercase letters, digits and dashes.
+fn mnx_is_board_name(s: string) -> bool {
+  if (slen(s) == 0) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (!((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
 // "name=impl" with both parts non-empty.
 fn mnx_is_use(s: string) -> bool {
   var eq: int64 = s_find_byte(s, 61);
@@ -862,6 +1012,15 @@ fn mnx_settings_new() -> Settings* {
   st->subsystem = "console";
   st->crash_report = true;
   st->image_base = s_empty();
+  st->board = s_empty();
+  st->objective = s_empty();
+  st->isa = s_empty();
+  st->abi = s_empty();
+  st->outputs = s_empty();
+  st->rvsim_until_ms = s_empty();
+  st->exit_on_uart = s_empty();
+  st->uart_script = s_empty();
+  st->pins = s_empty();
   st->components = sl_new();
   st->flags = sl_new();
   st->cflags = sl_new();
@@ -881,6 +1040,13 @@ fn mnx_set_origin(st: Settings*, key: string, origin: string) {
     }
   }
   sl_push(st->origins, key + "=" + origin);
+}
+
+fn mnx_outputs_text(v: TomlValue*) -> string {
+  if (v->kind == 4) {
+    return sl_join(v->items, ", ");
+  }
+  return v->text;
 }
 
 // Stores a checked typed value.
@@ -906,6 +1072,15 @@ fn mnx_assign(st: Settings*, key: string, v: TomlValue*) {
   else if (s_eq(key, "check-tasks")) { st->check_tasks = on; }
   else if (s_eq(key, "profile-runtime")) { st->profile_runtime = on; }
   else if (s_eq(key, "image-base")) { st->image_base = t; }
+  else if (s_eq(key, "board")) { st->board = t; }
+  else if (s_eq(key, "objective")) { st->objective = t; }
+  else if (s_eq(key, "isa")) { st->isa = s_lower(t); }
+  else if (s_eq(key, "abi")) { st->abi = t; }
+  else if (s_eq(key, "outputs")) { st->outputs = mnx_outputs_text(v); }
+  else if (s_eq(key, "rvsim-until-ms")) { st->rvsim_until_ms = t; }
+  else if (s_eq(key, "exit-on-uart")) { st->exit_on_uart = t; }
+  else if (s_eq(key, "uart-script")) { st->uart_script = t; }
+  else if (s_eq(key, "pins")) { st->pins = t; }
 }
 
 fn mnx_builtin(st: Settings*, profile: string) {
@@ -941,6 +1116,10 @@ fn mnx_covered(flag: string) -> string {
   if (s_eq(flag, "--subsystem")) { return "subsystem = \"windows\""; }
   if (s_eq(flag, "--profile-runtime")) { return "profile-runtime = true"; }
   if (s_eq(flag, "--image-base")) { return "image-base = \"ADDR\""; }
+  if (s_eq(flag, "--board")) { return "board = \"NAME\""; }
+  if (s_eq(flag, "--objective")) { return "objective = \"balanced\", \"size\" or \"speed\""; }
+  if (s_eq(flag, "--isa")) { return "isa = \"ISA\""; }
+  if (s_eq(flag, "--abi")) { return "abi = \"NAME\""; }
   return s_empty();
 }
 
@@ -1800,8 +1979,8 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   var t: int64 = 0;
   while (t < m->targets->len) {
     var tg: string = sl_get(m->targets, t);
-    if (!s_eq(tg, "linux") && !s_eq(tg, "windows")) {
-      mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected \"linux\" or \"windows\")");
+    if (!man_target_name(tg)) {
+      mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected " + mnx_quoted(mnx_list(mnx_target_words())) + ")");
       return m;
     }
     t = t + 1;
@@ -1939,17 +2118,28 @@ export fn man_settings(m: Manifest*, q: SettingsQuery*) -> Settings* {
     }
     i = i - 1;
   }
-  if (s_eq(q->target, "linux") || s_eq(q->target, "windows")) {
+  // [profile.NAME.linux] reaches riscv*-linux too, before its own section.
+  var layers: StrList* = sl_new();
+  if (s_eq(q->target, "riscv64-linux") || s_eq(q->target, "riscv32-linux")) {
+    sl_push(layers, "linux");
+  }
+  if (man_target_name(q->target)) {
+    sl_push(layers, q->target);
+  }
+  var li: int64 = 0;
+  while (li < layers->len) {
     i = chain->len - 1;
     while (i >= 0 && slen(st->error) == 0) {
-      var osec: string = "profile." + sl_get(chain, i) + "." + q->target;
+      var osec: string = "profile." + sl_get(chain, i) + "." + sl_get(layers, li);
       mnx_apply_section(st, m, osec);
       if (m->local != (Manifest*)0 && slen(st->error) == 0) {
         mnx_apply_section(st, m->local, osec);
       }
       i = i - 1;
     }
+    li = li + 1;
   }
+  free(layers);
   free(chain);
   if (slen(st->error) == 0 && slen(q->bin) > 0) {
     mnx_apply_section(st, m, "bin." + q->bin);
@@ -2013,6 +2203,22 @@ export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
     sl_push(res, "--image-base");
     sl_push(res, st->image_base);
   }
+  if (slen(st->board) > 0) {
+    sl_push(res, "--board");
+    sl_push(res, st->board);
+  }
+  if (slen(st->objective) > 0) {
+    sl_push(res, "--objective");
+    sl_push(res, st->objective);
+  }
+  if (slen(st->isa) > 0) {
+    sl_push(res, "--isa");
+    sl_push(res, st->isa);
+  }
+  if (slen(st->abi) > 0) {
+    sl_push(res, "--abi");
+    sl_push(res, st->abi);
+  }
   if (s_eq(st->subsystem, "windows") && s_eq(target, "windows")) {
     sl_push(res, "--subsystem");
     sl_push(res, "windows");
@@ -2020,7 +2226,7 @@ export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
   var i: int64 = 0;
   while (i < st->flags->len) {
     var f: string = sl_get(st->flags, i);
-    if (s_eq(f, "--subsystem") || s_eq(f, "--image-base")) {
+    if (s_eq(f, "--subsystem") || s_eq(f, "--image-base") || s_eq(f, "--board") || s_eq(f, "--objective") || s_eq(f, "--isa") || s_eq(f, "--abi")) {
       if (sl_has(res, f)) {
         i = i + 1;
       } else {
@@ -2101,8 +2307,8 @@ export fn man_parse_local(doc: Toml*, dir: string) -> Manifest* {
   i = 0;
   while (i < m->targets->len && slen(m->error) == 0) {
     var tg: string = sl_get(m->targets, i);
-    if (!s_eq(tg, "linux") && !s_eq(tg, "windows")) {
-      mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected \"linux\" or \"windows\")");
+    if (!man_target_name(tg)) {
+      mnx_error(m, toml_get(doc, "build", "targets")->line, "unknown target '" + tg + "' (expected " + mnx_quoted(mnx_list(mnx_target_words())) + ")");
     }
     i = i + 1;
   }

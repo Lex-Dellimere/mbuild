@@ -77,7 +77,7 @@ Per-OS settings go through `mb_on(os)`.
 |---|---|
 | `mb_package(name, version)` | Required. `name` is `[a-z][a-z0-9_]*`, at most 64 characters; `std` and `mbuild` are reserved. |
 | `mb_meta(key, value)` | `description`, `license`, `repository` or `authors`. Shown to people who depend on the package. |
-| `mb_targets(csv)` | What `build`, `check` and `doctor` build without `-t`: `"linux"`, `"windows"`. Default: the host. |
+| `mb_targets(csv)` | What `build`, `check` and `doctor` build without `-t`: `"linux"`, `"windows"`, a RISC-V target. Default: the host. |
 | `mb_flags(csv)` | Raw compiler flags for every compile. Prefer typed settings (below). |
 | `mb_prelude(on)` | Pass `--prelude`, so `std/prelude` is imported everywhere. |
 | `mb_agents(on)` | Keep the dependencies block in `AGENT.rules` ([packages](packages.md#agentrules)). Default `true`. |
@@ -296,7 +296,10 @@ error: unknown profile `fats`
 
 `mb_set` and `mb_set_list` apply to the last `mb_profile` or `mb_for_bin`.
 After `mb_on("linux")` or `mb_on("windows")` they (and the C and link calls)
-apply to that OS only, until `mb_on("")`.
+apply to that OS only, until `mb_on("")`. `mb_on` also takes a RISC-V target
+(`riscv64-linux`, `riscv32-linux`, `riscv64-none`, `riscv32-none`) for
+profile settings; a profile's `linux` settings reach the `riscv*-linux`
+targets first ([platforms](platforms.md#risc-v)).
 
 | Key | Values (default) | Passes |
 |---|---|---|
@@ -315,6 +318,12 @@ apply to that OS only, until `mb_on("")`.
 | `pgo-file` | path | the profile `pgo = "use"` reads |
 | `subsystem` | `console`, `windows` | `--subsystem windows` (Windows only) |
 | `image-base` | hex string | `--image-base` |
+| `board` | a board name, e.g. `qemu-virt` | `--board NAME`; a `riscv32-none` / `riscv64-none` image needs one |
+| `objective` | `balanced`, `size`, `speed` | `--objective NAME`; RISC-V only |
+| `isa` | an ISA string, e.g. `rv32imac_zba_zbb` | `--isa`; RISC-V only, of the target's width |
+| `abi` | `ilp32`, `ilp32e`, `ilp32f`, `ilp32d`, `lp64`, `lp64f`, `lp64d` | `--abi`; RISC-V only, of the target's width |
+| `outputs` | `bin`, `uf2`, `elf`, `hex` (`bin, elf`) | the files a board image writes; `uf2` with `pico2` only |
+| `rvsim-until-ms`, `exit-on-uart`, `uart-script`, `pins` | strings | rvsim's `--until-ms`, `--exit-on-uart`, `--uart-in`, `--pins` for `mbuild run` / `test` of a `pico2` image |
 | `components` | list of `name=impl` | picks component impls ([components](components.md)) |
 | `flags` | list | raw compiler flags, after the typed ones |
 | `cflags` | list | C flags for every package's C code in this profile |
@@ -375,14 +384,14 @@ A command named like a built-in can't be reached; `mbuild help` lists it as
 | `mb_root()`, `mb_name()`, `mb_version()` | the project's root, package name and version |
 | `mb_os()`, `mb_exe_ext()` | `"linux"` / `"windows"`, `""` / `".exe"` for the machine running mbuild |
 | `mb_verbose()` | whether `-v` was given |
-| `mb_out(bin, target, profile)` | absolute path of a built bin |
+| `mb_out(bin, target, profile)` | absolute path of the file a bin builds: the executable, `lib<bin>.so` / `<bin>.dll`, `<bin>.o` / `<bin>.obj`, or `<bin>.bin`; a freestanding bin's is under its triple whatever `target` says |
 | `mb_mbuild(args)` | runs this mbuild with `args` (split on spaces) and returns its exit code; nests at most 8 deep |
 
 ### Processes and files
 
 | Call | Does |
 |---|---|
-| `mb_cmd(program)` | a command to run, found on PATH |
+| `mb_cmd(program)` | a command to run, found on PATH; it belongs to mbuild, so don't free it |
 | `mb_cmd_arg(c, s)`, `mb_cmd_cwd(c, dir)`, `mb_cmd_env(c, "NAME=value")` | add an argument, set its directory, set a variable for it only |
 | `mb_cmd_run(c)` | runs it with your terminal, returns the exit code (127: could not start) |
 | `mb_cmd_output(c)` | runs it, returns stdout without one trailing newline; the exit code is then `mb_cmd_status(c)` |

@@ -305,7 +305,7 @@ Runtime options (`native-heap`, `crash-report`, `safe`, `profile-runtime`,
 | `exe` | `build/<target>/<profile>/<bin>`, `.exe` on Windows (the default) |
 | `shared` | `lib<bin>.so` / `<bin>.dll`; no `main` needed; `mbuild run` refuses it |
 | `object` | `<bin>.o` / `.obj` for the triple (default: the target's), to link elsewhere |
-| `flat` | `<bin>.bin`, a raw image; needs a `*-none` triple and `image-base` |
+| `flat` | `<bin>.bin`, a raw image; needs a `*-none` triple and `image-base`, or a RISC-V triple and a `board` |
 
 ```mettle
   mb_bin("app", "src/main.mettle");
@@ -337,6 +337,22 @@ $ mbuild run kern
 error: bin kern is freestanding (x86_64-none): mbuild cannot run it
   help: write a project command that starts your emulator: fn cmd_qemu
 ```
+
+A bin with a `riscv32-none` or `riscv64-none` triple is a board image: it
+needs a board instead of an `image-base`, writes `<bin>.bin` and `<bin>.elf`
+(or the `outputs` it names), and `mbuild run` boots it under an emulator
+([platforms](platforms.md#risc-v)):
+
+```mettle
+  mb_bin("game", "src/game.mettle");
+  mb_bin_kind("game", "flat", "riscv32-none");
+  mb_for_bin("game");
+  mb_set("board", "qemu-virt");
+  mb_set("objective", "size");
+```
+
+`mb_out("game", "host", "release")` answers `build/riscv32-none/release/game.bin`.
+`-t riscv32-none` does the same for every exe bin without a triple of its own.
 
 ## Project rules
 

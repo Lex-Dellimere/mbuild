@@ -153,6 +153,25 @@ fn mbi_starts(s: string, prefix: string) -> bool {
   return mbi_sub(s, 0, mbi_len(prefix)) == prefix;
 }
 
+fn mbi_ends(s: string, suffix: string) -> bool {
+  var n: int64 = mbi_len(s);
+  var k: int64 = mbi_len(suffix);
+  return n >= k && mbi_sub(s, n - k, n) == suffix;
+}
+
+fn mbi_contains(s: string, part: string) -> bool {
+  var n: int64 = mbi_len(s);
+  var k: int64 = mbi_len(part);
+  var i: int64 = 0;
+  while (i + k <= n) {
+    if (mbi_sub(s, i, i + k) == part) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 fn mbi_is_space(c: int32) -> bool {
   return c == 32 || c == 9 || c == 10 || c == 13;
 }
@@ -492,6 +511,9 @@ fn mbi_bool(on: bool) -> string {
 
 // The section the c/link calls write to: "c", "c.linux", ...
 fn mbi_os_section(base: string) -> string {
+  if ((base == "c" || base == "link") && mbi_starts(g_mbi_os, "riscv")) {
+    mbi_die(mbi_where() + ": [" + base + "] after mb_on(\"" + g_mbi_os + "\"): C code is built for \"linux\" and \"windows\" only", 1);
+  }
   if (mbi_len(g_mbi_os) > 0) {
     return base + "." + g_mbi_os;
   }
@@ -788,10 +810,11 @@ export fn mb_for_bin(name: string) {
   mbi_section("bin." + mbi_key(name));
 }
 
-// Following c, link and profile calls apply on "linux" or "windows" only ("" = everywhere).
+// Following c, link and profile calls apply on one target only ("" = everywhere);
+// a profile's settings on "linux" reach riscv*-linux too.
 export fn mb_on(os: string) {
-  if (os != "" && os != "linux" && os != "windows") {
-    mbi_die(mbi_where() + ": mb_on(\"" + os + "\"): expected \"linux\", \"windows\" or \"\"", 1);
+  if (os != "" && os != "linux" && os != "windows" && os != "riscv64-linux" && os != "riscv32-linux" && os != "riscv64-none" && os != "riscv32-none") {
+    mbi_die(mbi_where() + ": mb_on(\"" + os + "\"): expected a target (\"linux\", \"windows\", \"riscv64-linux\", \"riscv32-linux\", \"riscv64-none\", \"riscv32-none\") or \"\"", 1);
   }
   g_mbi_os = os;
 }
@@ -1031,11 +1054,49 @@ export fn mb_out(bin: string, target: string, profile: string) -> string {
   if (t == "host") {
     t = mb_os();
   }
-  var ext: string = "";
-  if (t == "windows") {
-    ext = ".exe";
+  var kind: string = "exe";
+  var triple: string = "";
+  var bins: MbiList* = mbi_split(mbi_env("MBUILD_BIN_KINDS"), 59);
+  defer free(bins);
+  var i: int64 = 0;
+  while (i < bins->len) {
+    var parts: MbiList* = mbi_split(bins->items[i], 61);
+    if (parts->len >= 2 && parts->items[0] == bin) {
+      kind = parts->items[1];
+      if (parts->len >= 3) {
+        triple = parts->items[2];
+      }
+    }
+    free(parts);
+    i = i + 1;
   }
-  return mb_root() + "/build/" + t + "/" + profile + "/" + bin + ext;
+  if (mbi_ends(triple, "-none")) {
+    t = triple;
+  }
+  return mb_root() + "/build/" + t + "/" + profile + "/" + mbi_out_name(bin, kind, triple, t);
+}
+
+// The file a bin of kind writes for target t (as mbuild names it).
+fn mbi_out_name(bin: string, kind: string, triple: string, t: string) -> string {
+  if (kind == "shared") {
+    if (t == "windows") {
+      return bin + ".dll";
+    }
+    return "lib" + bin + ".so";
+  }
+  if (kind == "flat" || (kind == "exe" && mbi_starts(t, "riscv") && mbi_ends(t, "-none"))) {
+    return bin + ".bin";
+  }
+  if (kind == "object" || mbi_ends(t, "-none")) {
+    if (t == "windows" || mbi_contains(triple, "-windows")) {
+      return bin + ".obj";
+    }
+    return bin + ".o";
+  }
+  if (t == "windows") {
+    return bin + ".exe";
+  }
+  return bin;
 }
 
 // The target of the build a hook runs for.
@@ -1078,6 +1139,11 @@ export fn mb_mbuild(args: string) -> int32 {
   return mbi_run_argv(exe, mbi_split(args, 32));
 }
 
+// Every MbCmd mb_cmd made: they belong to the API and live until the driver
+// exits, so a command or hook frees none of them.
+var g_mbi_cmds: MbCmd** = (MbCmd**)0;
+var g_mbi_ncmds: int64 = 0;
+
 // A command running program (searched on PATH when it has no directory).
 export fn mb_cmd(program: string) -> MbCmd* {
   mbi_refuse("mb_cmd");
@@ -1087,6 +1153,9 @@ export fn mb_cmd(program: string) -> MbCmd* {
   c->cwd = "";
   c->env = mbi_list();
   c->status = 0;
+  g_mbi_cmds = (MbCmd**)realloc(g_mbi_cmds, (g_mbi_ncmds + 1) * 8);
+  g_mbi_cmds[g_mbi_ncmds] = c;
+  g_mbi_ncmds = g_mbi_ncmds + 1;
   return c;
 }
 
