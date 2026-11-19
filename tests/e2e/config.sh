@@ -158,6 +158,20 @@ hooks pre_build"
   out=$("$D" load 2>&1)
   expect_has "$mode: fn main refused" "$out" "error: mbuild.mettle:7: mbuild.mettle cannot define fn main"
 
+  mkdir -p "$P/tset" && cd "$P/tset"
+  printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("tset", "0.1.0");\n  mb_test_glob("examples/*.mettle");\n  mb_test_exclude("meodb, helper");\n  mb_test_cmd("lint", "sh tools/lint.sh");\n  mb_test_set("*", "matrix", "debug, release");\n  mb_test_set("srv", "timeout", "120");\n  mb_test_env("srv", "A=1");\n}\n' > mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: mb_test_glob, mb_test_exclude, mb_test_cmd" "$out" "test globs examples/*.mettle exclude meodb,helper cmds lint=sh tools/lint.sh"
+  expect_line "$mode: mb_test_set \"*\"" "$out" "test * matrix=debug, release"
+  expect_line "$mode: mb_test_set" "$out" "test srv timeout=120"
+  expect_line "$mode: mb_test_env" "$out" "test srv env=A=1"
+  sed -i 's|"timeout", "120"|"timeout", "2m"|' mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: a bad test setting at its line" "$out" "error: mbuild.mettle:9: mb_test_set(\"srv\", \"timeout\", ...): timeout is seconds from 0 (none) to 86400, not '2m'"
+  sed -i 's|"timeout", "2m"|"timout", "2"|' mbuild.mettle
+  out=$("$D" load 2>&1)
+  expect_line "$mode: an unknown test setting suggests" "$out" "warning mbuild.mettle:9: mb_test_set(\"srv\", \"timout\", ...): unknown test setting 'timout' (did you mean 'timeout'?)"
+
   mkdir -p "$P/iroot/src" "$P/meosql" && cd "$P/iroot"
   printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("iroot", "0.1.0");\n  mb_import_root("src");\n}\n\nfn deps() {\n  mb_dep_path("meosql", "../meosql");\n  mb_dep_bin("meosql", "server");\n  mb_dep_bin("meosql", "admin");\n}\n' > mbuild.mettle
   "$D" load >/dev/null

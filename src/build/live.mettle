@@ -222,6 +222,11 @@ fn lv_glob(p: string, pi: int64, s: string, si: int64) -> bool {
   return si == ns;
 }
 
+// Whether path s (relative, '/' separators) matches glob pat.
+export fn lv_glob_match(pat: string, s: string) -> bool {
+  return lv_glob(pat, 0, s, 0);
+}
+
 // Files below root/rel into out as "REL\tSTAMP" when pat matches; dot
 // directories and the root's build/ are not entered.
 fn lv_walk(lv: LiveSess*, rel: string, pat: string, out: StrList*) {

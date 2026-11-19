@@ -770,6 +770,41 @@ export fn mb_test_bin(name: string, main: string) {
   mbi_put("test-bins", name, mbi_quote(main));
 }
 
+// A test setting: name "*" sets the default, a test's own value wins
+// (docs/project.md: matrix, timeout, repeat, serial, cwd, warnings, ...).
+export fn mb_test_set(name: string, key: string, value: string) {
+  mbi_put("test." + mbi_key(name), key, mbi_quote(value));
+}
+
+// Every main file matching glob is a test program named by its stem: "examples/*.mettle".
+export fn mb_test_glob(glob: string) {
+  mbi_append("tests", "globs", mbi_quote(glob));
+}
+
+// A command test: cmdline split into words like a service's; exit 0 passes.
+export fn mb_test_cmd(name: string, cmdline: string) {
+  mbi_put("test-cmds", name, mbi_quote(cmdline));
+}
+
+// "K=V" in a test's environment ("*" = every test).
+export fn mb_test_env(name: string, kv: string) {
+  mbi_append("test." + mbi_key(name), "env", mbi_quote(kv));
+}
+
+// Tests left out of the default set: "meodb, phase3_child". Naming one still runs it.
+export fn mb_test_exclude(csv: string) {
+  var parts: MbiList* = mbi_split(csv, 44);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var t: string = mbi_trim(parts->items[i]);
+    if (mbi_len(t) > 0) {
+      mbi_append("tests", "exclude", mbi_quote(t));
+    }
+    i = i + 1;
+  }
+}
+
 // A dependency from the registries: "v1.2.0" (minimum), "v1", "latest".
 export fn mb_dep(name: string, version: string) {
   mbi_put("dependencies", name, mbi_quote(version));

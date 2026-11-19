@@ -587,7 +587,7 @@ fn mfx_all_literal(c: MfxCall*) -> bool {
 // The argument a call's TOML key comes from (the package name of
 // mb_dep_from, the key of mb_raw, the OS of mb_component_on), -1 for none.
 fn mfx_key_index(name: string) -> int64 {
-  if (s_eq(name, "mb_dep_from") || s_eq(name, "mb_raw") || s_eq(name, "mb_component_on")) {
+  if (s_eq(name, "mb_dep_from") || s_eq(name, "mb_raw") || s_eq(name, "mb_component_on") || s_eq(name, "mb_test_set")) {
     return 1;
   }
   return 0;
@@ -1027,6 +1027,9 @@ fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
   if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include") || s_eq(f, "mb_import_root") || s_eq(f, "mb_toolchain")) { return "package"; }
   if (s_eq(f, "mb_dep_bin")) { return "dep-bins"; }
   if (s_eq(f, "mb_test_bin")) { return "test-bins"; }
+  if (s_eq(f, "mb_test_set") || s_eq(f, "mb_test_env")) { return "test." + a0; }
+  if (s_eq(f, "mb_test_glob") || s_eq(f, "mb_test_exclude")) { return "tests"; }
+  if (s_eq(f, "mb_test_cmd")) { return "test-cmds"; }
   if (s_eq(f, "mb_targets") || s_eq(f, "mb_test_targets") || s_eq(f, "mb_flags") || s_eq(f, "mb_prelude") || s_eq(f, "mb_agents")) { return "build"; }
   if (s_eq(f, "mb_bin") || s_eq(f, "mb_bin_kind")) { return "bin." + a0; }
   if (mfx_is_dep_fn(f)) { return "dependencies"; }

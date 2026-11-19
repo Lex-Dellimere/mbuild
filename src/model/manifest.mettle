@@ -57,6 +57,14 @@ export struct ServiceSpec {
   line: int64;
 }
 
+// One mb_test_set (or mb_test_env, key "env") entry: [test.NAME] key = "value".
+export struct TestSet {
+  name: string;       // a test's name, or "*"
+  key: string;
+  value: string;
+  line: int64;
+}
+
 export struct RegSpec {
   name: string;
   url: string;
@@ -108,6 +116,11 @@ export struct Manifest {
   test_bins: StrList*;    // [test-bins] as "name=main", in file order
   services: ServiceSpec*; // in declaration order
   nservices: int64;
+  test_globs: StrList*;   // [tests] globs: mb_test_glob
+  test_exclude: StrList*; // [tests] exclude: mb_test_exclude
+  test_cmds: StrList*;    // [test-cmds] as "name=cmdline", in file order
+  test_sets: TestSet*;    // [test.NAME] entries, env items one each
+  ntest_sets: int64;
 }
 
 export struct SettingsQuery {
@@ -571,6 +584,7 @@ fn mnx_known_keys(section: string) -> StrList* {
   if (s_starts(section, "registry.")) { return mnx_list("url"); }
   if (s_starts(section, "service.")) { return mnx_list("cmd port wait env"); }
   if (s_eq(section, "rules")) { return mnx_list("files"); }
+  if (s_eq(section, "tests")) { return mnx_list("globs exclude"); }
   if (s_eq(section, "live")) { return mnx_list("watch preview"); }
   if (s_eq(section, "tools")) { return mnx_list("cc cc-windows mettle-linux mettle-windows pkg-config"); }
   if (s_eq(section, "c") || s_eq(section, "c.linux") || s_eq(section, "c.windows")) {
@@ -626,7 +640,10 @@ fn mnx_is_named(section: string, head: string) -> bool {
 }
 
 fn mnx_section_known(section: string) -> bool {
-  if (sl_has(mnx_list("package build live dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins test-bins"), section)) {
+  if (sl_has(mnx_list("package build live dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins test-bins tests test-cmds"), section)) {
+    return true;
+  }
+  if (s_starts(section, "test.") && slen(section) > 5) {
     return true;
   }
   if (mnx_is_os_profile(section)) {
@@ -708,7 +725,7 @@ fn mnx_unknowns(m: Manifest*) {
         msg = msg + " (did you mean " + sug + "?)";
       }
       mnx_warn(m, mnx_section_line(m->doc, sec), msg);
-    } else if (!s_eq(sec, "dependencies") && !s_starts(sec, "dependencies.") && !s_eq(sec, "dep-bins") && !s_eq(sec, "test-bins")) {
+    } else if (!s_eq(sec, "dependencies") && !s_starts(sec, "dependencies.") && !s_eq(sec, "dep-bins") && !s_eq(sec, "test-bins") && !s_eq(sec, "test-cmds") && !s_starts(sec, "test.")) {
       if (s_eq(sec, "tools")) {
         mnx_warn(m, mnx_section_line(m->doc, sec), "[tools] is machine-specific: move it to mbuild.local.mettle");
       }
@@ -1811,6 +1828,395 @@ fn mnx_test_bins(m: Manifest*) {
   free(names);
 }
 
+// ---------------------------------------------------------------------------
+// Tests: [tests], [test-cmds], [test.NAME] (mb_test_*)
+// ---------------------------------------------------------------------------
+
+export fn man_test_keys() -> StrList* {
+  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports");
+}
+
+// A test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
+export fn man_test_default(key: string) -> string {
+  if (s_eq(key, "matrix")) { return "debug"; }
+  if (s_eq(key, "timeout")) { return "600"; }
+  if (s_eq(key, "repeat")) { return "1"; }
+  if (s_eq(key, "serial")) { return "false"; }
+  if (s_eq(key, "cwd")) { return "root"; }
+  if (s_eq(key, "warnings")) { return "allow"; }
+  if (s_eq(key, "golden")) { return "files"; }
+  if (s_eq(key, "golden-cross")) { return "true"; }
+  if (s_eq(key, "png-tolerance")) { return "0"; }
+  if (s_eq(key, "run")) { return "true"; }
+  if (s_eq(key, "native")) { return "skipped"; }
+  if (s_eq(key, "ports")) { return "20000-29999"; }
+  return s_empty();
+}
+
+// "0.001" as parts per million, -1 when it is no fraction from 0 to 1.
+export fn man_frac_ppm(s: string) -> int64 {
+  var n: int64 = slen(s);
+  if (n == 0) {
+    return -1;
+  }
+  var whole: int64 = 0;
+  var frac: int64 = 0;
+  var scale: int64 = 1000000;
+  var dot: bool = false;
+  var i: int64 = 0;
+  while (i < n) {
+    var c: int32 = s_byte(s, i);
+    if (c == 46 && !dot) {
+      dot = true;
+    } else if (is_digit_b(c)) {
+      if (dot) {
+        scale = scale / 10;
+        frac = frac + (int64)(c - 48) * scale;
+      } else {
+        whole = whole * 10 + (int64)(c - 48);
+        if (whole > 1) {
+          return -1;
+        }
+      }
+    } else {
+      return -1;
+    }
+    i = i + 1;
+  }
+  var ppm: int64 = whole * 1000000 + frac;
+  if (ppm > 1000000) {
+    return -1;
+  }
+  return ppm;
+}
+
+fn mnx_uint(s: string, lo: int64, hi: int64) -> bool {
+  if (slen(s) == 0 || slen(s) > 9) {
+    return false;
+  }
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    if (!is_digit_b(s_byte(s, i))) {
+      return false;
+    }
+    i = i + 1;
+  }
+  var v: int64 = s_to_int(s);
+  return v >= lo && v <= hi;
+}
+
+// One matrix cell: PROFILE or TARGET/PROFILE ("" = fine).
+fn mnx_cell_error(cell: string) -> string {
+  var slash: int64 = s_find_byte(cell, 47);
+  var prof: string = cell;
+  if (slash >= 0) {
+    var tg: string = s_sub(cell, 0, slash);
+    prof = s_from(cell, slash + 1);
+    if (!man_test_target(tg) || s_eq(tg, "all")) {
+      return "unknown target '" + tg + "' in cell '" + cell + "' (expected host, " + sl_join(mnx_list(mnx_target_words()), ", ") + ", or riscv32-none:BOARD)";
+    }
+  }
+  if (slen(prof) == 0 || !mnx_lower_name(prof, 64, 45)) {
+    return "cell '" + cell + "' names no profile (debug, release, or an mb_profile name)";
+  }
+  return s_empty();
+}
+
+// Why value does not fit key ("" when it does). name "*" alone may set ports.
+export fn man_test_check(name: string, key: string, value: string) -> string {
+  var v: string = s_trim(value);
+  if (s_eq(key, "matrix")) {
+    var cells: StrList* = s_split(v, 44);
+    defer free(cells);
+    var n: int64 = 0;
+    var i: int64 = 0;
+    while (i < cells->len) {
+      var cell: string = s_trim(sl_get(cells, i));
+      if (slen(cell) > 0) {
+        var e: string = mnx_cell_error(cell);
+        if (slen(e) > 0) {
+          return e;
+        }
+        n = n + 1;
+      }
+      i = i + 1;
+    }
+    if (n == 0) {
+      return "matrix needs a cell: debug, release, or TARGET/PROFILE";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "timeout")) {
+    if (!mnx_uint(v, 0, 86400)) {
+      return "timeout is seconds from 0 (none) to 86400, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "repeat")) {
+    if (!mnx_uint(v, 1, 100000)) {
+      return "repeat is a count from 1 to 100000, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "serial") || s_eq(key, "golden-cross") || s_eq(key, "run")) {
+    if (!s_eq(v, "true") && !s_eq(v, "false")) {
+      return key + " is true or false, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "cwd")) {
+    if (!s_eq(v, "root") && !s_eq(v, "tmp")) {
+      return "cwd is root or tmp, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "warnings")) {
+    if (!s_eq(v, "allow") && !s_eq(v, "error") && !(s_starts(v, "error:") && slen(v) > 6)) {
+      return "warnings is allow, error, or error:CODES (error:M01,W0001), not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "golden")) {
+    if (!s_eq(v, "files") && !s_eq(v, "off") && !s_eq(v, "files,stdout") && !s_eq(v, "stdout,files")) {
+      return "golden is files, files,stdout or off, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "golden-dir")) {
+    if (slen(v) == 0 || p_is_abs(v) || s_contains(v, "..")) {
+      return "golden-dir is a directory inside the project, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "png-tolerance")) {
+    var parts: StrList* = s_split(v, 44);
+    defer free(parts);
+    var ok: bool = parts->len == 1 || parts->len == 3;
+    if (ok) {
+      ok = mnx_uint(s_trim(sl_get(parts, 0)), 0, 255);
+    }
+    if (ok && parts->len == 3) {
+      ok = man_frac_ppm(s_trim(sl_get(parts, 1))) >= 0 && mnx_uint(s_trim(sl_get(parts, 2)), 0, 255);
+    }
+    if (!ok) {
+      return "png-tolerance is C or C,F,H (channel 0-255, fraction 0-1, channel 0-255: 2,0.001,48), not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "native")) {
+    if (!s_eq(v, "skipped") && !s_eq(v, "always") && !s_eq(v, "never")) {
+      return "native is skipped, always or never, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "ports")) {
+    if (!s_eq(name, "*")) {
+      return "ports is set for every test: mb_test_set(\"*\", \"ports\", \"" + value + "\")";
+    }
+    var dash: int64 = s_find_byte(v, 45);
+    if (dash <= 0 || !mnx_uint(s_sub(v, 0, dash), 1024, 65535) || !mnx_uint(s_from(v, dash + 1), 1024, 65535) || s_to_int(s_sub(v, 0, dash)) > s_to_int(s_from(v, dash + 1))) {
+      return "ports is LO-HI within 1024-65535 (20000-29999), not '" + value + "'";
+    }
+    return s_empty();
+  }
+  return s_empty();
+}
+
+fn mnx_test_set_push(m: Manifest*, ts: TestSet) {
+  if (m->ntest_sets % 16 == 0) {
+    m->test_sets = (TestSet*)realloc(m->test_sets, (m->ntest_sets + 16) * sizeof(TestSet));
+  }
+  m->test_sets[m->ntest_sets] = ts;
+  m->ntest_sets = m->ntest_sets + 1;
+}
+
+// [tests], [test-cmds] and every [test.NAME].
+fn mnx_tests(m: Manifest*) {
+  if (slen(m->error) > 0) {
+    return;
+  }
+  free(m->test_globs);
+  m->test_globs = mnx_strs(m, "tests", "globs");
+  free(m->test_exclude);
+  m->test_exclude = mnx_strs(m, "tests", "exclude");
+  var cmds: StrList* = toml_keys(m->doc, "test-cmds");
+  defer free(cmds);
+  var i: int64 = 0;
+  while (i < cmds->len && slen(m->error) == 0) {
+    var nm: string = sl_get(cmds, i);
+    i = i + 1;
+    var line: int64 = toml_get(m->doc, "test-cmds", nm)->line;
+    if (!pkg_name_ok(nm)) {
+      mnx_error(m, line, "test name '" + nm + "' " + MNX_NAME_RULE);
+      return;
+    }
+    var cl: string = mnx_str(m, "test-cmds", nm);
+    if (slen(m->error) == 0 && slen(s_trim(cl)) == 0) {
+      mnx_error(m, line, "mb_test_cmd(\"" + nm + "\", ...) has no command");
+    }
+    sl_push(m->test_cmds, nm + "=" + cl);
+  }
+  var known: StrList* = man_test_keys();
+  defer free(known);
+  var secs: StrList* = toml_sections(m->doc, "test.");
+  defer free(secs);
+  var si: int64 = 0;
+  while (si < secs->len && slen(m->error) == 0) {
+    var sec: string = sl_get(secs, si);
+    si = si + 1;
+    var name: string = s_from(sec, 5);
+    var keys: StrList* = toml_keys(m->doc, sec);
+    var k: int64 = 0;
+    while (k < keys->len && slen(m->error) == 0) {
+      var key: string = sl_get(keys, k);
+      k = k + 1;
+      var v: TomlValue* = toml_get(m->doc, sec, key);
+      if (s_eq(key, "env")) {
+        var envs: StrList* = mnx_strs(m, sec, key);
+        var e: int64 = 0;
+        while (e < envs->len) {
+          var kv: string = sl_get(envs, e);
+          if (s_find_byte(kv, 61) <= 0) {
+            mnx_error(m, v->line, "mb_test_env(\"" + name + "\", \"" + kv + "\"): expected NAME=VALUE");
+          }
+          var es: TestSet;
+          es.name = name;
+          es.key = key;
+          es.value = kv;
+          es.line = v->line;
+          mnx_test_set_push(m, es);
+          e = e + 1;
+        }
+        free(envs);
+        continue;
+      }
+      if (!sl_has(known, key)) {
+        var msg: string = "mb_test_set(\"" + name + "\", \"" + key + "\", ...): unknown test setting '" + key + "'";
+        var sug: string = man_suggest(key, known);
+        if (slen(sug) > 0) {
+          msg = msg + " (did you mean '" + sug + "'?)";
+        }
+        mnx_warn(m, v->line, msg);
+        continue;
+      }
+      var val: string = mnx_str(m, sec, key);
+      if (slen(m->error) > 0) {
+        break;
+      }
+      var why: string = man_test_check(name, key, val);
+      if (slen(why) > 0) {
+        mnx_error(m, v->line, "mb_test_set(\"" + name + "\", \"" + key + "\", ...): " + why);
+        break;
+      }
+      if (s_eq(key, "services")) {
+        var svs: StrList* = s_split(val, 44);
+        var q: int64 = 0;
+        while (q < svs->len) {
+          var sv: string = s_trim(sl_get(svs, q));
+          if (slen(sv) > 0 && man_service(m, sv) == (ServiceSpec*)0) {
+            mnx_error(m, v->line, "mb_test_set(\"" + name + "\", \"services\", ...): no mb_service named '" + sv + "'");
+          }
+          q = q + 1;
+        }
+        free(svs);
+      }
+      var ts: TestSet;
+      ts.name = name;
+      ts.key = key;
+      ts.value = s_trim(val);
+      ts.line = v->line;
+      mnx_test_set_push(m, ts);
+    }
+    free(keys);
+  }
+}
+
+export fn man_service(m: Manifest*, name: string) -> ServiceSpec* {
+  var i: int64 = 0;
+  while (i < m->nservices) {
+    if (s_eq(m->services[i].name, name)) {
+      return &m->services[i];
+    }
+    i = i + 1;
+  }
+  return (ServiceSpec*)0;
+}
+
+// A test's setting: its own value, else the "*" one, else the default.
+export fn man_test_get(m: Manifest*, name: string, key: string) -> string {
+  var star: string = s_empty();
+  var has_star: bool = false;
+  var i: int64 = 0;
+  while (i < m->ntest_sets) {
+    var ts: TestSet* = &m->test_sets[i];
+    if (s_eq(ts->key, key)) {
+      if (s_eq(ts->name, name)) {
+        return ts->value;
+      }
+      if (s_eq(ts->name, "*")) {
+        star = ts->value;
+        has_star = true;
+      }
+    }
+    i = i + 1;
+  }
+  if (has_star) {
+    return star;
+  }
+  return man_test_default(key);
+}
+
+// Whether the test itself or "*" sets key.
+export fn man_test_has(m: Manifest*, name: string, key: string) -> bool {
+  var i: int64 = 0;
+  while (i < m->ntest_sets) {
+    var ts: TestSet* = &m->test_sets[i];
+    if (s_eq(ts->key, key) && (s_eq(ts->name, name) || s_eq(ts->name, "*"))) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// mb_test_env items of "*", then of the test: "K=V".
+export fn man_test_env(m: Manifest*, name: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var pass: int64 = 0;
+  while (pass < 2) {
+    var want: string = "*";
+    if (pass == 1) {
+      want = name;
+    }
+    var i: int64 = 0;
+    while (i < m->ntest_sets) {
+      var ts: TestSet* = &m->test_sets[i];
+      if (s_eq(ts->key, "env") && s_eq(ts->name, want)) {
+        sl_push(l, ts->value);
+      }
+      i = i + 1;
+    }
+    pass = pass + 1;
+    if (s_eq(name, "*")) {
+      break;
+    }
+  }
+  return l;
+}
+
+// The names mb_test_set / mb_test_env give, "*" left out.
+export fn man_test_named(m: Manifest*) -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < m->ntest_sets) {
+    if (!s_eq(m->test_sets[i].name, "*")) {
+      sl_add_uniq(l, m->test_sets[i].name);
+    }
+    i = i + 1;
+  }
+  return l;
+}
+
 fn mnx_rules(m: Manifest*) {
   var files: StrList* = mnx_strs(m, "rules", "files");
   var i: int64 = 0;
@@ -1953,6 +2359,11 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->test_bins = sl_new();
   m->services = (ServiceSpec*)0;
   m->nservices = 0;
+  m->test_globs = sl_new();
+  m->test_exclude = sl_new();
+  m->test_cmds = sl_new();
+  m->test_sets = (TestSet*)0;
+  m->ntest_sets = 0;
   return m;
 }
 
@@ -2074,6 +2485,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   mnx_dep_bins(m);
   mnx_test_bins(m);
   mnx_services(m);
+  mnx_tests(m);
   if (slen(m->error) > 0) {
     return m;
   }

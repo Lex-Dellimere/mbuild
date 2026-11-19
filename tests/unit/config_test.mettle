@@ -98,6 +98,12 @@ fn drv_dump(m: Manifest*) {
     i = i + 1;
   }
   say("local components " + sl_join(m->local_components, ","));
+  say("test globs " + sl_join(m->test_globs, ",") + " exclude " + sl_join(m->test_exclude, ",") + " cmds " + sl_join(m->test_cmds, ","));
+  i = 0;
+  while (i < m->ntest_sets) {
+    say("test " + m->test_sets[i].name + " " + m->test_sets[i].key + "=" + m->test_sets[i].value);
+    i = i + 1;
+  }
   drv_settings(m, "release", "windows");
   drv_settings(m, "release", "linux");
   drv_settings(m, "debug", "linux");

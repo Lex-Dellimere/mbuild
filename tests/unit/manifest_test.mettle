@@ -504,8 +504,45 @@ fn test_import_root_and_dep_bins() {
   t_eq("dep bins: not in mbuild.local.mettle", local_of("[build]\ntargets = [\"linux\"]\n[dep-bins]\nx = [\"y\"]\n")->error, "/p/mbuild.local.mettle:3: [dep-bins] is not allowed here (mbuild.local.mettle holds [replace], [tools], [profile.NAME], [build] targets, [components] and [registry.NAME] url)");
 }
 
+// [tests], [test-cmds], [test.NAME]: mb_test_set and friends.
+fn test_tests() {
+  var m: Manifest* = man_of(pkg("[service.db]\ncmd = \"meodb\"\n[tests]\nglobs = [\"examples/*.mettle\"]\nexclude = [\"meodb\", \"helper\"]\n[test-cmds]\nlint = \"sh tools/lint.sh\"\n[test.\"*\"]\nmatrix = \"debug, release\"\ntimeout = \"30\"\nenv = [\"A=1\"]\nports = \"30000-30099\"\n[test.srv]\ntimeout = \"120\"\nrepeat = \"5\"\nserial = \"true\"\ncwd = \"tmp\"\nwarnings = \"error:M01,W0001\"\nchecks = \"PASS\"\nservices = \"db\"\ngolden = \"files,stdout\"\ngolden-dir = \"tests/g/srv\"\ngolden-cross = \"false\"\npng-tolerance = \"2,0.001,48\"\nrun = \"false\"\nargs = \"-x\"\nnative = \"always\"\nenv = [\"B=2\"]\n"));
+  t_eq("tests: valid", m->error + sl_join(m->warnings, " / "), "");
+  t_eq("tests: globs", sl_join(m->test_globs, ","), "examples/*.mettle");
+  t_eq("tests: exclude", sl_join(m->test_exclude, ","), "meodb,helper");
+  t_eq("tests: cmds", sl_join(m->test_cmds, ","), "lint=sh tools/lint.sh");
+  t_eq("tests: own value wins", man_test_get(m, "srv", "timeout"), "120");
+  t_eq("tests: \"*\" is the default", man_test_get(m, "other", "timeout") + " " + man_test_get(m, "srv", "matrix"), "30 debug, release");
+  t_eq("tests: built-in defaults", man_test_get(m, "other", "repeat") + " " + man_test_get(m, "other", "golden") + " " + man_test_get(m, "other", "native") + " " + man_test_get(m, "other", "golden-dir") + "|", "1 files skipped |");
+  t_eq("tests: every key", man_test_get(m, "srv", "repeat") + man_test_get(m, "srv", "serial") + man_test_get(m, "srv", "cwd") + man_test_get(m, "srv", "warnings") + man_test_get(m, "srv", "checks") + man_test_get(m, "srv", "services") + man_test_get(m, "srv", "golden") + man_test_get(m, "srv", "golden-dir") + man_test_get(m, "srv", "golden-cross") + man_test_get(m, "srv", "png-tolerance") + man_test_get(m, "srv", "run") + man_test_get(m, "srv", "args") + man_test_get(m, "srv", "native") + man_test_get(m, "*", "ports"), "5truetmperror:M01,W0001PASSdbfiles,stdouttests/g/srvfalse2,0.001,48false-xalways30000-30099");
+  t_eq("tests: env, \"*\" first", sl_join(man_test_env(m, "srv"), ",") + " " + sl_join(man_test_env(m, "other"), ","), "A=1,B=2 A=1");
+  t_ok("tests: has", man_test_has(m, "srv", "repeat") && man_test_has(m, "x", "timeout") && !man_test_has(m, "x", "repeat"));
+  t_eq("tests: named", sl_join(man_test_named(m), ","), "srv");
+  t_eq("tests: unknown key", sl_join(man_of(pkg("[test.a]\ntimout = \"3\"\n"))->warnings, " / "), "/p/mbuild.toml:4: mb_test_set(\"a\", \"timout\", ...): unknown test setting 'timout' (did you mean 'timeout'?)");
+  t_eq("tests: bad matrix", man_of(pkg("[test.a]\nmatrix = \"debug, mars/release\"\n"))->error, "/p/mbuild.toml:4: mb_test_set(\"a\", \"matrix\", ...): unknown target 'mars' in cell 'mars/release' (expected host, linux, windows, riscv64-linux, riscv32-linux, riscv64-none, riscv32-none, or riscv32-none:BOARD)");
+  t_eq("tests: matrix cells", man_test_check("a", "matrix", "release, linux/debug, riscv32-none:pico2/release, host/debug"), "");
+  t_eq("tests: empty matrix", man_test_check("a", "matrix", " , "), "matrix needs a cell: debug, release, or TARGET/PROFILE");
+  t_eq("tests: timeout", man_test_check("a", "timeout", "1m"), "timeout is seconds from 0 (none) to 86400, not '1m'");
+  t_eq("tests: repeat", man_test_check("a", "repeat", "0"), "repeat is a count from 1 to 100000, not '0'");
+  t_eq("tests: bools", man_test_check("a", "serial", "yes") + "|" + man_test_check("a", "run", "false"), "serial is true or false, not 'yes'|");
+  t_eq("tests: cwd", man_test_check("a", "cwd", "here"), "cwd is root or tmp, not 'here'");
+  t_eq("tests: warnings", man_test_check("a", "warnings", "error:") + "|" + man_test_check("a", "warnings", "error"), "warnings is allow, error, or error:CODES (error:M01,W0001), not 'error:'|");
+  t_eq("tests: golden", man_test_check("a", "golden", "stdout"), "golden is files, files,stdout or off, not 'stdout'");
+  t_eq("tests: golden-dir", man_test_check("a", "golden-dir", "../g"), "golden-dir is a directory inside the project, not '../g'");
+  t_eq("tests: png-tolerance", man_test_check("a", "png-tolerance", "2,1.5,48") + "|" + man_test_check("a", "png-tolerance", "3"), "png-tolerance is C or C,F,H (channel 0-255, fraction 0-1, channel 0-255: 2,0.001,48), not '2,1.5,48'|");
+  t_eq("tests: native", man_test_check("a", "native", "maybe"), "native is skipped, always or never, not 'maybe'");
+  t_eq("tests: ports for \"*\" only", man_test_check("a", "ports", "1-2"), "ports is set for every test: mb_test_set(\"*\", \"ports\", \"1-2\")");
+  t_eq("tests: ports range", man_test_check("*", "ports", "40000-30000"), "ports is LO-HI within 1024-65535 (20000-29999), not '40000-30000'");
+  t_eq("tests: unknown service", man_of(pkg("[test.a]\nservices = \"db\"\n"))->error, "/p/mbuild.toml:4: mb_test_set(\"a\", \"services\", ...): no mb_service named 'db'");
+  t_eq("tests: env needs =", man_of(pkg("[test.a]\nenv = [\"X\"]\n"))->error, "/p/mbuild.toml:4: mb_test_env(\"a\", \"X\"): expected NAME=VALUE");
+  t_eq("tests: cmd name", man_of(pkg("[test-cmds]\n\"a b\" = \"x\"\n"))->error, "/p/mbuild.toml:4: test name 'a b' may only hold letters, digits, '_', '-' and '.' (at most 64, not starting with '.' or '-', no '..')");
+  t_eq("tests: cmd without command", man_of(pkg("[test-cmds]\nl = \" \"\n"))->error, "/p/mbuild.toml:4: mb_test_cmd(\"l\", ...) has no command");
+  t_eq("tests: fractions", s_int(man_frac_ppm("0.001")) + " " + s_int(man_frac_ppm("1")) + " " + s_int(man_frac_ppm(".5")) + " " + s_int(man_frac_ppm("1.01")) + " " + s_int(man_frac_ppm("x")), "1000 1000000 500000 -1 -1");
+}
+
 fn run_all() -> int64 {
   test_basics();
+  test_tests();
   test_import_root_and_dep_bins();
   test_settings();
   test_replace_and_removed();

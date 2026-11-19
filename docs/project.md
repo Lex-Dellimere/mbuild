@@ -171,6 +171,11 @@ test that needs the package's C code or a C library is a test program:
 | Call | Meaning |
 |---|---|
 | `mb_test_bin(name, main)` | A program `mbuild test` builds and runs (`""` = `tests/<name>_test.mettle`). |
+| `mb_test_glob(glob)` | Every main file matching it is a test program named by its stem: `"examples/*.mettle"`. |
+| `mb_test_exclude(csv)` | Tests left out of the default set (programs by name, `@test` files by path); naming one still runs it. |
+| `mb_test_cmd(name, cmdline)` | A command test: words as for `mb_service`; exit 0 passes. |
+| `mb_test_set(name, key, value)` | A test setting; `"*"` sets the default (see below). |
+| `mb_test_env(name, "K=V")` | A variable in a test's environment (`"*"` = every test). |
 
 Without any `mb_test_bin`, every `tests/<name>_test.mettle` with `fn main`
 is a test program named `<name>`. They build like the bins (settings, C

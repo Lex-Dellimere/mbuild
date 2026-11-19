@@ -216,6 +216,14 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     sl_push(c, "mb_dep_bin|" + key + "|");
   } else if (s_eq(section, "test-bins")) {
     sl_push(c, "mb_test_bin|" + key + "|");
+  } else if (s_eq(section, "tests")) {
+    if (s_eq(key, "globs")) { sl_push(c, "mb_test_glob||"); }
+    if (s_eq(key, "exclude")) { sl_push(c, "mb_test_exclude||"); }
+  } else if (s_eq(section, "test-cmds")) {
+    sl_push(c, "mb_test_cmd|" + key + "|");
+  } else if (s_starts(section, "test.")) {
+    if (s_eq(key, "env")) { sl_push(c, "mb_test_env||" + section); }
+    sl_push(c, "mb_test_set|" + key + "|" + section);
   } else if (s_eq(section, "rules")) {
     sl_push(c, "mb_rule||");
   } else if (s_eq(section, "live")) {

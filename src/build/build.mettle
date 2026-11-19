@@ -3258,8 +3258,46 @@ fn bx_owned_files(p: Project*) -> StrList* {
   return found;
 }
 
-// Test programs: mb_test_bin, else tests/<name>_test.mettle files with fn main.
+// Test programs: mb_test_bin, else tests/<name>_test.mettle files with fn
+// main; then every main file an mb_test_glob matches, named by its stem.
 fn bx_test_bins(p: Project*) -> BinSet* {
+  var bs: BinSet* = bx_test_bins_declared(p);
+  if (p->man->test_globs->len == 0) {
+    return bs;
+  }
+  var all: StrList* = bx_owned_files(p);
+  defer free(all);
+  var i: int64 = 0;
+  while (i < all->len) {
+    var rel: string = sl_get(all, i);
+    i = i + 1;
+    var g: int64 = 0;
+    var hit: bool = false;
+    while (g < p->man->test_globs->len && !hit) {
+      hit = lv_glob_match(sl_get(p->man->test_globs, g), rel);
+      g = g + 1;
+    }
+    if (!hit) {
+      continue;
+    }
+    var rd: FsRead = fs_read(p->root + "/" + rel);
+    if (!rd.ok || !scan_source(rd.data)->has_main) {
+      continue;
+    }
+    var name: string = bx_safe_name(p_stem(rel));
+    var k: int64 = 0;
+    while (k < bs->n) {
+      if (s_eq(bs->items[k].name, name) && !s_eq(bs->items[k].main, rel)) {
+        fail_hint("two test programs are named " + name + ": " + bs->items[k].main + " and " + rel, "give one of them another name with mb_test_bin");
+      }
+      k = k + 1;
+    }
+    bx_binset_push(bs, name, rel);
+  }
+  return bs;
+}
+
+fn bx_test_bins_declared(p: Project*) -> BinSet* {
   var bs: BinSet* = new BinSet;
   bs->items = (BinInfo*)0;
   bs->n = 0;
@@ -3620,6 +3658,42 @@ fn bx_filter_bins(p: Project*, all: BinSet*, s: string) -> BinSet* {
   return bx_select_from(p, all, names);
 }
 
+// The default set without what mb_test_exclude names (programs by name,
+// @test files by their path from the root).
+fn bx_drop_excluded(p: Project*, progs: BinSet*, files: StrList*) -> BinSet* {
+  var ex: StrList* = p->man->test_exclude;
+  if (ex->len == 0) {
+    return progs;
+  }
+  var keep: StrList* = sl_new();
+  defer free(keep);
+  var i: int64 = 0;
+  while (i < files->len) {
+    if (!sl_has(ex, p_rel(p->root, sl_get(files, i)))) {
+      sl_push(keep, sl_get(files, i));
+    }
+    i = i + 1;
+  }
+  files->len = 0;
+  sl_extend(files, keep);
+  var names: StrList* = sl_new();
+  defer free(names);
+  i = 0;
+  while (i < progs->n) {
+    if (!sl_has(ex, progs->items[i].name)) {
+      sl_push(names, progs->items[i].name);
+    }
+    i = i + 1;
+  }
+  if (names->len == progs->n) {
+    return progs;
+  }
+  if (names->len == 0) {
+    return bx_no_test_bins(p);
+  }
+  return bx_select_from(p, progs, names);
+}
+
 // One row of the test matrix.
 struct BxMxRow {
   label: string;
@@ -3836,6 +3910,7 @@ export fn build_cmd_test(p: Project*) -> int32 {
   } else {
     bx_test_files(p, all_progs, files);
     progs = bx_filter_bins(p, all_progs, p->opts->filter);
+    progs = bx_drop_excluded(p, progs, files);
   }
   if (files->len == 0 && progs->n == 0) {
     status("Finished", "no tests (no function is marked @test and there are no test programs)");
