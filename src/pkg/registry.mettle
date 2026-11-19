@@ -1520,6 +1520,9 @@ fn rgx_nonblank(text: string) -> StrList* {
 
 // "" when the member name stays inside the package directory.
 fn rgx_bad_name(name: string) -> string {
+  if (slen(name) > 1024) {
+    return "has an over-long name";
+  }
   if (s_starts(name, "/") || (slen(name) >= 2 && s_byte(name, 1) == 58)) {
     return "is an absolute path";
   }
@@ -1532,6 +1535,9 @@ fn rgx_bad_name(name: string) -> string {
   while (i < parts->len) {
     if (s_eq(sl_get(parts, i), "..")) {
       return "leaves the package directory";
+    }
+    if (slen(sl_get(parts, i)) > 255) {
+      return "has an over-long name";
     }
     i = i + 1;
   }
@@ -1565,8 +1571,10 @@ fn rgx_check_members(tar: Tool, archive: string) -> string {
   var i: int64 = 0;
   while (i < names->len) {
     var name: string = sl_get(names, i);
-    var kind: int32 = s_byte(sl_get(long_lines, i), 0);
-    if (kind != 45 && kind != 100) {
+    var long_line: string = sl_get(long_lines, i);
+    var kind: int32 = s_byte(long_line, 0);
+    // bsdtar lists a hard link as a plain file "... a link to b"
+    if ((kind != 45 && kind != 100) || s_contains(long_line, " link to ") || s_contains(long_line, " -> ")) {
       return p_base(archive) + ": member `" + name + "` is not a regular file or directory; refusing to extract it";
     }
     var why: string = rgx_bad_name(name);
@@ -1576,6 +1584,16 @@ fn rgx_check_members(tar: Tool, archive: string) -> string {
     i = i + 1;
   }
   return s_empty();
+}
+
+// "" when the tar archive holds only plain files and directories with safe
+// names (what reg_extract checks before unpacking), else why not.
+export fn reg_check_archive(archive: string) -> string {
+  var tar: Tool = rgx_tar();
+  if (!tool_found(tar)) {
+    return "cannot find `tar` (needed to unpack " + p_base(archive) + ")\n  help: install tar and put it on PATH, or set MBUILD_TAR to its path";
+  }
+  return rgx_check_members(tar, archive);
 }
 
 export fn reg_extract(archive: string, sha: string, dest: string, marker: string) -> string {

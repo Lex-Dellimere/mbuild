@@ -26,6 +26,7 @@ import "../model/toml";
 import "../model/manifest";
 import "../model/project";
 import "../config/mbfile";
+import "../pkg/registry";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -1112,6 +1113,11 @@ fn tcx_extract(archive: string, dir: string, target: string) -> bool {
     var tar: Tool = tcx_host_tool("tar", "MBUILD_TAR");
     if (!tool_found(tar)) {
       tcx_tool_missing("cannot unpack " + p_base(archive), "tar", "MBUILD_TAR", "install tar");
+      return false;
+    }
+    var bad: string = reg_check_archive(archive);
+    if (slen(bad) > 0) {
+      tcx_set_err(bad, "the release archive is not laid out as expected; nothing was installed");
       return false;
     }
     var c: Cmd* = cmd_new(tar);

@@ -162,6 +162,39 @@ suite() { # MODE
   run fetch "$T/app" default strutil v1.0.0
   run extract "$(grep '^archive ' "$S/last.out" | cut -c9-)" "sha256:$a" "$D/x" "x"
   check "reg_extract checks the checksum first ($mode)" eval 'code_is 1 && has "does not match its checksum" && [ ! -e "$D/x" ]'
+  if command -v python3 >/dev/null 2>&1; then
+    X="$S/evil-tars-$mode"
+    rm -rf "$X"
+    mkdir -p "$X"
+    python3 - "$X" <<'EOF'
+import io, sys, tarfile
+d = sys.argv[1]
+def mk(name, members):
+    with tarfile.open(d + "/" + name + ".tar", "w", format=tarfile.GNU_FORMAT) as t:
+        for kind, path, extra in members:
+            ti = tarfile.TarInfo(path)
+            if kind == "f":
+                ti.size = 1
+                t.addfile(ti, io.BytesIO(b"x"))
+            elif kind == "h":
+                ti.type = tarfile.LNKTYPE
+                ti.linkname = extra
+                t.addfile(ti)
+            elif kind == "p":
+                ti.type = tarfile.FIFOTYPE
+                t.addfile(ti)
+mk("hard", [("f", "a.mettle", None), ("h", "b.mettle", "../../outside")])
+mk("abs", [("f", d + "/abs-out", None)])
+mk("long", [("f", "a" * 300 + ".mettle", None)])
+mk("fifo", [("p", "pipe", None)])
+EOF
+    for t in hard long fifo; do
+      run extract "$X/$t.tar" "" "$X/out-$t" "x"
+      check "a $t member is refused ($mode)" eval 'code_is 1 && has "refusing to extract it" && [ ! -e "$X/out-$t" ]'
+    done
+    run extract "$X/abs.tar" "" "$X/out-abs" "x"
+    check "an absolute member never lands outside ($mode)" eval '[ ! -e "$X/abs-out" ]'
+  fi
 
   echo "== offline ($mode)"
   export MBUILD_HOME="$T/home-off"
