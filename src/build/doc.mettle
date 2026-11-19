@@ -198,9 +198,48 @@ fn dc_field(b: DcBlock*, t: string, params: StrList*, has_summary: bool) -> bool
     dc_push_field(b, "returns", s_empty(), tt);
     return true;
   }
-  if (dc_indent(t) >= 2 && params != (StrList*)0 && sl_has(params, dc_word(tt))) {
-    dc_push_field(b, "param", dc_word(tt), dc_after_word(tt));
-    return true;
+  if (dc_indent(t) < 2 || params == (StrList*)0 || dc_other_field(b)) {
+    return false;
+  }
+  // "name  meaning" or "a, b  meaning", every name a parameter
+  var names: StrList* = sl_new();
+  defer free(names);
+  var i2: int64 = 0;
+  while (true) {
+    var st: int64 = i2;
+    while (i2 < slen(tt) && is_ident_b(s_byte(tt, i2))) {
+      i2 = i2 + 1;
+    }
+    if (i2 == st || !sl_has(params, s_sub(tt, st, i2))) {
+      return false;
+    }
+    sl_push(names, s_sub(tt, st, i2));
+    if (i2 + 1 < slen(tt) && s_byte(tt, i2) == 44 && s_byte(tt, i2 + 1) == 32) {
+      i2 = i2 + 2;
+      continue;
+    }
+    break;
+  }
+  if (i2 < slen(tt) && s_byte(tt, i2) != 32) {
+    return false;
+  }
+  var text: string = s_trim(s_from(tt, i2));
+  var k: int64 = 0;
+  while (k < names->len) {
+    dc_push_field(b, "param", sl_get(names, k), text);
+    k = k + 1;
+  }
+  return true;
+}
+
+// Whether b has a field other than param (indented parameter lines end there).
+fn dc_other_field(b: DcBlock*) -> bool {
+  var i: int64 = 0;
+  while (i < b->keys->len) {
+    if (!s_eq(sl_get(b->keys, i), "param")) {
+      return true;
+    }
+    i = i + 1;
   }
   return false;
 }
@@ -238,6 +277,8 @@ fn dc_block(o: DocOut*, rel: string, lines: StrList*, at: int64, params: StrList
   }
   b->found = last > k;
   var cur: int64 = -1;
+  var held: int64 = -1;
+  var keep_ind: bool = false;
   var sum_done: bool = false;
   var fence: bool = false;
   var findent: int64 = 0;
@@ -296,6 +337,7 @@ fn dc_block(o: DocOut*, rel: string, lines: StrList*, at: int64, params: StrList
     }
     if (slen(tt) == 0) {
       if (cur >= 0) {
+        held = cur;
         cur = -1;
       } else if (b->summary->len > 0) {
         sum_done = true;
@@ -309,12 +351,23 @@ fn dc_block(o: DocOut*, rel: string, lines: StrList*, at: int64, params: StrList
     if (cur >= 0 && !s_eq(sl_get(b->keys, cur), "param")) {
       pl = (StrList*)0;
     }
+    var was: int64 = held;
+    held = -1;
     if (dc_field(b, t, pl, b->summary->len > 0)) {
       cur = b->keys->len - 1;
+      keep_ind = false;
       sum_done = true;
       continue;
     }
-    if (cur >= 0) {
+    // an indented block after a blank line still belongs to the field above
+    if (was >= 0 && dc_indent(t) >= 2) {
+      cur = was;
+      keep_ind = true;
+      dc_append(b, cur, "");
+    }
+    if (cur >= 0 && keep_ind) {
+      dc_append(b, cur, t);
+    } else if (cur >= 0) {
       dc_append(b, cur, tt);
     } else if (!sum_done) {
       sl_push(b->summary, tt);

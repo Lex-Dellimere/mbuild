@@ -117,6 +117,21 @@ export fn fx_find(db: int64, id: int64) -> int64 {
   return db + id;
 }
 EOF
+cat > src/zalph.mettle <<'EOF'
+// Sends a request.
+//
+//   to          the server's pid
+//   tag, arg    as al_send
+//
+// Returns the ref. Then arrives:
+//
+//   ALPH_TAG_DOWN   the server exited;
+//                   arg = its exit reason
+// Thread: a handler.
+export fn al_request(to: int64, tag: int64, arg: int64) -> int64 {
+  return to + tag + arg;
+}
+EOF
 cat > src/internal.mettle <<'EOF'
 //! @internal
 
@@ -151,10 +166,13 @@ check "first comment paragraph is the module doc" api "seal: authenticated encry
 check "//   name  meaning lines are params" api '- `id`: the row id'
 check "// Returns ... is the returns field" api "**Returns:** Returns 0 when missing."
 check "const declaration" api "const CR_OVERHEAD: int64"
+check "alph: params after a blank line, two names on one line" sh -c 'grep -qxF -- "- \`tag\`: as al_send" docs/API.md && grep -qxF -- "- \`arg\`: as al_send" docs/API.md'
+check "alph: indented lines after Returns stay prose" sh -c 'grep -qF "arg = its exit reason" docs/API.md && ! grep -qF -- "- \`arg\`: = its" docs/API.md'
+check "alph: Thread: is a field" api "**Thread:** a handler."
 mb doc
 check "doc: unchanged is Fresh" line "       Fresh docs/API.md"
 mb doc --check
-check "--check: a fresh, documented package passes" sh -c '[ "$(cat "$0/last.code")" = 0 ] && grep -q "Checked docs/API.md (6 exports, 0 snippets)" "$0/last.out"' "$S"
+check "--check: a fresh, documented package passes" sh -c '[ "$(cat "$0/last.code")" = 0 ] && grep -q "Checked docs/API.md (7 exports, 0 snippets)" "$0/last.out"' "$S"
 
 # --- --check findings: undocumented, @param, required fields, stale
 cat >> src/orm.mettle <<'EOF'
