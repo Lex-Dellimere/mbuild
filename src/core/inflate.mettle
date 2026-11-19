@@ -1,0 +1,393 @@
+// inflate: a zlib stream (RFC 1950) holding deflate data (RFC 1951)
+// decoded, for PNG files. Canonical Huffman decoded a bit at a time, as
+// zlib's puff does: small, and fast enough for test images.
+
+import "std/mem";
+import "base";
+
+export struct InfOut {
+  ok: bool;
+  data: uint8*;
+  len: int64;
+  err: string;
+}
+
+struct InfHuff {
+  count: int32*;      // codes of each length, 0..15
+  symbol: int32*;     // symbols ordered by code
+}
+
+struct InfState {
+  src: uint8*;
+  n: int64;
+  pos: int64;
+  bitbuf: int64;
+  bitcnt: int64;
+  out: uint8*;
+  olen: int64;
+  ocap: int64;
+  err: string;
+}
+
+fn inf_fail(s: InfState*, why: string) {
+  if (slen(s->err) == 0) {
+    s->err = why;
+  }
+}
+
+fn inf_bits(s: InfState*, need: int64) -> int64 {
+  while (s->bitcnt < need) {
+    if (s->pos >= s->n) {
+      inf_fail(s, "the data ends early");
+      return 0;
+    }
+    s->bitbuf = s->bitbuf | ((int64)s->src[s->pos] << s->bitcnt);
+    s->pos = s->pos + 1;
+    s->bitcnt = s->bitcnt + 8;
+  }
+  var v: int64 = s->bitbuf & ((1 << need) - 1);
+  s->bitbuf = s->bitbuf >> need;
+  s->bitcnt = s->bitcnt - need;
+  return v;
+}
+
+fn inf_put(s: InfState*, b: int64) {
+  if (s->olen == s->ocap) {
+    s->ocap = s->ocap * 2 + 4096;
+    s->out = (uint8*)realloc(s->out, s->ocap);
+  }
+  s->out[s->olen] = (uint8)b;
+  s->olen = s->olen + 1;
+}
+
+fn inf_huff_new(n: int64) -> InfHuff* {
+  var h: InfHuff* = new InfHuff;
+  h->count = (int32*)malloc(16 * 4);
+  h->symbol = (int32*)malloc((n + 1) * 4);
+  return h;
+}
+
+fn inf_huff_free(h: InfHuff*) {
+  free(h->count);
+  free(h->symbol);
+  free(h);
+}
+
+// The table of n code lengths; false when the lengths over-subscribe.
+fn inf_build(h: InfHuff*, lengths: int32*, n: int64) -> bool {
+  var i: int64 = 0;
+  while (i < 16) {
+    h->count[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < n) {
+    h->count[lengths[i]] = h->count[lengths[i]] + 1;
+    i = i + 1;
+  }
+  var left: int64 = 1;
+  var len: int64 = 1;
+  while (len < 16) {
+    left = left * 2 - (int64)h->count[len];
+    if (left < 0) {
+      return false;
+    }
+    len = len + 1;
+  }
+  var offs: int32[16];
+  offs[1] = 0;
+  len = 1;
+  while (len < 15) {
+    offs[len + 1] = offs[len] + h->count[len];
+    len = len + 1;
+  }
+  i = 0;
+  while (i < n) {
+    if (lengths[i] != 0) {
+      h->symbol[offs[lengths[i]]] = (int32)i;
+      offs[lengths[i]] = offs[lengths[i]] + 1;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn inf_decode(s: InfState*, h: InfHuff*) -> int64 {
+  var code: int64 = 0;
+  var first: int64 = 0;
+  var index: int64 = 0;
+  var len: int64 = 1;
+  while (len < 16) {
+    code = code | inf_bits(s, 1);
+    var count: int64 = (int64)h->count[len];
+    if (code - count < first) {
+      return (int64)h->symbol[index + (code - first)];
+    }
+    index = index + count;
+    first = (first + count) << 1;
+    code = code << 1;
+    len = len + 1;
+  }
+  inf_fail(s, "a bad Huffman code");
+  return -1;
+}
+
+fn inf_len_extra(i: int64) -> int64 {
+  if (i < 8 || i == 28) {
+    return 0;
+  }
+  return (i - 4) / 4;
+}
+
+fn inf_len_base(i: int64) -> int64 {
+  if (i == 28) {
+    return 258;
+  }
+  var b: int64 = 3;
+  var k: int64 = 0;
+  while (k < i) {
+    b = b + (1 << inf_len_extra(k));
+    k = k + 1;
+  }
+  return b;
+}
+
+fn inf_dist_extra(i: int64) -> int64 {
+  if (i < 2) {
+    return 0;
+  }
+  return i / 2 - 1;
+}
+
+fn inf_dist_base(i: int64) -> int64 {
+  var b: int64 = 1;
+  var k: int64 = 0;
+  while (k < i) {
+    b = b + (1 << inf_dist_extra(k));
+    k = k + 1;
+  }
+  return b;
+}
+
+// One block's codes until end-of-block.
+fn inf_codes(s: InfState*, lit: InfHuff*, dist: InfHuff*) {
+  while (slen(s->err) == 0) {
+    var sym: int64 = inf_decode(s, lit);
+    if (sym < 0) {
+      return;
+    }
+    if (sym < 256) {
+      inf_put(s, sym);
+    } else if (sym == 256) {
+      return;
+    } else {
+      sym = sym - 257;
+      if (sym >= 29) {
+        inf_fail(s, "a bad length code");
+        return;
+      }
+      var len: int64 = inf_len_base(sym) + inf_bits(s, inf_len_extra(sym));
+      var ds: int64 = inf_decode(s, dist);
+      if (ds < 0 || ds >= 30) {
+        inf_fail(s, "a bad distance code");
+        return;
+      }
+      var d: int64 = inf_dist_base(ds) + inf_bits(s, inf_dist_extra(ds));
+      if (d > s->olen) {
+        inf_fail(s, "a distance before the start");
+        return;
+      }
+      var k: int64 = 0;
+      while (k < len) {
+        inf_put(s, (int64)s->out[s->olen - d]);
+        k = k + 1;
+      }
+    }
+  }
+}
+
+fn inf_stored(s: InfState*) {
+  s->bitbuf = 0;
+  s->bitcnt = 0;
+  if (s->pos + 4 > s->n) {
+    inf_fail(s, "the data ends early");
+    return;
+  }
+  var len: int64 = (int64)s->src[s->pos] | ((int64)s->src[s->pos + 1] << 8);
+  var nlen: int64 = (int64)s->src[s->pos + 2] | ((int64)s->src[s->pos + 3] << 8);
+  s->pos = s->pos + 4;
+  if (len + nlen != 65535) {
+    inf_fail(s, "a stored block's length does not check");
+    return;
+  }
+  if (s->pos + len > s->n) {
+    inf_fail(s, "the data ends early");
+    return;
+  }
+  var k: int64 = 0;
+  while (k < len) {
+    inf_put(s, (int64)s->src[s->pos + k]);
+    k = k + 1;
+  }
+  s->pos = s->pos + len;
+}
+
+fn inf_fixed(s: InfState*) {
+  var lengths: int32* = (int32*)malloc(320 * 4);
+  var i: int64 = 0;
+  while (i < 288) {
+    var l: int32 = 8;
+    if (i >= 144 && i < 256) {
+      l = 9;
+    } else if (i >= 256 && i < 280) {
+      l = 7;
+    }
+    lengths[i] = l;
+    i = i + 1;
+  }
+  var lit: InfHuff* = inf_huff_new(288);
+  inf_build(lit, lengths, 288);
+  i = 0;
+  while (i < 30) {
+    lengths[i] = 5;
+    i = i + 1;
+  }
+  var dist: InfHuff* = inf_huff_new(30);
+  inf_build(dist, lengths, 30);
+  inf_codes(s, lit, dist);
+  inf_huff_free(lit);
+  inf_huff_free(dist);
+  free(lengths);
+}
+
+fn inf_dynamic(s: InfState*) {
+  var nlen: int64 = inf_bits(s, 5) + 257;
+  var ndist: int64 = inf_bits(s, 5) + 1;
+  var ncode: int64 = inf_bits(s, 4) + 4;
+  if (nlen > 286 || ndist > 30) {
+    inf_fail(s, "bad code counts");
+    return;
+  }
+  var order: StrList* = s_split("16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15", 32);
+  defer free(order);
+  var lengths: int32* = (int32*)malloc(320 * 4);
+  defer free(lengths);
+  var i: int64 = 0;
+  while (i < 19) {
+    lengths[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < ncode) {
+    lengths[s_to_int(sl_get(order, i))] = (int32)inf_bits(s, 3);
+    i = i + 1;
+  }
+  var lencode: InfHuff* = inf_huff_new(19);
+  if (!inf_build(lencode, lengths, 19)) {
+    inf_fail(s, "bad code length codes");
+  }
+  i = 0;
+  while (i < nlen + ndist && slen(s->err) == 0) {
+    var sym: int64 = inf_decode(s, lencode);
+    if (sym < 16 && sym >= 0) {
+      lengths[i] = (int32)sym;
+      i = i + 1;
+    } else if (sym >= 16) {
+      var v: int32 = 0;
+      var rep: int64 = 0;
+      if (sym == 16) {
+        if (i == 0) {
+          inf_fail(s, "a repeat with nothing before it");
+          break;
+        }
+        v = lengths[i - 1];
+        rep = 3 + inf_bits(s, 2);
+      } else if (sym == 17) {
+        rep = 3 + inf_bits(s, 3);
+      } else {
+        rep = 11 + inf_bits(s, 7);
+      }
+      if (i + rep > nlen + ndist) {
+        inf_fail(s, "too many code lengths");
+        break;
+      }
+      while (rep > 0) {
+        lengths[i] = v;
+        i = i + 1;
+        rep = rep - 1;
+      }
+    }
+  }
+  inf_huff_free(lencode);
+  if (slen(s->err) > 0) {
+    return;
+  }
+  var lit: InfHuff* = inf_huff_new(nlen);
+  var dist: InfHuff* = inf_huff_new(ndist);
+  inf_build(lit, lengths, nlen);
+  inf_build(dist, &lengths[nlen], ndist);
+  inf_codes(s, lit, dist);
+  inf_huff_free(lit);
+  inf_huff_free(dist);
+}
+
+// The bytes of a zlib stream src[0..n).
+export fn inf_zlib(src: uint8*, n: int64) -> InfOut {
+  var r: InfOut;
+  r.ok = false;
+  r.data = (uint8*)0;
+  r.len = 0;
+  r.err = s_empty();
+  if (n < 6 || ((int64)src[0] & 15) != 8 || (((int64)src[0] << 8) | (int64)src[1]) % 31 != 0) {
+    r.err = "not a zlib stream";
+    return r;
+  }
+  if (((int64)src[1] & 32) != 0) {
+    r.err = "a preset dictionary";
+    return r;
+  }
+  var s: InfState;
+  memset((rawptr)&s, 0, (int64)sizeof(InfState));
+  s.src = src;
+  s.n = n;
+  s.pos = 2;
+  s.err = s_empty();
+  var last: int64 = 0;
+  while (last == 0 && slen(s.err) == 0) {
+    last = inf_bits(&s, 1);
+    var kind: int64 = inf_bits(&s, 2);
+    if (kind == 0) {
+      inf_stored(&s);
+    } else if (kind == 1) {
+      inf_fixed(&s);
+    } else if (kind == 2) {
+      inf_dynamic(&s);
+    } else {
+      inf_fail(&s, "a bad block type");
+    }
+  }
+  if (slen(s.err) == 0) {
+    var a: int64 = 1;
+    var b: int64 = 0;
+    var i: int64 = 0;
+    while (i < s.olen) {
+      a = (a + (int64)s.out[i]) % 65521;
+      b = (b + a) % 65521;
+      i = i + 1;
+    }
+    var at: int64 = s.pos;
+    if (at + 4 > n) {
+      inf_fail(&s, "no checksum");
+    } else {
+      var want: int64 = ((int64)src[at] << 24) | ((int64)src[at + 1] << 16) | ((int64)src[at + 2] << 8) | (int64)src[at + 3];
+      if (want != ((b << 16) | a)) {
+        inf_fail(&s, "the checksum does not match");
+      }
+    }
+  }
+  r.ok = slen(s.err) == 0;
+  r.err = s.err;
+  r.data = s.out;
+  r.len = s.olen;
+  return r;
+}

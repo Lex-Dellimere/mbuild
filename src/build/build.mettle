@@ -7075,7 +7075,7 @@ fn bx_init_cmds() {
   bx_fl("--only S", "with --bless: only golden paths containing S");
   bx_note("a test is an @test file (run in the compiler's interpreter), a test program (mb_test_bin, tests/NAME_test.mettle with fn main, mb_test_glob) or a command test (mb_test_cmd); it passes on exit 0. mb_test_set(name, key, value) sets matrix, timeout, repeat, serial, cwd, warnings, checks, args, run and more (docs/project.md).");
   bx_note("each run gets its own directory: TMPDIR (MBUILD_TEST_TMP), MBUILD_TEST_OUT, stdout and stderr; it runs in a process group of its own, which a timeout stops whole.");
-  bx_note("golden files: what a run writes to $MBUILD_TEST_OUT must match tests/golden/NAME (the golden-dir setting) byte for byte; with several cells, each cell's outputs must match the first's (golden-cross).");
+  bx_note("golden files: what a run writes to $MBUILD_TEST_OUT must match tests/golden/NAME (the golden-dir setting) byte for byte, PNG files pixel for pixel within png-tolerance; with several cells, each cell's outputs must match the first's (golden-cross).");
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
   bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");

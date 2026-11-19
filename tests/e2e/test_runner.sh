@@ -32,10 +32,11 @@ proj() {
 prog() { printf 'import "std/io";\nfn main() -> int32 {\n  println("%s");\n  return %s;\n}\n' "${3:-PASS one}" "$2" > "$1"; }
 
 # unit NAME: tests/unit/NAME.mettle built debug and --release, both runs agree
-unit() { if out=$(METTLE="$METTLE" TMPDIR="$S" sh "$here/tools/mcheck.sh" "$here/tests/unit/$1.mettle" --run 2>&1); then ok "$1 ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$1" "$out"; fi; }
+unit() { u="$1"; shift; if out=$(METTLE="$METTLE" TMPDIR="$S" sh "$here/tools/mcheck.sh" "$here/tests/unit/$u.mettle" --run "$@" 2>&1); then ok "$u ($(printf '%s\n' "$out" | sed -n 's/^\[run\] ok (.*: \(.*\))$/\1/p'))"; else bad "$u" "$out"; fi; }
 
 echo "== unit tests"
 unit testrun_test
+unit png_test -- "$here/tests/fixtures/png" "$S"
 
 for mode in ${MBTEST_MODES:-debug release}; do
 flag=""
@@ -273,6 +274,18 @@ mb test both
 check "golden-cross: agreeing cells pass" line "test both (debug, release) ... ok  0.0s"
 mb test gen --only x
 check "--only needs --bless" has "error: --only goes with --bless"
+cp "$here/tests/fixtures/png/rgba8.png" tests/img.png
+sed -i 's|  mb_test_cmd("both", "sh tests/both.sh");|&\n  mb_test_cmd("img", "cp tests/img.png $MBUILD_TEST_OUT/plot.png");|' mbuild.mettle
+mb test img --bless
+cp "$here/tests/fixtures/png/rgba8_stored.png" tests/img.png
+mb test img
+check "png: other bytes, the same pixels" line "test img (debug) ... ok  0.0s"
+cp "$here/tests/fixtures/png/rgba8_near.png" tests/img.png
+mb test img
+check "png: pixels that differ, and a diff image" sh -c 'grep -qxF -- "---- img (linux/debug): golden out/plot.png differs: 3 of 128 pixels beyond 0 (at most 0), channels off by up to 48" "$0/last.out" && [ -s .mbuild/test-run/linux-debug/img/1/out/plot.diff.png ]' "$S"
+sed -i 's|  mb_test_cmd("img", |  mb_test_set("img", "png-tolerance", "3,0.01,48");\n&|' mbuild.mettle
+mb test img
+check "png: within png-tolerance" line "test img (debug) ... ok  0.0s"
 
 done
 echo "test_runner: $pass passed, $failed failed"

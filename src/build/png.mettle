@@ -1,0 +1,441 @@
+// png: PNG files for golden compares (16.2). Decoded to RGBA8: bit depth 8,
+// colour types 0, 2, 3, 4 and 6 (tRNS honoured), no interlace; anything
+// else is an error that names it. A failing compare writes a diff image
+// (red where pixels failed) in stored deflate blocks.
+
+import "std/mem";
+import "../core/base";
+import "../core/fs";
+import "../core/inflate";
+import "../model/manifest";
+
+export struct PngImage {
+  ok: bool;
+  err: string;
+  w: int64;
+  h: int64;
+  rgba: uint8*;       // w * h * 4
+}
+
+fn png_be32(p: uint8*, at: int64) -> int64 {
+  return ((int64)p[at] << 24) | ((int64)p[at + 1] << 16) | ((int64)p[at + 2] << 8) | (int64)p[at + 3];
+}
+
+fn png_err(why: string) -> PngImage {
+  var im: PngImage;
+  im.ok = false;
+  im.err = why;
+  im.w = 0;
+  im.h = 0;
+  im.rgba = (uint8*)0;
+  return im;
+}
+
+fn png_paeth(a: int64, b: int64, c: int64) -> int64 {
+  var p: int64 = a + b - c;
+  var pa: int64 = p - a;
+  var pb: int64 = p - b;
+  var pc: int64 = p - c;
+  if (pa < 0) {
+    pa = 0 - pa;
+  }
+  if (pb < 0) {
+    pb = 0 - pb;
+  }
+  if (pc < 0) {
+    pc = 0 - pc;
+  }
+  if (pa <= pb && pa <= pc) {
+    return a;
+  }
+  if (pb <= pc) {
+    return b;
+  }
+  return c;
+}
+
+// The PNG in data[0..n).
+export fn png_decode(data: uint8*, n: int64) -> PngImage {
+  if (n < 8 || data[0] != (uint8)137 || data[1] != (uint8)80 || data[2] != (uint8)78 || data[3] != (uint8)71) {
+    return png_err("is not a PNG file");
+  }
+  var w: int64 = 0;
+  var h: int64 = 0;
+  var depth: int64 = 0;
+  var ctype: int64 = -1;
+  var interlace: int64 = 0;
+  var pal: uint8* = (uint8*)malloc(256 * 4);
+  defer free(pal);
+  var k: int64 = 0;
+  while (k < 256) {
+    pal[k * 4] = (uint8)0;
+    pal[k * 4 + 1] = (uint8)0;
+    pal[k * 4 + 2] = (uint8)0;
+    pal[k * 4 + 3] = (uint8)255;
+    k = k + 1;
+  }
+  var key: int64 = -1;       // tRNS of a gray or RGB image: that colour is transparent
+  var key_g: int64 = 0;
+  var key_b: int64 = 0;
+  var idat: Buf* = buf_new();
+  var at: int64 = 8;
+  while (at + 8 <= n) {
+    var len: int64 = png_be32(data, at);
+    var kind: string = s_view(&data[at + 4], 4);
+    var body: int64 = at + 8;
+    if (body + len + 4 > n) {
+      return png_err("is cut short");
+    }
+    if (s_eq(kind, "IHDR") && len >= 13) {
+      w = png_be32(data, body);
+      h = png_be32(data, body + 4);
+      depth = (int64)data[body + 8];
+      ctype = (int64)data[body + 9];
+      interlace = (int64)data[body + 12];
+    } else if (s_eq(kind, "PLTE")) {
+      var i: int64 = 0;
+      while (i < len / 3 && i < 256) {
+        pal[i * 4] = data[body + i * 3];
+        pal[i * 4 + 1] = data[body + i * 3 + 1];
+        pal[i * 4 + 2] = data[body + i * 3 + 2];
+        i = i + 1;
+      }
+    } else if (s_eq(kind, "tRNS")) {
+      if (ctype == 3) {
+        var t: int64 = 0;
+        while (t < len && t < 256) {
+          pal[t * 4 + 3] = data[body + t];
+          t = t + 1;
+        }
+      } else if (ctype == 0 && len >= 2) {
+        key = (int64)data[body + 1];
+      } else if (ctype == 2 && len >= 6) {
+        key = (int64)data[body + 1];
+        key_g = (int64)data[body + 3];
+        key_b = (int64)data[body + 5];
+      }
+    } else if (s_eq(kind, "IDAT")) {
+      buf_add(idat, s_view(&data[body], len));
+    } else if (s_eq(kind, "IEND")) {
+      break;
+    }
+    at = body + len + 4;
+  }
+  if (ctype < 0 || w <= 0 || h <= 0) {
+    return png_err("has no image header");
+  }
+  if (depth != 8) {
+    return png_err("has bit depth " + s_int(depth) + " (mbuild reads 8)");
+  }
+  if (interlace != 0) {
+    return png_err("is interlaced (mbuild reads non-interlaced PNGs)");
+  }
+  var bpp: int64 = 0;
+  if (ctype == 0 || ctype == 3) {
+    bpp = 1;
+  } else if (ctype == 2) {
+    bpp = 3;
+  } else if (ctype == 4) {
+    bpp = 2;
+  } else if (ctype == 6) {
+    bpp = 4;
+  } else {
+    return png_err("has colour type " + s_int(ctype));
+  }
+  var z: InfOut = inf_zlib(idat->data, idat->len);
+  free(idat);
+  if (!z.ok) {
+    return png_err("has bad image data (" + z.err + ")");
+  }
+  defer free(z.data);
+  var stride: int64 = w * bpp;
+  if (z.len < (stride + 1) * h) {
+    return png_err("has too little image data");
+  }
+  // unfilter in place: row y starts at y * (stride + 1) + 1
+  var y: int64 = 0;
+  while (y < h) {
+    var row: int64 = y * (stride + 1);
+    var f: int64 = (int64)z.data[row];
+    if (f > 4) {
+      return png_err("has filter type " + s_int(f));
+    }
+    var x: int64 = 0;
+    while (x < stride) {
+      var cur: int64 = row + 1 + x;
+      var a: int64 = 0;
+      var b: int64 = 0;
+      var c: int64 = 0;
+      if (x >= bpp) {
+        a = (int64)z.data[cur - bpp];
+      }
+      if (y > 0) {
+        b = (int64)z.data[cur - stride - 1];
+        if (x >= bpp) {
+          c = (int64)z.data[cur - stride - 1 - bpp];
+        }
+      }
+      var add: int64 = 0;
+      if (f == 1) {
+        add = a;
+      } else if (f == 2) {
+        add = b;
+      } else if (f == 3) {
+        add = (a + b) / 2;
+      } else if (f == 4) {
+        add = png_paeth(a, b, c);
+      }
+      z.data[cur] = (uint8)(((int64)z.data[cur] + add) & 255);
+      x = x + 1;
+    }
+    y = y + 1;
+  }
+  var im: PngImage;
+  im.ok = true;
+  im.err = s_empty();
+  im.w = w;
+  im.h = h;
+  im.rgba = (uint8*)malloc(w * h * 4 + 1);
+  y = 0;
+  while (y < h) {
+    var src: int64 = y * (stride + 1) + 1;
+    var x2: int64 = 0;
+    while (x2 < w) {
+      var o: int64 = (y * w + x2) * 4;
+      var s0: int64 = src + x2 * bpp;
+      var r: int64 = (int64)z.data[s0];
+      var g: int64 = r;
+      var bl: int64 = r;
+      var al: int64 = 255;
+      if (ctype == 3) {
+        g = (int64)pal[r * 4 + 1];
+        bl = (int64)pal[r * 4 + 2];
+        al = (int64)pal[r * 4 + 3];
+        r = (int64)pal[r * 4];
+      } else if (ctype == 2 || ctype == 6) {
+        g = (int64)z.data[s0 + 1];
+        bl = (int64)z.data[s0 + 2];
+        if (ctype == 6) {
+          al = (int64)z.data[s0 + 3];
+        }
+      } else if (ctype == 4) {
+        al = (int64)z.data[s0 + 1];
+      }
+      if (key >= 0 && r == key && (ctype == 0 || (g == key_g && bl == key_b))) {
+        al = 0;
+      }
+      im.rgba[o] = (uint8)r;
+      im.rgba[o + 1] = (uint8)g;
+      im.rgba[o + 2] = (uint8)bl;
+      im.rgba[o + 3] = (uint8)al;
+      x2 = x2 + 1;
+    }
+    y = y + 1;
+  }
+  return im;
+}
+
+export fn png_read(path: string) -> PngImage {
+  var rd: FsRead = fs_read(path);
+  if (!rd.ok) {
+    return png_err("cannot be read");
+  }
+  return png_decode(rd.data.chars, slen(rd.data));
+}
+
+// ---------------------------------------------------------------------------
+// Writing: RGBA8, filter 0, stored deflate blocks
+// ---------------------------------------------------------------------------
+
+var g_png_crc: uint32* = (uint32*)0;
+
+fn png_crc(p: uint8*, n: int64) -> int64 {
+  if (g_png_crc == (uint32*)0) {
+    g_png_crc = (uint32*)malloc(256 * 4);
+    var i: int64 = 0;
+    while (i < 256) {
+      var c: int64 = i;
+      var k: int64 = 0;
+      while (k < 8) {
+        if ((c & 1) != 0) {
+          c = 3988292384 ^ (c >> 1);
+        } else {
+          c = c >> 1;
+        }
+        k = k + 1;
+      }
+      g_png_crc[i] = (uint32)c;
+      i = i + 1;
+    }
+  }
+  var crc: int64 = 4294967295;
+  var j: int64 = 0;
+  while (j < n) {
+    crc = (int64)g_png_crc[(crc ^ (int64)p[j]) & 255] ^ (crc >> 8);
+    j = j + 1;
+  }
+  return crc ^ 4294967295;
+}
+
+fn png_put32(b: Buf*, v: int64) {
+  buf_addb(b, (int32)((v >> 24) & 255));
+  buf_addb(b, (int32)((v >> 16) & 255));
+  buf_addb(b, (int32)((v >> 8) & 255));
+  buf_addb(b, (int32)(v & 255));
+}
+
+fn png_chunk(b: Buf*, kind: string, body: Buf*) {
+  png_put32(b, body->len);
+  var c: Buf* = buf_new();
+  buf_add(c, kind);
+  buf_add(c, s_view(body->data, body->len));
+  buf_add(b, s_view(c->data, c->len));
+  png_put32(b, png_crc(c->data, c->len));
+  free(c);
+}
+
+// The bytes of a PNG of w x h RGBA8 pixels.
+export fn png_encode(w: int64, h: int64, rgba: uint8*) -> string {
+  var raw: Buf* = buf_new();
+  var y: int64 = 0;
+  while (y < h) {
+    buf_addb(raw, 0);
+    buf_add(raw, s_view(&rgba[y * w * 4], w * 4));
+    y = y + 1;
+  }
+  var z: Buf* = buf_new();
+  buf_addb(z, 120);
+  buf_addb(z, 1);
+  var at: int64 = 0;
+  while (true) {
+    var len: int64 = raw->len - at;
+    if (len > 65535) {
+      len = 65535;
+    }
+    var last: int32 = 0;
+    if (at + len == raw->len) {
+      last = 1;
+    }
+    buf_addb(z, last);
+    buf_addb(z, (int32)(len & 255));
+    buf_addb(z, (int32)(len >> 8));
+    buf_addb(z, (int32)((65535 - len) & 255));
+    buf_addb(z, (int32)((65535 - len) >> 8));
+    buf_add(z, s_view(&raw->data[at], len));
+    at = at + len;
+    if (last == 1) {
+      break;
+    }
+  }
+  var a: int64 = 1;
+  var bsum: int64 = 0;
+  var i: int64 = 0;
+  while (i < raw->len) {
+    a = (a + (int64)raw->data[i]) % 65521;
+    bsum = (bsum + a) % 65521;
+    i = i + 1;
+  }
+  png_put32(z, (bsum << 16) | a);
+  free(raw);
+  var out: Buf* = buf_new();
+  buf_addb(out, 137);
+  buf_add(out, "PNG\r\n");
+  buf_addb(out, 26);
+  buf_addb(out, 10);
+  var hd: Buf* = buf_new();
+  png_put32(hd, w);
+  png_put32(hd, h);
+  buf_addb(hd, 8);
+  buf_addb(hd, 6);
+  buf_addb(hd, 0);
+  buf_addb(hd, 0);
+  buf_addb(hd, 0);
+  png_chunk(out, "IHDR", hd);
+  free(hd);
+  png_chunk(out, "IDAT", z);
+  free(z);
+  var e: Buf* = buf_new();
+  png_chunk(out, "IEND", e);
+  free(e);
+  return buf_take(out);
+}
+
+// ---------------------------------------------------------------------------
+// Compare
+// ---------------------------------------------------------------------------
+
+// Why got differs from want beyond the tolerance ("C" or "C,F,H": a pixel
+// fails when a channel differs by more than C; the image when more than a
+// fraction F of pixels fail or any channel differs by more than H), "" when
+// it does not; a failing compare writes diff_out (red where pixels failed).
+export fn png_compare(want_path: string, got_path: string, tol: string, diff_out: string) -> string {
+  var a: PngImage = png_read(want_path);
+  if (!a.ok) {
+    return "(golden) " + a.err;
+  }
+  defer free(a.rgba);
+  var b: PngImage = png_read(got_path);
+  if (!b.ok) {
+    return b.err;
+  }
+  defer free(b.rgba);
+  if (a.w != b.w || a.h != b.h) {
+    return "is " + s_int(b.w) + "x" + s_int(b.h) + ", expected " + s_int(a.w) + "x" + s_int(a.h);
+  }
+  var parts: StrList* = s_split(tol, 44);
+  defer free(parts);
+  var c: int64 = s_to_int(s_trim(sl_get(parts, 0)));
+  var frac: int64 = 0;
+  var hard: int64 = 255;
+  if (parts->len == 3) {
+    frac = man_frac_ppm(s_trim(sl_get(parts, 1)));
+    hard = s_to_int(s_trim(sl_get(parts, 2)));
+  }
+  var total: int64 = a.w * a.h;
+  var failed: int64 = 0;
+  var most: int64 = 0;
+  var diff: uint8* = (uint8*)malloc(total * 4 + 1);
+  defer free(diff);
+  var i: int64 = 0;
+  while (i < total) {
+    var bad: bool = false;
+    var ch: int64 = 0;
+    while (ch < 4) {
+      var d: int64 = (int64)a.rgba[i * 4 + ch] - (int64)b.rgba[i * 4 + ch];
+      if (d < 0) {
+        d = 0 - d;
+      }
+      if (d > most) {
+        most = d;
+      }
+      if (d > c) {
+        bad = true;
+      }
+      ch = ch + 1;
+    }
+    var gray: int64 = ((int64)a.rgba[i * 4] + (int64)a.rgba[i * 4 + 1] + (int64)a.rgba[i * 4 + 2]) / 6 + 128;
+    if (bad) {
+      failed = failed + 1;
+      diff[i * 4] = (uint8)255;
+      diff[i * 4 + 1] = (uint8)0;
+      diff[i * 4 + 2] = (uint8)0;
+    } else {
+      diff[i * 4] = (uint8)gray;
+      diff[i * 4 + 1] = (uint8)gray;
+      diff[i * 4 + 2] = (uint8)gray;
+    }
+    diff[i * 4 + 3] = (uint8)255;
+    i = i + 1;
+  }
+  if (failed * 1000000 <= frac * total && most <= hard) {
+    return s_empty();
+  }
+  fs_write(diff_out, png_encode(a.w, a.h, diff));
+  var why: string = "differs: " + s_int(failed) + " of " + s_int(total) + " pixels beyond " + s_int(c);
+  if (most > hard) {
+    why = why + ", a channel off by " + s_int(most) + " (at most " + s_int(hard) + ")";
+  } else {
+    why = why + " (at most " + s_int(frac * total / 1000000) + "), channels off by up to " + s_int(most);
+  }
+  return why;
+}

@@ -8,6 +8,7 @@ import "std/mem";
 import "../core/base";
 import "../core/path";
 import "../core/fs";
+import "png";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
@@ -150,6 +151,13 @@ export fn gld_compare(gdir: string, gshown: string, out_dir: string, stdout_text
     var outp: string = out_dir + "/" + f;
     var gr: FsRead = fs_read(outp);
     if (s_eq(wr.data, gr.data)) {
+      continue;
+    }
+    if (s_ends(f, ".png")) {
+      var iw: string = png_compare(gdir + "/" + f, outp, tol, s_sub(outp, 0, slen(outp) - 4) + ".diff.png");
+      if (slen(iw) > 0) {
+        return "golden out/" + f + " " + iw;
+      }
       continue;
     }
     return "golden out/" + f + " differs " + gld_diff(wr.data, gr.data);
