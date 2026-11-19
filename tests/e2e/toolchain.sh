@@ -326,8 +326,12 @@ expect "update tells of a newer release" "$o" "Available Mettle v0.99.2 (newest 
 o=$(MBUILD_METTLE_API="$URL/b" "$MB" toolchain update 2>&1)
 expect "update: the latest is installed" "$o" "Fresh v0.99.1 is the latest release"
 o=$(MBUILD_METTLE_API="$URL/b" "$MB" toolchain install v0.99.3 2>&1); rc=$?
-expect_rc "a release without a digest installs" $rc 0
-expect "no digest: said" "$o" "the release lists no sha256 for mettle-v0.99.3-linux-x64.tar.gz"
+expect_rc "a release without a digest is refused" $rc 1
+expect "no digest: said" "$o" "the release lists no sha256 for mettle-v0.99.3-linux-x64.tar.gz; refusing to install"
+[ ! -e "$TH/v0.99.3" ] && ok "no digest: nothing installed" || bad "no digest: nothing installed"
+o=$(MBUILD_METTLE_API="http://example.com/api" "$MB" toolchain install v0.99.4 2>&1); rc=$?
+expect_rc "a plain http API is refused" $rc 1
+expect "plain http API: message" "$o" "downloads must use https://"
 o=$("$MB" toolchain install v0.99.5 2>&1); rc=$?
 expect_rc "an unknown release fails" $rc 1
 expect "unknown release: message" "$o" "no Mettle release v0.99.5"

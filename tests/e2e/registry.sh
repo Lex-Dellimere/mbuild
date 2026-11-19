@@ -107,7 +107,11 @@ suite() { # MODE
     MBUILD_REGISTRY="$H" run index "$T/app" default strutil
     grep -v '^warning' "$S/last.out" | sed 1d >"$S/idx-http"
     check "http index equals the path one ($mode)" cmp -s "$S/idx-path" "$S/idx-http"
-    check "http warns once ($mode)" count_is "uses http://" 1
+    check "loopback http is allowed quietly ($mode)" count_is "warning" 0
+    MBUILD_REGISTRY="http://example.com/reg" run index "$T/app" default strutil
+    check "http to another host is refused ($mode)" eval 'has "ok=0" && has "downloads must use https://"'
+    MBUILD_REGISTRY="http://127.0.0.1@example.com/reg" run index "$T/app" default strutil
+    check "http with a loopback userinfo is refused ($mode)" has "downloads must use https://"
     MBUILD_REGISTRY="$H" run index "$T/app" default nope
     check "missing package, http: curl exit 22 ($mode)" eval 'has "ok=1 found=0" && has "kind missing" && has "404"'
   else

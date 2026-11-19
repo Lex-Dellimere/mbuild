@@ -357,18 +357,18 @@ fn rgx_get(p: Project*, registry: string, url: string, rel: string, dest: string
       return false;
     }
   } else {
-    if (s_starts(url, "http://") && rgx_once("http " + registry)) {
-      warn("registry " + registry + " uses http://; locked builds are still checked against mbuild.lock, new versions are not");
+    var refused: string = net_url_refusal(url + "/" + rel);
+    if (slen(refused) > 0) {
+      var why: string = "registry " + registry + ": " + refused;
+      rgx_set("other", why);
+      return false;
     }
     var curl: Tool = rgx_host_tool("curl", "MBUILD_CURL");
     if (!tool_found(curl)) {
       rgx_set("other", "cannot find `curl` (needed to download from registry " + registry + ")\n  help: install curl and put it on PATH, or set MBUILD_CURL to its path");
       return false;
     }
-    var c: Cmd* = cmd_new(curl);
-    cmd_arg(c, "-fsSL");
-    cmd_arg(c, "--retry");
-    cmd_arg(c, "2");
+    var c: Cmd* = net_curl_cmd(curl, url);
     cmd_arg(c, "--netrc-optional");
     cmd_arg(c, "-o");
     cmd_path(c, tmp);

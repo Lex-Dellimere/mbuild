@@ -976,13 +976,6 @@ fn tcx_curl() -> Tool {
   return tcx_host_tool("curl", "MBUILD_CURL");
 }
 
-fn tcx_curl_cmd(t: Tool) -> Cmd* {
-  var c: Cmd* = cmd_new(t);
-  cmd_arg(c, "-fsSL");
-  cmd_arg(c, "--retry");
-  cmd_arg(c, "2");
-  return c;
-}
 
 // The first JSON string `"key": "..."` at or after from: at = -1 when there
 // is none, val = "" when it is not a string (null).
@@ -1046,7 +1039,13 @@ fn tcx_release(tag: string) -> TcxRelease {
     what = "releases/latest";
   }
   var url: string = tcx_api() + "/" + what;
-  var c: Cmd* = tcx_curl_cmd(curl);
+  var refused: string = net_url_refusal(url);
+  if (slen(refused) > 0) {
+    rel.soft = false;
+    tcx_set_err(refused, "MBUILD_METTLE_API must be an https:// URL");
+    return rel;
+  }
+  var c: Cmd* = net_curl_cmd(curl, url);
   cmd_arg(c, "-H");
   cmd_arg(c, "Accept: application/vnd.github+json");
   cmd_arg(c, url);
@@ -1088,6 +1087,12 @@ fn tcx_release(tag: string) -> TcxRelease {
   }
   if (slen(rel.url) == 0) {
     tcx_set_err("Mettle " + t.val + " has no " + asset, "see " + tcx_releases_page());
+    return rel;
+  }
+  var bad_url: string = net_url_refusal(rel.url);
+  if (slen(bad_url) > 0) {
+    rel.url = s_empty();
+    tcx_set_err(bad_url, "the release's download link must be https://");
     return rel;
   }
   rel.tag = tcx_norm(t.val);
@@ -1272,14 +1277,23 @@ fn tcx_install_release(rel: TcxRelease) -> bool {
     tcx_tool_missing("cannot download Mettle " + rel.tag, "curl", "MBUILD_CURL", "install curl");
     return false;
   }
+  if (!s_starts(rel.digest, "sha256:")) {
+    var why: string = "the release lists no sha256 for " + p_base(rel.url) + "; refusing to install a compiler that cannot be verified";
+    tcx_set_err(why, "install a source checkout with --from DIR, or point METTLE at a compiler you trust");
+    return false;
+  }
   var tmp: string = tcx_tmp(rel.tag);
   var unpack: string = tmp + "/x";
   if (!fs_mkdirs(unpack)) {
     tcx_set_err("cannot create " + unpack, "check that " + tcx_root() + " is writable");
     return false;
   }
-  var archive: string = tmp + "/" + p_base(rel.url);
-  var c: Cmd* = tcx_curl_cmd(curl);
+  var aname: string = p_base(rel.url);
+  if (slen(aname) == 0 || s_starts(aname, ".")) {
+    aname = "mettle-download";
+  }
+  var archive: string = tmp + "/" + aname;
+  var c: Cmd* = net_curl_cmd(curl, rel.url);
   cmd_arg(c, "-o");
   cmd_path(c, archive);
   cmd_arg(c, "-w");
@@ -1292,16 +1306,12 @@ fn tcx_install_release(rel: TcxRelease) -> bool {
     tcx_download_failed(rel.url, s_trim(got.out));
     return false;
   }
-  if (s_starts(rel.digest, "sha256:")) {
-    var want: string = s_lower(s_from(rel.digest, 7));
-    var have: string = sha_file(archive);
-    if (!s_eq(want, have)) {
-      sys_remove_tree(tmp);
-      tcx_set_err(p_base(archive) + " does not match the release's sha256 (got " + have + ", the release lists " + want + ")", "the download is damaged or was altered; nothing was installed");
-      return false;
-    }
-  } else {
-    note("the release lists no sha256 for " + p_base(archive) + "; it is not verified");
+  var want: string = s_lower(s_from(rel.digest, 7));
+  var have: string = sha_file(archive);
+  if (!s_eq(want, have)) {
+    sys_remove_tree(tmp);
+    tcx_set_err(p_base(archive) + " does not match the release's sha256 (got " + have + ", the release lists " + want + ")", "the download is damaged or was altered; nothing was installed");
+    return false;
   }
   if (!tcx_extract(archive, unpack, sys_os())) {
     sys_remove_tree(tmp);

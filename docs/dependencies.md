@@ -398,7 +398,7 @@ Declare more in `fn project()`; they're searched in call order, then
   mb_registry("mine", "../myreg");
 ```
 
-A URL is `https://...`, `http://...` (with a warning), `file:///abs/dir`,
+A URL is `https://...` (`http://` only for localhost), `file:///abs/dir`,
 or a plain path (relative to the project root).
 
 A package comes from the registry `mb_dep_from` names, else the first one

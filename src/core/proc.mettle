@@ -52,6 +52,91 @@ export fn proc_capture_all(c: Cmd*) -> Captured {
   return sys_capture(c, true);
 }
 
+// ---------------------------------------------------------------------------
+// Downloads: https only (plain http just for this machine), through curl
+// ---------------------------------------------------------------------------
+
+// The host of an http(s) URL, lowercased, without port or brackets; "" when
+// the authority holds credentials (user@host) or is empty.
+fn procx_url_host(url: string) -> string {
+  var at: int64 = s_find_byte(url, 58);
+  if (at < 0 || !s_starts(s_from(url, at), "://")) {
+    return s_empty();
+  }
+  var rest: string = s_from(url, at + 3);
+  var end: int64 = 0;
+  while (end < slen(rest)) {
+    var c: int32 = s_byte(rest, end);
+    if (c == 47 || c == 63 || c == 35) {
+      break;
+    }
+    end = end + 1;
+  }
+  var auth: string = s_lower(s_sub(rest, 0, end));
+  if (slen(auth) == 0 || s_find_byte(auth, 64) >= 0) {
+    return s_empty();
+  }
+  if (s_starts(auth, "[")) {
+    var close: int64 = s_find_byte(auth, 93);
+    if (close < 0) {
+      return s_empty();
+    }
+    return s_sub(auth, 1, close);
+  }
+  var colon: int64 = s_find_byte(auth, 58);
+  if (colon >= 0) {
+    return s_sub(auth, 0, colon);
+  }
+  return auth;
+}
+
+fn procx_is_loopback(url: string) -> bool {
+  var h: string = procx_url_host(url);
+  return s_eq(h, "localhost") || s_eq(h, "127.0.0.1") || s_eq(h, "::1");
+}
+
+// "" when mbuild may download from url, else why not (one line).
+export fn net_url_refusal(url: string) -> string {
+  var l: string = s_lower(url);
+  if (s_starts(l, "https://")) {
+    if (slen(procx_url_host(url)) == 0) {
+      return url + " has no host, or carries credentials (put them in ~/.netrc)";
+    }
+    return s_empty();
+  }
+  if (s_starts(l, "http://")) {
+    if (procx_is_loopback(url)) {
+      return s_empty();
+    }
+    return "refusing " + url + ": downloads must use https:// (plain http is only allowed for localhost)";
+  }
+  return "refusing " + url + ": not an https:// URL";
+}
+
+// A curl command for url: fails on HTTP errors, follows redirects to https
+// only, gives up on a stalled or endless transfer. The caller adds -o and the URL.
+export fn net_curl_cmd(curl: Tool, url: string) -> Cmd* {
+  var c: Cmd* = cmd_new(curl);
+  cmd_arg(c, "-fsSL");
+  cmd_arg(c, "--proto");
+  if (s_starts(s_lower(url), "http://")) {
+    cmd_arg(c, "=http,https");
+  } else {
+    cmd_arg(c, "=https");
+  }
+  cmd_arg(c, "--proto-redir");
+  cmd_arg(c, "=https");
+  cmd_arg(c, "--max-redirs");
+  cmd_arg(c, "5");
+  cmd_arg(c, "--connect-timeout");
+  cmd_arg(c, "30");
+  cmd_arg(c, "--max-time");
+  cmd_arg(c, "900");
+  cmd_arg(c, "--retry");
+  cmd_arg(c, "2");
+  return c;
+}
+
 // proc_run stopped after ms (0: no limit); *timed_out when it was.
 export fn proc_run_timeout(c: Cmd*, ms: int64, timed_out: bool*) -> int32 {
   verbose(cmd_display(c));
