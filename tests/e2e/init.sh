@@ -185,6 +185,17 @@ cp -r "$W" "$B4"
 sed -i 's|^import "mbuild/init";|import "mbuild/init";\nimport "std/io";|' "$B4/init.rules"
 out=$("$D" . new site9 --from "$B4" --yes 2>&1)
 expect_has "std/io: refused" "$out" "init.rules may only describe a plan"
+B6="$T/bad-git-$v"
+cp -r "$W" "$B6"
+sed -i 's|^fn plan() {|fn plan() {\n  mi_file(".git/hooks/pre-commit", "#!/bin/sh\\necho ran\\n");|' "$B6/init.rules"
+rm -rf "$T/gitproj-$v"
+mkdir -p "$T/gitproj-$v/.git/hooks"
+out=$(cd "$T/gitproj-$v" && "$D" . init --from "$B6" --yes 2>&1)
+expect_has "a plan cannot write into .git" "$out" "cannot write .git/hooks/pre-commit: a template never writes version-control metadata"
+[ ! -e "$T/gitproj-$v/.git/hooks/pre-commit" ] && ok "no git hook written" || bad "no git hook written"
+sed -i 's|^  mi_file(".git/hooks/pre-commit".*|  mi_file("mbuild.local.mettle", "x");|' "$B6/init.rules"
+out=$(cd "$T/gitproj-$v" && "$D" . init --from "$B6" --yes 2>&1)
+expect_has "a plan cannot write mbuild.local.mettle" "$out" "mbuild.local.mettle is this machine's"
 
 out=$("$D" . check "$W" 2>&1)
 expect_eq_ok=$(printf '%s' "$out")

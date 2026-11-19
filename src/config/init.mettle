@@ -187,9 +187,16 @@ fn inx_bad_path(p: string) -> string {
     if (s_eq(part, "..")) {
       return "it leaves the project";
     }
+    var lp: string = s_lower(part);
+    if (s_eq(lp, ".git") || s_eq(lp, ".hg") || s_eq(lp, ".svn") || s_eq(lp, ".jj")) {
+      return "a template never writes version-control metadata (hooks there would run code)";
+    }
     i = i + 1;
   }
   var c: string = p_clean(p);
+  if (s_eq(s_lower(c), "mbuild.local.mettle")) {
+    return "mbuild.local.mettle is this machine's, not a template's";
+  }
   if (s_eq(c, ".mbuild") || s_starts(c, ".mbuild/") || s_eq(c, "build") || s_starts(c, "build/")) {
     return "mbuild owns .mbuild/ and build/";
   }
