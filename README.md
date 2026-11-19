@@ -229,6 +229,7 @@ flags that work everywhere: `-v` (show every command), `-q`, `--offline`, `--loc
 - [docs/platforms.md](docs/platforms.md): linux, windows, wine, compilers, env vars
 - [docs/incremental.md](docs/incremental.md): what triggers a rebuild
 - [examples/live](examples/live): a program you patch while it runs, crashes included
+- [SECURITY.md](SECURITY.md): reporting a vulnerability, and what code mbuild runs
 
 ## building and testing mbuild itself
 
