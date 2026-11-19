@@ -1,0 +1,62 @@
+// mbuild/init_linux: init.rules run under a seccomp filter. mbuild's check
+// keeps extern, syscall and asm out of the rules, but raw pointers could
+// still reach libc; the filter leaves only memory, writing the plan file
+// and exiting, so no file, process or network access is possible at all.
+
+// One sock_filter (code, jt, jf, k) packed little-endian into a word.
+fn mii_bpf(code: uint64, jt: uint64, jf: uint64, k: uint64) -> uint64 {
+  return code | (jt << 16) | (jf << 24) | (k << 32);
+}
+
+// True when the filter is in place.
+export fn mii_sandbox() -> bool {
+  var allow: int64[24];
+  allow[0] = 0;     // read
+  allow[1] = 1;     // write
+  allow[2] = 3;     // close
+  allow[3] = 5;     // fstat
+  allow[4] = 8;     // lseek
+  allow[5] = 9;     // mmap
+  allow[6] = 10;    // mprotect
+  allow[7] = 11;    // munmap
+  allow[8] = 12;    // brk
+  allow[9] = 13;    // rt_sigaction
+  allow[10] = 14;   // rt_sigprocmask
+  allow[11] = 15;   // rt_sigreturn
+  allow[12] = 20;   // writev
+  allow[13] = 25;   // mremap
+  allow[14] = 28;   // madvise
+  allow[15] = 39;   // getpid
+  allow[16] = 60;   // exit
+  allow[17] = 131;  // sigaltstack
+  allow[18] = 186;  // gettid
+  allow[19] = 202;  // futex
+  allow[20] = 228;  // clock_gettime
+  allow[21] = 231;  // exit_group
+  allow[22] = 234;  // tgkill
+  allow[23] = 262;  // newfstatat
+  var n: int64 = 24;
+  var f: uint64[32];
+  f[0] = mii_bpf(32, 0, 0, 4);                  // ld arch
+  f[1] = mii_bpf(21, 1, 0, 3221225534);         // jeq AUDIT_ARCH_X86_64
+  f[2] = mii_bpf(6, 0, 0, 2147483648);          // ret KILL_PROCESS
+  f[3] = mii_bpf(32, 0, 0, 0);                  // ld nr
+  f[4] = mii_bpf(53, (uint64)(n + 2), 0, 1073741824); // jge x32 -> kill
+  var i: int64 = 0;
+  while (i < n) {
+    f[5 + i] = mii_bpf(21, (uint64)(n - i), 0, (uint64)allow[i]); // jeq nr -> allow
+    i = i + 1;
+  }
+  f[5 + n] = mii_bpf(6, 0, 0, 327681);          // ret ERRNO(EPERM)
+  f[6 + n] = mii_bpf(6, 0, 0, 2147418112);      // ret ALLOW
+  f[7 + n] = mii_bpf(6, 0, 0, 2147483648);      // ret KILL_PROCESS
+  var prog: uint64[2];
+  prog[0] = (uint64)(8 + n);
+  prog[1] = (uint64)&f[0];
+  if (syscall(157, 38, 1, 0, 0, 0) == 0 && syscall(157, 22, 2, &prog[0], 0, 0) == 0) { // no_new_privs, seccomp filter
+    return true;
+  }
+  var msg: string = "mbuild: cannot sandbox init.rules: this kernel refused a seccomp filter\n";
+  syscall(1, 2, msg.chars, (int64)msg.length);
+  return false;
+}

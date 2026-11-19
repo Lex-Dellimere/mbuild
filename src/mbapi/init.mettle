@@ -5,6 +5,9 @@
 // and bodies and the next note, @@name@@ is replaced by an option's value or
 // by project, package, package_version or mbuild_version; @@@@ is a literal @@.
 
+import "init_linux" if linux;
+import "init_windows" if windows;
+
 // The only C names the rules may reach: they write the plan file.
 extern fn mii_strlen(s: cstring) -> int64 = "strlen";
 extern fn mii_malloc(n: int64) -> uint8* = "malloc";
@@ -16,6 +19,7 @@ var mii_argc: int32 = 0;
 var mii_argv: cstring* = (cstring*)0;
 var mii_phase: string = "";
 var mii_out: string = "";
+var mii_fp: cstring = (cstring)0;
 
 // Declares an option (in fn options()): given with --opt NAME=VALUE or at a prompt.
 export fn mi_option(name: string, dflt: string, help: string) {
@@ -120,11 +124,15 @@ export fn mi_next(text: string) {
   mii_rec1("next", text);
 }
 
-// Driver plumbing: argv is MODE OUT [NAME=VALUE...].
+// Driver plumbing: argv is MODE OUT [NAME=VALUE...]. The plan file is
+// opened first, then the sandbox closes everything else off.
 export fn mii_start(argc: int32, argv: cstring*) {
   mii_argc = argc;
   mii_argv = argv;
-  if (argc > 1) {
+  if (argc > 2) {
+    mii_fp = mii_fopen(argv[2], mii_cstr("wb"));
+  }
+  if (argc > 1 && mii_fp != (cstring)0 && mii_sandbox()) {
     mii_phase = mii_str(argv[1]);
   }
 }
@@ -135,11 +143,8 @@ export fn mii_mode(m: string) -> bool {
 
 // Writes the records; 0 on success.
 export fn mii_finish() -> int32 {
-  if (mii_argc < 3) {
-    return 2;
-  }
-  var fp: cstring = mii_fopen(mii_argv[2], mii_cstr("wb"));
-  if (fp == 0) {
+  var fp: cstring = mii_fp;
+  if (fp == (cstring)0) {
     return 2;
   }
   var n: int64 = (int64)mii_out.length;

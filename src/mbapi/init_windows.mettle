@@ -1,0 +1,6 @@
+// mbuild/init_windows: no sandbox on Windows; init.rules rely on mbuild's
+// static check alone there.
+
+export fn mii_sandbox() -> bool {
+  return true;
+}

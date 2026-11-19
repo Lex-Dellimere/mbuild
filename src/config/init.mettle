@@ -424,6 +424,11 @@ fn inx_first_use(text: string, words: StrList*) -> string {
   return sl_get(uses, 0);
 }
 
+// mbuild's own init API files (init.mettle and its platform halves).
+fn inx_is_api(f: string, api_dir: string) -> bool {
+  return s_eq(p_dir(f), api_dir) && (s_eq(p_base(f), "init.mettle") || s_eq(p_base(f), "init_linux.mettle") || s_eq(p_base(f), "init_windows.mettle"));
+}
+
 // Writes the API and driver files and checks that the driver's import graph
 // declares no extern, syscall or asm outside the API and embeds nothing from
 // outside the package. Nothing is compiled.
@@ -439,6 +444,8 @@ fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
     return inx_err("cannot create " + src->driver_dir, "");
   }
   fs_write_if_changed(api, ini_api_text());
+  fs_write_if_changed(src->driver_dir + "/api/mbuild/init_linux.mettle", import_str "../mbapi/init_linux.mettle");
+  fs_write_if_changed(src->driver_dir + "/api/mbuild/init_windows.mettle", import_str "../mbapi/init_windows.mettle");
   src->driver = inx_driver_text(rules, s_contains(rf.data, "fn options("));
   fs_write_if_changed(driver, src->driver);
   var m: Mettle* = tc_select(p, sys_os());
@@ -448,6 +455,7 @@ fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
   c->cwd = src->driver_dir;
   var g: Graph* = graph_build(c, driver);
   var api_real: string = s_replace_byte(sys_realpath(api), 92, 47);
+  var api_dir: string = p_dir(api_real);
   var pkg_real: string = s_replace_byte(sys_realpath(src->dir), 92, 47);
   var why: string = src->label + ": init.rules may only describe a plan: ";
   var i: int64 = 0;
@@ -458,7 +466,7 @@ fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
   i = 0;
   while (i < g->externs->len) {
     var ef: string = sl_get(g->extern_files, i);
-    if (!s_eq(ef, api_real)) {
+    if (!inx_is_api(ef, api_dir)) {
       return inx_err(why + inx_rel_label(src, ef) + ":" + sl_get(g->extern_lines, i) + " declares extern fn " + sl_get(g->externs, i), "");
     }
     i = i + 1;
@@ -478,7 +486,7 @@ fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
   while (i < g->files->len) {
     var f: string = sl_get(g->files, i);
     i = i + 1;
-    if (s_eq(f, api_real)) {
+    if (inx_is_api(f, api_dir)) {
       continue;
     }
     var r: FsRead = fs_read(f);

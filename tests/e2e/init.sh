@@ -185,6 +185,29 @@ cp -r "$W" "$B4"
 sed -i 's|^import "mbuild/init";|import "mbuild/init";\nimport "std/io";|' "$B4/init.rules"
 out=$("$D" . new site9 --from "$B4" --yes 2>&1)
 expect_has "std/io: refused" "$out" "init.rules may only describe a plan"
+# raw pointers can reach libc past the static check; the seccomp filter stops that
+SB="$T/sandbox-$v"
+mkdir -p "$SB"
+cp "$here/src/mbapi/init_linux.mettle" "$SB/"
+cat > "$SB/t.mettle" <<'EOF'
+import "std/io";
+import "init_linux";
+extern fn t_fopen(p: cstring, m: cstring) -> cstring = "fopen";
+extern fn t_system(c: cstring) -> int32 = "system";
+fn main() -> int32 {
+  if (!mii_sandbox()) { return 3; }
+  if (t_fopen("/etc/hostname", "r") != (cstring)0) { return 4; }
+  var big: string = "xxxxxxxxxx";
+  var i: int32 = 0;
+  while (i < 17) { big = big + big; i = i + 1; }
+  print("sandboxed {t_system(\"true\")} {big.length}\n");
+  return 0;
+}
+EOF
+flag=""; [ "$v" = release ] && flag="--release"
+out=$(cd "$SB" && "$METTLE" --build $flag t.mettle -o t 2>&1 && ./t 2>&1)
+expect_line "init sandbox: no files, no processes, memory still works" "$out" "sandboxed 127 1310720"
+expect_no "init sandbox: builds without warnings" "$out" "warning"
 B6="$T/bad-git-$v"
 cp -r "$W" "$B6"
 sed -i 's|^fn plan() {|fn plan() {\n  mi_file(".git/hooks/pre-commit", "#!/bin/sh\\necho ran\\n");|' "$B6/init.rules"
