@@ -103,7 +103,7 @@ A profile with `cflags` keeps its own objects, so switching between debug and
 release doesn't recompile anything twice. A dependency's own profiles are
 ignored, and its `mb_c_flags` may not make the compiler run other programs
 (`-fplugin`, `-B`, `-wrapper`, `-specs`, `@file`, `-Xclang`) or write
-elsewhere (`-o`, `-MF`, `-save-temps`): building never runs dependency code.
+elsewhere (`-o`, `-MF`, `-save-temps`).
 
 ## Existing libraries
 
