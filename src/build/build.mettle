@@ -4001,15 +4001,20 @@ fn bt_spec(pl: BtPlan*, spec: string) {
     } else if (t->kind == BT_PROG) {
       sl_add_uniq(prog_names, t->name);
     } else if (t->kind == BT_CMD) {
-      var w: SvcWords = svc_split(t->cmdline);
-      if (w.ok && w.words->len > 0) {
-        var w0: string = sl_get(w.words, 0);
-        if (sl_has(all_prog_names, w0)) {
-          sl_add_uniq(prog_names, w0);
-        } else if (sl_has(proj_bins, w0) || sl_has(dep_bins, w0)) {
-          sl_add_uniq(bin_names, w0);
+      bt_first_word(t->cmdline, all_prog_names, proj_bins, dep_bins, prog_names, bin_names);
+    }
+    if (slen(c->skip) == 0) {
+      // the programs of its fixtures
+      var svs: StrList* = s_split(bt_get(p, t->name, "services"), 44);
+      var q: int64 = 0;
+      while (q < svs->len) {
+        var sv: ServiceSpec* = man_service(p->man, s_trim(sl_get(svs, q)));
+        if (sv != (ServiceSpec*)0) {
+          bt_first_word(sv->cmd, all_prog_names, proj_bins, dep_bins, prog_names, bin_names);
         }
+        q = q + 1;
       }
+      free(svs);
     }
     i = i + 1;
   }
@@ -4095,6 +4100,21 @@ fn bt_spec(pl: BtPlan*, spec: string) {
   p->opts->sets = saved_sets;
   p->opts->profile = saved_prof;
   p->opts->release = saved_rel;
+}
+
+// The first word of cmdline into progs or bins when it names a test program
+// or a bin of this project or of mb_dep_bin.
+fn bt_first_word(cmdline: string, all_progs: StrList*, proj_bins: StrList*, dep_bins: StrList*, progs: StrList*, bins: StrList*) {
+  var w: SvcWords = svc_split(cmdline);
+  if (w.ok && w.words->len > 0) {
+    var w0: string = sl_get(w.words, 0);
+    if (sl_has(all_progs, w0)) {
+      sl_add_uniq(progs, w0);
+    } else if (sl_has(proj_bins, w0) || sl_has(dep_bins, w0)) {
+      sl_add_uniq(bins, w0);
+    }
+  }
+  free(w.words);
 }
 
 // The unit of an @test file cell, by its place in fcells.
@@ -4224,17 +4244,26 @@ fn bt_runs(pl: BtPlan*) {
     var env: StrList* = man_test_env(p->man, t->name);
     defer free(env);
     var ms: int64 = bt_timeout_ms(p, t->name, c->emulated);
+    var svs: StrList* = bt_svc_names(p, t->name);
     var k: int64 = 1;
     while (k <= t->repeat) {
       var r: TrnRun* = trn_run_new(c->t, i - 1, k);
+      r->dir = bt_run_dir(p, c, t->name, k);
+      var vars: StrList* = sl_of("MBUILD_ROOT=" + p->root);
+      sl_push(vars, "MBUILD_TEST_TMP=" + r->dir + "/tmp");
+      sl_push(vars, "MBUILD_TEST_OUT=" + r->dir + "/out");
+      if (svs->len > 0) {
+        bt_fixtures(p, c, r, svs, vars);
+      }
       var cmd: Cmd* = cmd_new(c->cmd->tool);
-      cmd_args(cmd, c->cmd->args);
+      cmd_args(cmd, svc_expand_all(sl_copy(c->cmd->args), vars));
       if (t->kind == BT_PROG && args.ok) {
-        cmd_args(cmd, args.words);
+        cmd_args(cmd, svc_expand_all(sl_copy(args.words), vars));
       }
       sl_extend(cmd->env, c->cmd->env);
+      svc_port_env(cmd->env, vars);
+      free(vars);
       r->cmd = cmd;
-      r->dir = bt_run_dir(p, c, t->name, k);
       r->timeout_ms = ms;
       r->serial = serial;
       r->console = c->console;
@@ -4249,7 +4278,93 @@ fn bt_runs(pl: BtPlan*) {
       t->runs = t->runs + 1;
       k = k + 1;
     }
+    free(svs);
   }
+}
+
+// The services a test names.
+fn bt_svc_names(p: Project*, name: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var parts: StrList* = s_split(bt_get(p, name, "services"), 44);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var sv: string = s_trim(sl_get(parts, i));
+    if (slen(sv) > 0) {
+      sl_push(l, sv);
+    }
+    i = i + 1;
+  }
+  free(parts);
+  return l;
+}
+
+// A run's fixtures: ports (auto ones from the pool, into vars), words
+// expanded, programs resolved in the cell, cwd the run's tmp/.
+fn bt_fixtures(p: Project*, c: BtCell*, r: TrnRun*, svs: StrList*, vars: StrList*) {
+  var m: Manifest* = p->man;
+  var ports: StrList* = svc_ports_for(p, m, svs, vars);
+  defer free(ports);
+  var progs: StrList* = bx_bin_names(bx_test_bins(p));
+  defer free(progs);
+  var bins: StrList* = bx_bin_names(build_bins(p));
+  defer free(bins);
+  var ext: string = target_exe_ext(c->target);
+  r->svcs = (TrnSvc*)malloc((m->nservices + 1) * sizeof(TrnSvc));
+  r->nsvcs = 0;
+  var i: int64 = 0;
+  while (i < m->nservices) {
+    var spec: ServiceSpec* = &m->services[i];
+    i = i + 1;
+    if (!sl_has(svs, spec->name)) {
+      continue;
+    }
+    var sv: TrnSvc* = &r->svcs[r->nsvcs];
+    r->nsvcs = r->nsvcs + 1;
+    sv->name = spec->name;
+    sv->port = s_to_int(sl_get(ports, i - 1));
+    sv->check_port = !spec->auto_port;
+    sv->wait_ms = spec->wait_ms;
+    sv->log = r->dir + "/service-" + spec->name + ".log";
+    sv->cmd = (Cmd*)0;
+    var w: SvcWords = svc_split(spec->cmd);
+    var words: StrList* = svc_expand_all(w.words, vars);
+    sv->prog = sl_get(words, 0);
+    var t: Tool = tool_none();
+    if (sl_has(progs, sv->prog)) {
+      t.path = p->state_dir + "/test-bins/" + c->target + "/" + c->profile + "/" + sv->prog + ext;
+    } else if (sl_has(bins, sv->prog) || bt_is_dep_bin(m, sv->prog)) {
+      t.path = p->root + "/build/" + c->target + "/" + c->profile + "/" + sv->prog + ext;
+    } else if (s_find_byte(sv->prog, 47) >= 0 || s_find_byte(sv->prog, 92) >= 0) {
+      t.path = p_join(p->root, sv->prog);
+    } else {
+      t = sys_find_tool(sv->prog);
+    }
+    if (tool_found(t)) {
+      var sc: Cmd* = cmd_new(t);
+      var k: int64 = 1;
+      while (k < words->len) {
+        cmd_arg(sc, sl_get(words, k));
+        k = k + 1;
+      }
+      sc->cwd = r->dir + "/tmp";
+      sl_extend(sc->env, spec->env);
+      sl_extend(sc->env, vars);
+      sv->cmd = sc;
+    }
+    free(words);
+  }
+}
+
+fn bt_is_dep_bin(m: Manifest*, name: string) -> bool {
+  var i: int64 = 0;
+  while (i < m->dep_bins->len) {
+    var e: string = sl_get(m->dep_bins, i);
+    if (s_eq(s_from(e, s_find_byte(e, 61) + 1), name)) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
 }
 
 // Why a run failed, "" when it passed; its checks.
@@ -4440,6 +4555,13 @@ fn bt_ended(arg: rawptr, i: int64) -> bool {
   } else if (!pl->keep) {
     sys_remove_tree(r->dir);
   }
+  var q: int64 = 0;
+  while (q < r->nsvcs) {
+    if (!r->svcs[q].check_port && r->svcs[q].port > 0) {
+      svc_port_release(r->svcs[q].port);
+    }
+    q = q + 1;
+  }
   t->ended = t->ended + 1;
   bt_print_ready(pl);
   return true;
@@ -4484,6 +4606,12 @@ fn bt_failures(pl: BtPlan*) {
     if (slen(s_trim(r->err)) > 0) {
       say("stderr:");
       print(trn_tail(r->err, 40, "  "));
+    }
+    if (slen(r->svc_why) > 0 && r->nsvcs_up > 0) {
+      var sv: TrnSvc* = &r->svcs[r->nsvcs_up - 1];
+      var lr: FsRead = fs_read(sv->log);
+      say("service " + sv->name + " (" + bx_show(sv->log) + "):");
+      print(trn_tail(lr.data, 20, "  "));
     }
     say("kept: " + bx_show(r->dir));
   }
@@ -4890,6 +5018,7 @@ export fn build_cmd_test(p: Project*) -> int32 {
   if (rc != 130) {
     rc = bt_native(pl);
   }
+  svc_ports_release_all();
   bt_print_ready(pl);
   if (rc == 130) {
     say("test result: " + red("INTERRUPTED"));

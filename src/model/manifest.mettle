@@ -52,6 +52,7 @@ export struct ServiceSpec {
   name: string;
   cmd: string;
   port: int64;        // 0 = don't wait for one
+  auto_port: bool;    // mb_service_port(name, 0): a free port per start
   wait_ms: int64;
   env: StrList*;      // "K=V"
   line: int64;
@@ -1610,7 +1611,8 @@ fn mnx_services(m: Manifest*) {
     sv.name = s_from(sec, 8);
     sv.line = mnx_section_line(m->doc, sec);
     sv.cmd = mnx_str(m, sec, "cmd");
-    sv.port = mnx_int_key(m, sec, "port", 0, 1, 65535, "mb_service_port(\"" + sv.name + "\", ...)");
+    sv.port = mnx_int_key(m, sec, "port", 0, 0, 65535, "mb_service_port(\"" + sv.name + "\", ...)");
+    sv.auto_port = toml_get(m->doc, sec, "port") != (TomlValue*)0 && sv.port == 0;
     sv.wait_ms = mnx_int_key(m, sec, "wait", 10000, 1, 3600000, "mb_service_wait(\"" + sv.name + "\", ...)");
     sv.env = mnx_strs(m, sec, "env");
     if (!mnx_lower_name(sv.name, 64, 45)) {

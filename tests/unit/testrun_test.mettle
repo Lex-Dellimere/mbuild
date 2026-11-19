@@ -7,6 +7,7 @@ import "std/io";
 import "../../src/core/base";
 import "../../src/build/testrun";
 import "../../src/build/testnative";
+import "../../src/build/services";
 
 var g_pass: int64 = 0;
 var g_fail: int64 = 0;
@@ -80,8 +81,18 @@ fn test_native() {
   t_eq("passed lines", s_int(tnv_passed("test a ... ok\ntest b ... FAILED (returned 2)\ntest c ... ok\n")), "2");
 }
 
+fn test_services() {
+  var vars: StrList* = sl_of("MBUILD_PORT_DB=20001");
+  defer free(vars);
+  sl_push(vars, "MBUILD_TEST_TMP=/r/tmp");
+  t_eq("expand: known names", svc_expand("--port=$MBUILD_PORT_DB", vars) + " " + svc_expand("$MBUILD_TEST_TMP/db", vars), "--port=20001 /r/tmp/db");
+  t_eq("expand: nothing else", svc_expand("$HOME $MBUILD_PORT_DBX $ x$", vars), "$HOME $MBUILD_PORT_DBX $ x$");
+  t_eq("port variable", svc_port_var("db") + " " + svc_port_var("my-cache.2"), "MBUILD_PORT_DB MBUILD_PORT_MY_CACHE_2");
+}
+
 fn run_all() -> int64 {
   test_outputs();
+  test_services();
   test_native();
   say("");
   say("testrun_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");

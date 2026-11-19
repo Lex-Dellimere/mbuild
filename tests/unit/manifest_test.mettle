@@ -537,6 +537,8 @@ fn test_tests() {
   t_eq("tests: env needs =", man_of(pkg("[test.a]\nenv = [\"X\"]\n"))->error, "/p/mbuild.toml:4: mb_test_env(\"a\", \"X\"): expected NAME=VALUE");
   t_eq("tests: cmd name", man_of(pkg("[test-cmds]\n\"a b\" = \"x\"\n"))->error, "/p/mbuild.toml:4: test name 'a b' may only hold letters, digits, '_', '-' and '.' (at most 64, not starting with '.' or '-', no '..')");
   t_eq("tests: cmd without command", man_of(pkg("[test-cmds]\nl = \" \"\n"))->error, "/p/mbuild.toml:4: mb_test_cmd(\"l\", ...) has no command");
+  var ap: Manifest* = man_of(pkg("[service.db]\ncmd = \"meodb\"\nport = 0\n[service.fixed]\ncmd = \"x\"\nport = 5432\n[service.none]\ncmd = \"y\"\n"));
+  t_eq("services: port 0 is an auto port", ap->error + s_int((int64)ap->services[0].auto_port) + s_int((int64)ap->services[1].auto_port) + s_int((int64)ap->services[2].auto_port) + " " + s_int(ap->services[1].port), "100 5432");
   t_eq("tests: fractions", s_int(man_frac_ppm("0.001")) + " " + s_int(man_frac_ppm("1")) + " " + s_int(man_frac_ppm(".5")) + " " + s_int(man_frac_ppm("1.01")) + " " + s_int(man_frac_ppm("x")), "1000 1000000 500000 -1 -1");
 }
 

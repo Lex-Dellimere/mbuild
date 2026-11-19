@@ -9,11 +9,18 @@ import "testrun";
 import "../core/sys_linux" if linux;
 import "../../third_party/alph/sys/linux" if linux;
 import "../../third_party/alph/core/node" if linux;
+import "../../third_party/alph/net/port" if linux;
 
 const TRL_TAG_DONE: int64 = 220;     // a worker ended: arg = its run
 const TRL_TAG_SIGINT: int64 = 221;
 const TRL_TAG_TIMEOUT: int64 = 222;
 const TRL_TAG_KILL: int64 = 223;
+const TRL_TAG_DEADLINE: int64 = 224;  // a fixture's port did not open in time
+const TRL_TAG_STOP: int64 = 225;      // a fixture's grace after SIGTERM is over
+
+const TRL_SVC: int64 = 0;    // starting the fixtures
+const TRL_TEST: int64 = 1;
+const TRL_STOP: int64 = 2;   // stopping them, newest first
 
 struct TrlPool {
   runs: TrnRun**;
@@ -41,6 +48,14 @@ struct TrlWork {
   buf: uint8*;
   timer: int64;
   t0: int64;
+  phase: int64;
+  code: int64;        // the test's exit code, for after the fixtures stop
+  sh: int64*;         // fixture process handles while they run, else 0
+  spid: int64*;       // their pids (= groups)
+  started: int64;
+  stopping: int64;
+  waiter: int64;      // the port waiter, or 0
+  stimer: int64;      // a fixture's deadline or grace timer, or 0
 }
 
 // What h has now into b; false at its end (h closed).
@@ -73,8 +88,134 @@ fn trl_io(ctx: AlphCtx*, w: TrlWork*, h: int64) {
 }
 
 // The run is over: its outcome into the run, the pool told.
-fn trl_end(ctx: AlphCtx*, w: TrlWork*, code: int64) -> int64 {
+fn trl_done(ctx: AlphCtx*, w: TrlWork*) -> int64 {
   var r: TrnRun* = w->r;
+  r->code = w->code;
+  r->ms = sys_now_ms() - w->t0;
+  r->out = buf_take(w->out);
+  r->err = buf_take(w->err);
+  trn_save(r);
+  free(w->buf);
+  free(w->sh);
+  free(w->spid);
+  alph_send(ctx, alph_parent(ctx), TRL_TAG_DONE, w->index);
+  return alph_stop(ctx, ALPH_NORMAL);
+}
+
+fn trl_quiet(ctx: AlphCtx*, w: TrlWork*) {
+  if (w->waiter != 0) {
+    alph_exit_signal(ctx, w->waiter, ALPH_KILL);
+    w->waiter = 0;
+  }
+  if (w->stimer != 0) {
+    alph_cancel_timer(ctx, w->stimer);
+    w->stimer = 0;
+  }
+}
+
+// Stops the fixtures from the newest down, then ends the run.
+fn trl_stop_next(ctx: AlphCtx*, w: TrlWork*) -> int64 {
+  while (true) {
+    w->stopping = w->stopping - 1;
+    if (w->stopping < 0) {
+      return trl_done(ctx, w);
+    }
+    var i: int64 = w->stopping;
+    if (w->sh[i] != 0) {
+      syscall(ALPH_SYS_KILL, 0 - w->spid[i], ALPH_SIGTERM);
+      w->stimer = alph_start_timer(ctx, 2000, TRL_TAG_STOP, 0);
+      return ALPH_CONTINUE;
+    }
+    syscall(ALPH_SYS_KILL, 0 - w->spid[i], ALPH_SIGKILL);
+  }
+  return ALPH_CONTINUE;
+}
+
+fn trl_stop_all(ctx: AlphCtx*, w: TrlWork*, code: int64) -> int64 {
+  trl_quiet(ctx, w);
+  w->code = code;
+  w->phase = TRL_STOP;
+  w->stopping = w->started;
+  return trl_stop_next(ctx, w);
+}
+
+fn trl_svc_failed(ctx: AlphCtx*, w: TrlWork*, why: string) -> int64 {
+  w->r->svc_why = why;
+  return trl_stop_all(ctx, w, 1);
+}
+
+// The next fixture, or the test once all are up.
+fn trl_svc_next(ctx: AlphCtx*, w: TrlWork*) -> int64 {
+  var r: TrnRun* = w->r;
+  if (w->started == r->nsvcs) {
+    return trl_test_start(ctx, w);
+  }
+  var sv: TrnSvc* = &r->svcs[w->started];
+  if (sv->cmd == (Cmd*)0) {
+    return trl_svc_failed(ctx, w, "service " + sv->name + ": cannot find `" + sv->prog + "`");
+  }
+  if (sv->check_port && sv->port > 0 && !sys_port_free(sv->port)) {
+    return trl_svc_failed(ctx, w, "service " + sv->name + ": port " + s_int(sv->port) + " is already in use");
+  }
+  var h: int64 = sys_proc_start(ctx, sv->cmd, sv->log, false);
+  w->started = w->started + 1;
+  r->nsvcs_up = w->started;
+  if (h <= 0) {
+    return trl_svc_failed(ctx, w, "service " + sv->name + " exited (code 127) at once");
+  }
+  w->sh[w->started - 1] = h;
+  w->spid[w->started - 1] = alph_proc_os_pid(ctx, h);
+  if (sv->port > 0) {
+    w->waiter = alph_spawn_port_wait(ctx, alph_ip4(127, 0, 0, 1), sv->port, 20, (int64)1 << 40);
+    w->stimer = alph_start_timer(ctx, sv->wait_ms, TRL_TAG_DEADLINE, 0);
+    return ALPH_CONTINUE;
+  }
+  return trl_svc_next(ctx, w);
+}
+
+fn trl_test_start(ctx: AlphCtx*, w: TrlWork*) -> int64 {
+  var r: TrnRun* = w->r;
+  w->phase = TRL_TEST;
+  w->h = sys_proc_start_captured(ctx, r->cmd, &w->out_h, &w->err_h);
+  if (w->h <= 0) {
+    w->out_h = 0;
+    w->err_h = 0;
+    return trl_end(ctx, w, 127);
+  }
+  w->pid = alph_proc_os_pid(ctx, w->h);
+  alph_io_arm(ctx, w->out_h, ALPH_IO_IN);
+  alph_io_arm(ctx, w->err_h, ALPH_IO_IN);
+  if (r->timeout_ms > 0) {
+    w->timer = alph_start_timer(ctx, r->timeout_ms, TRL_TAG_TIMEOUT, 0);
+  }
+  return ALPH_CONTINUE;
+}
+
+// A fixture process ended.
+fn trl_svc_exit(ctx: AlphCtx*, w: TrlWork*, h: int64, code: int64) -> int64 {
+  var i: int64 = 0;
+  while (i < w->started) {
+    if (w->sh[i] == h) {
+      w->sh[i] = 0;
+      if (w->phase == TRL_SVC && i == w->started - 1 && w->waiter != 0) {
+        trl_quiet(ctx, w);
+        var sv: TrnSvc* = &w->r->svcs[i];
+        return trl_svc_failed(ctx, w, "service " + sv->name + " exited (code " + s_int(code) + ") before port " + s_int(sv->port) + " opened");
+      }
+      if (w->phase == TRL_STOP && i == w->stopping) {
+        trl_quiet(ctx, w);
+        syscall(ALPH_SYS_KILL, 0 - w->spid[i], ALPH_SIGKILL);
+        return trl_stop_next(ctx, w);
+      }
+      return ALPH_CONTINUE;
+    }
+    i = i + 1;
+  }
+  return ALPH_CONTINUE;
+}
+
+// The test ended: what it printed, what it left behind, then the fixtures.
+fn trl_end(ctx: AlphCtx*, w: TrlWork*, code: int64) -> int64 {
   if (w->timer != 0) {
     alph_cancel_timer(ctx, w->timer);
     w->timer = 0;
@@ -95,36 +236,37 @@ fn trl_end(ctx: AlphCtx*, w: TrlWork*, code: int64) -> int64 {
     // what the test forked and left behind
     syscall(ALPH_SYS_KILL, 0 - w->pid, ALPH_SIGKILL);
   }
-  r->code = code;
-  r->ms = sys_now_ms() - w->t0;
-  r->out = buf_take(w->out);
-  r->err = buf_take(w->err);
-  trn_save(r);
-  free(w->buf);
-  alph_send(ctx, alph_parent(ctx), TRL_TAG_DONE, w->index);
-  return alph_stop(ctx, ALPH_NORMAL);
+  w->h = 0;
+  return trl_stop_all(ctx, w, code);
 }
 
 fn trl_work(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
   var w: TrlWork* = (TrlWork*)ctx->state;
   var r: TrnRun* = w->r;
   if (m->tag == ALPH_TAG_INIT) {
+    alph_trap_exits(ctx, true);
     w->out = buf_new();
     w->err = buf_new();
     w->buf = (uint8*)malloc(8192);
     w->t0 = sys_now_ms();
-    w->h = sys_proc_start_captured(ctx, r->cmd, &w->out_h, &w->err_h);
-    if (w->h <= 0) {
-      w->out_h = 0;
-      w->err_h = 0;
-      return trl_end(ctx, w, 127);
+    w->sh = (int64*)malloc((r->nsvcs + 1) * 8);
+    w->spid = (int64*)malloc((r->nsvcs + 1) * 8);
+    memset((rawptr)w->sh, 0, (r->nsvcs + 1) * 8);
+    memset((rawptr)w->spid, 0, (r->nsvcs + 1) * 8);
+    w->phase = TRL_SVC;
+    return trl_svc_next(ctx, w);
+  } else if (m->tag == ALPH_TAG_PORT_READY && m->from == w->waiter && w->waiter != 0) {
+    if (m->arg == 1) {
+      trl_quiet(ctx, w);
+      return trl_svc_next(ctx, w);
     }
-    w->pid = alph_proc_os_pid(ctx, w->h);
-    alph_io_arm(ctx, w->out_h, ALPH_IO_IN);
-    alph_io_arm(ctx, w->err_h, ALPH_IO_IN);
-    if (r->timeout_ms > 0) {
-      w->timer = alph_start_timer(ctx, r->timeout_ms, TRL_TAG_TIMEOUT, 0);
-    }
+  } else if (m->tag == TRL_TAG_DEADLINE && m->ref == w->stimer && w->phase == TRL_SVC) {
+    w->stimer = 0;
+    var sv: TrnSvc* = &r->svcs[w->started - 1];
+    return trl_svc_failed(ctx, w, "service " + sv->name + ": port " + s_int(sv->port) + " not open after " + trn_secs(sv->wait_ms));
+  } else if (m->tag == TRL_TAG_STOP && m->ref == w->stimer && w->phase == TRL_STOP) {
+    w->stimer = 0;
+    syscall(ALPH_SYS_KILL, 0 - w->spid[w->stopping], ALPH_SIGKILL);
   } else if (m->tag == ALPH_TAG_IO) {
     trl_io(ctx, w, m->ref);
   } else if (m->tag == TRL_TAG_TIMEOUT && m->ref == w->timer) {
@@ -134,8 +276,10 @@ fn trl_work(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
   } else if (m->tag == TRL_TAG_KILL && m->ref == w->timer) {
     w->timer = 0;
     syscall(ALPH_SYS_KILL, 0 - w->pid, ALPH_SIGKILL);
-  } else if (m->tag == ALPH_TAG_PROC_EXIT && m->ref == w->h) {
+  } else if (m->tag == ALPH_TAG_PROC_EXIT && m->ref == w->h && w->h != 0) {
     return trl_end(ctx, w, m->arg);
+  } else if (m->tag == ALPH_TAG_PROC_EXIT) {
+    return trl_svc_exit(ctx, w, m->ref, m->arg);
   }
   return ALPH_CONTINUE;
 }
@@ -233,7 +377,15 @@ export fn trn_exec(runs: TrnRun**, n: int64, parallel: int64, arg: rawptr,
   s.arg = arg;
   s.workers = (int64*)malloc((n + 1) * 8);
   memset((rawptr)s.workers, 0, (n + 1) * 8);
-  var handles: int64 = s.parallel * 4 + 8;
+  var most: int64 = 0;
+  var k: int64 = 0;
+  while (k < n) {
+    if (runs[k]->nsvcs > most) {
+      most = runs[k]->nsvcs;
+    }
+    k = k + 1;
+  }
+  var handles: int64 = s.parallel * (4 + most) + 8;
   var code: int64 = sys_node_run((rawptr)&s, (int64)sizeof(TrlPool), handles, TRL_TAG_SIGINT, &trl_pool);
   free(s.workers);
   return (int32)code;

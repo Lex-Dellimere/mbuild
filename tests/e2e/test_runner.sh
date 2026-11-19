@@ -175,6 +175,55 @@ printf '@test fn more() -> int32 {\n  if (c_getpid() < 0) { return 1; }\n  retur
 mb test lib/cc.mettle --matrix=debug,release
 check "native: in every cell" sh -c 'grep -qF "Compiling test lib_cc__mbt (linux, release)" "$0/last.out" && grep -q "^test lib/cc.mettle (debug, release) ... ok" "$0/last.out"' "$S"
 
+# --- fixtures: mb_service per run, ports from the pool
+mkdir -p "$W/fix/src" "$W/fix/tools"
+cp "$here/tests/fixtures/svc_app.mettle" "$W/fix/src/main.mettle"
+cp "$here/tests/fixtures/svc_srv.mettle" "$W/fix/tools/srv.mettle"
+cat > "$W/fix/mbuild.mettle" <<'EOF2'
+import "mbuild/api";
+
+fn project() {
+  mb_package("fix", "0.1.0");
+  mb_bin("app", "src/main.mettle");
+  mb_bin("srv", "tools/srv.mettle");
+  mb_service("db", "srv $MBUILD_PORT_DB db.pid 100");
+  mb_service_port("db", 0);
+  mb_service("note", "sh -c 'echo $MBUILD_PORT_DB > port.txt; sleep 30'");
+  mb_test_cmd("live1", "app $MBUILD_PORT_DB 0");
+  mb_test_cmd("live2", "sh -c 'test -n \"$MBUILD_PORT_DB\" && exec \"$0\" \"$MBUILD_PORT_DB\" 0' build/linux/debug/app");
+  mb_test_cmd("slow", "sleep 30");
+  mb_test_set("live1", "services", "db");
+  mb_test_set("live2", "services", "db");
+  mb_test_set("slow", "services", "db");
+  mb_test_set("slow", "timeout", "1");
+}
+EOF2
+cd "$W/fix" || exit 1
+mb test live1 live2 slow -j 4
+check "fixtures: two tests at once, each with its db" sh -c 'grep -qF "test live1 (debug) ... ok" "$0/last.out" && grep -qF "test live2 (debug) ... ok" "$0/last.out"' "$S"
+p1=$(sed -n 's/^srv \([0-9]*\): listening$/\1/p' .mbuild/test-run/linux-debug/slow/1/service-db.log)
+check "fixtures: the test's timeout stops its fixture" sh -c 'grep -qF "test slow (debug) ... TIMEOUT 1.0s" "$0/last.out" && [ -s .mbuild/test-run/linux-debug/slow/1/tmp/db.pid ] && ! kill -0 "$(cat .mbuild/test-run/linux-debug/slow/1/tmp/db.pid)" 2>/dev/null' "$S"
+check "fixtures: ports come from the pool, and go back" sh -c '[ "${0:-0}" -ge 20000 ] && [ "$0" -le 29999 ] && [ -z "$(ls "$1/home/tmp/ports")" ]' "$p1" "$S"
+# a stale lock is taken over; a live one is skipped
+P=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])' 2>/dev/null || echo 24567)
+mkdir -p "$S/home/tmp/ports/$P"
+echo 999999 > "$S/home/tmp/ports/$P/pid"
+sed -i "s|  mb_test_set(\"live1\", \"services\", \"db\");|&\n  mb_test_set(\"*\", \"ports\", \"$P-$P\");|" mbuild.mettle
+mb test live1 --keep
+check "ports: a stale lock is taken over" sh -c 'grep -qF "test live1 (debug) ... ok" "$0/last.out" && grep -qxF "srv $1: listening" .mbuild/test-run/linux-debug/live1/1/service-db.log' "$S" "$P"
+mkdir -p "$S/home/tmp/ports/$P"
+echo $$ > "$S/home/tmp/ports/$P/pid"
+mb test live1
+check "ports: a held one is not taken" sh -c 'grep -qF "error: service db: no free port in $1-$1" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S" "$P"
+rm -rf "$S/home/tmp/ports/$P"
+sed -i "/\"ports\"/d" mbuild.mettle
+sed -i 's|srv $MBUILD_PORT_DB db.pid 100|srv $MBUILD_PORT_DB db.pid 0 quiet|; s|  mb_service_port("db", 0);|&\n  mb_service_wait("db", 300);|' mbuild.mettle
+mb test live1
+check "fixtures: a service that does not come up fails the run, with its log" sh -c 'grep -q -- "^---- live1 (linux/debug): service db: port [0-9]* not open after 0.3s$" "$0/last.out" && grep -q "^  srv [0-9]*: not listening$" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+sed -i 's|srv $MBUILD_PORT_DB db.pid 0 quiet|srv $MBUILD_PORT_DB db.pid 100|' mbuild.mettle
+mb run app -- 1 0 500
+check "run: port 0 takes one from the pool, \$MBUILD_PORT_DB names it" sh -c 'port=$(sed -n "s/^ *Ready db on :\([0-9]*\) .*/\1/p" "$0/last.out"); [ -n "$port" ] && grep -qF "Starting note (sh -c '"'"'echo $port > " "$0/last.out" && [ -z "$(ls "$0/home/tmp/ports")" ]' "$S"
+
 done
 echo "test_runner: $pass passed, $failed failed"
 [ $failed = 0 ]

@@ -21,6 +21,7 @@ fn svw_stop_all(items: SvcItem*, jobs: Job**, n: int64) {
 export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app: Cmd*, app_shown: string) -> int32 {
   var n: int64 = p->man->nservices;
   var items: SvcItem* = svc_items(p, out_dir, ext, bins);
+  svc_items_env(p->man, items, app->env);
   var jobs: Job** = (Job**)malloc((n + 1) * 8);
   defer free(jobs);
   sys_catch_interrupt();
@@ -80,5 +81,6 @@ export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app
   var code: int32 = sys_spawn_wait(aj);
   free(aj);
   svw_stop_all(items, jobs, n);
+  svc_ports_release_all();
   return code;
 }

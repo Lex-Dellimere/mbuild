@@ -214,7 +214,7 @@ a Procfile:
 | Call | Meaning |
 |---|---|
 | `mb_service(name, cmdline)` | A process to run alongside the app. The line is split into words like a shell does (quotes, backslashes), with no other shell features; a first word naming a bin of this project or of `mb_dep_bin` runs it from `build/<target>/<profile>/`. |
-| `mb_service_port(name, port)` | Wait until `127.0.0.1:port` accepts a connection before going on. |
+| `mb_service_port(name, port)` | Wait until `127.0.0.1:port` accepts a connection before going on; `0` takes a free port from the pool each time it starts. |
 | `mb_service_wait(name, ms)` | How long to wait for it (default 10000). |
 | `mb_service_env(name, "K=V")` | A variable for that process. |
 
@@ -222,6 +222,13 @@ They start in declaration order, each waited for on its port; then the
 program runs; when it exits (Ctrl-C too) they stop in reverse order
 (terminated, killed after 2 s), and the exit code is the program's.
 `mbuild run --no-services` skips them, `mbuild services` lists them.
+Every process (services and app) gets `MBUILD_PORT_<NAME>` (name
+upper-cased, other bytes `_`) for each service with a port, and a word may
+use `$MBUILD_PORT_<NAME>` and `$MBUILD_ROOT` (in a test, also
+`$MBUILD_TEST_TMP` and `$MBUILD_TEST_OUT`); nothing else is expanded. Free
+ports come from `mb_test_set("*", "ports", "20000-29999")`, each locked under
+`$MBUILD_HOME/tmp/ports/` while in use, so parallel tests and parallel
+mbuilds get distinct ones.
 Their output goes to `.mbuild/logs/NAME.log`. The fixture server of the
 tests (`tests/fixtures/svc_srv.mettle`) as a bin `srv`:
 

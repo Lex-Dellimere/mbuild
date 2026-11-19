@@ -121,6 +121,7 @@ export struct SvcItem {
   prog: string;
   shown: string;
   port: int64;
+  auto_port: bool;
   wait_ms: int64;
   log: string;
 }
@@ -131,11 +132,15 @@ export fn svc_items(p: Project*, out_dir: string, ext: string, bins: StrList*) -
   var logs: string = p->state_dir + "/logs";
   fs_mkdirs(logs);
   var items: SvcItem* = (SvcItem*)malloc((m->nservices + 1) * sizeof(SvcItem));
+  var vars: StrList* = sl_of("MBUILD_ROOT=" + p->root);
+  defer free(vars);
+  var ports: StrList* = svc_ports_for(p, m, sl_new(), vars);
+  defer free(ports);
   var i: int64 = 0;
   while (i < m->nservices) {
     var sv: ServiceSpec* = &m->services[i];
     var it: SvcItem* = &items[i];
-    var words: StrList* = svx_words(sv);
+    var words: StrList* = svc_expand_all(svx_words(sv), vars);
     var prog: string = sl_get(words, 0);
     var t: Tool = tool_none();
     var shown: string = prog;
@@ -149,7 +154,8 @@ export fn svc_items(p: Project*, out_dir: string, ext: string, bins: StrList*) -
     }
     it->name = sv->name;
     it->prog = prog;
-    it->port = sv->port;
+    it->port = s_to_int(sl_get(ports, i));
+    it->auto_port = sv->auto_port;
     it->wait_ms = sv->wait_ms;
     it->log = logs + "/" + sv->name + ".log";
     it->cmd = (Cmd*)0;
@@ -163,6 +169,7 @@ export fn svc_items(p: Project*, out_dir: string, ext: string, bins: StrList*) -
       }
       c->cwd = p->root;
       sl_extend(c->env, sv->env);
+      svc_port_env(c->env, vars);
       it->cmd = c;
     }
     it->shown = shown;
@@ -241,4 +248,205 @@ export fn svc_cmd_list(p: Project*) -> int32 {
     i = i + 1;
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Ports: mb_service_port(name, 0) takes one from the pool, locked under
+// $MBUILD_HOME/tmp/ports/PORT (a directory holding the owner's pid) so
+// parallel runs and parallel mbuilds get distinct ones.
+// ---------------------------------------------------------------------------
+
+var g_svc_held: StrList* = (StrList*)0;
+var g_svc_next: int64 = 0;
+
+fn svx_ports_dir() -> string {
+  return fs_mbuild_home() + "/tmp/ports";
+}
+
+// Takes the lock of port: free, or held by a process that is gone.
+fn svx_lock(port: int64) -> bool {
+  var dir: string = svx_ports_dir() + "/" + s_int(port);
+  var i: int64 = 0;
+  while (i < 2) {
+    if (sys_mkdir_new(dir)) {
+      fs_write(dir + "/pid", s_int(sys_pid()) + "\n");
+      return true;
+    }
+    var rd: FsRead = fs_read(dir + "/pid");
+    var owner: int64 = s_to_int(s_trim(rd.data));
+    if (!rd.ok || (owner > 0 && sys_pid_alive(owner))) {
+      return false;
+    }
+    sys_remove_tree(dir);
+    i = i + 1;
+  }
+  return false;
+}
+
+// A free port from lo-hi, locked for this process; 0 when none is left.
+export fn svc_port_take(lo: int64, hi: int64) -> int64 {
+  if (g_svc_held == (StrList*)0) {
+    g_svc_held = sl_new();
+  }
+  fs_mkdirs(svx_ports_dir());
+  var span: int64 = hi - lo + 1;
+  if (g_svc_next == 0) {
+    g_svc_next = (sys_pid() * 7919) % span + 1;
+  }
+  var k: int64 = 0;
+  while (k < span) {
+    var port: int64 = lo + (g_svc_next + k) % span;
+    if (svx_lock(port)) {
+      if (sys_port_free(port)) {
+        g_svc_next = g_svc_next + k + 1;
+        sl_push(g_svc_held, s_int(port));
+        return port;
+      }
+      sys_remove_tree(svx_ports_dir() + "/" + s_int(port));
+    }
+    k = k + 1;
+  }
+  return 0;
+}
+
+// Gives a port back to the pool.
+export fn svc_port_release(port: int64) {
+  if (g_svc_held == (StrList*)0) {
+    return;
+  }
+  var at: int64 = sl_index(g_svc_held, s_int(port));
+  if (at >= 0) {
+    sl_remove_at(g_svc_held, at);
+    sys_remove_tree(svx_ports_dir() + "/" + s_int(port));
+  }
+}
+
+// Every port this process holds back to the pool.
+export fn svc_ports_release_all() {
+  while (g_svc_held != (StrList*)0 && g_svc_held->len > 0) {
+    svc_port_release(s_to_int(sl_get(g_svc_held, 0)));
+  }
+}
+
+// The pool of "*"'s ports setting.
+export fn svc_pool(m: Manifest*, lo: int64*, hi: int64*) {
+  var v: string = man_test_get(m, "*", "ports");
+  var dash: int64 = s_find_byte(v, 45);
+  *lo = s_to_int(s_sub(v, 0, dash));
+  *hi = s_to_int(s_from(v, dash + 1));
+}
+
+// "MBUILD_PORT_DB": the name upper-cased, other bytes '_'.
+export fn svc_port_var(name: string) -> string {
+  var d: string = s_dup(s_lower(name));
+  var i: int64 = 0;
+  while (i < slen(d)) {
+    var c: int32 = s_byte(d, i);
+    if (c >= 97 && c <= 122) {
+      d.chars[i] = (uint8)(c - 32);
+    } else if (!(c >= 48 && c <= 57)) {
+      d.chars[i] = (uint8)95;
+    }
+    i = i + 1;
+  }
+  return "MBUILD_PORT_" + d;
+}
+
+// The port of every service named in only (every one when only is empty),
+// "0" for the others and for those without one; auto ports taken from the
+// pool. vars gets "MBUILD_PORT_X=port" for each port.
+export fn svc_ports_for(p: Project*, m: Manifest*, only: StrList*, vars: StrList*) -> StrList* {
+  var lo: int64 = 0;
+  var hi: int64 = 0;
+  svc_pool(m, &lo, &hi);
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < m->nservices) {
+    var sv: ServiceSpec* = &m->services[i];
+    var port: int64 = 0;
+    if (only->len == 0 || sl_has(only, sv->name)) {
+      port = sv->port;
+      if (sv->auto_port) {
+        port = svc_port_take(lo, hi);
+        if (port == 0) {
+          fail("service " + sv->name + ": no free port in " + s_int(lo) + "-" + s_int(hi) + " (mb_test_set(\"*\", \"ports\", ...))");
+        }
+      }
+      if (port > 0) {
+        sl_push(vars, svc_port_var(sv->name) + "=" + s_int(port));
+      }
+    }
+    sl_push(l, s_int(port));
+    i = i + 1;
+  }
+  return l;
+}
+
+// The MBUILD_PORT_ entries of vars into env.
+export fn svc_port_env(env: StrList*, vars: StrList*) {
+  var i: int64 = 0;
+  while (i < vars->len) {
+    if (s_starts(sl_get(vars, i), "MBUILD_PORT_")) {
+      sl_push(env, sl_get(vars, i));
+    }
+    i = i + 1;
+  }
+}
+
+// word with each $NAME of vars ("NAME=value") replaced; nothing else is.
+export fn svc_expand(word: string, vars: StrList*) -> string {
+  if (s_find_byte(word, 36) < 0) {
+    return word;
+  }
+  var b: Buf* = buf_new();
+  var n: int64 = slen(word);
+  var i: int64 = 0;
+  while (i < n) {
+    var c: int32 = s_byte(word, i);
+    var done: bool = false;
+    if (c == 36) {
+      var e: int64 = i + 1;
+      while (e < n && (is_ident_b(s_byte(word, e)))) {
+        e = e + 1;
+      }
+      var name: string = s_sub(word, i + 1, e);
+      var k: int64 = 0;
+      while (k < vars->len && !done) {
+        var kv: string = sl_get(vars, k);
+        var eq: int64 = s_find_byte(kv, 61);
+        if (s_eq(s_sub(kv, 0, eq), name)) {
+          buf_add(b, s_from(kv, eq + 1));
+          i = e;
+          done = true;
+        }
+        k = k + 1;
+      }
+    }
+    if (!done) {
+      buf_addb(b, c);
+      i = i + 1;
+    }
+  }
+  return buf_take(b);
+}
+
+// Every word expanded, in place.
+export fn svc_expand_all(words: StrList*, vars: StrList*) -> StrList* {
+  var i: int64 = 0;
+  while (i < words->len) {
+    sl_set(words, i, svc_expand(sl_get(words, i), vars));
+    i = i + 1;
+  }
+  return words;
+}
+
+// MBUILD_PORT_X of every service with a port, into env (the app's).
+export fn svc_items_env(m: Manifest*, items: SvcItem*, env: StrList*) {
+  var i: int64 = 0;
+  while (i < m->nservices) {
+    if (items[i].port > 0) {
+      sl_push(env, svc_port_var(items[i].name) + "=" + s_int(items[i].port));
+    }
+    i = i + 1;
+  }
 }

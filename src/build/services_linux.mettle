@@ -203,6 +203,7 @@ export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app
   s.p = p;
   s.n = p->man->nservices;
   s.items = svc_items(p, out_dir, ext, bins);
+  svc_items_env(p->man, s.items, app->env);
   s.app = app;
   s.app_shown = app_shown;
   s.procs = (int64*)malloc((s.n + 1) * 8);
@@ -214,5 +215,6 @@ export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app
   free(s.procs);
   free(s.pids);
   free(s.codes);
+  svc_ports_release_all();
   return (int32)code;
 }
