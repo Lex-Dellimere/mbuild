@@ -277,6 +277,7 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "flash")) { return build_cmd_flash(p); }
   if (s_eq(command, "pgo")) { return build_cmd_pgo(p); }
   if (s_eq(command, "check")) { return build_cmd_check(p); }
+  if (s_eq(command, "doc")) { return build_cmd_doc(p); }
   if (s_eq(command, "clean")) { return build_cmd_clean(p); }
   if (s_eq(command, "mettle")) { return build_cmd_mettle(p); }
   if (s_eq(command, "trace")) { return build_cmd_trace(p, "trace"); }

@@ -314,6 +314,51 @@ test plot (debug, release) ... ok  0.0s
 test result: ok. 1 passed, 0 failed (0.0s)
 ```
 
+### Documentation
+
+`mbuild doc` writes the API reference (`docs/API.md`) from the comment
+block directly above each export: `///` lines when the block has any, else
+`//` lines; `//!` lines are the module doc. The first paragraph is the
+summary; `@param NAME`, `@return`, `@error`, `@mem`, `@thread`, `@cost`
+or `in:`, `returns:`, `owns:`, `thread:`, `example:` lines are fields,
+shown as labelled sections. `@internal` (or `//! @internal`) leaves an
+export (or a module) out. Struct fields, enum variants and generic
+parameters are listed.
+
+| Call | |
+|---|---|
+| `mb_doc_out(path)` | Where it goes (default `docs/API.md`); set, `mbuild publish` runs `mbuild doc --check` first. |
+| `mb_doc_require(csv)` | Fields every function must have: `param`, `returns` (when it returns a value), `in`, `error`, `owns`, `thread`, `cost`, `example`; `in` covers `param`. |
+| `mb_doc_exports(csv)` | Only names with one of these prefixes (`"rz_"`); `"!crx_"` drops them. |
+| `mb_doc_facade(file)` | Only that file and the modules it imports, in import order. |
+| `mb_doc_snippets(csv)` | Markdown files (globs) whose ```` ```mettle ```` blocks `--check` compiles too. |
+
+`mbuild doc --check` writes nothing and exits 1 with `file:line` for an
+export without a doc comment or summary, an `@param` that is not a
+parameter or is out of order, a required field missing, and an out-of-date
+output file. It also compiles each ```` ```mettle ```` block of the doc
+comments as a program importing the module (statements become the body of
+`main`); a block fenced ```` ```mettle ignore ```` is not compiled.
+
+```text
+$ mbuild doc --check
+src/ring.mettle:19: ring_push: @param x is not a parameter (r, v)
+src/ring.mettle:19: ring_push: parameter v is not documented (@param)
+docs/API.md:39: out of date; run `mbuild doc`
+    Checking 1 doc snippet
+error: docs/API.md: 3 problems
+```
+
+With `@param x` renamed to `@param v`:
+
+```text
+$ mbuild doc
+    Updating docs/API.md
+$ mbuild doc --check
+    Checking 1 doc snippet
+     Checked docs/API.md (2 exports, 1 snippets)
+```
+
 ### Services
 
 Processes `mbuild run` starts before your program and stops after it, like

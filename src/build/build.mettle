@@ -38,6 +38,7 @@ import "live_windows" if windows;
 import "testrun";
 import "testnative";
 import "golden";
+import "doc";
 import "testrun_linux" if linux;
 import "testrun_windows" if windows;
 import "../core/sys_linux" if linux;
@@ -7096,6 +7097,15 @@ fn bx_init_cmds() {
   bx_ex("mbuild check", "");
   bx_ex("mbuild check -t all", "");
   bx_note("in a library each top-level and src/ .mettle file is checked.");
+  bx_def("doc", "write the API reference from the doc comments", "mbuild doc [--check]", "project.md");
+  bx_ex("mbuild doc", "docs/API.md (mb_doc_out) from the comments above the exports");
+  bx_ex("mbuild doc --check", "write nothing; fail on a problem or a stale file");
+  bx_fl("--check", "also compile the ```mettle blocks; exit 1 on any finding");
+  bx_note("the doc of an export is the comment block directly above it (`///` lines when there are any, else `//`); `//!` lines are the module doc.");
+  bx_note("fields: `@param NAME`, `@return`, `@error`, `@mem`, `@thread`, `@cost`, `@internal`, or `in:` `returns:` `out:` `owns:` `thread:` `example:` lines; the first paragraph is the summary.");
+  bx_note("--check reports FILE:LINE for an export without a doc comment or summary, an @param that is not a parameter or out of order, a field mb_doc_require asks for, and a stale output file.");
+  bx_note("a ```mettle block of a doc comment (or of an mb_doc_snippets file) is compiled as a program importing its module; ```mettle ignore is not.");
+  bx_note("settings: mb_doc_out(path), mb_doc_require(\"param, returns\"), mb_doc_exports(\"rz_\"), mb_doc_facade(\"src/crypto.mettle\"), mb_doc_snippets(\"README.md\"). `mbuild publish` runs doc --check when mb_doc_out is set.");
   bx_def("clean", "remove build outputs", "mbuild clean [--all]", "incremental.md");
   bx_ex("mbuild clean", "build/ and .mbuild/{{cache,stamps,tmp}");
   bx_ex("mbuild clean --all", "all of .mbuild/ too");
@@ -7966,6 +7976,285 @@ fn bx_pub_manifest(p: Project*) -> string {
 }
 
 // mbuild publish [--to DIR] [--registry NAME] [--dry-run] [--allow-breaking] [--no-verify]
+// mb_doc_out, else docs/API.md.
+fn bx_doc_out(p: Project*) -> string {
+  if (slen(p->man->doc_out) > 0) {
+    return p->man->doc_out;
+  }
+  return "docs/API.md";
+}
+
+// A file that is part of the documented API: not a test, example, command
+// or the project's own mbuild files.
+fn bx_doc_api_file(rel: string) -> bool {
+  var base_name: string = p_base(rel);
+  if (s_ends(base_name, "_test.mettle") || s_starts(base_name, "test_")) {
+    return false;
+  }
+  if (s_starts(rel, "tests/") || s_starts(rel, "examples/") || s_starts(rel, "cmd/")) {
+    return false;
+  }
+  return !s_eq(rel, "mbuild.mettle") && !s_eq(rel, "mbuild.local.mettle");
+}
+
+// The package file an import of rel names, "" when it is not one.
+fn bx_doc_import(p: Project*, rel: string, path: string) -> string {
+  if (s_starts(path, "std/")) {
+    return s_empty();
+  }
+  var local: string = p_clean(p_join(p_dir(rel), path)) + ".mettle";
+  if (!s_starts(local, "../") && fs_is_file(p->root + "/" + local)) {
+    return local;
+  }
+  var pre: string = p->man->name + "/";
+  if (slen(p->man->name) > 0 && s_starts(path, pre)) {
+    var rest: string = s_from(path, slen(pre)) + ".mettle";
+    var pkg: string = p_clean(p_join(p->man->import_root, rest));
+    if (slen(p->man->import_root) == 0) {
+      pkg = p_clean(rest);
+    }
+    if (fs_is_file(p->root + "/" + pkg)) {
+      return pkg;
+    }
+  }
+  return s_empty();
+}
+
+// The documented files: the facade and what it imports within the package
+// (breadth first, in import order), else every API file sorted by path.
+fn bx_doc_files(p: Project*) -> StrList* {
+  var facade: string = p->man->doc_facade;
+  if (slen(facade) == 0) {
+    var all: StrList* = bx_owned_files(p);
+    var keep: StrList* = sl_new();
+    var i: int64 = 0;
+    while (i < all->len) {
+      if (bx_doc_api_file(sl_get(all, i))) {
+        sl_push(keep, sl_get(all, i));
+      }
+      i = i + 1;
+    }
+    free(all);
+    return keep;
+  }
+  facade = p_clean(facade);
+  if (!fs_is_file(p->root + "/" + facade)) {
+    fail("mb_doc_facade(\"" + facade + "\"): no such file");
+  }
+  var files: StrList* = sl_of(facade);
+  var k: int64 = 0;
+  while (k < files->len) {
+    var rel: string = sl_get(files, k);
+    k = k + 1;
+    var rd: FsRead = fs_read(p->root + "/" + rel);
+    if (!rd.ok) {
+      continue;
+    }
+    var r: ScanResult* = scan_source(rd.data);
+    defer free(r);
+    var j: int64 = 0;
+    while (j < r->nimports) {
+      var f: string = bx_doc_import(p, rel, scan_import(r, j)->path);
+      if (slen(f) > 0) {
+        sl_add_uniq(files, f);
+      }
+      j = j + 1;
+    }
+  }
+  return files;
+}
+
+// The Markdown files mb_doc_snippets names, sorted; never the output.
+fn bx_doc_md_files(p: Project*, out: string) -> StrList* {
+  var found: StrList* = sl_new();
+  if (p->man->doc_snippets->len == 0) {
+    return found;
+  }
+  var all: StrList* = fs_walk(p->root, ".md", (StrList*)0);
+  var i: int64 = 0;
+  while (i < all->len) {
+    var rel: string = sl_get(all, i);
+    var g: int64 = 0;
+    while (g < p->man->doc_snippets->len) {
+      if (!s_eq(rel, out) && lv_glob_match(sl_get(p->man->doc_snippets, g), rel)) {
+        sl_add_uniq(found, rel);
+      }
+      g = g + 1;
+    }
+    i = i + 1;
+  }
+  free(all);
+  sl_sort(found);
+  return found;
+}
+
+// Each snippet of o compiled as a program (.mbuild/doc/snip/N.mettle) for
+// the host; the number that failed.
+fn bx_doc_snippets(p: Project*, o: DocOut*) -> int64 {
+  var dir: string = p->state_dir + "/doc/snip";
+  sys_remove_tree(dir);
+  fs_mkdirs(dir);
+  fs_mkdirs(p->state_dir + "/tmp");
+  var bs: BinSet* = new BinSet;
+  bs->items = (BinInfo*)0;
+  bs->n = 0;
+  bs->root = p->root;
+  var facade: string = p->man->doc_facade;
+  var i: int64 = 0;
+  while (i < o->snips->len) {
+    var mod: string = sl_get(o->snip_mod, i);
+    if (slen(facade) > 0) {
+      mod = p_clean(facade);
+    }
+    var imp: string = s_empty();
+    if (slen(mod) > 0) {
+      imp = p_stem(mod);
+    }
+    var rel: string = ".mbuild/doc/snip/" + s_int(i + 1) + ".mettle";
+    fs_write(p->root + "/" + rel, doc_snip_program(sl_get(o->snips, i), imp));
+    bx_binset_push(bs, sl_get(o->snip_at, i), rel);
+    var b: BinInfo* = &bs->items[bs->n - 1];
+    if (slen(mod) > 0) {
+      sl_push(b->flags, "-I");
+      var mdir: string = p_dir(mod);
+      if (slen(mdir) == 0) {
+        mdir = ".";
+      }
+      sl_push(b->flags, mdir);
+    }
+    i = i + 1;
+  }
+  var s: BxSess* = bx_sess(p, sl_of(sys_os()));
+  g_bx_sess = s;
+  var us: BxUnits* = bx_bin_units(s, bs);
+  g_bx_units = us;
+  bx_prepare(s, us, s_empty());
+  var what: string = s_int(us->n) + " doc snippets";
+  if (us->n == 1) {
+    what = "1 doc snippet";
+  }
+  status("Checking", what);
+  var bad: int64 = 0;
+  i = 0;
+  while (i < us->n) {
+    var u: BxUnit* = us->items[i];
+    var obj: string = p->state_dir + "/tmp/doc-snip-" + s_int(i + 1) + ".o";
+    var c: Cmd* = bx_check_cmd(s, u, obj);
+    cmd_args(c, u->b->flags);
+    var cap: Captured = proc_capture_all(c);
+    free(c);
+    sys_remove_file(obj);
+    sys_remove_file(obj + ".o");
+    sys_remove_file(obj + ".obj");
+    if (cap.code != 0) {
+      bx_print_block(bx_compiler_output(cap.out));
+      error_msg(u->b->name + ": the ```mettle block does not compile (" + u->b->main + ")");
+      bad = bad + 1;
+    }
+    i = i + 1;
+  }
+  return bad;
+}
+
+// The first line where a and b differ (1-based).
+fn bx_first_diff(a: string, b: string) -> int64 {
+  var la: StrList* = s_lines(a);
+  var lb: StrList* = s_lines(b);
+  var i: int64 = 0;
+  while (i < la->len && i < lb->len && s_eq(sl_get(la, i), sl_get(lb, i))) {
+    i = i + 1;
+  }
+  free(la);
+  free(lb);
+  return i + 1;
+}
+
+// `mbuild doc`: the reference written (or with check, compared, the
+// snippets compiled, nothing written); 1 on a finding under check.
+fn bx_doc(p: Project*, check: bool) -> int32 {
+  var cfg: DocCfg* = new DocCfg;
+  defer free(cfg);
+  cfg->pkg = p->man->name;
+  cfg->require = p->man->doc_require;
+  cfg->exports = p->man->doc_exports;
+  var out: string = bx_doc_out(p);
+  var o: DocOut* = doc_begin(cfg);
+  defer free(o);
+  var files: StrList* = bx_doc_files(p);
+  defer free(files);
+  var facade: string = p_clean(p->man->doc_facade);
+  var i: int64 = 0;
+  while (i < files->len) {
+    var rel: string = sl_get(files, i);
+    var rd: FsRead = fs_read(p->root + "/" + rel);
+    if (rd.ok) {
+      doc_file(o, cfg, rel, rd.data, s_eq(rel, facade));
+    }
+    i = i + 1;
+  }
+  var text: string = doc_text(o);
+  var path: string = p->root + "/" + out;
+  var cur: FsRead = fs_read(path);
+  if (!check) {
+    i = 0;
+    while (i < o->findings->len) {
+      warn(sl_get(o->findings, i));
+      i = i + 1;
+    }
+    if (cur.ok && s_eq(cur.data, text)) {
+      status("Fresh", out);
+      return 0;
+    }
+    fs_mkdirs(p_dir(path));
+    if (!fs_write(path, text)) {
+      fail("cannot write " + out);
+    }
+    status("Updating", out);
+    return 0;
+  }
+  var mds: StrList* = bx_doc_md_files(p, out);
+  i = 0;
+  while (i < mds->len) {
+    var mrd: FsRead = fs_read(p->root + "/" + sl_get(mds, i));
+    if (mrd.ok) {
+      doc_md_snippets(o, sl_get(mds, i), mrd.data);
+    }
+    i = i + 1;
+  }
+  if (!cur.ok) {
+    var miss: string = out + ":1: missing; run `mbuild doc`";
+    sl_push(o->findings, miss);
+  } else if (!s_eq(cur.data, text)) {
+    var stale: string = out + ":" + s_int(bx_first_diff(cur.data, text)) + ": out of date; run `mbuild doc`";
+    sl_push(o->findings, stale);
+  }
+  i = 0;
+  while (i < o->findings->len) {
+    err_line(sl_get(o->findings, i));
+    i = i + 1;
+  }
+  var bad: int64 = o->findings->len;
+  if (o->snips->len > 0) {
+    bad = bad + bx_doc_snippets(p, o);
+  }
+  if (bad > 0) {
+    var probs: string = s_int(bad) + " problems";
+    if (bad == 1) {
+      probs = "1 problem";
+    }
+    error_msg(out + ": " + probs);
+    return 1;
+  }
+  var counts: string = out + " (" + s_int(o->nexports) + " exports, " + s_int(o->snips->len) + " snippets)";
+  status("Checked", counts);
+  return 0;
+}
+
+export fn build_cmd_doc(p: Project*) -> int32 {
+  var check: bool = bx_take_flag(p, "--check");
+  return bx_doc(p, check);
+}
+
 export fn build_cmd_publish(p: Project*) -> int32 {
   var to: string = bx_take_opt(p, "--to");
   var registry: string = bx_take_opt(p, "--registry");
@@ -8000,6 +8289,10 @@ export fn build_cmd_publish(p: Project*) -> int32 {
   }
   if (slen(newest) > 0) {
     warn("publishing " + version + " after " + newest);
+  }
+  if (slen(m->doc_out) > 0 && bx_doc(p, true) != 0) {
+    bx_help("fix the API docs (`mbuild doc`), then publish");
+    return 1;
   }
   var ierr: string = ini_check_package(p, p->root);
   if (slen(ierr) > 0) {

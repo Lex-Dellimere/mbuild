@@ -1,0 +1,1031 @@
+// doc: what `mbuild doc` reads and writes (16.4): the doc block above each
+// export, its fields, the checks, the Markdown, and the ```mettle blocks
+// of the doc comments and Markdown files as small programs.
+//
+// A doc block is the run of comment lines directly above a declaration
+// (decorators may sit between); when it holds a `///` line only those
+// count. A field starts at `@KEY` or `KEY:` for a known key; `//!` lines
+// are the module doc.
+
+import "std/mem";
+import "../core/base";
+import "scan";
+
+export struct DocCfg {
+  pkg: string;
+  require: StrList*;   // fields every export must have ("summary" always)
+  exports: StrList*;   // name prefixes kept, "!PREFIX" drops
+}
+
+// A run's results: the Markdown lines, findings ("file:line: name: problem"),
+// and the ```mettle blocks: code, "file:line", the module ("" for Markdown).
+export struct DocOut {
+  md: StrList*;
+  findings: StrList*;
+  snips: StrList*;
+  snip_at: StrList*;
+  snip_mod: StrList*;
+  nexports: int64;
+}
+
+// One parsed doc block; fields in doc order (keys, names for param, texts
+// with continuation lines joined by "\n").
+struct DcBlock {
+  found: bool;
+  summary: StrList*;
+  prose: StrList*;
+  keys: StrList*;
+  names: StrList*;
+  texts: StrList*;
+}
+
+export fn doc_begin(cfg: DocCfg*) -> DocOut* {
+  var o: DocOut* = new DocOut;
+  o->md = sl_new();
+  o->findings = sl_new();
+  o->snips = sl_new();
+  o->snip_at = sl_new();
+  o->snip_mod = sl_new();
+  o->nexports = 0;
+  if (slen(cfg->pkg) > 0) {
+    var title: string = "# " + cfg->pkg + " API";
+    sl_push(o->md, title);
+  } else {
+    sl_push(o->md, "# API");
+  }
+  return o;
+}
+
+// The file's text: the lines with single blank lines, ending in a newline.
+export fn doc_text(o: DocOut*) -> string {
+  var body: string = sl_join(o->md, "\n");
+  return body + "\n";
+}
+
+fn dc_indent(s: string) -> int64 {
+  var i: int64 = 0;
+  while (i < slen(s) && (s_byte(s, i) == 32 || s_byte(s, i) == 9)) {
+    i = i + 1;
+  }
+  return i;
+}
+
+fn dc_rtrim(s: string) -> string {
+  var b: int64 = slen(s);
+  while (b > 0 && is_space_b(s_byte(s, b - 1))) {
+    b = b - 1;
+  }
+  return s_sub(s, 0, b);
+}
+
+fn dc_is_comment(line: string) -> bool {
+  var t: string = s_trim(line);
+  return s_starts(t, "//") && !s_starts(t, "//!");
+}
+
+fn dc_is_triple(line: string) -> bool {
+  var t: string = s_trim(line);
+  return s_starts(t, "///") && !s_starts(t, "////");
+}
+
+// A comment line's text: the marker (`///`, `//!` or `//`) and one space off.
+fn dc_strip(line: string) -> string {
+  var t: string = s_from(line, dc_indent(line));
+  if (s_starts(t, "///") || s_starts(t, "//!")) {
+    t = s_from(t, 3);
+  } else if (s_starts(t, "//")) {
+    t = s_from(t, 2);
+  }
+  if (s_starts(t, " ")) {
+    t = s_from(t, 1);
+  }
+  return dc_rtrim(t);
+}
+
+fn dc_blank(out: StrList*) {
+  if (out->len > 0 && slen(sl_get(out, out->len - 1)) > 0) {
+    sl_push(out, "");
+  }
+}
+
+// The first word of s (up to a space) and what follows it, trimmed.
+fn dc_word(s: string) -> string {
+  var t: string = s_trim(s);
+  var i: int64 = 0;
+  while (i < slen(t) && !is_space_b(s_byte(t, i))) {
+    i = i + 1;
+  }
+  return s_sub(t, 0, i);
+}
+
+fn dc_after_word(s: string) -> string {
+  var t: string = s_trim(s);
+  var w: int64 = slen(dc_word(t));
+  return s_trim(s_from(t, w));
+}
+
+// A field key's one name: "" when word names no field.
+fn dc_key(word: string) -> string {
+  var w: string = s_lower(word);
+  if (s_eq(w, "param") || s_eq(w, "params")) { return "param"; }
+  if (s_eq(w, "in")) { return "in"; }
+  if (s_eq(w, "return") || s_eq(w, "returns") || s_eq(w, "out")) { return "returns"; }
+  if (s_eq(w, "error") || s_eq(w, "errors")) { return "error"; }
+  if (s_eq(w, "mem") || s_eq(w, "owns")) { return "owns"; }
+  if (s_eq(w, "thread")) { return "thread"; }
+  if (s_eq(w, "cost")) { return "cost"; }
+  if (s_eq(w, "example") || s_eq(w, "examples")) { return "example"; }
+  if (s_eq(w, "internal")) { return "internal"; }
+  return s_empty();
+}
+
+fn dc_label(key: string) -> string {
+  if (s_eq(key, "in")) { return "In"; }
+  if (s_eq(key, "returns")) { return "Returns"; }
+  if (s_eq(key, "error")) { return "Errors"; }
+  if (s_eq(key, "owns")) { return "Owns"; }
+  if (s_eq(key, "thread")) { return "Thread"; }
+  if (s_eq(key, "cost")) { return "Cost"; }
+  if (s_eq(key, "example")) { return "Example"; }
+  return key;
+}
+
+fn dc_push_field(b: DcBlock*, key: string, name: string, text: string) {
+  sl_push(b->keys, key);
+  sl_push(b->names, name);
+  sl_push(b->texts, text);
+}
+
+// Whether t starts a field; when it does, the field is added to b.
+// params: the function's parameters (flux_orm's `//   name  meaning`);
+// has_summary: `Returns ...` is a field only after a summary.
+fn dc_field(b: DcBlock*, t: string, params: StrList*, has_summary: bool) -> bool {
+  var tt: string = s_trim(t);
+  if (s_starts(tt, "@")) {
+    var w: string = s_from(dc_word(tt), 1);
+    var key: string = dc_key(w);
+    if (slen(key) == 0) {
+      return false;
+    }
+    var rest: string = dc_after_word(tt);
+    if (s_eq(key, "param")) {
+      var pname: string = dc_word(rest);
+      if (s_ends(pname, ":")) {
+        pname = s_sub(pname, 0, slen(pname) - 1);
+      }
+      var ptext: string = dc_after_word(rest);
+      if (s_starts(ptext, "- ")) {
+        ptext = s_trim(s_from(ptext, 2));
+      }
+      dc_push_field(b, key, pname, ptext);
+      return true;
+    }
+    dc_push_field(b, key, s_empty(), rest);
+    return true;
+  }
+  var i: int64 = 0;
+  while (i < slen(tt) && is_alpha_b(s_byte(tt, i))) {
+    i = i + 1;
+  }
+  if (i > 0 && i < slen(tt) && s_byte(tt, i) == 58 && (i + 1 == slen(tt) || s_byte(tt, i + 1) == 32) && dc_indent(t) == 0) {
+    var ckey: string = dc_key(s_sub(tt, 0, i));
+    if (slen(ckey) > 0 && !s_eq(ckey, "param")) {
+      dc_push_field(b, ckey, s_empty(), s_trim(s_from(tt, i + 1)));
+      return true;
+    }
+  }
+  if (has_summary && dc_indent(t) == 0 && s_starts(tt, "Returns ")) {
+    dc_push_field(b, "returns", s_empty(), tt);
+    return true;
+  }
+  if (dc_indent(t) >= 2 && params != (StrList*)0 && sl_has(params, dc_word(tt))) {
+    dc_push_field(b, "param", dc_word(tt), dc_after_word(tt));
+    return true;
+  }
+  return false;
+}
+
+fn dc_append(b: DcBlock*, cur: int64, line: string) {
+  var old: string = sl_get(b->texts, cur);
+  if (slen(old) == 0) {
+    sl_set(b->texts, cur, line);
+    return;
+  }
+  var joined: string = old + "\n" + line;
+  sl_set(b->texts, cur, joined);
+}
+
+// The doc block of the declaration on line `at` (1-based), parsed; its
+// ```mettle blocks go to o as snippets at rel.
+fn dc_block(o: DocOut*, rel: string, lines: StrList*, at: int64, params: StrList*) -> DcBlock* {
+  var b: DcBlock* = new DcBlock;
+  b->summary = sl_new();
+  b->prose = sl_new();
+  b->keys = sl_new();
+  b->names = sl_new();
+  b->texts = sl_new();
+  var k: int64 = at - 2;
+  while (k >= 0 && s_starts(s_trim(sl_get(lines, k)), "@")) {
+    k = k - 1;
+  }
+  var last: int64 = k;
+  var triple: bool = false;
+  while (k >= 0 && dc_is_comment(sl_get(lines, k))) {
+    if (dc_is_triple(sl_get(lines, k))) {
+      triple = true;
+    }
+    k = k - 1;
+  }
+  b->found = last > k;
+  var cur: int64 = -1;
+  var sum_done: bool = false;
+  var fence: bool = false;
+  var findent: int64 = 0;
+  var snip: Buf* = (Buf*)0;
+  var snip_line: int64 = 0;
+  var i: int64 = k + 1;
+  while (i <= last) {
+    var raw: string = sl_get(lines, i);
+    i = i + 1;
+    if (triple && !dc_is_triple(raw)) {
+      continue;
+    }
+    var t: string = dc_strip(raw);
+    var tt: string = s_trim(t);
+    if (fence) {
+      var body: string = t;
+      if (dc_indent(t) >= findent) {
+        body = s_from(t, findent);
+      } else {
+        body = tt;
+      }
+      if (s_starts(tt, "```")) {
+        fence = false;
+        body = tt;
+        if (snip != (Buf*)0) {
+          sl_push(o->snips, buf_take(snip));
+          var sat: string = rel + ":" + s_int(snip_line);
+          sl_push(o->snip_at, sat);
+          sl_push(o->snip_mod, rel);
+          snip = (Buf*)0;
+        }
+      } else if (snip != (Buf*)0) {
+        buf_line(snip, body);
+      }
+      if (cur >= 0) {
+        dc_append(b, cur, body);
+      } else {
+        sl_push(b->prose, body);
+      }
+      continue;
+    }
+    if (s_starts(tt, "```")) {
+      fence = true;
+      findent = dc_indent(t);
+      if (s_eq(s_trim(s_from(tt, 3)), "mettle")) {
+        snip = buf_new();
+        snip_line = i;
+      }
+      if (cur >= 0) {
+        dc_append(b, cur, tt);
+      } else {
+        sum_done = true;
+        sl_push(b->prose, tt);
+      }
+      continue;
+    }
+    if (slen(tt) == 0) {
+      if (cur >= 0) {
+        cur = -1;
+      } else if (b->summary->len > 0) {
+        sum_done = true;
+      }
+      if (sum_done && b->prose->len > 0) {
+        sl_push(b->prose, "");
+      }
+      continue;
+    }
+    var pl: StrList* = params;
+    if (cur >= 0 && !s_eq(sl_get(b->keys, cur), "param")) {
+      pl = (StrList*)0;
+    }
+    if (dc_field(b, t, pl, b->summary->len > 0)) {
+      cur = b->keys->len - 1;
+      sum_done = true;
+      continue;
+    }
+    if (cur >= 0) {
+      dc_append(b, cur, tt);
+    } else if (!sum_done) {
+      sl_push(b->summary, tt);
+    } else {
+      sl_push(b->prose, t);
+    }
+  }
+  return b;
+}
+
+// Lines of doc text as Markdown: fences kept, a run indented two or more
+// spaces becomes a fenced block.
+fn dc_emit(out: StrList*, lines: StrList*) {
+  var fence: bool = false;
+  var ind: bool = false;
+  var base: int64 = 0;
+  var after: bool = false;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = sl_get(lines, i);
+    var tt: string = s_trim(l);
+    i = i + 1;
+    if (fence) {
+      sl_push(out, l);
+      if (s_starts(tt, "```")) {
+        fence = false;
+        after = true;
+      }
+      continue;
+    }
+    var start_fence: bool = s_starts(tt, "```");
+    var indented: bool = slen(tt) > 0 && dc_indent(l) >= 2 && !start_fence;
+    if (ind && !indented) {
+      sl_push(out, "```");
+      ind = false;
+      after = true;
+    }
+    if (slen(tt) == 0) {
+      dc_blank(out);
+      after = false;
+      continue;
+    }
+    if (after) {
+      dc_blank(out);
+      after = false;
+    }
+    if (start_fence) {
+      dc_blank(out);
+      sl_push(out, tt);
+      fence = true;
+      continue;
+    }
+    if (indented) {
+      if (!ind) {
+        dc_blank(out);
+        sl_push(out, "```");
+        ind = true;
+        base = dc_indent(l);
+      }
+      var cut: int64 = base;
+      if (dc_indent(l) < cut) {
+        cut = dc_indent(l);
+      }
+      sl_push(out, s_from(l, cut));
+      continue;
+    }
+    sl_push(out, l);
+  }
+  if (ind || fence) {
+    sl_push(out, "```");
+  }
+}
+
+// s split at sep outside (), [], <> and {}, each part trimmed (empty ones dropped).
+fn dc_split_top(s: string, sep: int32) -> StrList* {
+  var parts: StrList* = sl_new();
+  var depth: int64 = 0;
+  var start: int64 = 0;
+  var i: int64 = 0;
+  while (i <= slen(s)) {
+    var c: int32 = 0;
+    if (i < slen(s)) {
+      c = s_byte(s, i);
+    }
+    if (c == 40 || c == 91 || c == 60 || c == 123) {
+      depth = depth + 1;
+    } else if ((c == 41 || c == 93 || c == 125 || (c == 62 && (i == 0 || s_byte(s, i - 1) != 45))) && depth > 0) {
+      depth = depth - 1;
+    } else if (i == slen(s) || (c == sep && depth == 0)) {
+      var part: string = s_trim(s_sub(s, start, i));
+      if (slen(part) > 0) {
+        sl_push(parts, part);
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return parts;
+}
+
+// The index just past the generic parameters that lead s ("<T, U>"), else 0.
+fn dc_generics_end(s: string) -> int64 {
+  if (!s_starts(s, "<")) {
+    return 0;
+  }
+  var depth: int64 = 0;
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 60) {
+      depth = depth + 1;
+    } else if (c == 62) {
+      depth = depth - 1;
+      if (depth == 0) {
+        return i + 1;
+      }
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+// The `)` matching the `(` at open in s, -1 when unclosed.
+fn dc_close_paren(s: string, open: int64) -> int64 {
+  var depth: int64 = 0;
+  var i: int64 = open;
+  while (i < slen(s)) {
+    var c: int32 = s_byte(s, i);
+    if (c == 40) {
+      depth = depth + 1;
+    } else if (c == 41) {
+      depth = depth - 1;
+      if (depth == 0) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+// A function sig's parameter names ("(a: int32, b: T) -> T": a, b).
+fn dc_params(sig: string) -> StrList* {
+  var names: StrList* = sl_new();
+  var open: int64 = s_find_from(sig, "(", dc_generics_end(sig));
+  var close: int64 = -1;
+  if (open >= 0) {
+    close = dc_close_paren(sig, open);
+  }
+  if (close < 0) {
+    return names;
+  }
+  var parts: StrList* = dc_split_top(s_sub(sig, open + 1, close), 44);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var part: string = sl_get(parts, i);
+    var colon: int64 = s_find_byte(part, 58);
+    if (colon > 0) {
+      sl_push(names, s_trim(s_sub(part, 0, colon)));
+    }
+    i = i + 1;
+  }
+  free(parts->items);
+  free(parts);
+  return names;
+}
+
+// Whether a function sig returns a value.
+fn dc_returns(sig: string) -> bool {
+  var open: int64 = s_find_from(sig, "(", dc_generics_end(sig));
+  if (open < 0) {
+    return false;
+  }
+  var close: int64 = dc_close_paren(sig, open);
+  if (close < 0) {
+    return false;
+  }
+  var rest: string = s_trim(s_from(sig, close + 1));
+  if (!s_starts(rest, "->")) {
+    return false;
+  }
+  var ty: string = s_trim(s_from(rest, 2));
+  var eq: int64 = s_find(ty, " =");
+  if (eq >= 0) {
+    ty = s_trim(s_sub(ty, 0, eq));
+  }
+  return slen(ty) > 0 && !s_eq(ty, "void");
+}
+
+fn dc_is_fn(it: ExportItem*) -> bool {
+  return s_eq(it->kind, "fn") || (s_eq(it->kind, "extern") && s_starts(it->sig, "("));
+}
+
+// "name\tdoc" for each member of the struct or enum declared on line at:
+// the comment lines above a member or the comment after it on its line.
+fn dc_member_docs(lines: StrList*, at: int64) -> StrList* {
+  var docs: StrList* = sl_new();
+  var i: int64 = at - 1;
+  while (i < lines->len && s_find_byte(sl_get(lines, i), 123) < 0) {
+    i = i + 1;
+  }
+  if (i >= lines->len || s_find_byte(sl_get(lines, i), 125) >= 0) {
+    return docs;
+  }
+  i = i + 1;
+  var pending: StrList* = sl_new();
+  while (i < lines->len) {
+    var l: string = sl_get(lines, i);
+    var t: string = s_trim(l);
+    i = i + 1;
+    if (s_starts(t, "}")) {
+      break;
+    }
+    if (slen(t) == 0) {
+      free(pending->items);
+      free(pending);
+      pending = sl_new();
+      continue;
+    }
+    if (s_starts(t, "//")) {
+      sl_push(pending, s_trim(dc_strip(t)));
+      continue;
+    }
+    var n: int64 = 0;
+    while (n < slen(t) && is_ident_b(s_byte(t, n))) {
+      n = n + 1;
+    }
+    var doc: string = sl_join(pending, " ");
+    var cm: int64 = s_find(t, "//");
+    if (cm >= 0) {
+      doc = s_trim(dc_strip(s_from(t, cm)));
+    }
+    if (n > 0) {
+      var entry: string = s_sub(t, 0, n) + "\t" + doc;
+      sl_push(docs, entry);
+    }
+    free(pending->items);
+    free(pending);
+    pending = sl_new();
+  }
+  free(pending->items);
+  free(pending);
+  return docs;
+}
+
+fn dc_member_doc(docs: StrList*, name: string) -> string {
+  var pre: string = name + "\t";
+  var i: int64 = 0;
+  while (i < docs->len) {
+    if (s_starts(sl_get(docs, i), pre)) {
+      return s_from(sl_get(docs, i), slen(pre));
+    }
+    i = i + 1;
+  }
+  return s_empty();
+}
+
+fn dc_cell(s: string) -> string {
+  return s_replace(s, "|", "\\|");
+}
+
+// The declaration as the reference shows it; struct members and enum
+// variants one per line.
+fn dc_decl(it: ExportItem*) -> string {
+  if (s_eq(it->kind, "fn")) {
+    return "fn " + it->name + it->sig;
+  }
+  if (s_eq(it->kind, "extern")) {
+    if (s_starts(it->sig, "(")) {
+      return "extern fn " + it->name + it->sig;
+    }
+    return "extern var " + it->name + it->sig;
+  }
+  if (s_eq(it->kind, "struct") || s_eq(it->kind, "enum")) {
+    var g: int64 = dc_generics_end(it->sig);
+    var gen: string = s_sub(it->sig, 0, g);
+    var sep: int32 = 59;
+    var end: string = ";";
+    if (s_eq(it->kind, "enum")) {
+      sep = 44;
+      end = ",";
+    }
+    var parts: StrList* = dc_split_top(s_from(it->sig, g), sep);
+    var b: Buf* = buf_new();
+    buf_add(b, it->kind + " " + it->name + gen + " {{");
+    var i: int64 = 0;
+    while (i < parts->len) {
+      buf_add(b, "\n  " + sl_get(parts, i) + end);
+      i = i + 1;
+    }
+    buf_add(b, "\n}");
+    free(parts->items);
+    free(parts);
+    return buf_take(b);
+  }
+  if (slen(it->sig) == 0) {
+    return it->kind + " " + it->name;
+  }
+  return it->kind + " " + it->name + ": " + it->sig;
+}
+
+// The member table of a struct or enum.
+fn dc_members(out: StrList*, it: ExportItem*, lines: StrList*) {
+  var g: int64 = dc_generics_end(it->sig);
+  var is_enum: bool = s_eq(it->kind, "enum");
+  var sep: int32 = 59;
+  if (is_enum) {
+    sep = 44;
+  }
+  var parts: StrList* = dc_split_top(s_from(it->sig, g), sep);
+  if (parts->len == 0) {
+    free(parts->items);
+    free(parts);
+    return;
+  }
+  var docs: StrList* = dc_member_docs(lines, it->line);
+  dc_blank(out);
+  if (is_enum) {
+    sl_push(out, "| Variant | Description |");
+    sl_push(out, "|---|---|");
+  } else {
+    sl_push(out, "| Field | Type | Description |");
+    sl_push(out, "|---|---|---|");
+  }
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var part: string = sl_get(parts, i);
+    var n: int64 = 0;
+    while (n < slen(part) && is_ident_b(s_byte(part, n))) {
+      n = n + 1;
+    }
+    var name: string = s_sub(part, 0, n);
+    var doc: string = dc_cell(dc_member_doc(docs, name));
+    var row: string = s_empty();
+    if (is_enum) {
+      row = "| `" + dc_cell(part) + "` | " + doc + " |";
+    } else {
+      var colon: int64 = s_find_byte(part, 58);
+      var ty: string = s_empty();
+      if (colon >= 0) {
+        ty = s_trim(s_from(part, colon + 1));
+      }
+      row = "| `" + name + "` | `" + dc_cell(ty) + "` | " + doc + " |";
+    }
+    sl_push(out, row);
+    i = i + 1;
+  }
+  free(parts->items);
+  free(parts);
+  free(docs->items);
+  free(docs);
+}
+
+fn dc_has_key(b: DcBlock*, key: string) -> bool {
+  return sl_has(b->keys, key);
+}
+
+fn dc_find(o: DocOut*, rel: string, it: ExportItem*, msg: string) {
+  var f: string = rel + ":" + s_int(it->line) + ": " + it->name + ": " + msg;
+  sl_push(o->findings, f);
+}
+
+// The checks of 16.4 on one export.
+fn dc_check(o: DocOut*, cfg: DocCfg*, rel: string, it: ExportItem*, b: DcBlock*, params: StrList*) {
+  if (!b->found) {
+    dc_find(o, rel, it, "no doc comment");
+    return;
+  }
+  if (b->summary->len == 0) {
+    dc_find(o, rel, it, "the doc comment has no summary");
+  }
+  if (!dc_is_fn(it)) {
+    return;
+  }
+  var prev: int64 = -1;
+  var named: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < b->keys->len) {
+    if (s_eq(sl_get(b->keys, i), "param")) {
+      var pn: string = sl_get(b->names, i);
+      var at: int64 = sl_index(params, pn);
+      if (at < 0) {
+        var m1: string = "@param " + pn + " is not a parameter (" + sl_join(params, ", ") + ")";
+        dc_find(o, rel, it, m1);
+      } else if (at < prev) {
+        var m2: string = "@param " + pn + " is out of order (" + sl_join(params, ", ") + ")";
+        dc_find(o, rel, it, m2);
+      } else {
+        prev = at;
+      }
+      sl_push(named, pn);
+    }
+    i = i + 1;
+  }
+  var r: int64 = 0;
+  while (r < cfg->require->len) {
+    var key: string = sl_get(cfg->require, r);
+    r = r + 1;
+    if (s_eq(key, "summary")) {
+      continue;
+    }
+    if (s_eq(key, "param")) {
+      if (dc_has_key(b, "in")) {
+        continue;
+      }
+      var p: int64 = 0;
+      while (p < params->len) {
+        if (!sl_has(named, sl_get(params, p))) {
+          var m3: string = "parameter " + sl_get(params, p) + " is not documented (@param)";
+          dc_find(o, rel, it, m3);
+        }
+        p = p + 1;
+      }
+      continue;
+    }
+    if (s_eq(key, "returns") && !dc_returns(it->sig)) {
+      continue;
+    }
+    if (!dc_has_key(b, key)) {
+      var m4: string = "no `" + key + "` field (mb_doc_require)";
+      dc_find(o, rel, it, m4);
+    }
+  }
+  free(named->items);
+  free(named);
+}
+
+fn dc_render(out: StrList*, it: ExportItem*, b: DcBlock*, lines: StrList*) {
+  dc_blank(out);
+  var head: string = "### " + it->name;
+  sl_push(out, head);
+  sl_push(out, "");
+  sl_push(out, "```mettle");
+  sl_push(out, dc_decl(it));
+  sl_push(out, "```");
+  if (b->summary->len > 0) {
+    sl_push(out, "");
+    sl_extend(out, b->summary);
+  }
+  if (b->prose->len > 0) {
+    dc_blank(out);
+    dc_emit(out, b->prose);
+  }
+  var params_done: bool = false;
+  var i: int64 = 0;
+  while (i < b->keys->len) {
+    var key: string = sl_get(b->keys, i);
+    if (s_eq(key, "param")) {
+      if (!params_done) {
+        params_done = true;
+        dc_blank(out);
+        sl_push(out, "**Parameters**");
+        sl_push(out, "");
+        var k: int64 = i;
+        while (k < b->keys->len) {
+          if (s_eq(sl_get(b->keys, k), "param")) {
+            var item: string = "- `" + sl_get(b->names, k) + "`: " + s_replace(sl_get(b->texts, k), "\n", " ");
+            sl_push(out, dc_rtrim(item));
+          }
+          k = k + 1;
+        }
+      }
+    } else if (!s_eq(key, "internal")) {
+      var tl: StrList* = s_lines(sl_get(b->texts, i));
+      dc_blank(out);
+      var label: string = "**" + dc_label(key) + ":**";
+      if (tl->len > 0 && slen(sl_get(tl, 0)) > 0 && !s_starts(sl_get(tl, 0), "```")) {
+        var first: string = label + " " + sl_get(tl, 0);
+        sl_set(tl, 0, first);
+      } else {
+        sl_push(out, label);
+      }
+      dc_emit(out, tl);
+      free(tl->items);
+      free(tl);
+    }
+    i = i + 1;
+  }
+  if (s_eq(it->kind, "struct") || s_eq(it->kind, "enum")) {
+    dc_members(out, it, lines);
+  }
+}
+
+fn dc_keep_name(cfg: DocCfg*, name: string) -> bool {
+  var any_pos: bool = false;
+  var hit: bool = false;
+  var i: int64 = 0;
+  while (i < cfg->exports->len) {
+    var e: string = sl_get(cfg->exports, i);
+    if (s_starts(e, "!")) {
+      if (s_starts(name, s_from(e, 1))) {
+        return false;
+      }
+    } else {
+      any_pos = true;
+      if (s_starts(name, e)) {
+        hit = true;
+      }
+    }
+    i = i + 1;
+  }
+  return !any_pos || hit;
+}
+
+// The module doc: the `//!` lines before the first declaration, else the
+// first comment paragraph of the file unless it sits on a declaration.
+fn dc_module_doc(lines: StrList*, first: int64) -> StrList* {
+  var doc: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < lines->len && i < first - 1) {
+    var t: string = s_trim(sl_get(lines, i));
+    if (s_starts(t, "//!")) {
+      sl_push(doc, dc_strip(t));
+    }
+    i = i + 1;
+  }
+  if (doc->len > 0) {
+    return doc;
+  }
+  i = 0;
+  while (i < lines->len && dc_is_comment(sl_get(lines, i))) {
+    i = i + 1;
+  }
+  if (i == 0 || i + 1 == first || (i < lines->len && s_starts(s_trim(sl_get(lines, i)), "@"))) {
+    return doc;
+  }
+  var k: int64 = 0;
+  while (k < i) {
+    sl_push(doc, dc_strip(sl_get(lines, k)));
+    k = k + 1;
+  }
+  return doc;
+}
+
+fn dc_internal_module(doc: StrList*) -> bool {
+  var i: int64 = 0;
+  while (i < doc->len) {
+    if (s_starts(s_trim(sl_get(doc, i)), "@internal")) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+// One module: its section in the Markdown (when it has exports to show,
+// or always with force) and its findings.
+export fn doc_file(o: DocOut*, cfg: DocCfg*, rel: string, text: string, force: bool) {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var l: ExportList* = scan_exports(text);
+  defer free(l);
+  var first: int64 = lines->len + 1;
+  if (l->n > 0) {
+    first = scan_export(l, 0)->line;
+  }
+  var mod: StrList* = dc_module_doc(lines, first);
+  if (dc_internal_module(mod)) {
+    return;
+  }
+  var blocks: DcBlock** = (DcBlock**)malloc((l->n + 1) * 8);
+  var kept: int64 = 0;
+  var i: int64 = 0;
+  while (i < l->n) {
+    var it: ExportItem* = scan_export(l, i);
+    blocks[i] = (DcBlock*)0;
+    if (dc_keep_name(cfg, it->name)) {
+      var params: StrList* = sl_new();
+      if (dc_is_fn(it)) {
+        params = dc_params(it->sig);
+      }
+      var before: int64 = o->snips->len;
+      var b: DcBlock* = dc_block(o, rel, lines, it->line, params);
+      if (dc_has_key(b, "internal")) {
+        while (o->snips->len > before) {
+          sl_remove_at(o->snips, o->snips->len - 1);
+          sl_remove_at(o->snip_at, o->snip_at->len - 1);
+          sl_remove_at(o->snip_mod, o->snip_mod->len - 1);
+        }
+      } else {
+        blocks[i] = b;
+        kept = kept + 1;
+        dc_check(o, cfg, rel, it, b, params);
+      }
+    }
+    i = i + 1;
+  }
+  if (kept > 0 || force) {
+    dc_blank(o->md);
+    var head: string = "## " + rel;
+    sl_push(o->md, head);
+    var body: StrList* = sl_new();
+    defer free(body);
+    i = 0;
+    while (i < mod->len) {
+      if (!s_starts(s_trim(sl_get(mod, i)), "@internal")) {
+        sl_push(body, sl_get(mod, i));
+      }
+      i = i + 1;
+    }
+    if (body->len > 0) {
+      sl_push(o->md, "");
+      dc_emit(o->md, body);
+    }
+    i = 0;
+    while (i < l->n) {
+      if (blocks[i] != (DcBlock*)0) {
+        dc_render(o->md, scan_export(l, i), blocks[i], lines);
+        o->nexports = o->nexports + 1;
+      }
+      i = i + 1;
+    }
+  }
+  free(blocks);
+}
+
+// The ```mettle blocks of a Markdown file as snippets (```mettle ignore and
+// other languages are left alone).
+export fn doc_md_snippets(o: DocOut*, rel: string, text: string) {
+  var lines: StrList* = s_lines(text);
+  defer free(lines);
+  var snip: Buf* = (Buf*)0;
+  var fence: bool = false;
+  var at: int64 = 0;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var t: string = s_trim(sl_get(lines, i));
+    i = i + 1;
+    if (!s_starts(t, "```")) {
+      if (snip != (Buf*)0) {
+        buf_line(snip, sl_get(lines, i - 1));
+      }
+      continue;
+    }
+    if (!fence) {
+      fence = true;
+      if (s_eq(s_trim(s_from(t, 3)), "mettle")) {
+        snip = buf_new();
+        at = i;
+      }
+      continue;
+    }
+    fence = false;
+    if (snip != (Buf*)0) {
+      sl_push(o->snips, buf_take(snip));
+      var sat: string = rel + ":" + s_int(at);
+      sl_push(o->snip_at, sat);
+      sl_push(o->snip_mod, s_empty());
+      snip = (Buf*)0;
+    }
+  }
+}
+
+// A snippet as a program. Its own imports lead; without any, `import
+// "std/io"` and imp (the module it documents, "" for none). A snippet
+// with `fn main` is kept as is, one with other top-level declarations
+// gets an empty main, and plain statements become main's body.
+export fn doc_snip_program(code: string, imp: string) -> string {
+  var lines: StrList* = s_lines(code);
+  defer free(lines);
+  var imports: StrList* = sl_new();
+  defer free(imports);
+  var body: StrList* = sl_new();
+  defer free(body);
+  var decls: bool = false;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = sl_get(lines, i);
+    i = i + 1;
+    if (s_starts(l, "import ")) {
+      sl_push(imports, l);
+      continue;
+    }
+    if (s_starts(l, "fn ") || s_starts(l, "struct ") || s_starts(l, "enum ") || s_starts(l, "export ") || s_starts(l, "@")) {
+      decls = true;
+    }
+    sl_push(body, l);
+  }
+  var b: Buf* = buf_new();
+  if (imports->len == 0) {
+    buf_line(b, "import \"std/io\";");
+    if (slen(imp) > 0) {
+      var il: string = "import \"" + imp + "\";";
+      buf_line(b, il);
+    }
+  }
+  i = 0;
+  while (i < imports->len) {
+    buf_line(b, sl_get(imports, i));
+    i = i + 1;
+  }
+  buf_line(b, "");
+  var text: string = sl_join(body, "\n");
+  if (s_contains(text, "fn main(")) {
+    buf_line(b, text);
+  } else if (decls) {
+    buf_line(b, text);
+    buf_line(b, "");
+    buf_line(b, "fn main() -> int32 {{");
+    buf_line(b, "  return 0;");
+    buf_line(b, "}");
+  } else {
+    buf_line(b, "fn main() -> int32 {{");
+    i = 0;
+    while (i < body->len) {
+      var bl: string = "  " + sl_get(body, i);
+      buf_line(b, bl);
+      i = i + 1;
+    }
+    buf_line(b, "  return 0;");
+    buf_line(b, "}");
+  }
+  return buf_take(b);
+}

@@ -122,6 +122,11 @@ export struct Manifest {
   test_cmds: StrList*;    // [test-cmds] as "name=cmdline", in file order
   test_sets: TestSet*;    // [test.NAME] entries, env items one each
   ntest_sets: int64;
+  doc_out: string;        // [doc] out: mb_doc_out, "" unset (docs/API.md)
+  doc_require: StrList*;  // [doc] require: mb_doc_require fields
+  doc_exports: StrList*;  // [doc] exports: name prefixes, "!PREFIX" drops
+  doc_facade: string;     // [doc] facade: mb_doc_facade, "" unset
+  doc_snippets: StrList*; // [doc] snippets: Markdown globs whose ```mettle blocks --check compiles
 }
 
 export struct SettingsQuery {
@@ -587,6 +592,7 @@ fn mnx_known_keys(section: string) -> StrList* {
   if (s_eq(section, "rules")) { return mnx_list("files"); }
   if (s_eq(section, "tests")) { return mnx_list("globs exclude"); }
   if (s_eq(section, "live")) { return mnx_list("watch preview"); }
+  if (s_eq(section, "doc")) { return mnx_list("out require exports facade snippets"); }
   if (s_eq(section, "tools")) { return mnx_list("cc cc-windows mettle-linux mettle-windows pkg-config"); }
   if (s_eq(section, "c") || s_eq(section, "c.linux") || s_eq(section, "c.windows")) {
     return mnx_list("sources include cflags libs");
@@ -641,7 +647,7 @@ fn mnx_is_named(section: string, head: string) -> bool {
 }
 
 fn mnx_section_known(section: string) -> bool {
-  if (sl_has(mnx_list("package build live dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins test-bins tests test-cmds"), section)) {
+  if (sl_has(mnx_list("package build live doc dependencies c c.linux c.windows link link.linux link.windows replace tools rules dep-bins test-bins tests test-cmds"), section)) {
     return true;
   }
   if (s_starts(section, "test.") && slen(section) > 5) {
@@ -2032,6 +2038,32 @@ fn mnx_test_set_push(m: Manifest*, ts: TestSet) {
   m->ntest_sets = m->ntest_sets + 1;
 }
 
+// [doc]: mbuild doc's settings.
+fn mnx_doc(m: Manifest*) {
+  if (slen(m->error) > 0) {
+    return;
+  }
+  m->doc_out = mnx_str(m, "doc", "out");
+  m->doc_facade = mnx_str(m, "doc", "facade");
+  free(m->doc_require);
+  m->doc_require = mnx_strs(m, "doc", "require");
+  free(m->doc_exports);
+  m->doc_exports = mnx_strs(m, "doc", "exports");
+  free(m->doc_snippets);
+  m->doc_snippets = mnx_strs(m, "doc", "snippets");
+  var known: StrList* = mnx_list("summary param in returns error owns thread cost example");
+  defer free(known);
+  var i: int64 = 0;
+  while (i < m->doc_require->len && slen(m->error) == 0) {
+    var f: string = sl_get(m->doc_require, i);
+    if (!sl_has(known, f)) {
+      var msg: string = "mb_doc_require: unknown field '" + f + "' (summary, param, in, returns, error, owns, thread, cost, example)";
+      mnx_error(m, toml_get(m->doc, "doc", "require")->line, msg);
+    }
+    i = i + 1;
+  }
+}
+
 // [tests], [test-cmds] and every [test.NAME].
 fn mnx_tests(m: Manifest*) {
   if (slen(m->error) > 0) {
@@ -2366,6 +2398,11 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->test_cmds = sl_new();
   m->test_sets = (TestSet*)0;
   m->ntest_sets = 0;
+  m->doc_out = s_empty();
+  m->doc_require = sl_new();
+  m->doc_exports = sl_new();
+  m->doc_facade = s_empty();
+  m->doc_snippets = sl_new();
   return m;
 }
 
@@ -2488,6 +2525,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   mnx_test_bins(m);
   mnx_services(m);
   mnx_tests(m);
+  mnx_doc(m);
   if (slen(m->error) > 0) {
     return m;
   }

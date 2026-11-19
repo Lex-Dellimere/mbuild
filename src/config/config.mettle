@@ -226,6 +226,9 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     sl_push(c, "mb_test_set|" + key + "|" + section);
   } else if (s_eq(section, "rules")) {
     sl_push(c, "mb_rule||");
+  } else if (s_eq(section, "doc")) {
+    var dcall: string = "mb_doc_" + key + "||";
+    sl_push(c, dcall);
   } else if (s_eq(section, "live")) {
     if (s_eq(key, "watch")) { sl_push(c, "mb_watch||"); }
     if (s_eq(key, "preview")) { sl_push(c, "mb_preview||"); }

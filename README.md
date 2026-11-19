@@ -194,6 +194,7 @@ this needs wine and a windows build of the mettle compiler: set `MBUILD_METTLE_W
 | `mbuild shell` | a prompt inside the running program: read and set its state, redefine functions |
 | `mbuild test` | run the tests (`@test`, test programs, command tests) in every cell of their matrix, cached |
 | `mbuild check` | type check without linking |
+| `mbuild doc [--check]` | write `docs/API.md` from the doc comments above the exports; `--check` fails on gaps and stale docs |
 | `mbuild clean` | remove build output |
 | `mbuild search [TEXT]` | find packages in the registries by name, description or function |
 | `mbuild info PKG[@VERSION]` | a package: README intro, versions, dependencies, every exported function with its comment |

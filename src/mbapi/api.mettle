@@ -996,6 +996,46 @@ export fn mb_preview(side: string) {
   mbi_put("live", "preview", mbi_quote(side));
 }
 
+// Where `mbuild doc` writes the API reference (default "docs/API.md"); set,
+// `mbuild publish` runs `mbuild doc --check` first.
+export fn mb_doc_out(path: string) {
+  mbi_put("doc", "out", mbi_quote(path));
+}
+
+fn mbi_doc_list(key: string, csv: string) {
+  var parts: MbiList* = mbi_split(csv, 44);
+  defer free(parts);
+  var i: int64 = 0;
+  while (i < parts->len) {
+    var t: string = mbi_trim(parts->items[i]);
+    if (mbi_len(t) > 0) {
+      mbi_append("doc", key, mbi_quote(t));
+    }
+    i = i + 1;
+  }
+}
+
+// Doc fields every export must have, checked by `mbuild doc --check`:
+// "param, returns" (summary, param, in, returns, error, owns, thread, cost, example).
+export fn mb_doc_require(csv: string) {
+  mbi_doc_list("require", csv);
+}
+
+// The exports `mbuild doc` shows: names with one of the prefixes ("rz_"); "!crx_" drops them.
+export fn mb_doc_exports(csv: string) {
+  mbi_doc_list("exports", csv);
+}
+
+// Only the modules this file imports (and itself) are documented, in import order.
+export fn mb_doc_facade(file: string) {
+  mbi_put("doc", "facade", mbi_quote(file));
+}
+
+// Markdown files (globs) whose ```mettle blocks `mbuild doc --check` compiles: "README.md, docs/*.md".
+export fn mb_doc_snippets(csv: string) {
+  mbi_doc_list("snippets", csv);
+}
+
 // A file of @rule functions applied to every bin and test.
 export fn mb_rule(file: string) {
   mbi_append("rules", "files", mbi_quote(file));
