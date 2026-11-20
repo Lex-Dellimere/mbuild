@@ -1,9 +1,4 @@
-// mbfile: mbuild.mettle as text.
-//
-// A light scanner, not a parser: it skips strings (with their `{expr}`
-// interpolations), comments and char literals, tracks braces, and records the
-// top-level functions and every `mb_*(...)` call with its arguments. Edits
-// replace or insert whole lines and keep every other byte.
+// mbfile: mbuild.mettle as text: a light scanner, not a parser, and edits that replace or insert whole lines.
 
 import "std/mem";
 import "../core/base";
@@ -51,7 +46,7 @@ export struct MbfEdit {
   why: string;
 }
 
-// A top-level function. decl is the offset of its first token (a decorator
+// a top-level function. decl is the offset of its first token (a decorator
 // or `export`); body_open/body_close are the offsets of its braces, -1 when
 // it has no body.
 struct MfxFn {
@@ -64,7 +59,7 @@ struct MfxFn {
   noparams: bool;
 }
 
-// One `mb_*(...)` call. args hold the decoded value of a string literal
+// one `mb_*(...)` call. args hold the decoded value of a string literal
 // argument and the source text of any other (literal says which, "1" / "").
 // alone: the call is the only statement on its line.
 struct MfxCall {
@@ -93,9 +88,7 @@ struct MfxScan {
   deps_call_line: int64;
 }
 
-// ---------------------------------------------------------------------------
-// Scanner
-// ---------------------------------------------------------------------------
+// scanner
 
 fn mfx_line_of(text: string, off: int64) -> int64 {
   var line: int64 = 1;
@@ -117,7 +110,7 @@ fn mfx_line_start(text: string, off: int64) -> int64 {
   return i;
 }
 
-// The offset just past the line's newline (or the end of the text).
+// the offset just past the line's newline (or the end of the text).
 fn mfx_line_end(text: string, off: int64) -> int64 {
   var i: int64 = off;
   while (i < slen(text) && s_byte(text, i) != 10) {
@@ -224,7 +217,7 @@ fn mfx_skip_space(text: string, i: int64) -> int64 {
   return j;
 }
 
-// The value of a string literal that is exactly the text s; ok = false when
+// the value of a string literal that is exactly the text s; ok = false when
 // s is anything else (an expression, an interpolation).
 struct MfxLit {
   ok: bool;
@@ -268,7 +261,7 @@ fn mfx_decode(s: string) -> MfxLit {
   return r;
 }
 
-// A Mettle string literal holding s.
+// a Mettle string literal holding s.
 fn mfx_lit(s: string) -> string {
   var b: Buf* = buf_new();
   buf_addb(b, 34);
@@ -300,7 +293,7 @@ fn mfx_push_call(sc: MfxScan*, c: MfxCall) {
   sc->ncalls = sc->ncalls + 1;
 }
 
-// The call whose `(` is at open; its arguments split at top-level commas.
+// the call whose `(` is at open; its arguments split at top-level commas.
 fn mfx_call(sc: MfxScan*, name: string, start: int64, open: int64, in_fn: int64, at_depth: int64) -> int64 {
   var text: string = sc->text;
   var n: int64 = slen(text);
@@ -527,7 +520,7 @@ fn mfx_find_fn(sc: MfxScan*, name: string) -> int64 {
   return -1;
 }
 
-// The `//` lines directly above line `line`, without the slashes.
+// the `//` lines directly above line `line`, without the slashes.
 fn mfx_doc(text: string, decl: int64) -> StrList* {
   var out: StrList* = sl_new();
   var lines: StrList* = s_lines(s_sub(text, 0, mfx_line_start(text, decl)));
@@ -559,12 +552,12 @@ fn mfx_is_dep_fn(name: string) -> bool {
   return s_eq(name, "mb_dep") || s_eq(name, "mb_dep_from") || s_eq(name, "mb_dep_path") || s_eq(name, "mb_dep_path_v");
 }
 
-// The calls that belong in fn deps().
+// the calls that belong in fn deps().
 fn mfx_is_deps_fn(name: string) -> bool {
   return mfx_is_dep_fn(name) || s_eq(name, "mb_dep_bin") || s_eq(name, "mb_replace_path") || s_eq(name, "mb_replace_version");
 }
 
-// The call is in fn project() or fn deps().
+// the call is in fn project() or fn deps().
 fn mfx_in_decl(sc: MfxScan*, c: MfxCall*) -> bool {
   if (c->in_fn < 0) {
     return false;
@@ -584,7 +577,7 @@ fn mfx_all_literal(c: MfxCall*) -> bool {
   return true;
 }
 
-// The argument a call's TOML key comes from (the package name of
+// the argument a call's TOML key comes from (the package name of
 // mb_dep_from, the key of mb_raw, the OS of mb_component_on), -1 for none.
 fn mfx_key_index(name: string) -> int64 {
   if (s_eq(name, "mb_dep_from") || s_eq(name, "mb_raw") || s_eq(name, "mb_component_on") || s_eq(name, "mb_test_set")) {
@@ -712,9 +705,7 @@ export fn mbf_scan(text: string) -> MbfInfo* {
   return info;
 }
 
-// ---------------------------------------------------------------------------
-// Edits
-// ---------------------------------------------------------------------------
+// edits
 
 fn mfx_edit(ok: bool, text: string, line: int64, why: string) -> MbfEdit {
   var e: MbfEdit;
@@ -733,7 +724,7 @@ fn mfx_indent(text: string, line_start: int64) -> string {
   return s_sub(text, line_start, j);
 }
 
-// The calls that declare `name`; a refusal when one cannot be edited.
+// the calls that declare `name`; a refusal when one cannot be edited.
 struct MfxMatch {
   at: int64;        // index into calls, -1 when none
   count: int64;
@@ -806,7 +797,7 @@ export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
   return mfx_insert_dep(text, sc, stmt);
 }
 
-// Adds `mb_dep_path("NAME", "PATH");` where mbf_set_dep adds a new mb_dep;
+// adds `mb_dep_path("NAME", "PATH");` where mbf_set_dep adds a new mb_dep;
 // refused when NAME is declared already.
 export fn mbf_add_dep_path(text: string, name: string, path: string) -> MbfEdit {
   var sc: MfxScan* = mfx_scan(text);
@@ -826,9 +817,9 @@ export fn mbf_add_dep_path(text: string, name: string, path: string) -> MbfEdit 
   return mfx_insert_dep(text, sc, stmt);
 }
 
-// A new dependency line goes into fn deps(): after its last mb_dep* line,
+// a new dependency line goes into fn deps(): after its last mb_dep* line,
 // else at the end of its body; without fn deps(), into a new one right after
-// fn project() (13.8).
+// fn project().
 fn mfx_insert_dep(text: string, sc: MfxScan*, stmt: string) -> MbfEdit {
   var dfn: int64 = mfx_find_fn(sc, "deps");
   if (dfn < 0 || sc->fns[dfn].body_close < 0) {
@@ -867,7 +858,7 @@ fn mfx_append_body(text: string, sc: MfxScan*, fi: int64, add: string) -> MbfEdi
   return mfx_edit(true, s_sub(text, 0, close) + "\n" + add + s_from(text, close), at_line + 1, s_empty());
 }
 
-// A new `fn deps()` holding add (whole lines), right after fn project().
+// a new `fn deps()` holding add (whole lines), right after fn project().
 fn mfx_new_deps(text: string, sc: MfxScan*, add: string) -> MbfEdit {
   var proj: int64 = mfx_find_fn(sc, "project");
   var at: int64 = slen(text);
@@ -990,7 +981,7 @@ export fn mbf_remove_dep(text: string, name: string) -> MbfEdit {
   return mfx_edit(true, s_sub(text, 0, c->line_start) + s_from(text, c->line_end), c->line, s_empty());
 }
 
-// The TOML section a declaration in fn project() writes to, following the
+// the TOML section a declaration in fn project() writes to, following the
 // cursor of mb_profile / mb_for_bin / mb_on as the API does.
 struct MfxCursor {
   kind: string;
@@ -1060,9 +1051,9 @@ fn mfx_decl_fn(sc: MfxScan*) -> int64 {
   return at;
 }
 
-// The line of the first literal `call(...)` in fn project() or fn deps() (or fn local())
+// the line of the first literal `call(...)` in fn project() or fn deps() (or fn local())
 // whose key argument is first_arg ("" = any) and that writes to section ("" =
-// any); 0 when there is none. Calls made from other functions are not followed.
+// any); 0 when there is none. calls made from other functions are not followed.
 export fn mbf_locate(text: string, call: string, first_arg: string, section: string) -> int64 {
   var sc: MfxScan* = mfx_scan(text);
   var proj: int64 = mfx_decl_fn(sc);
@@ -1165,9 +1156,7 @@ export fn mbf_add_command(text: string, name: string, summary: string, body: str
   return mfx_edit(true, buf_take(b), line, s_empty());
 }
 
-// ---------------------------------------------------------------------------
-// Generated text
-// ---------------------------------------------------------------------------
+// generated text
 
 export fn mbf_driver(info: MbfInfo*, file: string, config_only: bool) -> string {
   return mbf_driver_local(info, file, s_empty(), config_only);
@@ -1246,7 +1235,7 @@ export fn mbf_init_text(name: string) -> string {
   return buf_take(b);
 }
 
-// The call on an edited line, for the status line: mb_dep("x", "v1").
+// the call on an edited line, for the status line: mb_dep("x", "v1").
 export fn mbf_call_at(text: string, line: int64) -> string {
   var lines: StrList* = s_lines(text);
   defer free(lines);
@@ -1264,9 +1253,7 @@ export fn mbf_call_at(text: string, line: int64) -> string {
   return l;
 }
 
-// ---------------------------------------------------------------------------
 // mbuild.local.mettle
-// ---------------------------------------------------------------------------
 
 export fn mbf_local_text() -> string {
   return "import \"mbuild/api\";\n\nfn local() {{\n}\n";
@@ -1305,9 +1292,9 @@ fn mfx_call_text(call: string, args: StrList*) -> string {
   return call + "(" + sl_join(lits, ", ") + ");";
 }
 
-// The one call named `call` in the declaring function whose key argument is
+// the one call named `call` in the declaring function whose key argument is
 // first_arg; at = -1 when there is none.
-// Calls a file holds at most once, matched whatever their argument.
+// calls a file holds at most once, matched whatever their argument.
 fn mfx_singleton(call: string) -> bool {
   return s_eq(call, "mb_toolchain");
 }
@@ -1353,9 +1340,9 @@ fn mfx_match_call(sc: MfxScan*, call: string, first_arg: string) -> MfxMatch {
   return m;
 }
 
-// Sets `call(args...)` (string literals) in fn local() (or fn project()):
+// sets `call(args...)` (string literals) in fn local() (or fn project()):
 // the call whose key argument is first_arg is rewritten, else a new line is
-// added right after the opening brace, ahead of any mb_profile cursor. An
+// added right after the opening brace, ahead of any mb_profile cursor. an
 // empty text starts from mbf_local_text().
 export fn mbf_set_call(text: string, call: string, first_arg: string, args: StrList*) -> MbfEdit {
   var t: string = text;
@@ -1393,7 +1380,7 @@ export fn mbf_set_call(text: string, call: string, first_arg: string, args: StrL
   return mfx_edit(true, s_sub(t, 0, open + 1) + "\n  " + stmt + "\n" + s_from(t, open + 1), brace_line + 1, s_empty());
 }
 
-// Deletes the line of the call whose key argument is first_arg; ok with the
+// deletes the line of the call whose key argument is first_arg; ok with the
 // text unchanged when there is none.
 export fn mbf_remove_call(text: string, call: string, first_arg: string) -> MbfEdit {
   var sc: MfxScan* = mfx_scan(text);
@@ -1409,9 +1396,9 @@ export fn mbf_remove_call(text: string, call: string, first_arg: string) -> MbfE
   return mfx_edit(true, s_sub(text, 0, c->line_start) + s_from(text, c->line_end), c->line, s_empty());
 }
 
-// Literal argument idx of the first `call(...)` in fn project() (or fn
+// literal argument idx of the first `call(...)` in fn project() (or fn
 // local()) whose key argument is first_arg (any for a singleton); "" when
-// there is none. Read before the file is compiled (the compiler pin).
+// there is none. read before the file is compiled (the compiler pin).
 export fn mbf_call_arg(text: string, call: string, first_arg: string, idx: int64) -> string {
   var sc: MfxScan* = mfx_scan(text);
   var owner: int64 = mfx_decl_fn(sc);

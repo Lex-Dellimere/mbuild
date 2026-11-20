@@ -1,5 +1,4 @@
-// agents: the managed block in a project's AGENT.rules that points at the
-// AGENT.rules of its dependencies.
+// agents: the managed block in a project's AGENT.rules that points at its dependencies' AGENT.rules.
 
 import "std/mem";
 import "../core/base";
@@ -73,7 +72,7 @@ fn agx_index(entry: string) -> int64 {
   return s_to_int(s_from(entry, s_find_byte(entry, 10) + 1));
 }
 
-// The block for the direct dependencies that ship AGENT.rules, "" when none.
+// the block for the direct dependencies that ship AGENT.rules, "" when none.
 fn agx_block(p: Project*, ds: DepState*) -> string {
   var b: Buf* = buf_new();
   var any: bool = false;
@@ -160,7 +159,7 @@ fn agx_with_block(text: string, block: string) -> string {
   return out;
 }
 
-// Rewrites the block after a resolution; true when AGENT.rules changed.
+// rewrites the block after a resolution; true when AGENT.rules changed.
 export fn agt_refresh(p: Project*, ds: DepState*) -> bool {
   if (!agx_enabled(p)) {
     return false;

@@ -1,8 +1,4 @@
 // init: a package's init.rules starts or extends a project.
-//
-// The rules are compiled into a driver with mbuild/init, after a check that
-// nothing they import can reach the OS. The driver only writes records; this
-// module validates them, fills @@variables@@ and applies the plan.
 
 import "std/io";
 import "std/mem";
@@ -33,10 +29,10 @@ export struct IniRequest {
   force: bool;
 }
 
-// Set by the CLI: the value of @@mbuild_version@@.
+// set by the CLI: the value of @@mbuild_version@@.
 export var ini_mbuild_version: string = "";
 
-// The package whose rules run.
+// the package whose rules run.
 struct InxSrc {
   name: string;
   version: string;      // "" for a path package without one
@@ -54,13 +50,13 @@ struct InxOpts {
   choices: StrList*;    // csv per option, "" = any value
 }
 
-// One record of the driver's output: KIND and its fields.
+// one record of the driver's output: KIND and its fields.
 struct InxRec {
   kind: string;
   f: StrList*;
 }
 
-// A checked plan with every variable filled in.
+// a checked plan with every variable filled in.
 struct InxWork {
   dirs: StrList*;
   files: StrList*;
@@ -75,7 +71,7 @@ struct InxWork {
   next: StrList*;
 }
 
-// The last error of an inx_ step and its help line ("" for none).
+// the last error of an inx_ step and its help line ("" for none).
 var g_inx_err: string;
 var g_inx_hint: string;
 
@@ -206,7 +202,7 @@ fn inx_bad_path(p: string) -> string {
   return s_empty();
 }
 
-// A Mettle string literal for s.
+// a Mettle string literal for s.
 fn inx_lit(s: string) -> string {
   var b: Buf* = buf_new();
   buf_addb(b, 34);
@@ -231,15 +227,13 @@ fn inx_lit(s: string) -> string {
   return buf_take(b);
 }
 
-// ---------------------------------------------------------------------------
-// The package
-// ---------------------------------------------------------------------------
+// the package
 
 fn inx_is_path_ref(from: string) -> bool {
   return s_starts(from, ".") || s_find_byte(from, 47) >= 0 || s_find_byte(from, 92) >= 0;
 }
 
-// The first two string literals after `call(` in text, as "a\nb"; "" when absent.
+// the first two string literals after `call(` in text, as "a\nb"; "" when absent.
 fn inx_call_args(text: string, call: string) -> StrList* {
   var r: StrList* = sl_new();
   var at: int64 = s_find(text, call + "(");
@@ -265,7 +259,7 @@ fn inx_call_args(text: string, call: string) -> StrList* {
   return r;
 }
 
-// Name and version of a package in dir from mb_package(...) in its
+// name and version of a package in dir from mb_package(...) in its
 // mbuild.mettle (read, not run).
 fn inx_ident(dir: string, name: string*, version: string*) {
   *name = s_empty();
@@ -292,7 +286,7 @@ fn inx_marker_for(name: string, version: string, rv: RegVersion*, registry: stri
   return name + " " + version + " " + sha + " " + registry;
 }
 
-// The newest version that is not yanked, stable before pre-releases.
+// the newest version that is not yanked, stable before pre-releases.
 fn inx_newest(ix: RegIndex*) -> string {
   var vs: StrList* = sl_new();
   defer free(vs);
@@ -306,7 +300,7 @@ fn inx_newest(ix: RegIndex*) -> string {
   return sv_max(vs);
 }
 
-// Fetches a registry package into $MBUILD_HOME/init/NAME@VERSION, or takes a path.
+// fetches a registry package into $MBUILD_HOME/init/NAME@VERSION, or takes a path.
 fn inx_source(p: Project*, from: string, registry: string, src: InxSrc*) -> bool {
   src->is_path = inx_is_path_ref(from);
   if (src->is_path) {
@@ -379,9 +373,7 @@ fn inx_source(p: Project*, from: string, registry: string, src: InxSrc*) -> bool
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// The driver
-// ---------------------------------------------------------------------------
+// the driver
 
 fn inx_driver_text(rules: string, has_options: bool) -> string {
   var b: Buf* = buf_new();
@@ -429,9 +421,9 @@ fn inx_is_api(f: string, api_dir: string) -> bool {
   return s_eq(p_dir(f), api_dir) && (s_eq(p_base(f), "init.mettle") || s_eq(p_base(f), "init_linux.mettle") || s_eq(p_base(f), "init_windows.mettle"));
 }
 
-// Writes the API and driver files and checks that the driver's import graph
+// writes the API and driver files and checks that the driver's import graph
 // declares no extern, syscall or asm outside the API and embeds nothing from
-// outside the package. Nothing is compiled.
+// outside the package. nothing is compiled.
 fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
   var rules: string = src->dir + "/init.rules";
   var rf: FsRead = fs_read(rules);
@@ -502,7 +494,7 @@ fn inx_check_graph(p: Project*, src: InxSrc*) -> bool {
   return true;
 }
 
-// Runs `driver MODE OUT ARGS...` and parses the records it wrote.
+// runs `driver MODE OUT ARGS...` and parses the records it wrote.
 fn inx_run_driver(src: InxSrc*, exe: string, mode: string, args: StrList*, recs: InxRec**, n: int64*) -> bool {
   var out: string = src->driver_dir + "/" + mode + ".out";
   sys_remove_file(out);
@@ -584,9 +576,7 @@ fn inx_build(p: Project*, src: InxSrc*) -> string {
   return exe;
 }
 
-// ---------------------------------------------------------------------------
-// Options
-// ---------------------------------------------------------------------------
+// options
 
 fn inx_reserved(name: string) -> bool {
   return s_eq(name, "project") || s_eq(name, "package") || s_eq(name, "package_version") || s_eq(name, "mbuild_version");
@@ -677,7 +667,7 @@ fn inx_read_line(eof: bool*) -> string {
   return s_trim(buf_take(b));
 }
 
-// One value per option: --opt, else a prompt on a terminal, else the default.
+// one value per option: --opt, else a prompt on a terminal, else the default.
 fn inx_values(src: InxSrc*, o: InxOpts*, r: IniRequest*, vals: StrList*) -> bool {
   var given: StrList* = sl_new();
   defer free(given);
@@ -752,9 +742,7 @@ fn inx_values(src: InxSrc*, o: InxOpts*, r: IniRequest*, vals: StrList*) -> bool
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// The plan
-// ---------------------------------------------------------------------------
+// the plan
 
 fn inx_work_new() -> InxWork* {
   var w: InxWork* = new InxWork;
@@ -799,7 +787,7 @@ fn inx_dst(src: InxSrc*, what: string, raw: string, vars: StrList*, ok: bool*) -
   return p_clean(d);
 }
 
-// Checks every record and fills its variables.
+// checks every record and fills its variables.
 fn inx_work(src: InxSrc*, recs: InxRec*, n: int64, vars: StrList*, w: InxWork*) -> bool {
   var pkg_real: string = s_replace_byte(sys_realpath(src->dir), 92, 47);
   var ok: bool = true;
@@ -893,7 +881,7 @@ fn inx_work(src: InxSrc*, recs: InxRec*, n: int64, vars: StrList*, w: InxWork*) 
   return true;
 }
 
-// Options, values and the checked plan of src for a project named project.
+// options, values and the checked plan of src for a project named project.
 fn inx_plan(p: Project*, src: InxSrc*, r: IniRequest*, project: string, w: InxWork*) -> bool {
   var exe: string = inx_build(p, src);
   if (slen(exe) == 0) {
@@ -930,11 +918,9 @@ fn inx_plan(p: Project*, src: InxSrc*, r: IniRequest*, project: string, w: InxWo
   return inx_work(src, recs, n, vars, w);
 }
 
-// ---------------------------------------------------------------------------
-// Applying
-// ---------------------------------------------------------------------------
+// applying
 
-// The 13.10 mbuild.mettle, without its example command when bare.
+// the mbuild.mettle, without its example command when bare.
 fn inx_skeleton(name: string, bare: bool) -> string {
   var t: string = mbf_init_text(name);
   if (!bare) {
@@ -1093,7 +1079,7 @@ fn inx_edit(e: MbfEdit, what: string, text: string*) -> bool {
   return true;
 }
 
-// The plan's edits of mbuild.mettle. added lists "name version" of new deps.
+// the plan's edits of mbuild.mettle. added lists "name version" of new deps.
 fn inx_edit_file(src: InxSrc*, w: InxWork*, text: string*, force: bool, added: StrList*, cmds: StrList*) -> bool {
   var info: MbfInfo* = mbf_scan(*text);
   defer free(info);
@@ -1180,7 +1166,7 @@ fn inx_dir_empty(d: string) -> bool {
   return files->len == 0 && dirs->len == 0;
 }
 
-// Writes the plan into root (prefix: how paths are shown, "site/" or "").
+// writes the plan into root (prefix: how paths are shown, "site/" or "").
 fn inx_apply(src: InxSrc*, w: InxWork*, r: IniRequest*, root: string, prefix: string, project: string, fresh: bool) -> bool {
   var mbpath: string = root + "/mbuild.mettle";
   var text: string = s_empty();
@@ -1293,7 +1279,7 @@ fn inx_apply(src: InxSrc*, w: InxWork*, r: IniRequest*, root: string, prefix: st
   return true;
 }
 
-// Plain `mbuild init` for init --from in a directory without mbuild.mettle.
+// plain `mbuild init` for init --from in a directory without mbuild.mettle.
 fn inx_plain_init(root: string, name: string, dry_run: bool, w: InxWork*) -> bool {
   var verb: string = "Created";
   if (dry_run) {

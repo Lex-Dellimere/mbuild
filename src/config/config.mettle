@@ -1,10 +1,4 @@
 // config: mbuild.mettle compiled into a driver program and run.
-//
-// The API file is written to .mbuild/api/mbuild/api.mettle; the driver to
-// .mbuild/config/driver.mettle, compiled with the host compiler only when its
-// stamp (compiler, mbuild, every file it imports) changed. `driver config`
-// writes the project's TOML (and mbuild.local.mettle's, when present), which
-// man_parse reads after its lines have been re-pointed at the mb_* calls.
 
 import "std/mem";
 import "../core/base";
@@ -55,7 +49,7 @@ fn cfx_write_api(dir: string) {
   fs_write_if_changed(dir + "/init_windows.mettle", import_str "../mbapi/init_windows.mettle");
 }
 
-// A path as the user sees it from the working directory.
+// a path as the user sees it from the working directory.
 fn cfx_show(p: Project*, file: string) -> string {
   var cwd: string = p_clean(s_replace_byte(sys_cwd(), 92, 47));
   if (p_has_prefix_dir(file, cwd)) {
@@ -190,7 +184,7 @@ fn cfx_relabel(msg: string, label: string, shown: string) -> string {
   return msg;
 }
 
-// The line of the mb_* call that wrote [section] key, 0 when unknown.
+// the line of the mb_* call that wrote [section] key, 0 when unknown.
 fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
   var c: StrList* = sl_new();
   defer free(c);
@@ -279,7 +273,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
   return 0;
 }
 
-// Points every entry and header of the emitted TOML at the mbuild.mettle
+// points every entry and header of the emitted TOML at the mbuild.mettle
 // line that produced it (0 when unknown), so man_parse's messages and the
 // settings' origins name the user's file.
 fn cfx_repoint(doc: Toml*, text: string) {
@@ -376,7 +370,7 @@ export fn cfg_quiet_misplaced() {
   g_cfx_quiet_misplaced = true;
 }
 
-// Once per file and command: a deps-section call inside fn project().
+// once per file and command: a deps-section call inside fn project().
 fn cfx_warn_misplaced(info: MbfInfo*, shown: string) {
   if (info->misplaced_line == 0 || g_cfx_quiet_misplaced) {
     return;
@@ -392,10 +386,10 @@ fn cfx_warn_misplaced(info: MbfInfo*, shown: string) {
   err_line("  " + cyan("help") + ": mbuild tidy moves it");
 }
 
-// A dependency's mbuild.mettle may only declare things: neither it nor a
+// a dependency's mbuild.mettle may only declare things: neither it nor a
 // file it imports may declare an extern fn or use syscall or asm, and it may
 // import no stdlib module that does (std/io, std/mem, ...). mbuild/api itself
-// is the one exception. On linux the driver then also runs sandboxed.
+// is the one exception. on linux the driver then also runs sandboxed.
 fn cfx_dep_fail(p: Project*, f: string, line: string, what: string) {
   var at: string = cfx_show(p, f);
   if (slen(line) > 0) {
@@ -417,7 +411,7 @@ fn cfx_dep_raw(text: string) -> string {
   return sl_get(uses, 0);
 }
 
-// True when entry's import graph has no extern, syscall or asm.
+// true when entry's import graph has no extern, syscall or asm.
 fn cfx_dep_clean(c: GraphCtx*, entry: string) -> bool {
   var g: Graph* = graph_build(c, entry);
   defer free(g);
@@ -490,7 +484,7 @@ fn cfx_check_dep(p: Project*, file: string, state_dir: string) {
   }
 }
 
-// Compiles and runs the driver for file (and local_file, "" = none) with its
+// compiles and runs the driver for file (and local_file, "" = none) with its
 // state in state_dir; parses what it declares. fail() / exit on any error.
 fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, config_only: bool) -> Manifest* {
   var shown: string = cfx_show(p, file);
@@ -605,7 +599,7 @@ fn cfx_version_from(p: Project*, m: Manifest*, text: string, shown: string) {
   m->version = sv_canonical(from->version);
 }
 
-// A directory that still holds only an mbuild.toml, which mbuild no longer reads.
+// a directory that still holds only an mbuild.toml, which mbuild no longer reads.
 fn cfx_refuse_legacy(p: Project*, dir: string) {
   if (fs_is_file(dir + "/mbuild.toml") && !fs_is_file(dir + "/mbuild.mettle")) {
     fail(cfx_show(p, dir + "/mbuild.toml") + " is no longer read; write mbuild.mettle (mbuild init)");
@@ -638,9 +632,9 @@ export fn cfg_load_dir(p: Project*, dir: string, key: string) -> Manifest* {
   return cfx_load(p, file, s_empty(), state_dir, true);
 }
 
-// A path package built as a root once resolves "mbuild/api" through its own
+// a path package built as a root once resolves "mbuild/api" through its own
 // mettle.deps to its own .mbuild/api: the driver must import that same file,
-// or the API is declared twice. A mettle.deps beside the driver points there,
+// or the API is declared twice. a mettle.deps beside the driver points there,
 // and the file gets this mbuild's API.
 fn cfx_path_api(p: Project*, file: string, state_dir: string) {
   var deps: string = state_dir + "/mettle.deps";
@@ -669,7 +663,7 @@ export fn cfg_info(p: Project*) -> MbfInfo* {
   return mbf_scan(r.data);
 }
 
-// The root's driver with its command and hook branches.
+// the root's driver with its command and hook branches.
 fn cfx_root_driver(p: Project*) -> string {
   var file: string = cfx_mbfile(p);
   var info: MbfInfo* = cfg_info(p);
