@@ -1,16 +1,4 @@
-// scan: what mbuild needs from Mettle source text, without a full parser.
-//
-// A small tokenizer that follows src/lexer/lexer.c: `//` comments, nesting
-// `/* */` comments, string literals with interpolation (a `{` at depth 0
-// opens an expression, `{{` is literal, a `"` inside an expression toggles a
-// nested string), char literals, and `asm { ... }` bodies skipped the way the
-// parser skips them. Over the tokens it finds:
-//
-//   import "p" [as x] [if os]      import { a, b } from "p" [if os]
-//   import_str "p"                 extern fn / extern var (not extern kernel)
-//   @test fn (a decorated function)  fn main at brace depth 0
-//
-// Imports are kept in an array (imports[0..nimports)); line numbers are 1-based.
+// scan: imports, externs and @test fns from mettle source, without a full parser
 
 import "../core/base";
 import "std/mem";
@@ -26,15 +14,15 @@ export struct ScanResult {
   nimports: int64;
   embeds: StrList*;         // import_str paths
   embed_lines: StrList*;    // their lines, parallel
-  externs: StrList*;        // link names: the `= "sym"` value, else the Mettle name
+  externs: StrList*;        // link names: the `= "sym"` value, else the mettle name
   extern_lines: StrList*;   // their lines, parallel
-  extern_names: StrList*;   // the Mettle names, parallel
+  extern_names: StrList*;   // the mettle names, parallel
   has_tests: bool;
   has_main: bool;
 }
 
 // kind 1 word, 2 string (text = body as the lexer buffers it), 3 number or
-// char, 4 punctuation (one byte). depth = brace depth outside the token.
+// char, 4 punctuation (one byte). depth = brace depth outside the token
 struct ScxTok {
   kind: int32;
   text: string;
@@ -84,7 +72,7 @@ fn scx_adv(lx: ScxLex*) {
   lx->pos = lx->pos + 1;
 }
 
-// Nesting block comment, lx at "/*".
+// nesting block comment, lx at "/*"
 fn scx_block_comment(lx: ScxLex*) {
   lx->pos = lx->pos + 2;
   var depth: int64 = 1;
@@ -108,8 +96,8 @@ fn scx_line_comment(lx: ScxLex*) {
   }
 }
 
-// One pass of lexer_read_string_body from `from` (just past the opening
-// quote). Returns the offset of the closing quote, or -1 at end of input.
+// one pass of lexer_read_string_body from `from` (just past the opening
+// quote). returns the offset of the closing quote, or -1 at end of input
 fn scx_string_end(src: string, from: int64, aware: bool) -> int64 {
   var i: int64 = from;
   var n: int64 = slen(src);
@@ -144,7 +132,7 @@ fn scx_string_end(src: string, from: int64, aware: bool) -> int64 {
   return -1;
 }
 
-// The body between the quotes with the lexer's escapes decoded.
+// the body between the quotes with the lexer's escapes decoded
 fn scx_decode(raw: string) -> string {
   var b: Buf* = buf_new();
   var i: int64 = 0;
@@ -198,7 +186,7 @@ fn scx_string(lx: ScxLex*) {
   lx->pos = end + 1;
 }
 
-// A char literal 'x' or '\n'; anything else is a lone apostrophe.
+// a char literal 'x' or '\n'; anything else is a lone apostrophe
 fn scx_char(lx: ScxLex*) {
   var c: int32 = scx_c(lx, 1);
   var len: int64 = 0;
@@ -231,8 +219,8 @@ fn scx_skip_space(lx: ScxLex*) {
   }
 }
 
-// An asm body, lx at its `{` (parser_parse_inline_asm's rules: `;` and `//`
-// line comments, flat `/* */`, quoted runs, brace counting).
+// an asm body, lx at its `{` (parser_parse_inline_asm's rules: `;` and `//`
+// line comments, flat `/* */`, quoted runs, brace counting)
 fn scx_asm_body(lx: ScxLex*) {
   var src: string = lx->src;
   var n: int64 = slen(src);
@@ -375,7 +363,7 @@ fn scx_add_import(r: ScanResult*, path: string, guard: string, line: int64) {
   r->nimports = r->nimports + 1;
 }
 
-// After an import's path (token i): an optional `if os`. Returns the guard.
+// after an import's path (token i): an optional `if os`. returns the guard
 fn scx_guard(lx: ScxLex*, i: int64) -> string {
   if (scx_is(lx, i, 1, "if") && scx_kind(lx, i + 1) == 1) {
     var g: string = lx->toks[i + 1].text;
@@ -386,7 +374,7 @@ fn scx_guard(lx: ScxLex*, i: int64) -> string {
   return s_empty();
 }
 
-// Token i is `import`. Returns the index to continue from.
+// token i is `import`. returns the index to continue from
 fn scx_import(lx: ScxLex*, i: int64, r: ScanResult*) -> int64 {
   var line: int64 = lx->toks[i].line;
   var j: int64 = i + 1;
@@ -422,7 +410,7 @@ fn scx_stop_word(w: string) -> bool {
          s_eq(w, "if") || s_eq(w, "while") || s_eq(w, "for");
 }
 
-// Token i is `extern`. Returns the index to continue from.
+// token i is `extern`. returns the index to continue from
 fn scx_extern(lx: ScxLex*, i: int64, r: ScanResult*) -> int64 {
   var j: int64 = i + 1;
   var line: int64 = lx->toks[i].line;
@@ -475,12 +463,12 @@ fn scx_decorator_name(w: string) -> bool {
          s_eq(w, "numerics") || s_eq(w, "parallel") || s_eq(w, "unroll");
 }
 
-// Token i is a top-level `@`. True when it starts a decorator chain the
+// token i is a top-level `@`. true when it starts a decorator chain the
 // compiler accepts (`@name`, optionally `!` or `(...)`, any number) holding
 // `@test` and followed by `fn` or `export fn`, all on one line: a newline
 // ends the chain in both compilers. `@rule` and `@unroll` reject the chain,
 // as does an unknown or duplicate decorator or a preceding `export`.
-// Returns the index after the chain; *found tells whether it declares a test.
+// returns the index after the chain; *found tells whether it declares a test
 fn scx_test_decl(lx: ScxLex*, i: int64, found: bool*) -> int64 {
   *found = false;
   var j: int64 = i;
@@ -582,7 +570,7 @@ export fn scan_import(r: ScanResult*, i: int64) -> ImportRef* {
   return &r->imports[i];
 }
 
-// Whether an import guard selects the target OS ("linux" or "windows").
+// whether an import guard selects the target OS ("linux" or "windows")
 export fn scan_guard_active(guard: string, os: string) -> bool {
   if (slen(guard) == 0) {
     return true;
@@ -599,15 +587,13 @@ export fn scan_guard_active(guard: string, os: string) -> bool {
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// Exported declarations and name uses (API reports)
-// ---------------------------------------------------------------------------
+// exported declarations and name uses (API reports)
 
-// One top-level `export` declaration. kind: fn | extern | struct | enum | var
+// one top-level `export` declaration. kind: fn | extern | struct | enum | var
 // | const. sig: fn and extern, the text after the name ("(a: int32) -> int32",
 // an extern keeps its `= "sym"`); struct, its fields "a: int32; b: int32";
 // enum, its variants "A = 1, B"; var and const, the declared type or "".
-// Generic parameters, when present, lead a struct's or enum's sig.
+// generic parameters, when present, lead a struct's or enum's sig
 export struct ExportItem {
   kind: string;
   name: string;
@@ -630,7 +616,7 @@ fn scx_punct(lx: ScxLex*, k: int64, c: int32) -> bool {
   return s_byte(lx->toks[k].text, 0) == c;
 }
 
-// No space after ( [ and none before ) ] , ;
+// no space after ( [ and none before ) ] , ;
 fn scx_space_between(lx: ScxLex*, k: int64) -> bool {
   if (lx->toks[k].spos <= lx->toks[k - 1].epos) {
     return false;
@@ -644,8 +630,8 @@ fn scx_space_between(lx: ScxLex*, k: int64) -> bool {
   return true;
 }
 
-// The source text of tokens [from, to) with comments dropped and every gap
-// between tokens collapsed to one space.
+// the source text of tokens [from, to) with comments dropped and every gap
+// between tokens collapsed to one space
 fn scx_text(lx: ScxLex*, from: int64, to: int64) -> string {
   var b: Buf* = buf_new();
   var k: int64 = from;
@@ -675,8 +661,8 @@ fn scx_new_export(l: ExportList*) -> ExportItem* {
   return it;
 }
 
-// From token k: the first token that ends a declaration head: `{` or `;`
-// (outside parentheses), a `}`, or with stop_words a declaration keyword.
+// from token k: the first token that ends a declaration head: `{` or `;`
+// (outside parentheses), a `}`, or with stop_words a declaration keyword
 fn scx_head_end(lx: ScxLex*, k: int64, stop_words: bool) -> int64 {
   var j: int64 = k;
   var parens: int64 = 0;
@@ -703,8 +689,8 @@ fn scx_head_end(lx: ScxLex*, k: int64, stop_words: bool) -> int64 {
   return j;
 }
 
-// Struct fields or enum variants: the body after the `{` at token open,
-// split at sep (outside parentheses), each part as collapsed text.
+// struct fields or enum variants: the body after the `{` at token open,
+// split at sep (outside parentheses), each part as collapsed text
 fn scx_body_parts(lx: ScxLex*, open: int64, sep: int32) -> StrList* {
   var parts: StrList* = sl_new();
   var depth: int64 = lx->toks[open].depth;
@@ -737,7 +723,7 @@ fn scx_body_parts(lx: ScxLex*, open: int64, sep: int32) -> StrList* {
   return parts;
 }
 
-// The `}` closing the brace at token open (the last token when unclosed).
+// the `}` closing the brace at token open (the last token when unclosed)
 fn scx_close(lx: ScxLex*, open: int64) -> int64 {
   var depth: int64 = lx->toks[open].depth;
   var j: int64 = open + 1;
@@ -750,12 +736,12 @@ fn scx_close(lx: ScxLex*, open: int64) -> int64 {
   return lx->n - 1;
 }
 
-// Token i is a top-level `export`; adds the declaration it introduces.
+// token i is a top-level `export`; adds the declaration it introduces
 fn scx_export(lx: ScxLex*, i: int64, l: ExportList*) {
   scx_decl(lx, i + 1, i, l);
 }
 
-// Token j is a declaration keyword, i the first token of the declaration.
+// token j is a declaration keyword, i the first token of the declaration
 fn scx_decl(lx: ScxLex*, j: int64, i: int64, l: ExportList*) {
   if (scx_kind(lx, j) != 1 || scx_kind(lx, j + 1) != 1) {
     return;
@@ -844,7 +830,7 @@ fn scx_decl(lx: ScxLex*, j: int64, i: int64, l: ExportList*) {
   }
 }
 
-// The top-level `export` declarations of a source text, in file order.
+// the top-level `export` declarations of a source text, in file order
 export fn scan_exports(text: string) -> ExportList* {
   var l: ExportList* = new ExportList;
   l->items = (ExportItem*)0;
@@ -863,8 +849,8 @@ export fn scan_exports(text: string) -> ExportList* {
   return l;
 }
 
-// Every top-level declaration, exported or not, in file order; a fn also
-// gets the source span from its first token (`export` included) to its `}`.
+// every top-level declaration, exported or not, in file order; a fn also
+// gets the source span from its first token (`export` included) to its `}`
 export fn scan_decls(text: string) -> ExportList* {
   var l: ExportList* = new ExportList;
   l->items = (ExportItem*)0;
@@ -897,8 +883,8 @@ export fn scan_export(l: ExportList*, i: int64) -> ExportItem* {
 }
 
 // "name line" for every identifier equal to one of names, outside strings
-// and comments (each name and line once, in order). A name match, not a
-// type check.
+// and comments (each name and line once, in order). a name match, not a
+// type check
 export fn scan_uses(text: string, names: StrList*) -> StrList* {
   var found: StrList* = sl_new();
   var lx: ScxLex* = scx_tokenize(text);

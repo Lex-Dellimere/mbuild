@@ -1,28 +1,24 @@
-// complete: mbuild completion SHELL: the completion scripts for bash, zsh and fish.
-//
-// A script knows the command and flag names build.mettle takes from its help
-// table (so they never drift) and asks `mbuild __complete KIND [PREFIX]` for
-// the values that depend on the project or the caches.
+// complete: bash, zsh and fish completion scripts
 
 import "std/mem";
 import "../core/base";
 
-// What a script is made from: the built-in commands in the help table's
+// what a script is made from: the built-in commands in the help table's
 // order, each one's flags (space-separated, parallel to cmds), and the global
-// flags, one each.
+// flags, one each
 export struct CmpSpec {
   cmds: StrList*;
   flags: StrList*;
   globals: StrList*;
 }
 
-// The flags that take a value (--color's is optional); the second list is the
-// command flags among them, which reach a command as --name=VALUE.
+// the flags that take a value (--color's is optional); the second list is the
+// command flags among them, which reach a command as --name=VALUE
 var g_cpx_valued: string = "-j --jobs -t --target -p --profile --mettle --filter --color --set --flag --use";
 var g_cpx_cmd_opts: string = "--to --registry --name --from --opt --home --preview --timeout --repeat --only --coverage-out";
 var g_cpx_all: string = "";
 
-// Both lists as one string (kept, since the pieces split from it are views).
+// both lists as one string (kept, since the pieces split from it are views)
 fn cpx_all_valued() -> string {
   if (slen(g_cpx_all) == 0) {
     g_cpx_all = g_cpx_valued + " " + g_cpx_cmd_opts;
@@ -46,8 +42,8 @@ export fn cmp_takes_value(name: string) -> bool {
   return cpx_has_word(g_cpx_valued, name) || cmp_cmd_opt(name);
 }
 
-// The kind of value a flag takes, as __complete names it; "" when it is free
-// text (a file, a number) and "colors" for --color's fixed words.
+// the kind of value a flag takes, as __complete names it; "" when it is free
+// text (a file, a number) and "colors" for --color's fixed words
 export fn cmp_flag_kind(name: string) -> string {
   if (s_eq(name, "-t") || s_eq(name, "--target")) {
     return "targets";
@@ -61,8 +57,8 @@ export fn cmp_flag_kind(name: string) -> string {
   return s_empty();
 }
 
-// What the positional arguments of a built-in command are, as __complete
-// names it; "" when they are files or free text.
+// what the positional arguments of a built-in command are, as __complete
+// names it; "" when they are files or free text
 export fn cmp_kind(cmd: string) -> string {
   if (cpx_has_word("build run check live", cmd)) {
     return "bins";
@@ -85,7 +81,7 @@ export fn cmp_kind(cmd: string) -> string {
   return s_empty();
 }
 
-// Words that can follow a command directly.
+// words that can follow a command directly
 export fn cmp_words(cmd: string) -> string {
   if (s_eq(cmd, "help")) {
     return "flags";
@@ -102,8 +98,8 @@ export fn cmp_words(cmd: string) -> string {
   return s_empty();
 }
 
-// Adds the flags in text (a usage line, a flag row) to out, each once: the
-// pieces between spaces, commas, bars, brackets and '=' that look like -x or --name.
+// adds the flags in text (a usage line, a flag row) to out, each once: the
+// pieces between spaces, commas, bars, brackets and '=' that look like -x or --name
 export fn cmp_flags_in(text: string, out: StrList*) {
   var n: int64 = slen(text);
   var start: int64 = 0;
@@ -128,14 +124,14 @@ export fn cmp_flags_in(text: string, out: StrList*) {
   }
 }
 
-// One script line: ' stands for " and ` for ', so the shell code reads as it
-// runs; a literal { is written {{ like in any string.
+// one script line: ' stands for " and ` for ', so the shell code reads as it
+// runs; a literal { is written {{ like in any string
 fn cpx_ln(b: Buf*, text: string) {
   var q: string = s_replace_byte(text, 39, 34);
   buf_line(b, s_replace_byte(q, 96, 39));
 }
 
-// The commands whose positional kind is kind, as a case pattern.
+// the commands whose positional kind is kind, as a case pattern
 fn cpx_cmds_of(sp: CmpSpec*, kind: string) -> string {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -155,47 +151,40 @@ fn cpx_kinds() -> StrList* {
   return s_split("bins tests packages deps components commands", 32);
 }
 
-// The value flags that have no list of their own, as a case pattern.
+// the value flags as a case pattern: those with no list of their own, or all but --color
+// (its value is optional)
+fn cpx_valued_pick(plain: bool) -> string {
+  var all: StrList* = s_split(cpx_all_valued(), 32);
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < all->len) {
+    var flag: string = sl_get(all, i);
+    var keep: bool = !s_eq(flag, "--color");
+    if (plain) {
+      keep = slen(cmp_flag_kind(flag)) == 0;
+    }
+    if (keep) {
+      sl_push(l, flag);
+    }
+    i = i + 1;
+  }
+  var r: string = sl_join(l, "|");
+  free(all->items);
+  free(all);
+  free(l->items);
+  free(l);
+  return r;
+}
+
 fn cpx_plain_valued() -> string {
-  var all: StrList* = s_split(cpx_all_valued(), 32);
-  var l: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < all->len) {
-    if (slen(cmp_flag_kind(sl_get(all, i))) == 0) {
-      sl_push(l, sl_get(all, i));
-    }
-    i = i + 1;
-  }
-  var r: string = sl_join(l, "|");
-  free(all->items);
-  free(all);
-  free(l->items);
-  free(l);
-  return r;
+  return cpx_valued_pick(true);
 }
 
-// Every value flag but --color (its value is optional), as a case pattern.
 fn cpx_valued_alt() -> string {
-  var all: StrList* = s_split(cpx_all_valued(), 32);
-  var l: StrList* = sl_new();
-  var i: int64 = 0;
-  while (i < all->len) {
-    if (!s_eq(sl_get(all, i), "--color")) {
-      sl_push(l, sl_get(all, i));
-    }
-    i = i + 1;
-  }
-  var r: string = sl_join(l, "|");
-  free(all->items);
-  free(all);
-  free(l->items);
-  free(l);
-  return r;
+  return cpx_valued_pick(false);
 }
 
-// ---------------------------------------------------------------------------
 // bash
-// ---------------------------------------------------------------------------
 
 fn cpx_bash(sp: CmpSpec*) -> string {
   var b: Buf* = buf_new();
@@ -281,9 +270,7 @@ fn cpx_bash(sp: CmpSpec*) -> string {
   return buf_take(b);
 }
 
-// ---------------------------------------------------------------------------
 // zsh
-// ---------------------------------------------------------------------------
 
 fn cpx_zsh(sp: CmpSpec*) -> string {
   var b: Buf* = buf_new();
@@ -366,11 +353,9 @@ fn cpx_zsh(sp: CmpSpec*) -> string {
   return buf_take(b);
 }
 
-// ---------------------------------------------------------------------------
 // fish
-// ---------------------------------------------------------------------------
 
-// complete -c mbuild [-n COND] -s X | -l NAME [-r [-f -a '(mbuild __complete KIND ...)']] for one flag.
+// complete -c mbuild [-n COND] -s X | -l NAME [-r [-f -a '(mbuild __complete KIND ...)']] for one flag
 fn cpx_fish_flag(b: Buf*, cond: string, flag: string) {
   var line: string = "complete -c mbuild";
   if (slen(cond) > 0) {
@@ -493,7 +478,7 @@ fn cpx_fish(sp: CmpSpec*) -> string {
   return buf_take(b);
 }
 
-// The script for shell ("bash", "zsh" or "fish"); "" for any other.
+// the script for shell ("bash", "zsh" or "fish"); "" for any other
 export fn cmp_script(shell: string, sp: CmpSpec*) -> string {
   if (s_eq(shell, "bash")) {
     return cpx_bash(sp);

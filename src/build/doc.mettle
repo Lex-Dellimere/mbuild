@@ -1,11 +1,4 @@
-// doc: what `mbuild doc` reads and writes (16.4): the doc block above each
-// export, its fields, the checks, the Markdown, and the ```mettle blocks
-// of the doc comments and Markdown files as small programs.
-//
-// A doc block is the run of comment lines directly above a declaration
-// (decorators may sit between); when it holds a `///` line only those
-// count. A field starts at `@KEY` or `KEY:` for a known key; `//!` lines
-// are the module doc.
+// doc: what mbuild doc reads and writes: doc blocks, checks, markdown and snippets
 
 import "std/mem";
 import "../core/base";
@@ -17,8 +10,8 @@ export struct DocCfg {
   exports: StrList*;   // name prefixes kept, "!PREFIX" drops
 }
 
-// A run's results: the Markdown lines, findings ("file:line: name: problem"),
-// and the ```mettle blocks: code, "file:line", the module ("" for Markdown).
+// a run's results: the Markdown lines, findings ("file:line: name: problem"),
+// and the ```mettle blocks: code, "file:line", the module ("" for Markdown)
 export struct DocOut {
   md: StrList*;
   findings: StrList*;
@@ -28,8 +21,8 @@ export struct DocOut {
   nexports: int64;
 }
 
-// One parsed doc block; fields in doc order (keys, names for param, texts
-// with continuation lines joined by "\n").
+// one parsed doc block; fields in doc order (keys, names for param, texts
+// with continuation lines joined by "\n")
 struct DcBlock {
   found: bool;
   summary: StrList*;
@@ -56,7 +49,7 @@ export fn doc_begin(cfg: DocCfg*) -> DocOut* {
   return o;
 }
 
-// The file's text: the lines with single blank lines, ending in a newline.
+// the file's text: the lines with single blank lines, ending in a newline
 export fn doc_text(o: DocOut*) -> string {
   var body: string = sl_join(o->md, "\n");
   return body + "\n";
@@ -88,7 +81,7 @@ fn dc_is_triple(line: string) -> bool {
   return s_starts(t, "///") && !s_starts(t, "////");
 }
 
-// A comment line's text: the marker (`///`, `//!` or `//`) and one space off.
+// a comment line's text: the marker (`///`, `//!` or `//`) and one space off
 fn dc_strip(line: string) -> string {
   var t: string = s_from(line, dc_indent(line));
   if (s_starts(t, "///") || s_starts(t, "//!")) {
@@ -108,7 +101,7 @@ fn dc_blank(out: StrList*) {
   }
 }
 
-// The first word of s (up to a space) and what follows it, trimmed.
+// the first word of s (up to a space) and what follows it, trimmed
 fn dc_word(s: string) -> string {
   var t: string = s_trim(s);
   var i: int64 = 0;
@@ -124,7 +117,7 @@ fn dc_after_word(s: string) -> string {
   return s_trim(s_from(t, w));
 }
 
-// A field key's one name: "" when word names no field.
+// a field key's one name: "" when word names no field
 fn dc_key(word: string) -> string {
   var w: string = s_lower(word);
   if (s_eq(w, "param") || s_eq(w, "params")) { return "param"; }
@@ -156,9 +149,9 @@ fn dc_push_field(b: DcBlock*, key: string, name: string, text: string) {
   sl_push(b->texts, text);
 }
 
-// Whether t starts a field; when it does, the field is added to b.
+// whether t starts a field; when it does, the field is added to b.
 // params: the function's parameters (flux_orm's `//   name  meaning`);
-// has_summary: `Returns ...` is a field only after a summary.
+// has_summary: `Returns ...` is a field only after a summary
 fn dc_field(b: DcBlock*, t: string, params: StrList*, has_summary: bool) -> bool {
   var tt: string = s_trim(t);
   if (s_starts(tt, "@")) {
@@ -232,7 +225,7 @@ fn dc_field(b: DcBlock*, t: string, params: StrList*, has_summary: bool) -> bool
   return true;
 }
 
-// Whether b has a field other than param (indented parameter lines end there).
+// whether b has a field other than param (indented parameter lines end there)
 fn dc_other_field(b: DcBlock*) -> bool {
   var i: int64 = 0;
   while (i < b->keys->len) {
@@ -254,8 +247,8 @@ fn dc_append(b: DcBlock*, cur: int64, line: string) {
   sl_set(b->texts, cur, joined);
 }
 
-// The doc block of the declaration on line `at` (1-based), parsed; its
-// ```mettle blocks go to o as snippets at rel.
+// the doc block of the declaration on line `at` (1-based), parsed; its
+// ```mettle blocks go to o as snippets at rel
 fn dc_block(o: DocOut*, rel: string, lines: StrList*, at: int64, params: StrList*) -> DcBlock* {
   var b: DcBlock* = new DcBlock;
   b->summary = sl_new();
@@ -378,8 +371,8 @@ fn dc_block(o: DocOut*, rel: string, lines: StrList*, at: int64, params: StrList
   return b;
 }
 
-// Lines of doc text as Markdown: fences kept, a run indented two or more
-// spaces becomes a fenced block.
+// lines of doc text as Markdown: fences kept, a run indented two or more
+// spaces becomes a fenced block
 fn dc_emit(out: StrList*, lines: StrList*) {
   var fence: bool = false;
   var ind: bool = false;
@@ -441,7 +434,7 @@ fn dc_emit(out: StrList*, lines: StrList*) {
   }
 }
 
-// s split at sep outside (), [], <> and {}, each part trimmed (empty ones dropped).
+// s split at sep outside (), [], <> and {}, each part trimmed (empty ones dropped)
 fn dc_split_top(s: string, sep: int32) -> StrList* {
   var parts: StrList* = sl_new();
   var depth: int64 = 0;
@@ -468,7 +461,7 @@ fn dc_split_top(s: string, sep: int32) -> StrList* {
   return parts;
 }
 
-// The index just past the generic parameters that lead s ("<T, U>"), else 0.
+// the index just past the generic parameters that lead s ("<T, U>"), else 0
 fn dc_generics_end(s: string) -> int64 {
   if (!s_starts(s, "<")) {
     return 0;
@@ -490,7 +483,7 @@ fn dc_generics_end(s: string) -> int64 {
   return 0;
 }
 
-// The `)` matching the `(` at open in s, -1 when unclosed.
+// the `)` matching the `(` at open in s, -1 when unclosed
 fn dc_close_paren(s: string, open: int64) -> int64 {
   var depth: int64 = 0;
   var i: int64 = open;
@@ -509,7 +502,7 @@ fn dc_close_paren(s: string, open: int64) -> int64 {
   return -1;
 }
 
-// A function sig's parameter names ("(a: int32, b: T) -> T": a, b).
+// a function sig's parameter names ("(a: int32, b: T) -> T": a, b)
 fn dc_params(sig: string) -> StrList* {
   var names: StrList* = sl_new();
   var open: int64 = s_find_from(sig, "(", dc_generics_end(sig));
@@ -535,7 +528,6 @@ fn dc_params(sig: string) -> StrList* {
   return names;
 }
 
-// Whether a function sig returns a value.
 fn dc_returns(sig: string) -> bool {
   var open: int64 = s_find_from(sig, "(", dc_generics_end(sig));
   if (open < 0) {
@@ -562,7 +554,7 @@ fn dc_is_fn(it: ExportItem*) -> bool {
 }
 
 // "name\tdoc" for each member of the struct or enum declared on line at:
-// the comment lines above a member or the comment after it on its line.
+// the comment lines above a member or the comment after it on its line
 fn dc_member_docs(lines: StrList*, at: int64) -> StrList* {
   var docs: StrList* = sl_new();
   var i: int64 = at - 1;
@@ -629,8 +621,8 @@ fn dc_cell(s: string) -> string {
   return s_replace(s, "|", "\\|");
 }
 
-// The declaration as the reference shows it; struct members and enum
-// variants one per line.
+// the declaration as the reference shows it; struct members and enum
+// variants one per line
 fn dc_decl(it: ExportItem*) -> string {
   if (s_eq(it->kind, "fn")) {
     return "fn " + it->name + it->sig;
@@ -669,7 +661,6 @@ fn dc_decl(it: ExportItem*) -> string {
   return it->kind + " " + it->name + ": " + it->sig;
 }
 
-// The member table of a struct or enum.
 fn dc_members(out: StrList*, it: ExportItem*, lines: StrList*) {
   var g: int64 = dc_generics_end(it->sig);
   var is_enum: bool = s_eq(it->kind, "enum");
@@ -730,7 +721,6 @@ fn dc_find(o: DocOut*, rel: string, it: ExportItem*, msg: string) {
   sl_push(o->findings, f);
 }
 
-// The checks of 16.4 on one export.
 fn dc_check(o: DocOut*, cfg: DocCfg*, rel: string, it: ExportItem*, b: DcBlock*, params: StrList*) {
   if (!b->found) {
     dc_find(o, rel, it, "no doc comment");
@@ -872,8 +862,8 @@ fn dc_keep_name(cfg: DocCfg*, name: string) -> bool {
   return !any_pos || hit;
 }
 
-// The module doc: the `//!` lines before the first declaration, else the
-// first comment paragraph of the file unless it sits on a declaration.
+// the module doc: the `//!` lines before the first declaration, else the
+// first comment paragraph of the file unless it sits on a declaration
 fn dc_module_doc(lines: StrList*, first: int64) -> StrList* {
   var doc: StrList* = sl_new();
   var i: int64 = 0;
@@ -913,8 +903,8 @@ fn dc_internal_module(doc: StrList*) -> bool {
   return false;
 }
 
-// One module: its section in the Markdown (when it has exports to show,
-// or always with force) and its findings.
+// one module: its section in the Markdown (when it has exports to show,
+// or always with force) and its findings
 export fn doc_file(o: DocOut*, cfg: DocCfg*, rel: string, text: string, force: bool) {
   var lines: StrList* = s_lines(text);
   defer free(lines);
@@ -984,8 +974,8 @@ export fn doc_file(o: DocOut*, cfg: DocCfg*, rel: string, text: string, force: b
   free(blocks);
 }
 
-// The ```mettle blocks of a Markdown file as snippets (```mettle ignore and
-// other languages are left alone).
+// the ```mettle blocks of a Markdown file as snippets (```mettle ignore and
+// other languages are left alone)
 export fn doc_md_snippets(o: DocOut*, rel: string, text: string) {
   var lines: StrList* = s_lines(text);
   defer free(lines);
@@ -1021,10 +1011,10 @@ export fn doc_md_snippets(o: DocOut*, rel: string, text: string) {
   }
 }
 
-// A snippet as a program. Its own imports lead; without any, `import
-// "std/io"` and imp (the module it documents, "" for none). A snippet
+// a snippet as a program. its own imports lead; without any, `import
+// "std/io"` and imp (the module it documents, "" for none). a snippet
 // with `fn main` is kept as is, one with other top-level declarations
-// gets an empty main, and plain statements become main's body.
+// gets an empty main, and plain statements become main's body
 export fn doc_snip_program(code: string, imp: string) -> string {
   var lines: StrList* = s_lines(code);
   defer free(lines);

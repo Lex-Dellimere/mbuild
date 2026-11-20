@@ -1,11 +1,4 @@
-// components: selection, interface checks and the generated modules of a
-// build's components, the rule wrapper (14.7), `mbuild
-// components` and `mbuild use`.
-//
-// A build's gen dir, .mbuild/gen/<target>-<profile>-<bin>/, holds
-// <component>.mettle per component, entry.mettle when rules apply, and
-// build.info: the build and the dependencies' components, from which `mbuild
-// use` regenerates the dir without resolving dependencies.
+// components: selection, interface checks and generated modules of a build's components
 
 import "std/mem";
 import "../core/base";
@@ -31,7 +24,7 @@ export struct CmpBuild {
   settings: Settings*;
 }
 
-// selected and origins hold "name=impl" and "name=origin" per component.
+// selected and origins hold "name=impl" and "name=origin" per component
 export struct CmpOut {
   ok: bool;
   err: string;
@@ -42,7 +35,7 @@ export struct CmpOut {
   has_swap: bool;
 }
 
-// The root's components first (nroot of them), then the dependencies'.
+// the root's components first (nroot of them), then the dependencies'
 struct CmxComps {
   items: CompSpec**;
   n: int64;
@@ -54,7 +47,7 @@ struct CmxPick {
   origin: string;
 }
 
-// One swap function: its name, the slot type and the display text.
+// one swap function: its name, the slot type and the display text
 struct CmxSlot {
   name: string;
   ty: string;
@@ -66,9 +59,7 @@ struct CmxSlots {
   n: int64;
 }
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
+// small helpers
 
 fn cmx_free(l: StrList*) {
   free(l->items);
@@ -79,7 +70,7 @@ fn cmx_show(p: Project*, path: string) -> string {
   return p_rel(p->root, path);
 }
 
-// A Mettle string literal's body: `\`, `"` and `{` escaped.
+// a mettle string literal's body: `\`, `"` and `{` escaped
 fn cmx_lit(s: string) -> string {
   var b: Buf* = buf_new();
   var i: int64 = 0;
@@ -110,7 +101,7 @@ fn cmx_upper(s: string) -> string {
   return buf_take(b);
 }
 
-// An impl name as an identifier part ('-' -> '_').
+// an impl name as an identifier part ('-' -> '_')
 fn cmx_ident(iname: string) -> string {
   return s_replace_byte(iname, 45, 95);
 }
@@ -140,7 +131,7 @@ fn cmx_label(c: CompSpec*) -> string {
   return "component " + c->name + " (" + c->mode + ")";
 }
 
-// The value of "key=value" items for key, "" when absent (the last wins).
+// the value of "key=value" items for key, "" when absent (the last wins)
 fn cmx_kv(items: StrList*, key: string) -> string {
   var found: string = s_empty();
   var i: int64 = 0;
@@ -162,9 +153,7 @@ fn cmx_read(path: string) -> string {
   return r.data;
 }
 
-// ---------------------------------------------------------------------------
-// The components of a build
-// ---------------------------------------------------------------------------
+// the components of a build
 
 fn cmx_push(cs: CmxComps*, c: CompSpec*) {
   if (cs->n % 8 == 0) {
@@ -250,7 +239,7 @@ fn cmx_packages(p: Project*, ds: DepState*) -> StrList* {
   return names;
 }
 
-// A component name declared twice, or equal to a package name of the build.
+// a component name declared twice, or equal to a package name of the build
 fn cmx_clashes(p: Project*, cs: CmxComps*, packages: StrList*) -> string {
   var i: int64 = 0;
   while (i < cs->n) {
@@ -270,8 +259,8 @@ fn cmx_clashes(p: Project*, cs: CmxComps*, packages: StrList*) -> string {
   return s_empty();
 }
 
-// Root and dependency components (with owners), 0-terminated. Clashes are
-// reported by cmp_prepare and cmp_check.
+// root and dependency components (with owners), 0-terminated. clashes are
+// reported by cmp_prepare and cmp_check
 export fn cmp_all(p: Project*, ds: DepState*) -> CompSpec** {
   var cs: CmxComps* = cmx_collect(p, ds);
   var all: CompSpec** = cs->items;
@@ -279,9 +268,7 @@ export fn cmp_all(p: Project*, ds: DepState*) -> CompSpec** {
   return all;
 }
 
-// ---------------------------------------------------------------------------
-// Selection (15.5)
-// ---------------------------------------------------------------------------
+// selection
 
 fn cmx_impl_problem(c: CompSpec*, iname: string) -> string {
   if (sl_has(c->impls, iname)) {
@@ -295,7 +282,7 @@ fn cmx_impl_problem(c: CompSpec*, iname: string) -> string {
   return msg + "; its impls: " + sl_join(c->impls, ", ");
 }
 
-// Applies one "name=impl" from origin; "" or the problem.
+// applies one "name=impl" from origin; "" or the problem
 fn cmx_apply(cs: CmxComps*, picks: CmxPick*, item: string, origin: string) -> string {
   var eq: int64 = s_find_byte(item, 61);
   if (eq <= 0 || eq + 1 >= slen(item)) {
@@ -325,8 +312,8 @@ fn cmx_apply(cs: CmxComps*, picks: CmxPick*, item: string, origin: string) -> st
   return s_empty();
 }
 
-// Where a "name=impl" of the settings' components comes from: the
-// highest-precedence components list holding it.
+// where a "name=impl" of the settings' components comes from: the
+// highest-precedence components list holding it
 fn cmx_setting_origin(p: Project*, b: CmpBuild*, item: string) -> string {
   var m: Manifest* = p->man;
   var secs: StrList* = sl_new();
@@ -405,11 +392,9 @@ fn cmx_select(p: Project*, cs: CmxComps*, b: CmpBuild*, picks: CmxPick*) -> stri
   return err;
 }
 
-// ---------------------------------------------------------------------------
-// Interface checks (15.3, 15.4)
-// ---------------------------------------------------------------------------
+// interface checks
 
-// The text an export shows in messages (as api.mettle shows it).
+// the text an export shows in messages (as api.mettle shows it)
 fn cmx_display(it: ExportItem*) -> string {
   if (s_eq(it->kind, "fn")) {
     return "fn " + it->name + it->sig;
@@ -432,7 +417,6 @@ fn cmx_display(it: ExportItem*) -> string {
   return it->kind + " " + it->name + ": " + it->sig;
 }
 
-// The export surface of one file.
 fn cmx_surface(path: string, shown: string) -> ApiSurface* {
   var s: ApiSurface* = new ApiSurface;
   s->names = sl_new();
@@ -463,7 +447,7 @@ fn cmx_at(s: ApiSurface*, name: string) -> string {
   return sl_get(s->files, k) + ":" + sl_get(s->lines, k);
 }
 
-// Removed and changed exports of cur against def; with exact, added ones too.
+// removed and changed exports of cur against def; with exact, added ones too
 fn cmx_mismatch(def: ApiSurface*, cur: ApiSurface*, iname: string, exact: bool) -> string {
   var d: ApiDiff* = api_diff(def, cur);
   var parts: StrList* = sl_new();
@@ -504,8 +488,8 @@ fn cmx_check_static(p: Project*, c: CompSpec*, iname: string) -> string {
   return s_empty();
 }
 
-// Whether the declaration starting at 1-based line carries the decorator
-// (on the line itself or on the line before).
+// whether the declaration starting at 1-based line carries the decorator
+// (on the line itself or on the line before)
 fn cmx_decorated(lines: StrList*, line: int64, deco: string) -> bool {
   if (line < 1 || line > lines->len) {
     return false;
@@ -522,7 +506,7 @@ fn cmx_decorated(lines: StrList*, line: int64, deco: string) -> bool {
 }
 
 // "Name" for every `trait Name` declaration, prefixed "!" when it is not
-// `@dyn export`.
+// `@dyn export`
 fn cmx_traits(text: string) -> StrList* {
   var found: StrList* = sl_new();
   var lines: StrList* = s_lines(text);
@@ -552,7 +536,7 @@ fn cmx_traits(text: string) -> StrList* {
   return found;
 }
 
-// The X of every `impl T for X` in text.
+// the X of every `impl T for X` in text
 fn cmx_implementors(text: string, trait_name: string) -> StrList* {
   var found: StrList* = sl_new();
   var pat: string = "impl " + trait_name + " for ";
@@ -587,7 +571,7 @@ fn cmx_check_idents(c: CompSpec*) -> string {
   return s_empty();
 }
 
-// The interface's trait name, or "" with *err set.
+// the interface's trait name, or "" with *err set
 fn cmx_check_dyn(p: Project*, c: CompSpec*, err: string*) -> string {
   var label: string = cmx_label(c);
   *err = cmx_check_idents(c);
@@ -700,8 +684,8 @@ fn cmx_base_type(ty: string) -> string {
   return t;
 }
 
-// The slot type of a scanned fn signature: "(n: int32) -> int32" ->
-// "fn(int32) -> int32"; the first non-built-in type in *bad.
+// the slot type of a scanned fn signature: "(n: int32) -> int32" ->
+// "fn(int32) -> int32"; the first non-built-in type in *bad
 fn cmx_slot_type(sig: string, bad: string*) -> string {
   *bad = s_empty();
   var open: int64 = s_find_byte(sig, 40);
@@ -754,7 +738,7 @@ fn cmx_slot_type(sig: string, bad: string*) -> string {
   return res;
 }
 
-// The swappable functions of one impl file, or *err.
+// the swappable functions of one impl file, or *err
 fn cmx_swap_slots(p: Project*, c: CompSpec*, iname: string, err: string*) -> CmxSlots* {
   var label: string = cmx_label(c);
   var file: string = cmx_impl_file(c, iname);
@@ -791,7 +775,7 @@ fn cmx_swap_slots(p: Project*, c: CompSpec*, iname: string, err: string*) -> Cmx
   return out;
 }
 
-// The default impl's slots, or 0 with *err set.
+// the default impl's slots, or 0 with *err set
 fn cmx_check_swap(p: Project*, c: CompSpec*, err: string*) -> CmxSlots* {
   var label: string = cmx_label(c);
   *err = cmx_check_idents(c);
@@ -847,9 +831,7 @@ fn cmx_check_files(p: Project*, c: CompSpec*) -> string {
   return s_empty();
 }
 
-// ---------------------------------------------------------------------------
-// Generated modules (15.3, 15.4, 15.8)
-// ---------------------------------------------------------------------------
+// generated modules
 
 fn cmx_header(c: CompSpec*, iname: string, b: CmpBuild*) -> string {
   var what: string = b->target + ", " + b->profile + ", " + b->bin;
@@ -953,7 +935,7 @@ fn cmx_abs(p: Project*, path: string) -> string {
   return p_clean(p_join(p->root, path));
 }
 
-// The rule wrapper's text, "" when the root attaches no rules; *err on a missing file.
+// the rule wrapper's text, "" when the root attaches no rules; *err on a missing file
 fn cmx_gen_entry(p: Project*, b: CmpBuild*, err: string*) -> string {
   var rules: StrList* = p->man->rules;
   if (rules->len == 0) {
@@ -998,7 +980,6 @@ fn cmx_info_text(b: CmpBuild*, cs: CmxComps*, packages: StrList*, include_dir: s
   return buf_take(g);
 }
 
-// Removes the .mettle files of dir that are not in keep.
 fn cmx_remove_stale(dir: string, keep: StrList*) {
   var files: StrList* = sl_new();
   var dirs: StrList* = sl_new();
@@ -1038,7 +1019,7 @@ fn cmx_bin(p: Project*, name: string) -> BinSpec* {
   return (BinSpec*)0;
 }
 
-// Swap components the program imports: their generated files in its graph.
+// swap components the program imports: their generated files in its graph
 fn cmx_swap_used(cs: CmxComps*, b: CmpBuild*, gen_dir: string, include_dir: string, entry: string, quiesce: bool*) -> StrList* {
   var used: StrList* = sl_new();
   var os: string = b->target;
@@ -1176,9 +1157,9 @@ fn cmx_prepare(p: Project*, cs: CmxComps*, packages: StrList*, b: CmpBuild*, inc
   return o;
 }
 
-// Writes the gen dir of one build (components, rule wrapper) and answers
+// writes the gen dir of one build (components, rule wrapper) and answers
 // the -I directory and the entry to compile; selected/origins list every
-// component.
+// component
 export fn cmp_prepare(p: Project*, ds: DepState*, b: CmpBuild*) -> CmpOut* {
   var cs: CmxComps* = cmx_collect(p, ds);
   var packages: StrList* = cmx_packages(p, ds);
@@ -1193,9 +1174,7 @@ export fn cmp_prepare(p: Project*, ds: DepState*, b: CmpBuild*) -> CmpOut* {
   return o;
 }
 
-// ---------------------------------------------------------------------------
-// Bin kinds and freestanding bins (15.7); B decides the flags
-// ---------------------------------------------------------------------------
+// bin kinds and freestanding bins; B decides the flags
 
 export fn cmp_freestanding(b: BinSpec*) -> bool {
   return s_ends(b->triple, "-none");
@@ -1204,7 +1183,7 @@ export fn cmp_freestanding(b: BinSpec*) -> bool {
 // "" or why the RISC-V settings do not fit a unit compiled for target (a
 // target name or a bin's triple): board, outputs and the rvsim keys need a
 // board image (riscv32-none, riscv64-none), objective, isa and abi a RISC-V
-// target of their width.
+// target of their width
 export fn cmp_target_problem(label: string, target: string, st: Settings*) -> string {
   if (st == (Settings*)0) {
     return s_empty();
@@ -1267,7 +1246,7 @@ export fn cmp_target_problem(label: string, target: string, st: Settings*) -> st
   return s_empty();
 }
 
-// "" or why the bin cannot be built as declared.
+// "" or why the bin cannot be built as declared
 export fn cmp_bin_problem(p: Project*, b: BinSpec*, st: Settings*) -> string {
   var label: string = "bin " + b->name;
   var rv_bare: bool = s_eq(b->triple, "riscv32-none") || s_eq(b->triple, "riscv64-none");
@@ -1299,7 +1278,7 @@ export fn cmp_bin_problem(p: Project*, b: BinSpec*, st: Settings*) -> string {
 
 // flags without the ones that need a runtime: the compiler refuses --safe
 // and --check-effects on *-none triples, and -s makes a flat image reference
-// mettle_crash_install (issue 12).
+// mettle_crash_install (issue 12)
 export fn cmp_freestanding_flags(flags: StrList*) -> StrList* {
   var out: StrList* = sl_new();
   var i: int64 = 0;
@@ -1315,9 +1294,7 @@ export fn cmp_freestanding_flags(flags: StrList*) -> StrList* {
   return out;
 }
 
-// ---------------------------------------------------------------------------
 // mbuild components [--check]
-// ---------------------------------------------------------------------------
 
 fn cmx_target(p: Project*) -> string {
   if (p->opts != (Options*)0 && p->opts->targets->len > 0) {
@@ -1396,7 +1373,7 @@ export fn cmp_cmd_components(p: Project*, ds: DepState*) -> int32 {
     free(cs);
     return 1;
   }
-  // A bin whose own components pick differently gets a row under the component.
+  // a bin whose own components pick differently gets a row under the component
   var bins: StrList* = toml_sections(p->man->doc, "bin.");
   var bpicks: CmxPick** = (CmxPick**)malloc((bins->len + 1) * 8);
   var bi: int64 = 0;
@@ -1529,7 +1506,7 @@ fn cmx_json_field(line: string, key: string) -> string {
   return buf_take(b);
 }
 
-// The compiler's errors from --error-format=json output, "file:line: message".
+// the compiler's errors from --error-format=json output, "file:line: message"
 fn cmx_diag(p: Project*, text: string) -> StrList* {
   var res: StrList* = sl_new();
   var lines: StrList* = s_lines(text);
@@ -1549,8 +1526,8 @@ fn cmx_diag(p: Project*, text: string) -> StrList* {
   return res;
 }
 
-// Interface checks of every component, then every impl of every static
-// component compiled for the host as an object, so unselected impls cannot rot.
+// interface checks of every component, then every impl of every static
+// component compiled for the host as an object, so unselected impls cannot rot
 export fn cmp_check(p: Project*, ds: DepState*) -> int32 {
   var cs: CmxComps* = cmx_collect(p, ds);
   var packages: StrList* = cmx_packages(p, ds);
@@ -1640,9 +1617,7 @@ export fn cmp_check(p: Project*, ds: DepState*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
 // mbuild use NAME IMPL | NAME
-// ---------------------------------------------------------------------------
 
 struct CmxInfo {
   b: CmpBuild;
@@ -1720,7 +1695,7 @@ fn cmx_info_comps(p: Project*, info: CmxInfo*) -> CmxComps* {
   return cs;
 }
 
-// Every gen dir of the project with its build.info, sorted.
+// every gen dir of the project with its build.info, sorted
 fn cmx_gen_dirs(p: Project*) -> StrList* {
   var files: StrList* = sl_new();
   var dirs: StrList* = sl_new();
@@ -1740,7 +1715,7 @@ fn cmx_gen_dirs(p: Project*) -> StrList* {
   return out;
 }
 
-// The root's components plus those any gen dir knows of (dependencies').
+// the root's components plus those any gen dir knows of (dependencies')
 fn cmx_known(p: Project*, dirs: StrList*) -> CmxComps* {
   var cs: CmxComps* = cmx_comps_new();
   cmx_add_root(cs, p);
@@ -1778,8 +1753,8 @@ fn cmx_set_local(p: Project*, name: string, iname: string) {
   }
 }
 
-// Writes or removes mb_use(NAME, ...) in mbuild.local.mettle, then
-// regenerates every existing gen dir. Takes NAME IMPL, NAME=IMPL or NAME.
+// writes or removes mb_use(NAME, ...) in mbuild.local.mettle, then
+// regenerates every existing gen dir. takes NAME IMPL, NAME=IMPL or NAME
 export fn cmp_cmd_use(p: Project*) -> int32 {
   if (p->opts == (Options*)0 || p->opts->rest->len == 0 || p->opts->rest->len > 2) {
     error_msg("usage: mbuild use NAME IMPL (or mbuild use NAME to drop the local choice)");

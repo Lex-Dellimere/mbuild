@@ -1,13 +1,4 @@
-// graph: the import graph of one entry file for one target OS.
-//
-// Mirrors the compiler's resolver (src/semantic/import_resolver.c,
-// resolve_import_path_uncached): absolute path; std/ under the stdlib (a
-// `.linux` variant first on Linux when the import has no extension);
-// `mettle.deps` files walking up from the importing file's directory, nearest
-// first, matched on the first path component; relative to the importing file;
-// each -I directory; relative to the working directory; last, a one-component
-// import as a package's main module, <root>/<name>. A candidate is tried
-// as written, then with `.mettle` appended unless it already ends so.
+// graph: the import graph of an entry file for one target os
 
 import "std/mem";
 import "../core/base";
@@ -17,7 +8,7 @@ import "scan";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
-// One parsed mettle.deps file (cached per directory).
+// one parsed mettle.deps file (cached per directory)
 struct GxDepsFile {
   dir: string;
   exists: bool;
@@ -71,7 +62,7 @@ fn gx_canon(p: string) -> string {
   return gx_slash(sys_realpath(p));
 }
 
-// The last dot comes after the last separator.
+// the last dot comes after the last separator
 fn gx_has_ext(p: string) -> bool {
   var dot: int64 = s_rfind_byte(p, 46);
   if (dot < 0) {
@@ -155,7 +146,7 @@ fn gx_deps_for(c: GraphCtx*, dir: string) -> GxDepsFile* {
   return d;
 }
 
-// The compiler stops before the filesystem root ("/" or "C:/") itself.
+// the compiler stops before the filesystem root ("/" or "C:/") itself
 fn gx_is_root(d: string) -> bool {
   if (s_eq(d, "/")) {
     return true;
@@ -203,7 +194,11 @@ fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string, main_module: bo
   return s_empty();
 }
 
-// Where the compiler finds `imp` named in from_file (canonical); "" when it does not.
+// where the compiler finds `imp` named in from_file (canonical); "" when it does not
+// the compiler's order: absolute; std/ under the stdlib (a .linux variant first on linux);
+// mettle.deps files walking up from the importing file, nearest first; relative to the
+// importing file; each -I; the working directory; last, a one-component import as <root>/<name>.
+// a candidate is tried as written, then with .mettle appended
 export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string {
   if (slen(imp) == 0) {
     return s_empty();
@@ -255,7 +250,7 @@ fn gx_missing(g: Graph*, what: string, from_file: string, line: string) {
   sl_push(g->missing_lines, line);
 }
 
-// Walks every file the compiler would read for `entry` on ctx->os.
+// walks every file the compiler would read for `entry` on ctx->os
 export fn graph_build(c: GraphCtx*, entry: string) -> Graph* {
   var g: Graph* = new Graph;
   g->files = sl_new();
@@ -336,7 +331,7 @@ export fn graph_build(c: GraphCtx*, entry: string) -> Graph* {
     }
     free(sr);
   }
-  // Sort files and their hashes together.
+  // sort files and their hashes together
   var keyed: StrList* = sl_new();
   var k: int64 = 0;
   while (k < g->files->len) {
@@ -366,8 +361,8 @@ export fn graph_has_file(g: Graph*, p: string) -> bool {
   return sl_has(g->files, p);
 }
 
-// "Z:/home/x" -> "/home/x": wine's drive Z: is the Linux root, so a path seen
-// from mbuild.exe under wine and from Linux mbuild compare equal.
+// "Z:/home/x" -> "/home/x": wine's drive Z: is the linux root, so a path seen
+// from mbuild.exe under wine and from linux mbuild compare equal
 fn gx_unz(p: string) -> string {
   var s: string = gx_slash(p);
   if (slen(s) >= 3 && s_byte(s, 1) == 58 && s_byte(s, 2) == 47 && (s_byte(s, 0) == 90 || s_byte(s, 0) == 122)) {
@@ -376,9 +371,9 @@ fn gx_unz(p: string) -> string {
   return s;
 }
 
-// The form of path p that goes into fingerprints: "@root/rel" inside root,
-// "@std/rel" inside the stdlib, else p without a wine Z: drive. The same file
-// gets the same key from Linux and from wine, wherever the project lives.
+// the form of path p that goes into fingerprints: "@root/rel" inside root,
+// "@std/rel" inside the stdlib, else p without a wine Z: drive. the same file
+// gets the same key from linux and from wine, wherever the project lives
 export fn graph_path_key(root: string, stdlib_dir: string, p: string) -> string {
   var cp: string = gx_unz(p);
   if (slen(root) > 0) {
@@ -400,11 +395,10 @@ fn gx_key(g: Graph*, p: string) -> string {
   return graph_path_key(g->root, g->stdlib_dir, p);
 }
 
-// Mixes everything the graph contributes to a build fingerprint.
 export fn graph_fingerprint(g: Graph*, h: Hasher*) {
   h_str(h, "graph");
   h_str(h, gx_key(g, g->entry));
-  // Sorted by key, so the order does not depend on how the host spells paths.
+  // sorted by key, so the order does not depend on how the host spells paths
   var keyed: StrList* = sl_new();
   var i: int64 = 0;
   while (i < g->files->len) {
