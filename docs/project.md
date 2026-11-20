@@ -206,6 +206,7 @@ works, `mbuild run` says there's nothing to run.
 | `coverage-min` | | `"*"` only: with `--coverage`, fail under this percent of functions |
 | `devices` | | rvsim devices, `;`-separated: `bme280:t=25; ssd1306:addr=0x3c` ([RISC-V](platforms.md#simulated-devices)) |
 | `sim-args` | | words appended to the emulator's command line |
+| `exit-on-uart`, `until-ms`, `uart-script` | | board tests: the console text that passes, the simulated time limit, the UART input script; they win over the bin's settings ([RISC-V](platforms.md#simulator-settings-per-test)) |
 
 each (test, cell) runs `repeat` times, at most `-j` at once, every run in
 `.mbuild/test-run/<cell>/<name>/<run>/`: `tmp/` (its `TMPDIR`, also

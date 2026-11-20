@@ -391,6 +391,42 @@ test sensor (debug) ... skipped (devices need rvsim, and this cell runs natively
 test result: ok. 0 passed, 0 failed, 1 skipped (0.0s)
 ```
 
+### simulator settings per test
+
+a test program on a board passes when its console prints a text. three test
+settings (`"*"` is the default, a test's own value wins, and both win over
+the bin's `exit-on-uart`, `rvsim-until-ms` and `uart-script`) set it up:
+
+| key | rvsim flag | default |
+|---|---|---|
+| `exit-on-uart` | `--exit-on-uart TEXT` | the bin's, else `PASS` on pico2 |
+| `until-ms` | `--until-ms N` | the bin's, else 10000 on pico2 |
+| `uart-script` | `--uart-script FILE` (rvsim's script of sends and waits, not the bin's `--uart-in`) | the bin's |
+
+```mettle
+  mb_test_set("boot", "exit-on-uart", "booted");
+  mb_test_set("boot", "until-ms", "200");
+```
+
+a run that never prints the text fails naming the text it waited for:
+
+```text
+$ mbuild test
+test boot (riscv32-none:pico2/debug) ... ok  0.0s
+test hang (riscv32-none:pico2/debug) ... FAILED
+
+failures:
+
+---- hang (riscv32-none:pico2/debug): no never printed on the console
+stdout:
+  booted
+stderr:
+  rp2350: stopped at --until-ms (50.000 ms of simulated time)
+kept: .mbuild/test-run/riscv32-none-pico2-debug/hang/1
+
+test result: FAILED. 1 passed, 1 failed (3.9s)
+```
+
 ### flashing and monitoring
 
 `mbuild flash [BIN] [--port TTY]` builds the bin's image and runs the

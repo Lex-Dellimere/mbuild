@@ -3592,30 +3592,56 @@ fn bx_drop_valued(c: Cmd*, names: string) {
   free(kinds);
 }
 
-// a pico2 program never exits: a test program passes when its console
-// prints exit-on-uart (default PASS), which stops rvsim. that string, after
-// adding it and a 10 s until-ms when unset to c; "" for other targets
-fn bx_console_pass(s: BxSess*, b: BinInfo*, t: TargetCtx*, c: Cmd*) -> string {
-  var target: string = bx_run_target(b, t);
+// a board program never exits: it passes when its console prints the text
+// (the test's exit-on-uart, else the bin's; PASS by default on pico2). rvsim
+// gets it, until-ms and uart-script as flags (pico2: 10 s of simulated
+// time). the text, "" when the run waits for none
+fn bt_console(p: Project*, s: BxSess*, c: BtCell*, t: BtTest*, j: BxJob*, cmd: Cmd*) -> string {
+  var target: string = bx_run_target(j->b, j->t);
   if (!target_is_bare(target)) {
     return s_empty();
   }
-  var st: Settings* = bx_settings_of(s->p, s->profile, b->name, target);
+  var st: Settings* = bx_settings_of(p, s->profile, j->b->name, target);
   defer free(st);
-  if (!s_eq(st->board, "pico2")) {
+  var own: string = bt_get(p, t->name, "exit-on-uart");
+  var want: string = own;
+  if (slen(want) == 0) {
+    want = st->exit_on_uart;
+  }
+  if (!man_board_rvsim(st)) {
     return s_empty();
   }
-  var want: string = st->exit_on_uart;
-  if (slen(want) == 0) {
-    want = "PASS";
-    cmd_arg(c, "--exit-on-uart");
-    cmd_arg(c, want);
+  var pico: bool = s_eq(st->board, "pico2");
+  var text: string = s_empty();
+  if (slen(own) > 0) {
+    bx_drop_valued(cmd, "--exit-on-uart");
+    cmd_arg(cmd, "--exit-on-uart");
+    cmd_arg(cmd, own);
+    text = own;
+  } else if (pico) {
+    text = st->exit_on_uart;
+    if (slen(text) == 0) {
+      text = "PASS";
+      cmd_arg(cmd, "--exit-on-uart");
+      cmd_arg(cmd, text);
+    }
   }
-  if (slen(st->rvsim_until_ms) == 0) {
-    cmd_arg(c, "--until-ms");
-    cmd_arg(c, "10000");
+  var until: string = bt_get(p, t->name, "until-ms");
+  if (slen(until) > 0) {
+    bx_drop_valued(cmd, "--until-ms");
+    cmd_arg(cmd, "--until-ms");
+    cmd_arg(cmd, until);
+  } else if (pico && slen(st->rvsim_until_ms) == 0) {
+    cmd_arg(cmd, "--until-ms");
+    cmd_arg(cmd, "10000");
   }
-  return want;
+  var script: string = bt_get(p, t->name, "uart-script");
+  if (slen(script) > 0) {
+    bx_drop_valued(cmd, "--uart-in");
+    cmd_arg(cmd, "--uart-script");
+    cmd_path(cmd, p_join(p->root, script));
+  }
+  return text;
 }
 
 fn bx_no_test_bins(p: Project*) -> BinSet* {
@@ -4353,7 +4379,7 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
     return;
   }
   bt_devices(p, t, cmd);
-  c->console = bx_console_pass(s, j->b, j->t, cmd);
+  c->console = bt_console(p, s, c, t, j, cmd);
   bt_sim_args(p, c, t, cmd);
   c->cmd = cmd;
 }
@@ -7640,7 +7666,7 @@ fn bx_init_cmds() {
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
   bx_note("over more than one cell, a table ends the run: a row per test, a column per cell (ok, FAIL, skip[N] with its reason below, - when not in it). skips never fail the run.");
   bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
-  bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
+  bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000). mb_test_set(name, \"exit-on-uart\" | \"until-ms\" | \"uart-script\", ...) sets them per test (\"*\" for all) over the bin's; a failure names the text waited for.");
   bx_note("--on-board [--port TTY]: each board test program is flashed (as mbuild flash does), then mflash monitor waits for its exit-on-uart text (default PASS) until the timeout; one at a time. devices cells are skipped.");
   bx_note("mb_test_set(name, \"devices\", \"bme280:t=25; ssd1306:addr=0x3c\") puts each ;-separated spec on rvsim's command line as --device SPEC; cells not on rvsim are skipped. sim-args are words appended to the emulator's command line.");
   bx_def("flash", "write a board image to the board", "mbuild flash [BIN] [--port TTY] [-t T] [-r | -p PROFILE]", "platforms.md");

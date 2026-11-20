@@ -260,6 +260,14 @@ check "matrix: the table, a row per test and a column per cell" sh -c 'grep -qE 
 if [ $have_rvsim = 1 ]; then
   check "matrix: pico2 cell, @test skipped with why" sh -c 'grep -qF "    riscv32-none:pico2/debug skipped: @test functions run on hosted targets" "$0/last.out" && grep -qF -- "---- fail (riscv32-none:pico2/debug): no PASS on the console" "$0/last.out"' "$S"
 fi
+if [ $have_rvsim = 1 ]; then
+  printf 'import "std/io";\nimport "plat";\nfn main() -> int32 {\n  plat_init();\n  println("HELLO");\n  return 0;\n}\n' > tests/hello.mettle
+  sed -i 's|  mb_test_bin("fail", "tests/fail.mettle");|&\n  mb_test_bin("hello", "tests/hello.mettle");\n  mb_test_bin("later", "tests/hello.mettle");\n  mb_test_set("hello", "exit-on-uart", "HELLO");\n  mb_test_set("later", "exit-on-uart", "NEVER");\n  mb_test_set("later", "until-ms", "50");|' mbuild.mettle
+  mb test -t riscv32-none:pico2 hello
+  check "rvsim: the test's exit-on-uart text passes it" sh -c 'grep -qF "test hello (riscv32-none:pico2/debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+  mb test -t riscv32-none:pico2 later
+  check "rvsim: the failure names the text, until-ms stops it" sh -c 'grep -qF -- "---- later (riscv32-none:pico2/debug): no NEVER on the console" "$0/last.out" && grep -qF "stopped at --until-ms (50.000 ms" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+fi
 MBUILD_QEMU_USER_DIR="$W" MBUILD_RVSIM="$W/nope" mb test --matrix -t host,riscv64-linux,riscv32-none:pico2 pass
 check "matrix: skips in the table, with their reasons" sh -c 'grep -qE "^pass +ok +skip\[1\] +skip\[2\]$" "$0/last.out" && grep -qE "^\[1\] MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^\[2\] MBUILD_RVSIM=.* does not exist$" "$0/last.out"' "$S"
 check "matrix: a missing emulator is skipped, not failed" sh -c 'grep -qE "^    riscv64-linux/debug skipped: MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^    riscv32-none:pico2/debug skipped: MBUILD_RVSIM=.* does not exist$" "$0/last.out" && grep -qE "1 passed, 0 failed.*, 2 skipped" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
@@ -288,7 +296,7 @@ cat > "$F/rvsim" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >>"$F/rvsim.log"
 echo PASS
-echo "rp2350: UART0 printed the --exit-on-uart string at 1.000 ms" >&2
+[ -n "\${RVSIM_QUIET:-}" ] || echo "rp2350: UART0 printed the --exit-on-uart string at 1.000 ms" >&2
 EOF
 # F/mflash records its argv; write exits FLASH_EXIT, monitor prints CONSOLE (default PASS) and exits MON_EXIT
 cat > "$F/mflash" <<EOF
@@ -328,7 +336,7 @@ fn project() {
 EOF
 printf 'export fn bsp2_ok() -> bool { return true; }\n' > bsp2/src/lib.mettle
 printf '// a board\n' > bsp2/src/board/myboard.mettle
-# brd_proj BOARD EXTRA_DEPS
+# brd_proj BOARD EXTRA_DEPS [TEST_SETTINGS [BIN_SETTINGS]]
 brd_proj() { cat > "$W/brd/app/mbuild.mettle" <<EOF
 import "mbuild/api";
 
@@ -340,10 +348,10 @@ fn project() {
   mb_test_bin("plain", "tests/dev.mettle");
   mb_test_set("dev", "devices", "bme280:t=25,p=101325,h=40; ssd1306:addr=0x3c");
   mb_test_set("dev", "sim-args", "--trace-uart");
-  mb_profile("debug");
+${3:-}  mb_profile("debug");
   mb_on("riscv32-none");
   mb_set("board", "$1");
-  mb_on("");
+${4:-}  mb_on("");
 }
 
 fn deps() {
@@ -395,6 +403,23 @@ METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" CONSOLE=FAIL MON_EXIT=1 mb test --o
 check "test --on-board: no PASS fails" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): no PASS on the board'"'"'s console (mflash monitor exited with 1)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" FLASH_EXIT=3 mb test --on-board plain
 check "test --on-board: a failed flash fails" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): flashing failed (mflash exited with 3)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+# --- per-test simulator settings: "*" defaults, the test over the bin, the text waited for
+printf 'u\n' > tests/in.txt
+brd_proj myboard '' '  mb_test_set("*", "until-ms", "777");
+  mb_test_set("plain", "exit-on-uart", "DONE");
+  mb_test_set("plain", "until-ms", "1234");
+  mb_test_set("plain", "uart-script", "tests/in.txt");
+' '  mb_set("rvsim-until-ms", "300");
+  mb_set("exit-on-uart", "BINTEXT");
+  mb_set("uart-script", "tests/in.txt");
+'
+rm -f "$F/rvsim.log"
+METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain dev
+check "sim settings: the test's own, on rvsim" sh -c 'l=$(grep plain.bin "$1/rvsim.log") && case "$l" in *" --exit-on-uart DONE"*" --until-ms 1234"*" --uart-script $2/tests/in.txt"*) ;; *) exit 1 ;; esac && case "$l" in *BINTEXT*|*"--until-ms 300"*|*777*|*--uart-in*) exit 1 ;; esac' "$S" "$F" "$W/brd/app"
+check "sim settings: \"*\" over the bin's, the bin's text kept" sh -c 'l=$(grep dev.bin "$1/rvsim.log") && case "$l" in *"--exit-on-uart BINTEXT"*) ;; *) exit 1 ;; esac && case "$l" in *"--until-ms 777"*) ;; *) exit 1 ;; esac && case "$l" in *"--uart-in "*) ;; *) exit 1 ;; esac && case "$l" in *"--until-ms 300"*|*--uart-script*) exit 1 ;; esac' "$S" "$F"
+check "sim settings: both pass" sh -c 'grep -qF "test plain (riscv32-none/debug) ... ok" "$0/last.out" && grep -qF "test dev (riscv32-none/debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+RVSIM_QUIET=1 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain --force
+check "sim settings: the failure names the text waited for" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): no DONE on the console" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 mkdir -p "$W/brd/flash/src"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("flash", "0.1.0");\n  mb_bin("mflash", "src/main.mettle");\n}\n' > "$W/brd/flash/mbuild.mettle"
 printf 'import "std/io";\nfn main() -> int32 {\n  println("mflash of the flash package");\n  return 0;\n}\n' > "$W/brd/flash/src/main.mettle"

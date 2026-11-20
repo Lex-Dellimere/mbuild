@@ -534,6 +534,7 @@ fn test_tests() {
   t_eq("tests: golden", man_test_check("a", "golden", "stdout"), "golden is files, files,stdout or off, not 'stdout'");
   t_eq("tests: golden-dir", man_test_check("a", "golden-dir", "../g"), "golden-dir is a directory inside the project, not '../g'");
   t_eq("tests: png-tolerance", man_test_check("a", "png-tolerance", "2,1.5,48") + "|" + man_test_check("a", "png-tolerance", "3"), "png-tolerance is C or C,F,H (channel 0-255, fraction 0-1, channel 0-255: 2,0.001,48), not '2,1.5,48'|");
+  t_eq("tests: sim settings", man_test_check("a", "until-ms", "500") + "|" + man_test_check("a", "until-ms", "0") + "|" + man_test_check("a", "exit-on-uart", "") + "|" + man_test_check("a", "uart-script", "/abs"), "|until-ms is milliseconds of simulated time such as \"500\", not '0'|exit-on-uart needs text|uart-script is a file inside the project, not '/abs'");
   t_eq("tests: native", man_test_check("a", "native", "maybe"), "native is skipped, always or never, not 'maybe'");
   t_eq("tests: ports for \"*\" only", man_test_check("a", "ports", "1-2"), "ports is set for every test: mb_test_set(\"*\", \"ports\", \"1-2\")");
   t_eq("tests: ports range", man_test_check("*", "ports", "40000-30000"), "ports is LO-HI within 1024-65535 (20000-29999), not '40000-30000'");

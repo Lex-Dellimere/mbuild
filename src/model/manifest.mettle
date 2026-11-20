@@ -1897,7 +1897,7 @@ fn mnx_test_bins(m: Manifest*) {
 // tests: [tests], [test-cmds], [test.NAME] (mb_test_*)
 
 export fn man_test_keys() -> StrList* {
-  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min devices sim-args");
+  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min devices sim-args exit-on-uart until-ms uart-script");
 }
 
 // a test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
@@ -2076,6 +2076,21 @@ export fn man_test_check(name: string, key: string, value: string) -> string {
         return "devices are specs separated by ';' (bme280:t=25; ssd1306:addr=0x3c), and one is empty";
       }
       d = d + 1;
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "until-ms")) {
+    if (!mnx_uint(v, 1, 86400000)) {
+      return "until-ms is milliseconds of simulated time such as \"500\", not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "exit-on-uart") || s_eq(key, "uart-script")) {
+    if (slen(v) == 0) {
+      return key + " needs text";
+    }
+    if (s_eq(key, "uart-script") && (p_is_abs(v) || s_contains(v, ".."))) {
+      return "uart-script is a file inside the project, not '" + value + "'";
     }
     return s_empty();
   }
