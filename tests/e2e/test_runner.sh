@@ -351,6 +351,21 @@ check "image: a name that is no test program" has "---- nope (linux/debug): no t
 mb test hello show
 check "image: the program and its command test" sh -c 'grep -qF "test hello (debug, release) ... ok" "$0/last.out" && grep -qF "test show (debug, release) ... ok" "$0/last.out"' "$S"
 
+# --- the image on disk matches the sources of the run: A, then B, then A again
+proj "$W/imgfresh" <<'EOF2'
+  mb_test_bin("hello", "tests/hello.mettle");
+  mb_test_cmd("same", "sh tests/chk.sh {{image:hello}");
+EOF2
+cd "$W/imgfresh" || exit 1
+printf 'grep -aqF "$(cat tests/marker)" "$1" || { echo "stale image"; exit 1; }\n' > tests/chk.sh
+for v in MARK-A MARK-B MARK-A; do
+  prog tests/hello.mettle 0 "$v"
+  printf '%s' "$v" > tests/marker
+  mb test
+  check "image fresh: $v after the earlier runs" sh -c 'grep -qF "2 passed, 0 failed" "$0/last.out"' "$S"
+done
+check "image fresh: the pass of the earlier source stays cached" has "test hello (debug) ... ok (cached)"
+
 done
 echo "test_runner: $pass passed, $failed failed"
 [ $failed = 0 ]

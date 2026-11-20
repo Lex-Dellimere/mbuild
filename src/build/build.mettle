@@ -1988,6 +1988,7 @@ struct BxJob {
   g: Graph*;
   ok: bool;         // built (or fresh)
   pass: string;     // a test program's pass stamp, "" when not cached
+  passed: bool;     // that stamp holds: the pass is reused even when the image is rebuilt
 }
 
 fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, j: BxJob*) {
@@ -2154,6 +2155,7 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
 
   j->ok = false;
   j->pass = s_empty();
+  j->passed = false;
   if (s->tests) {
     var key: string = bt_key_of(b->name);
     if (slen(key) > 0) {
@@ -2163,7 +2165,8 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
       j->pass = bx_test_pass_stamp(p, h_hex(&hp));
     }
   }
-  if (slen(j->pass) > 0 && fs_is_file(j->outp) && bx_stamp_ok(p, j->pass, j->fp)) {
+  j->passed = slen(j->pass) > 0 && bx_stamp_ok(p, j->pass, j->fp);
+  if (j->passed && bx_job_files(j) && bx_stamp_ok(p, j->stamp, j->fp)) {
     j->state = 3;
     j->ok = true;
     return j;
@@ -4548,7 +4551,7 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
   }
   c->stamp = j->pass;
   c->fp = j->fp;
-  c->cached = j->state == 3 && !pl->nocache;
+  c->cached = (j->state == 3 || j->passed) && !pl->nocache;
   if (s_eq(bt_get(p, t->name, "run"), "false")) {
     return;
   }
