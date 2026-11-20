@@ -721,6 +721,28 @@ fn dx_check_name(p: Project*, m: Manifest*, key: string, rel: string, call: stri
   dx_fail_hint(msg, "in " + file + ": point " + call + "(\"" + key + "\", ...) at a package named " + key + ", or remove the replacement");
 }
 
+// An mb_dep_path_v package must be the version it names, or a later one of
+// its line (what the registry would select for it).
+fn dx_check_pathv(p: Project*, pm: Manifest*, d: DepSpec*, file_dir: string) {
+  if (!d->pathv || slen(d->pver) == 0) {
+    return;
+  }
+  var file: string = dx_rel(p->root, file_dir) + "/mbuild.mettle";
+  if (s_starts(file, "./")) {
+    file = s_from(file, 2);
+  }
+  var have: string = s_empty();
+  if (pm != (Manifest*)0 && sv_is(pm->version)) {
+    have = sv_canonical(pm->version);
+  }
+  if (slen(have) == 0) {
+    dx_fail_hint(d->key + ": " + d->path + " declares no version, but " + file + " requires " + d->pver, "give it one: mb_package(\"" + d->key + "\", \"" + d->pver + "\")");
+  }
+  if (!s_eq(sv_line(have), sv_line(d->pver)) || sv_cmp(have, d->pver) < 0) {
+    dx_fail(d->key + ": " + d->path + " is " + have + ", but " + file + " requires " + d->pver);
+  }
+}
+
 // A package cannot depend on a package with its own name (the root's name
 // is the only one imports of it could mean). chain: how the requirer is
 // reached from the root, "" when the root asks itself.
@@ -763,6 +785,7 @@ fn dx_collect_paths(cx: DxCx*) {
         while (k < cx->paths->len) {
           if (s_eq(dx_path_at(cx, k)->dir, dir)) {
             seen = true;
+            dx_check_pathv(cx->p, dx_path_at(cx, k)->man, d, m->dir);
           }
           k = k + 1;
         }
@@ -778,6 +801,7 @@ fn dx_collect_paths(cx: DxCx*) {
           if (pp->man != (Manifest*)0) {
             dx_check_name(cx->p, pp->man, d->key, d->path, "mb_dep_path", m->dir);
           }
+          dx_check_pathv(cx->p, pp->man, d, m->dir);
           dpa_push(cx->paths, pp);
           if (pp->man != (Manifest*)0) {
             dma_push(mans, pp->man);
@@ -2869,6 +2893,23 @@ export fn deps_cmd_get(p: Project*) -> int32 {
       }
     }
     var d: DepSpec* = man_dep_find(p->man, name);
+    if (d != (DepSpec*)0 && d->pathv) {
+      if (!sv_is(want)) {
+        error_msg("'" + name + "' is a path dependency with a version: give one (" + name + "@v1.2.0)");
+        return 1;
+      }
+      var nd: DepSpec = *d;
+      nd.pver = sv_canonical(want);
+      var k: int64 = 0;
+      while (k < cx->paths->len) {
+        if (s_eq(dx_path_at(cx, k)->key, name)) {
+          dx_check_pathv(p, dx_path_at(cx, k)->man, &nd, p->root);
+        }
+        k = k + 1;
+      }
+      cfg_set_dep(p, name, nd.pver);
+      continue;
+    }
     if (d != (DepSpec*)0 && slen(d->path) > 0) {
       error_msg("'" + name + "' is a path dependency; edit its mb_dep_path in mbuild.mettle instead");
       return 1;
@@ -2889,6 +2930,9 @@ export fn deps_cmd_get(p: Project*) -> int32 {
     drq_push(m->reqs, dx_req_new(name, want, "the command line", true));
     sl_push(names, name);
     sl_push(labels, dx_pick_for_get(cx, m, want));
+  }
+  if (names->len == 0) {
+    return 0;
   }
   dx_arm(p);
   i = 0;
@@ -3125,7 +3169,15 @@ fn dx_ds_find(ds: DepState*, d: DepSpec*) -> int64 {
 
 fn dx_describe(p: Project*, dm: DepModule*) -> string {
   if (dm->is_path) {
-    return dm->module + " " + dim("(path " + dx_rel(p->root, dm->dir) + ")");
+    var shown: string = dm->module + " ";
+    if (dm->man != (Manifest*)0 && sv_is(dm->man->version)) {
+      shown = shown + sv_canonical(dm->man->version) + " ";
+    }
+    var rel: string = dx_rel(p->root, dm->dir);
+    if (s_starts(rel, "./")) {
+      rel = s_from(rel, 2);
+    }
+    return shown + dim("(path " + rel + ")");
   }
   var rs: ReplaceSpec* = man_replace_find(p->man, dm->module);
   if (rs != (ReplaceSpec*)0 && slen(dm->replaced) > 0) {

@@ -13,6 +13,8 @@ import "../core/fs";
 import "../core/proc";
 import "../model/toml";
 import "../model/manifest";
+import "../model/semver";
+import "../core/sha256";
 import "../model/project";
 import "../build/scan";
 import "../build/graph";
@@ -195,6 +197,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
   // "call|first_arg|section" candidates, tried in order.
   if (s_eq(section, "package")) {
     if (s_eq(key, "name") || s_eq(key, "version")) { sl_push(c, "mb_package||"); }
+    if (s_eq(key, "version-from")) { sl_push(c, "mb_version_from||"); }
     if (s_eq(key, "include")) { sl_push(c, "mb_publish_include||"); }
     if (s_eq(key, "import-root")) { sl_push(c, "mb_import_root||"); }
     if (s_eq(key, "toolchain")) { sl_push(c, "mb_toolchain||"); }
@@ -209,6 +212,7 @@ fn cfx_entry_line(text: string, section: string, key: string) -> int64 {
     sl_push(c, "mb_dep|" + key + "|");
     sl_push(c, "mb_dep_from|" + key + "|");
     sl_push(c, "mb_dep_path|" + key + "|");
+    sl_push(c, "mb_dep_path_v|" + key + "|");
   } else if (s_eq(section, "replace")) {
     sl_push(c, "mb_replace_path|" + key + "|");
     sl_push(c, "mb_replace_version|" + key + "|");
@@ -559,6 +563,9 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
     }
     fail(loc + ": mb_import_root(\"" + m->import_root + "\"): " + cfx_show(p, man_import_dir(m, dir)) + " is not a directory");
   }
+  if (slen(m->version_from) > 0) {
+    cfx_version_from(p, m, text, shown);
+  }
   if (slen(local_file) > 0) {
     var lm: Manifest* = man_parse_local(cfx_doc(p, lout, ltext, lshown), dir);
     cfx_relabel_all(lm, dir + "/mbuild.local.mettle", lshown);
@@ -569,6 +576,33 @@ fn cfx_load(p: Project*, file: string, local_file: string, state_dir: string, co
     man_merge_local(m, lm);
   }
   return m;
+}
+
+var g_cfx_vfrom_depth: int32 = 0;
+
+// mb_version_from(dir): m's version is the one dir's mbuild.mettle declares.
+fn cfx_version_from(p: Project*, m: Manifest*, text: string, shown: string) {
+  var at: int64 = mbf_locate(text, "mb_version_from", "", "");
+  var loc: string = shown + " (in fn project())";
+  if (at > 0) {
+    loc = shown + ":" + s_int(at);
+  }
+  var call: string = loc + ": mb_version_from(\"" + m->version_from + "\"): ";
+  var dir: string = p_clean(p_join(m->dir, m->version_from));
+  if (!fs_is_file(dir + "/mbuild.mettle")) {
+    fail(call + cfx_show(p, dir) + " has no mbuild.mettle");
+  }
+  if (g_cfx_vfrom_depth > 8) {
+    fail(call + "a loop of mb_version_from calls");
+  }
+  var key: string = "vfrom-" + s_sub(sha_string(dir), 0, 16);
+  g_cfx_vfrom_depth = g_cfx_vfrom_depth + 1;
+  var from: Manifest* = cfg_load_dir(p, dir, key);
+  g_cfx_vfrom_depth = g_cfx_vfrom_depth - 1;
+  if (from == (Manifest*)0 || !sv_is(from->version)) {
+    fail(call + cfx_show(p, dir) + "/mbuild.mettle declares no version");
+  }
+  m->version = sv_canonical(from->version);
 }
 
 // A directory that still holds only an mbuild.toml, which mbuild no longer reads.

@@ -184,6 +184,9 @@ fn test_edits() {
   t_eq("add: deps in fn project() stay, the new one goes to fn deps()", mbf_set_dep(mixed, "b", "v1").text, src("fn project() $\n  mb_dep(`a`, `v1`);\n}\n\nfn deps() $\n  mb_dep(`b`, `v1`);\n}\n"));
   t_has("set: a dep in fn project() is edited in place", mbf_set_dep(mixed, "a", "v2").text, src("fn project() $\n  mb_dep(`a`, `v2`);\n}\n"));
   t_eq("remove: a dep in fn project()", mbf_remove_dep(mixed, "a").text, src("fn project() $\n}\n"));
+  var pvt: string = src("fn project() $\n}\nfn deps() $\n  mb_dep_path_v(`core`, `libs/core`, `v0.1.0`);\n}\n");
+  t_eq("set: mb_dep_path_v version", mbf_set_dep(pvt, "core", "v0.2.0").text, src("fn project() $\n}\nfn deps() $\n  mb_dep_path_v(`core`, `libs/core`, `v0.2.0`);\n}\n"));
+  t_eq("remove: mb_dep_path_v", mbf_remove_dep(pvt, "core").text, src("fn project() $\n}\nfn deps() $\n}\n"));
   t_has("add path: into fn deps()", mbf_add_dep_path(viewer(), "foo", "../foo").text, "mb_dep_path(\"widgets\", \"../widgets\");\n  mb_dep_path(\"foo\", \"../foo\");\n}\n");
 
   var commented: string = src("fn project() $\n  mb_package(`p`, `1.0.0`);\n  /* mb_dep(`strutil`, `v1.0.0`); */\n  // mb_dep(`strutil`, `v1.0.0`);\n}\n");

@@ -34,6 +34,8 @@ export struct DepSpec {
   path: string;
   line: int64;
   registry: string;   // "" = search order
+  pathv: bool;        // a path with a version (mb_dep_path_v): published as name = pver
+  pver: string;       // its version; "" = whatever the path package declares
 }
 
 // [component.NAME].
@@ -113,6 +115,7 @@ export struct Manifest {
   meta: StrList*;         // "key=value": description, license, repository, authors
   local_components: StrList*;  // "name=impl" from mbuild.local.mettle [components]
   import_root: string;    // [package] import-root, cleaned ("" = the package directory)
+  version_from: string;   // [package] version-from (mb_version_from), as written; "" = none
   dep_bins: StrList*;     // [dep-bins] as "dep=bin", in call order
   test_bins: StrList*;    // [test-bins] as "name=main", in file order
   services: ServiceSpec*; // in declaration order
@@ -464,6 +467,8 @@ fn mnx_dep_new(key: string, line: int64) -> DepSpec {
   d.path = s_empty();
   d.line = line;
   d.registry = s_empty();
+  d.pathv = false;
+  d.pver = s_empty();
   return d;
 }
 
@@ -489,8 +494,16 @@ fn mnx_dep_finish(m: Manifest*, d: DepSpec*, has_version: bool) {
   }
   if (slen(d->path) > 0) {
     if (has_version) {
-      mnx_error(m, d->line, "dependency '" + d->key + "' has both a path and a version");
-      return;
+      if (slen(d->version) > 0 && !sv_is(d->version)) {
+        mnx_error(m, d->line, "dependency '" + d->key + "': '" + d->version + "' is not a version (v1.2.0, or \"\" for the path package's own)");
+        return;
+      }
+      d->pathv = true;
+      d->pver = s_empty();
+      if (slen(d->version) > 0) {
+        d->pver = sv_canonical(d->version);
+      }
+      d->version = s_empty();
     }
     if (slen(d->registry) > 0) {
       mnx_error(m, d->line, "dependency '" + d->key + "' has both a path and a registry");
@@ -572,7 +585,7 @@ export fn man_preview_side(s: string) -> bool {
 }
 
 fn mnx_known_keys(section: string) -> StrList* {
-  if (s_eq(section, "package")) { return mnx_list("name version mettle toolchain include description license repository authors import-root"); }
+  if (s_eq(section, "package")) { return mnx_list("name version version-from mettle toolchain include description license repository authors import-root"); }
   if (s_eq(section, "build")) { return mnx_list("targets test-targets flags prelude agents"); }
   // bound to locals: mnx_list keeps views into its argument
   if (s_starts(section, "profile.")) {
@@ -2389,6 +2402,7 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->meta = sl_new();
   m->local_components = sl_new();
   m->import_root = s_empty();
+  m->version_from = s_empty();
   m->dep_bins = sl_new();
   m->test_bins = sl_new();
   m->services = (ServiceSpec*)0;
@@ -2424,6 +2438,11 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   }
   if (!pkg_name_ok(m->name)) {
     mnx_error(m, toml_get(doc, "package", "name")->line, "package name '" + m->name + "' " + MNX_NAME_RULE);
+    return m;
+  }
+  m->version_from = mnx_str(m, "package", "version-from");
+  if (slen(m->version_from) > 0 && slen(m->version) > 0) {
+    mnx_error(m, toml_get(doc, "package", "version-from")->line, "mb_version_from(" + toml_quote(m->version_from) + ") needs mb_package(\"" + m->name + "\", \"\"): the version comes from there");
     return m;
   }
   if (slen(m->version) > 0 && !sv_is(m->version)) {

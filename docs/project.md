@@ -83,6 +83,7 @@ Per-OS settings go through `mb_on(os)`.
 | `mb_prelude(on)` | Pass `--prelude`, so `std/prelude` is imported everywhere. |
 | `mb_agents(on)` | Keep the dependencies block in `AGENT.rules` ([packages](packages.md#agentrules)). Default `true`. |
 | `mb_publish_include(csv)` | The files `mbuild publish` packs ([dependencies](dependencies.md#publishing)). |
+| `mb_version_from(dir)` | This package's version is that of the package in `dir`; use with `mb_package(name, "")`. |
 | `mb_import_root(dir)` | Imports of `name/...` start in `dir` instead of the package root ([dependencies](dependencies.md#import-roots)). |
 | `mb_registry(name, url)` | A registry, searched in call order before `default`. |
 | `mb_toolchain(v)` | The Mettle toolchain this project builds with, an id or version (`mbuild toolchain use`, [platforms](platforms.md#toolchains)). |
@@ -98,6 +99,7 @@ follows the same rules. `mbuild init` writes an empty one.
 | `mb_dep(name, version)` | A package from the registries, `"v1.2.0"` or higher. |
 | `mb_dep_from(registry, name, version)` | The same, from one named registry. |
 | `mb_dep_path(name, path)` | A package in a local directory. |
+| `mb_dep_path_v(name, path, version)` | A local directory, published as `mb_dep(name, version)` ([dependencies](dependencies.md#several-packages-in-one-repository)). |
 | `mb_dep_bin(dep, bin)` | Also build bin `bin` of dependency `dep` (below). |
 | `mb_replace_version(name, version)` | One version of `name` for the whole build. |
 | `mb_replace_path(name, path)` | Use a local directory instead of `name` everywhere in the build. |

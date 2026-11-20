@@ -556,7 +556,7 @@ fn mfx_doc(text: string, decl: int64) -> StrList* {
 }
 
 fn mfx_is_dep_fn(name: string) -> bool {
-  return s_eq(name, "mb_dep") || s_eq(name, "mb_dep_from") || s_eq(name, "mb_dep_path");
+  return s_eq(name, "mb_dep") || s_eq(name, "mb_dep_from") || s_eq(name, "mb_dep_path") || s_eq(name, "mb_dep_path_v");
 }
 
 // The calls that belong in fn deps().
@@ -793,7 +793,7 @@ export fn mbf_set_dep(text: string, name: string, version: string) -> MbfEdit {
       return mfx_edit(false, text, c->line, "a path dependency");
     }
     var vi: int64 = 1;
-    if (s_eq(c->fn_name, "mb_dep_from")) {
+    if (s_eq(c->fn_name, "mb_dep_from") || s_eq(c->fn_name, "mb_dep_path_v")) {
       vi = 2;
     }
     if (vi >= c->args->len || vi >= 16) {
@@ -1024,7 +1024,7 @@ fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
     cur->os = a0;
     return s_empty();
   }
-  if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include") || s_eq(f, "mb_import_root") || s_eq(f, "mb_toolchain")) { return "package"; }
+  if (s_eq(f, "mb_package") || s_eq(f, "mb_meta") || s_eq(f, "mb_publish_include") || s_eq(f, "mb_import_root") || s_eq(f, "mb_toolchain") || s_eq(f, "mb_version_from")) { return "package"; }
   if (s_eq(f, "mb_dep_bin")) { return "dep-bins"; }
   if (s_eq(f, "mb_test_bin")) { return "test-bins"; }
   if (s_eq(f, "mb_test_set") || s_eq(f, "mb_test_env")) { return "test." + a0; }

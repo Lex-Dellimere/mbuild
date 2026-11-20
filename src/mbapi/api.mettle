@@ -707,6 +707,12 @@ export fn mb_package(name: string, version: string) {
   mbi_put("package", "version", mbi_quote(version));
 }
 
+// This package's version is the one the mbuild.mettle in dir declares
+// (with mb_package(name, "")).
+export fn mb_version_from(dir: string) {
+  mbi_put("package", "version-from", mbi_quote(dir));
+}
+
 // A [package] field: description, license, repository or authors (a list).
 export fn mb_meta(key: string, value: string) {
   if (key == "authors") {
@@ -818,6 +824,12 @@ export fn mb_dep_from(registry: string, name: string, version: string) {
 // A dependency on a local directory.
 export fn mb_dep_path(name: string, path: string) {
   mbi_put("dependencies", name, "{{ path = " + mbi_quote(path) + " }");
+}
+
+// A local directory that is published as mb_dep(name, version); the
+// package there must be that version or a later one of its line. "" = its own.
+export fn mb_dep_path_v(name: string, path: string, version: string) {
+  mbi_put("dependencies", name, "{{ path = " + mbi_quote(path) + ", version = " + mbi_quote(version) + " }");
 }
 
 // Also build a dependency's bin, for the same target and profile, into this project's output directory.

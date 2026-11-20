@@ -449,8 +449,10 @@ fn test_basics() {
   sl_push(want, "/p/mbuild.toml:4: unknown target 'macos' (expected \"linux\", \"windows\", \"riscv64-linux\", \"riscv32-linux\", \"riscv64-none\", \"riscv32-none\")");
   sl_push(cases, pkg("[build]\nprelude = \"yes\"\n"));
   sl_push(want, "/p/mbuild.toml:4: [build] prelude must be true or false, not a string");
-  sl_push(cases, pkg("[dependencies]\nl = {{ path = \"../l\", version = \"v1.0.0\" }\n"));
-  sl_push(want, "/p/mbuild.toml:4: dependency 'l' has both a path and a version");
+  sl_push(cases, pkg("[dependencies]\nl = {{ path = \"../l\", version = \"latest\" }\n"));
+  sl_push(want, "/p/mbuild.toml:4: dependency 'l': 'latest' is not a version (v1.2.0, or \"\" for the path package's own)");
+  sl_push(cases, "[package]\nname = \"x\"\nversion = \"1.0.0\"\nversion-from = \"..\"\n");
+  sl_push(want, "/p/mbuild.toml:4: mb_version_from(\"..\") needs mb_package(\"x\", \"\"): the version comes from there");
   sl_push(cases, pkg("[dependencies]\nstrutil = true\n"));
   sl_push(want, "/p/mbuild.toml:4: dependency 'strutil' must be a version string or an inline table, not a boolean");
   sl_push(cases, pkg("[bin.tool]\nflags = 3\n"));
@@ -466,6 +468,13 @@ fn test_basics() {
     t_eq("basics: error " + s_int(i), man_of(sl_get(cases, i))->error, sl_get(want, i));
     i = i + 1;
   }
+
+  var pv: Manifest* = man_of("[package]\nname = \"x\"\nversion = \"\"\nversion-from = \"../..\"\n[dependencies]\na = {{ path = \"../a\", version = \"0.2.0\" }\nb = {{ path = \"../b\", version = \"\" }\nc = {{ path = \"../c\" }\n");
+  t_eq("path+version: parses", pv->error, "");
+  t_eq("path+version: version-from", pv->version_from, "../..");
+  t_ok("path+version: a", man_dep(pv, 0)->pathv && s_eq(man_dep(pv, 0)->pver, "v0.2.0") && slen(man_dep(pv, 0)->version) == 0);
+  t_ok("path+version: \"\" follows the package", man_dep(pv, 1)->pathv && slen(man_dep(pv, 1)->pver) == 0);
+  t_ok("path+version: plain path", !man_dep(pv, 2)->pathv);
 
   var w: Manifest* = man_of(pkg("nmae = \"y\"\n[buidl]\nflags = []\n[profiles.release]\n[bin]\nmain = \"m\"\n[c.macos]\n[zzz]\n[link]\nlib = []\n[dependencies]\nk = {{ path = \"p\", verison = \"v1\" }\n"));
   t_eq("basics: warnings valid", w->error, "");
