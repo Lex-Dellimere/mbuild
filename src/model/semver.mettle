@@ -1,6 +1,6 @@
 // semver: version parsing, precedence and selection.
 //
-// Accepted: [v]MAJOR[.MINOR[.PATCH]][-PRE][+BUILD]. Missing components are 0,
+// accepted: [v]MAJOR[.MINOR[.PATCH]][-PRE][+BUILD]. missing components are 0,
 // build metadata is ignored, PRE is dot-separated [0-9A-Za-z-] identifiers.
 
 import "../core/base";
@@ -165,7 +165,7 @@ fn svx_pre_cmp(a: string, b: string) -> int32 {
   return svx_num_cmp(pa->len, pb->len);
 }
 
-// Precedence of two parsed versions: -1, 0 or 1.
+// precedence of two parsed versions: -1, 0 or 1.
 export fn sv_cmp_parsed(a: SemVer, b: SemVer) -> int32 {
   if (a.ok != b.ok) {
     if (a.ok) { return 1; }
@@ -178,7 +178,7 @@ export fn sv_cmp_parsed(a: SemVer, b: SemVer) -> int32 {
   return c;
 }
 
-// Semver precedence of two version strings: -1, 0 or 1. Anything that is
+// semver precedence of two version strings: -1, 0 or 1. anything that is
 // not a version sorts below every version (and lexically among itself).
 export fn sv_cmp(a: string, b: string) -> int32 {
   var x: SemVer = sv_parse(a);
@@ -189,7 +189,7 @@ export fn sv_cmp(a: string, b: string) -> int32 {
   return sv_cmp_parsed(x, y);
 }
 
-// The highest stable version in the list, else the highest pre-release, else "".
+// the highest stable version in the list, else the highest pre-release, else "".
 export fn sv_max(list: StrList*) -> string {
   var best: string = s_empty();
   var best_pre: string = s_empty();
@@ -214,7 +214,7 @@ export fn sv_max(list: StrList*) -> string {
   return best_pre;
 }
 
-// The compatibility line: "v1.4.2" -> "v1", "v0.3.1" -> "v0.3" (in v0 a minor
+// the compatibility line: "v1.4.2" -> "v1", "v0.3.1" -> "v0.3" (in v0 a minor
 // bump may break), "v2.0.0-rc.1" -> "v2"; "" when not a version.
 export fn sv_line(s: string) -> string {
   var v: SemVer = sv_parse(s);

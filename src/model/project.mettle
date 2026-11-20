@@ -1,15 +1,11 @@
 // project: the types the build, dependency and native modules share.
-//
-// build.mettle creates the Options and the Project; deps.mettle answers a
-// DepState for it; native.mettle answers a NatLink for one target. Keeping the
-// shapes here lets those modules be written and tested apart.
 
 import "std/io";
 import "std/mem";
 import "../core/base";
 import "manifest";
 
-// Command-line options shared by every command.
+// command-line options shared by every command.
 export struct Options {
   verbose: bool;
   quiet: bool;
@@ -41,7 +37,7 @@ export struct Project {
   legacy_toml: bool;     // only an mbuild.toml is present
 }
 
-// One selected dependency.
+// one selected dependency.
 export struct DepModule {
   module: string;     // package name
   version: string;    // "v1.2.0", "" for a path package
@@ -59,7 +55,7 @@ export struct DepState {
   include_dir: string;   // absolute ".mbuild/deps", passed to the compiler as -I
 }
 
-// One (target, profile) build: where things go and which compiler builds it.
+// one (target, profile) build: where things go and which compiler builds it.
 export struct TargetCtx {
   target: string;                // "linux" | "windows"
   profile: string;
@@ -71,7 +67,7 @@ export struct TargetCtx {
   app_profile: string;
 }
 
-// What the native step contributes to one compile for one target.
+// what the native step contributes to one compile for one target.
 export struct NatLink {
   mettle_args: StrList*;  // appended to the compiler argv (-L/-l/--rpath or --link-arg)
   env: StrList*;          // "NAME=value" for the compiler (WINEPATH / PATH additions)
@@ -148,12 +144,12 @@ export fn target_is_riscv(target: string) -> bool {
   return s_eq(target, "riscv64-linux") || s_eq(target, "riscv32-linux") || s_eq(target, "riscv64-none") || s_eq(target, "riscv32-none");
 }
 
-// A board image target: riscv64-none, riscv32-none.
+// a board image target: riscv64-none, riscv32-none.
 export fn target_is_bare(target: string) -> bool {
   return target_is_riscv(target) && s_ends(target, "-none");
 }
 
-// The OS import guards and [c] see: "linux" for riscv*-linux, "none" for a
+// the OS import guards and [c] see: "linux" for riscv*-linux, "none" for a
 // board image.
 export fn target_os(target: string) -> string {
   if (s_eq(target, "riscv64-linux") || s_eq(target, "riscv32-linux")) {
@@ -163,17 +159,6 @@ export fn target_os(target: string) -> string {
     return "none";
   }
   return target;
-}
-
-// "rv32" or "rv64" for a RISC-V target, "" otherwise.
-export fn target_rv_width(target: string) -> string {
-  if (s_starts(target, "riscv32-")) {
-    return "rv32";
-  }
-  if (s_starts(target, "riscv64-")) {
-    return "rv64";
-  }
-  return s_empty();
 }
 
 export fn target_names() -> string {

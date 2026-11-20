@@ -1,18 +1,4 @@
-// manifest: the manifest model: the TOML mbuild.mettle emits and registries serve.
-//
-// man_parse checks types and dependency rules (first problem -> m->error as
-// "file:line: message") and reports unknown sections and keys as warnings,
-// with a "did you mean" when one known name is within edit distance 2.
-// Dependencies may be written inline (`x = "v1"`, `x = {{ ... }`) or as a
-// table (`[dependencies.x]`); keys are package names. Removed keys
-// are errors naming the replacement.
-//
-// Build settings: typed keys in [profile.NAME] and
-// [bin.NAME], resolved by man_settings through built-in profile ->
-// the profile's inherits chain (ancestor first, each followed by the same
-// profile of mbuild.local.mettle) -> [bin.NAME] -> --set; raw flags
-// concatenate in that order and [build] flags come last. With a target,
-// the chain's [profile.NAME.os] sections follow the chain (ancestor first).
+// manifest: the manifest model, the toml mbuild.mettle emits and registries serve.
 
 import "../core/base";
 import "std/mem";
@@ -49,7 +35,7 @@ export struct CompSpec {
   line: int64;
 }
 
-// One [service.NAME] (mb_service): a process `mbuild run` starts beside the app.
+// one [service.NAME] (mb_service): a process `mbuild run` starts beside the app.
 export struct ServiceSpec {
   name: string;
   cmd: string;
@@ -60,7 +46,7 @@ export struct ServiceSpec {
   line: int64;
 }
 
-// One mb_test_set (or mb_test_env, key "env") entry: [test.NAME] key = "value".
+// one mb_test_set (or mb_test_env, key "env") entry: [test.NAME] key = "value".
 export struct TestSet {
   name: string;       // a test's name, or "*"
   key: string;
@@ -74,7 +60,7 @@ export struct RegSpec {
   line: int64;
 }
 
-// One [replace] entry: path or version.
+// one [replace] entry: path or version.
 export struct ReplaceSpec {
   module: string;
   path: string;
@@ -139,7 +125,7 @@ export struct SettingsQuery {
   sets: StrList*;         // --set KEY=VALUE items; 0 or empty for none
 }
 
-// Resolved build settings for one compile. flags holds the raw flags in
+// resolved build settings for one compile. flags holds the raw flags in
 // layer order ([build] flags last); origins "key=file:line" or "key=--set"
 // for every key not from a built-in; warnings the covered-raw-flag warnings.
 export struct Settings {
@@ -179,9 +165,7 @@ export struct Settings {
   warnings: StrList*;
 }
 
-// ---------------------------------------------------------------------------
-// Edit distance
-// ---------------------------------------------------------------------------
+// edit distance
 
 export fn man_edit_distance(a: string, b: string) -> int64 {
   var n: int64 = slen(a);
@@ -219,7 +203,7 @@ export fn man_edit_distance(a: string, b: string) -> int64 {
   return d;
 }
 
-// The closest candidate within distance 2, or "".
+// the closest candidate within distance 2, or "".
 export fn man_suggest(word: string, candidates: StrList*) -> string {
   var best: string = s_empty();
   var best_d: int64 = 3;
@@ -235,10 +219,6 @@ export fn man_suggest(word: string, candidates: StrList*) -> string {
   }
   return best;
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn mnx_list(words: string) -> StrList* {
   return s_split(words, 32);
@@ -286,7 +266,7 @@ fn mnx_label(section: string, key: string) -> string {
   return "[" + section + "] " + key;
 }
 
-// A string value; "" when absent (an error when another type).
+// a string value; "" when absent (an error when another type).
 fn mnx_str(m: Manifest*, section: string, key: string) -> string {
   var v: TomlValue* = toml_get(m->doc, section, key);
   if (v == (TomlValue*)0) {
@@ -311,7 +291,7 @@ fn mnx_bool(m: Manifest*, section: string, key: string) -> bool {
   return s_eq(v->text, "true");
 }
 
-// An array of strings (a single string counts as one item).
+// an array of strings (a single string counts as one item).
 fn mnx_strs(m: Manifest*, section: string, key: string) -> StrList* {
   var v: TomlValue* = toml_get(m->doc, section, key);
   if (v == (TomlValue*)0) {
@@ -343,7 +323,7 @@ fn mnx_first_component(s: string) -> string {
   return s_sub(s, 0, at);
 }
 
-// A host name: letters, digits, '-' and '.', at least one inner dot, no dot
+// a host name: letters, digits, '-' and '.', at least one inner dot, no dot
 // at either end. "github.com" is one; ".", "..", "x.mettle/" pieces are not.
 fn mnx_is_host(c: string) -> bool {
   var n: int64 = slen(c);
@@ -367,7 +347,7 @@ fn mnx_is_host(c: string) -> bool {
   return dots > 0;
 }
 
-// A remote module path: a host name, then '/' and more ("github.com/x/y").
+// a remote module path: a host name, then '/' and more ("github.com/x/y").
 export fn man_is_remote_module(s: string) -> bool {
   var first: string = mnx_first_component(s);
   if (slen(first) >= slen(s) || s_ends(first, ".mettle")) {
@@ -392,15 +372,13 @@ fn mnx_push_dep(m: Manifest*, d: DepSpec) {
   m->ndeps = m->ndeps + 1;
 }
 
-// ---------------------------------------------------------------------------
-// Dependencies
-// ---------------------------------------------------------------------------
+// dependencies
 
 fn mnx_dep_fields() -> StrList* {
   return mnx_list("version path registry");
 }
 
-// A table section ([dependencies.x], [replace.x]) as an inline-table value.
+// a table section ([dependencies.x], [replace.x]) as an inline-table value.
 fn mnx_table_as_inline(doc: Toml*, sec: string, line: int64) -> TomlValue* {
   var v: TomlValue* = new TomlValue;
   v->kind = 5;
@@ -423,7 +401,7 @@ fn mnx_table_as_inline(doc: Toml*, sec: string, line: int64) -> TomlValue* {
   return v;
 }
 
-// The replacement for a removed dependency field; "" when f is not one.
+// the replacement for a removed dependency field; "" when f is not one.
 fn mnx_dep_removed(f: string) -> string {
   if (s_eq(f, "url")) { return "url was removed: packages come from a registry (registry = \"NAME\" with [registry.NAME] url) or a path"; }
   if (s_eq(f, "module")) { return "module was removed: the key is the package name"; }
@@ -431,7 +409,7 @@ fn mnx_dep_removed(f: string) -> string {
   return s_empty();
 }
 
-// Fills d from an inline table (or a [dependencies.x] table as one).
+// fills d from an inline table (or a [dependencies.x] table as one).
 fn mnx_dep_from_fields(m: Manifest*, d: DepSpec*, v: TomlValue*) {
   var known: StrList* = mnx_dep_fields();
   defer free(known);
@@ -472,7 +450,7 @@ fn mnx_dep_new(key: string, line: int64) -> DepSpec {
   return d;
 }
 
-// What is wrong with a dependency or [replace] key; "" when it is a package name.
+// what is wrong with a dependency or [replace] key; "" when it is a package name.
 fn mnx_key_problem(key: string) -> string {
   if (man_is_remote_module(key) || s_find_byte(key, 47) >= 0) {
     return "'" + key + "' is a module path: dependencies are package names now (e.g. " + p_base(key) + " = \"v1.0.0\")";
@@ -575,11 +553,9 @@ fn mnx_deps(m: Manifest*) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Unknown names
-// ---------------------------------------------------------------------------
+// unknown names
 
-// A preview side: mb_preview / --preview.
+// a preview side: mb_preview / --preview.
 export fn man_preview_side(s: string) -> bool {
   return s_eq(s, "left") || s_eq(s, "right") || s_eq(s, "top") || s_eq(s, "bottom") || s_eq(s, "off");
 }
@@ -635,7 +611,7 @@ fn mnx_target_words() -> string {
   return "linux windows riscv64-linux riscv32-linux riscv64-none riscv32-none";
 }
 
-// A target -t and mb_targets take (not all or host).
+// a target -t and mb_targets take (not all or host).
 export fn man_target_name(t: string) -> bool {
   var words: StrList* = mnx_list(mnx_target_words());
   var found: bool = sl_has(words, t);
@@ -643,7 +619,7 @@ export fn man_target_name(t: string) -> bool {
   return found;
 }
 
-// An mb_test_targets entry: a target, host, all, or a board target with
+// an mb_test_targets entry: a target, host, all, or a board target with
 // its board ("riscv32-none:pico2").
 export fn man_test_target(t: string) -> bool {
   if (s_eq(t, "host") || s_eq(t, "all") || man_target_name(t)) {
@@ -776,9 +752,7 @@ fn mnx_unknown_keys(m: Manifest*, sec: string) {
   free(keys);
 }
 
-// ---------------------------------------------------------------------------
-// Build settings
-// ---------------------------------------------------------------------------
+// build settings
 
 fn mnx_typed_words() -> string {
   return "optimize safe stack-trace debug-info crash-report native-heap check-overflow check-proofs check-effects check-deadlines check-tasks assume-no-signed-overflow pgo pgo-file verify ml-opt subsystem profile-runtime image-base board objective isa abi outputs rvsim-until-ms exit-on-uart uart-script pins";
@@ -815,7 +789,7 @@ fn mnx_quoted(words: StrList*) -> string {
   return buf_take(b);
 }
 
-// The nearest enum value: distance at most 3 and below the word's length.
+// the nearest enum value: distance at most 3 and below the word's length.
 fn mnx_suggest_value(word: string, cands: StrList*) -> string {
   var best: string = s_empty();
   var best_d: int64 = 4;
@@ -836,7 +810,7 @@ fn mnx_base(file: string) -> string {
   return s_from(file, s_rfind_byte(file, 47) + 1);
 }
 
-// What is wrong with a settings value (typed key, flags, cflags, inherits); "" when nothing.
+// what is wrong with a settings value (typed key, flags, cflags, inherits); "" when nothing.
 fn mnx_setting_problem(key: string, v: TomlValue*) -> string {
   if (s_eq(key, "abi") && v->kind == 1 && s_eq(v->text, "lp64e")) {
     return "abi = \"lp64e\": the Mettle compiler does not support RV64E and lp64e yet; use \"lp64\", \"lp64f\" or \"lp64d\"";
@@ -980,7 +954,7 @@ fn mnx_is_digits(s: string) -> bool {
   return true;
 }
 
-// The files a board image writes: "bin, elf" (a string) or ["uf2", "elf"].
+// the files a board image writes: "bin, elf" (a string) or ["uf2", "elf"].
 export fn man_outputs(text: string) -> StrList* {
   var out: StrList* = sl_new();
   var parts: StrList* = s_split(text, 44);
@@ -1029,7 +1003,7 @@ fn mnx_outputs_problem(v: TomlValue*) -> string {
   return s_empty();
 }
 
-// A board module's name: lowercase letters, digits and dashes.
+// a board module's name: lowercase letters, digits and dashes.
 fn mnx_is_board_name(s: string) -> bool {
   if (slen(s) == 0) {
     return false;
@@ -1097,7 +1071,7 @@ fn mnx_outputs_text(v: TomlValue*) -> string {
   return v->text;
 }
 
-// Stores a checked typed value.
+// stores a checked typed value.
 fn mnx_assign(st: Settings*, key: string, v: TomlValue*) {
   var t: string = v->text;
   var on: bool = s_eq(t, "true");
@@ -1140,7 +1114,7 @@ fn mnx_builtin(st: Settings*, profile: string) {
   }
 }
 
-// The typed key that covers a raw compiler flag, as "key = value"; "" when none.
+// the typed key that covers a raw compiler flag, as "key = value"; "" when none.
 fn mnx_covered(flag: string) -> string {
   if (s_eq(flag, "--release") || s_eq(flag, "-r")) { return "optimize = \"full\""; }
   if (s_eq(flag, "-O") || s_eq(flag, "--optimize")) { return "optimize = \"checked\""; }
@@ -1182,7 +1156,7 @@ fn mnx_covered_warnings(st: Settings*, loc: string, fl: StrList*) {
   }
 }
 
-// Applies [section] of mm's file: typed keys win, flags (and cflags in a
+// applies [section] of mm's file: typed keys win, flags (and cflags in a
 // profile) concatenate; inherits and main are not settings.
 fn mnx_apply_section(st: Settings*, mm: Manifest*, section: string) {
   var is_bin: bool = s_starts(section, "bin.");
@@ -1224,7 +1198,7 @@ fn mnx_apply_section(st: Settings*, mm: Manifest*, section: string) {
   free(keys);
 }
 
-// One --set KEY=VALUE: the value is a TOML scalar (true/false, else a string; quotes optional).
+// one --set KEY=VALUE: the value is a TOML scalar (true/false, else a string; quotes optional).
 fn mnx_apply_set(st: Settings*, item: string) {
   var label: string = "--set " + item + ": ";
   var eq: int64 = s_find_byte(item, 61);
@@ -1284,7 +1258,7 @@ fn mnx_apply_set(st: Settings*, item: string) {
   free(v);
 }
 
-// The manifest (main or local) whose [profile.NAME] has an inherits key; 0 when none.
+// the manifest (main or local) whose [profile.NAME] has an inherits key; 0 when none.
 fn mnx_inherits_owner(m: Manifest*, name: string) -> Manifest* {
   var sec: string = "profile." + name;
   if (m->local != (Manifest*)0 && toml_get(m->local->doc, sec, "inherits") != (TomlValue*)0) {
@@ -1296,7 +1270,7 @@ fn mnx_inherits_owner(m: Manifest*, name: string) -> Manifest* {
   return (Manifest*)0;
 }
 
-// The inherits chain of a profile, the profile first; problems go to st->error.
+// the inherits chain of a profile, the profile first; problems go to st->error.
 fn mnx_chain(m: Manifest*, profile: string, st: Settings*) -> StrList* {
   var chain: StrList* = sl_new();
   var names: StrList* = man_profile_names(m);
@@ -1352,7 +1326,7 @@ fn mnx_chain(m: Manifest*, profile: string, st: Settings*) -> StrList* {
   return chain;
 }
 
-// Type checks of the settings keys in [profile.*] and [bin.*]; with chains,
+// type checks of the settings keys in [profile.*] and [bin.*]; with chains,
 // every profile's inherits chain too.
 fn mnx_check_settings(m: Manifest*, chains: bool) {
   var secs: StrList* = m->doc->sections;
@@ -1397,9 +1371,7 @@ fn mnx_check_settings(m: Manifest*, chains: bool) {
   free(names);
 }
 
-// ---------------------------------------------------------------------------
 // [package] extras, [replace], [tools]
-// ---------------------------------------------------------------------------
 
 fn mnx_package_extra(m: Manifest*) {
   var mv: TomlValue* = toml_get(m->doc, "package", "mettle");
@@ -1444,7 +1416,7 @@ fn mnx_package_extra(m: Manifest*) {
   }
 }
 
-// Removed keys, each an error naming its replacement.
+// removed keys, each an error naming its replacement.
 fn mnx_removed(m: Manifest*) {
   var mv: TomlValue* = toml_get(m->doc, "package", "module");
   if (mv != (TomlValue*)0) {
@@ -1564,9 +1536,7 @@ fn mnx_tools(m: Manifest*) {
   free(keys);
 }
 
-// ---------------------------------------------------------------------------
 // [registry.NAME], [component.NAME], [rules]
-// ---------------------------------------------------------------------------
 
 fn mnx_push_reg(m: Manifest*, r: RegSpec) {
   if (m->nregs % 8 == 0) {
@@ -1691,7 +1661,7 @@ fn mnx_impls(m: Manifest*, sec: string) -> StrList* {
   return out;
 }
 
-// A suggestion for a mode: a prefix match first ("dynamic" -> "dyn"), else the nearest.
+// a suggestion for a mode: a prefix match first ("dynamic" -> "dyn"), else the nearest.
 fn mnx_suggest_mode(word: string, modes: StrList*) -> string {
   var i: int64 = 0;
   while (i < modes->len) {
@@ -1849,15 +1819,13 @@ fn mnx_test_bins(m: Manifest*) {
   free(names);
 }
 
-// ---------------------------------------------------------------------------
-// Tests: [tests], [test-cmds], [test.NAME] (mb_test_*)
-// ---------------------------------------------------------------------------
+// tests: [tests], [test-cmds], [test.NAME] (mb_test_*)
 
 export fn man_test_keys() -> StrList* {
   return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min");
 }
 
-// A test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
+// a test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
 export fn man_test_default(key: string) -> string {
   if (s_eq(key, "matrix")) { return "debug"; }
   if (s_eq(key, "timeout")) { return "600"; }
@@ -1926,7 +1894,7 @@ fn mnx_uint(s: string, lo: int64, hi: int64) -> bool {
   return v >= lo && v <= hi;
 }
 
-// One matrix cell: PROFILE or TARGET/PROFILE ("" = fine).
+// one matrix cell: PROFILE or TARGET/PROFILE ("" = fine).
 fn mnx_cell_error(cell: string) -> string {
   var slash: int64 = s_find_byte(cell, 47);
   var prof: string = cell;
@@ -1943,7 +1911,7 @@ fn mnx_cell_error(cell: string) -> string {
   return s_empty();
 }
 
-// Why value does not fit key ("" when it does). name "*" alone may set ports.
+// why value does not fit key ("" when it does). name "*" alone may set ports.
 export fn man_test_check(name: string, key: string, value: string) -> string {
   var v: string = s_trim(value);
   if (s_eq(key, "matrix")) {
@@ -2198,7 +2166,7 @@ export fn man_service(m: Manifest*, name: string) -> ServiceSpec* {
   return (ServiceSpec*)0;
 }
 
-// A test's setting: its own value, else the "*" one, else the default.
+// a test's setting: its own value, else the "*" one, else the default.
 export fn man_test_get(m: Manifest*, name: string, key: string) -> string {
   var star: string = s_empty();
   var has_star: bool = false;
@@ -2222,7 +2190,7 @@ export fn man_test_get(m: Manifest*, name: string, key: string) -> string {
   return man_test_default(key);
 }
 
-// Whether the test itself or "*" sets key.
+// whether the test itself or "*" sets key.
 export fn man_test_has(m: Manifest*, name: string, key: string) -> bool {
   var i: int64 = 0;
   while (i < m->ntest_sets) {
@@ -2260,7 +2228,7 @@ export fn man_test_env(m: Manifest*, name: string) -> StrList* {
   return l;
 }
 
-// The names mb_test_set / mb_test_env give, "*" left out.
+// the names mb_test_set / mb_test_env give, "*" left out.
 export fn man_test_named(m: Manifest*) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -2327,14 +2295,12 @@ fn mnx_add_profile_sections(names: StrList*, doc: Toml*) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
+// parsing
 
 const MNX_NAME_RULE: string = "may only hold letters, digits, '_', '-' and '.' (at most 64, not starting with '.' or '-', no '..')";
 
-// A package name: 1 to 64 of [A-Za-z0-9_.-], not starting with . or -,
-// without "..". Names become paths in caches and registries.
+// a package name: 1 to 64 of [A-Za-z0-9_.-], not starting with . or -,
+// without "..". names become paths in caches and registries.
 export fn pkg_name_ok(s: string) -> bool {
   if (slen(s) == 0 || slen(s) > 64 || s_byte(s, 0) == 46 || s_byte(s, 0) == 45 || s_contains(s, "..")) {
     return false;
@@ -2377,7 +2343,7 @@ fn mnx_check_lists(m: Manifest*, base_section: string, keys: string) {
   }
 }
 
-// A manifest with no file behind it (zero-config projects).
+// a manifest with no file behind it (zero-config projects).
 export fn man_empty(dir: string, name: string) -> Manifest* {
   var m: Manifest* = new Manifest;
   m->dir = dir;
@@ -2561,11 +2527,9 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   return m;
 }
 
-// ---------------------------------------------------------------------------
-// Queries
-// ---------------------------------------------------------------------------
+// queries
 
-// "debug", "release", then the [profile.NAME] sections of mbuild.toml and
+// "debug", "release", then the [profile.NAME] sections of the manifest and
 // of the merged mbuild.local.mettle, in first-seen order.
 export fn man_profile_names(m: Manifest*) -> StrList* {
   var names: StrList* = sl_new();
@@ -2585,11 +2549,9 @@ export fn man_has_profile(m: Manifest*, profile: string) -> bool {
   return found;
 }
 
-// The raw profile flags as before typed settings: [profile.NAME] flags, else
-// ["--release"] for release, else nothing. Kept for existing callers (its
-// results differ from man_settings_flags, which adds the built-in -s for
-// debug and keeps --release under a release flags list); new code uses
-// man_settings / man_settings_flags.
+// raw profile flags, without typed settings: [profile.NAME] flags, else
+// ["--release"] for release, else nothing. man_settings_flags differs: it adds
+// the built-in -s for debug and keeps --release under a release flags list.
 export fn man_profile_flags(m: Manifest*, profile: string) -> StrList* {
   var sec: string = "profile." + profile;
   if (toml_get(m->doc, sec, "flags") != (TomlValue*)0) {
@@ -2601,7 +2563,7 @@ export fn man_profile_flags(m: Manifest*, profile: string) -> StrList* {
   return sl_new();
 }
 
-// Extra C compiler flags for builds in this profile: the cflags of its
+// extra C compiler flags for builds in this profile: the cflags of its
 // inherits chain (ancestor first), each followed by mbuild.local.mettle's.
 export fn man_profile_cflags(m: Manifest*, profile: string) -> StrList* {
   var q: SettingsQuery* = new SettingsQuery;
@@ -2616,7 +2578,7 @@ export fn man_profile_cflags(m: Manifest*, profile: string) -> StrList* {
   return cf;
 }
 
-// The build settings of one compile. Problems go to the
+// the build settings of one compile. problems go to the
 // result's error ("file:line: message", or "--set ITEM: message").
 export fn man_settings(m: Manifest*, q: SettingsQuery*) -> Settings* {
   var st: Settings* = mnx_settings_new();
@@ -2687,9 +2649,9 @@ export fn man_settings(m: Manifest*, q: SettingsQuery*) -> Settings* {
   return st;
 }
 
-// Compiler flags for settings on one target: typed flags in the order of
-// the 12.12 table, then the raw flags (a raw flag a typed one already
-// passes is dropped; --subsystem only for windows).
+// compiler flags for settings on one target: typed flags first, then the raw
+// flags (a raw flag a typed one already passes is dropped; --subsystem only
+// for windows).
 export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
   var res: StrList* = sl_new();
   if (s_eq(st->optimize, "checked")) { sl_push(res, "-O"); }
@@ -2757,7 +2719,7 @@ export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
   return res;
 }
 
-// The [replace] entry for a module (mbuild.local.mettle's first); 0 when none.
+// the [replace] entry for a module (mbuild.local.mettle's first); 0 when none.
 export fn man_replace_find(m: Manifest*, module: string) -> ReplaceSpec* {
   var pass: int32 = 0;
   while (pass < 2) {
@@ -2876,11 +2838,11 @@ fn mnx_local_components(m: Manifest*) {
   free(keys);
 }
 
-// Layers a parsed mbuild.local.mettle over m: its profiles (read by
+// layers a parsed mbuild.local.mettle over m: its profiles (read by
 // man_settings), [build] targets, [tools] per key and [replace] per module
 // win; [components] become m->local_components; a [registry.NAME] url
 // replaces the url of a registry m declares (the others, e.g. a mirror of
-// default, stay in m->local->regs). Its warnings join m's; its error becomes
+// default, stay in m->local->regs). its warnings join m's; its error becomes
 // m's when m has none.
 export fn man_merge_local(m: Manifest*, local: Manifest*) {
   m->local = local;
@@ -2937,7 +2899,7 @@ export fn man_merge_local(m: Manifest*, local: Manifest*) {
 }
 
 // `[S].K` followed by `[S.os].K`, for section_key "S.K" (e.g. "link.libs").
-// (One string rather than section and key: see the report on v0.17.0 calls.)
+// one string, not section and key: the v0.17.0 call limit (see toml.mettle).
 export fn man_os_list(m: Manifest*, section_key: string, os: string) -> StrList* {
   var dot: int64 = s_rfind_byte(section_key, 46);
   var section: string = s_sub(section_key, 0, dot);
@@ -2949,7 +2911,7 @@ export fn man_os_list(m: Manifest*, section_key: string, os: string) -> StrList*
   return l;
 }
 
-// Whether the package compiles C code (any [c] sources, for any OS).
+// whether the package compiles C code (any [c] sources, for any OS).
 export fn man_has_c(m: Manifest*) -> bool {
   var sections: StrList* = mnx_list("c c.linux c.windows");
   defer free(sections);
@@ -2966,7 +2928,7 @@ export fn man_has_c(m: Manifest*) -> bool {
   return false;
 }
 
-// The directory imports of `name/...` start in: dir, or dir/<import-root>.
+// the directory imports of `name/...` start in: dir, or dir/<import-root>.
 export fn man_import_dir(m: Manifest*, dir: string) -> string {
   if (m == (Manifest*)0 || slen(m->import_root) == 0) {
     return dir;
@@ -2974,7 +2936,7 @@ export fn man_import_dir(m: Manifest*, dir: string) -> string {
   return dir + "/" + m->import_root;
 }
 
-// The bins of dependency dep that [dep-bins] names, in call order.
+// the bins of dependency dep that [dep-bins] names, in call order.
 export fn man_dep_bins(m: Manifest*, dep: string) -> StrList* {
   var l: StrList* = sl_new();
   var prefix: string = dep + "=";
@@ -2989,7 +2951,7 @@ export fn man_dep_bins(m: Manifest*, dep: string) -> StrList* {
   return l;
 }
 
-// The dependency with this key; 0 when absent.
+// the dependency with this key; 0 when absent.
 export fn man_dep_find(m: Manifest*, key: string) -> DepSpec* {
   var i: int64 = 0;
   while (i < m->ndeps) {
