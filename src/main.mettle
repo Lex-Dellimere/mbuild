@@ -69,7 +69,7 @@ fn mx_add_targets(o: Options*, v: string) {
 
 // Value-less command flags: they go to rest as written.
 fn mx_is_cmd_flag(name: string) -> bool {
-  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --agent-rules --allow-breaking --with-path-deps --no-services --local --stream --plain --serve --no-compiler --readme --matrix --keep --deny-warnings --bless --coverage", 32);
+  var l: StrList* = s_split("--all --tree --major --dry-run --no-verify --test --remove --check --undo --yes --package --agent-rules --allow-breaking --with-path-deps --no-services --local --stream --plain --serve --no-compiler --readme --matrix --keep --deny-warnings --bless --coverage --on-board", 32);
   var has: bool = sl_has(l, name);
   free(l);
   return has;
@@ -275,6 +275,7 @@ fn mx_dispatch(command: string, o: Options*) -> int32 {
   if (s_eq(command, "shell")) { return shell_cmd(p); }
   if (s_eq(command, "test")) { return build_cmd_test(p); }
   if (s_eq(command, "flash")) { return build_cmd_flash(p); }
+  if (s_eq(command, "monitor")) { return build_cmd_monitor(p); }
   if (s_eq(command, "pgo")) { return build_cmd_pgo(p); }
   if (s_eq(command, "check")) { return build_cmd_check(p); }
   if (s_eq(command, "doc")) { return build_cmd_doc(p); }

@@ -250,8 +250,9 @@ donerp2350: UART0 printed the --exit-on-uart string at 3.854 ms
 ```
 
 `build/riscv32-none/debug/blink.uf2` is the file for the board's drive.
-other boards have no emulator here: `mbuild run` says so, and a project
-command (`fn cmd_upload`) can flash them.
+other boards have no emulator here unless a package declares a runner for
+them ([boards from packages](#boards-from-packages)); `mbuild flash` writes
+them ([flashing](#flashing-and-monitoring)).
 
 under an emulator `run` and `test` stop the program after 30 seconds, or
 `--timeout SECS`; the status is then 124:
@@ -384,14 +385,49 @@ test sensor (debug) ... skipped (devices need rvsim, and this cell runs natively
 test result: ok. 0 passed, 0 failed, 1 skipped (0.0s)
 ```
 
-### flashing a Pico 2
+### flashing and monitoring
 
-`mbuild flash [BIN]` builds the bin's UF2 (adding `uf2` to `outputs` when
-it's missing) and copies it to the board. hold BOOTSEL while plugging the
-board in: it mounts as a drive labelled RP2350, which mbuild looks for
-under `/run/media/$USER`, `/media/$USER` and `/mnt`, or takes from
-`MBUILD_FLASH_DIR`. it writes `NAME.uf2`, syncs, and the board restarts
-into the program:
+`mbuild flash [BIN] [--port TTY]` builds the bin's image and runs the
+board's `flash` command, then `--port TTY` when given, then the image (its
+first output that isn't `elf`). a board without a `flash` command gets
+`mflash write --board NAME`. `mflash` is the `flash` package's program:
+
+1. `MBUILD_MFLASH`;
+2. a dependency with a bin named `mflash`, built for the host into
+   `build/<host>/<profile>/` as `mb_dep_bin` builds;
+3. `mflash` on PATH.
+
+```text
+$ mbuild flash --port /dev/ttyACM0
+   Compiling blink (riscv32-none, debug)
+    Finished in 0.1s
+    Flashing build/riscv32-none/debug/blink.bin (mflash)
+```
+
+`mbuild monitor [--port TTY] [--until TEXT] [--timeout S]` runs `mflash
+monitor` with those flags: the board's console, until TEXT or S seconds.
+
+`mbuild test --on-board [--port TTY]` runs the board test programs on the
+board, one at a time: each is flashed as above, then `mflash monitor`
+waits for its `exit-on-uart` text (default `PASS`) until its timeout (30 s
+by default); a failed flash or no text fails it. on-board runs are never
+cached, and tests with `devices` are skipped:
+
+```text
+$ mbuild test --on-board --port /dev/ttyACM0
+   Compiling test hello (riscv32-none, debug)
+    Flashing hello (riscv32-none/debug)
+test hello (riscv32-none/debug) ... ok  0.0s
+test sensor (riscv32-none/debug) ... skipped (devices need rvsim, and this cell runs on the board (--on-board))
+test result: ok. 1 passed, 0 failed, 1 skipped (0.2s)
+```
+
+without mflash, `mbuild flash` copies a `pico2` image to the board's drive
+as a UF2 (adding `uf2` to `outputs` when it's missing). hold BOOTSEL while
+plugging the board in: it mounts as a drive labelled RP2350, which mbuild
+looks for under `/run/media/$USER`, `/media/$USER` and `/mnt`, or takes
+from `MBUILD_FLASH_DIR`. it writes `NAME.uf2`, syncs, and the board
+restarts into the program:
 
 ```text
 $ mbuild flash
@@ -404,9 +440,16 @@ error: no RP2350 drive is mounted (looked in /run/media/you, /media/you, /mnt)
   help: hold BOOTSEL while plugging the board in, then run mbuild flash again (or set MBUILD_FLASH_DIR to the drive)
 ```
 
+other boards need mflash:
+
+```text
+$ mbuild flash
+error: flashing board esp32c3 needs mflash, and there is none
+  help: add the flash package (mb_dep("flash", ...)) or install mflash (on PATH, or MBUILD_MFLASH)
+```
+
 the target is the bin's own triple, else `-t`, else the board target of
-`mb_targets`, else `riscv32-none`. only `pico2` has a UF2 drive; for other
-boards `flash` says so and points to a project command.
+`mb_targets`, else the declared board's `target`, else `riscv32-none`.
 
 ### profile-guided builds
 

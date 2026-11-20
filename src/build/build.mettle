@@ -2882,8 +2882,9 @@ export fn build_cmd_pgo(p: Project*) -> int32 {
   return build_cmd_build(p);
 }
 
-// mbuild flash [BIN]: the bin's UF2 image, built and copied to the board's
-// drive (an RP2350 in BOOTSEL mode mounts as a drive named RP2350)
+// mbuild flash [BIN] [--port TTY]: the bin's image, built and written by the
+// board's flash command (mb_board_set(NAME, "flash", ...)), else by mflash
+// write --board NAME; without mflash a pico2 UF2 goes to the board's drive
 export fn build_cmd_flash(p: Project*) -> int32 {
   var bs: BinSet* = bx_run_bin(p, "flash");
   var b: BinInfo* = &bs->items[0];
@@ -2892,18 +2893,26 @@ export fn build_cmd_flash(p: Project*) -> int32 {
   if (slen(st->board) == 0) {
     fail_hint("bin " + b->name + ": mbuild flash needs a board, and " + target + " has none set", "mb_set(\"board\", \"pico2\") after mb_on(\"" + target + "\") in a profile, or after mb_for_bin");
   }
-  if (!s_eq(st->board, "pico2")) {
-    fail_hint("board " + st->board + " has no UF2 drive mbuild can copy to (only pico2 has, today)", "write a project command that flashes it, such as fn cmd_upload in mbuild.mettle (docs/project.md), and run mbuild upload");
+  var port: string = bt_rest_value(p, "--port");
+  var fc: Cmd* = bx_flash_cmd(p, st, port);
+  if (fc == (Cmd*)0 && !s_eq(st->board, "pico2")) {
+    fail_hint("flashing board " + st->board + " needs mflash, and there is none", "add the flash package (mb_dep(\"flash\", ...)) or install mflash (on PATH, or MBUILD_MFLASH)");
   }
-  var outs: StrList* = bx_image_outputs(st);
-  if (!sl_has(outs, "uf2")) {
-    var with_uf2: string = sl_join(outs, ", ") + ", uf2";
-    p->opts->sets = sl_copy(p->opts->sets);
-    sl_push(p->opts->sets, "outputs=" + with_uf2);
+  if (fc == (Cmd*)0) {
+    var outs: StrList* = bx_image_outputs(st);
+    if (!sl_has(outs, "uf2")) {
+      var with_uf2: string = sl_join(outs, ", ") + ", uf2";
+      p->opts->sets = sl_copy(p->opts->sets);
+      sl_push(p->opts->sets, "outputs=" + with_uf2);
+    }
+    free(outs);
   }
-  free(outs);
+  var main_ext: string = bx_image_main(st);
   free(st);
-  var drive: string = bx_flash_drive();
+  var drive: string = s_empty();
+  if (fc == (Cmd*)0) {
+    drive = bx_flash_drive();
+  }
   var s: BxSess* = bx_sess(p, sl_of(target));
   g_bx_sess = s;
   if (bx_build_all(s, bs) != 0) {
@@ -2916,6 +2925,12 @@ export fn build_cmd_flash(p: Project*) -> int32 {
     dir = p_dir(t->out_dir);
     dir = p_dir(dir) + "/" + target + "/" + p_base(t->out_dir);
   }
+  if (fc != (Cmd*)0) {
+    var file: string = dir + "/" + b->name + "." + main_ext;
+    cmd_path(fc, file);
+    status("Flashing", bx_show(file) + " (" + p_base(fc->tool.path) + ")");
+    return proc_run(fc);
+  }
   var image: string = dir + "/" + b->name + ".uf2";
   var dest: string = drive + "/" + b->name + ".uf2";
   status("Flashing", bx_show(image) + " to " + drive);
@@ -2925,6 +2940,156 @@ export fn build_cmd_flash(p: Project*) -> int32 {
   sys_sync();
   status("Flashed", b->name + " (" + s_int(sys_stat(image).size) + " bytes); the board restarts into it");
   return 0;
+}
+
+// the command that flashes st's board, the image's path still to add: the
+// board's flash command (its mflash found as below), else mflash write
+// --board NAME; --port TTY when given. 0 when it needs mflash and there is none
+fn bx_flash_cmd(p: Project*, st: Settings*, port: string) -> Cmd* {
+  var line: string = "mflash write --board " + st->board;
+  var b: Board* = rv_board(st->board);
+  if (b != (Board*)0 && slen(b->flash) > 0) {
+    line = b->flash;
+  }
+  var w: SvcWords = svc_split(line);
+  if (!w.ok || w.words->len == 0) {
+    fail("board " + st->board + ": its flash command `" + line + "` does not split into words");
+  }
+  var w0: string = sl_get(w.words, 0);
+  var t: Tool = tool_none();
+  if (s_eq(w0, "mflash")) {
+    t = bx_mflash(p);
+    if (!tool_found(t)) {
+      return (Cmd*)0;
+    }
+  } else if (s_find_byte(w0, 47) >= 0) {
+    t.path = p_join(p->root, w0);
+  } else {
+    t = sys_find_tool(w0);
+    if (!tool_found(t)) {
+      fail_hint("board " + st->board + "'s flash command needs " + w0 + ", and it is not on PATH", "install it, or change mb_board_set(\"" + st->board + "\", \"flash\", ...)");
+    }
+  }
+  var c: Cmd* = cmd_new(t);
+  var i: int64 = 1;
+  while (i < w.words->len) {
+    cmd_arg(c, sl_get(w.words, i));
+    i = i + 1;
+  }
+  if (slen(port) > 0) {
+    cmd_arg(c, "--port");
+    cmd_arg(c, port);
+  }
+  return c;
+}
+
+var g_bx_mflash: string = "";
+var g_bx_mflash_done: bool = false;
+
+// mflash: MBUILD_MFLASH, else built from a dependency with a bin named
+// mflash (into build/HOST/PROFILE, like mb_dep_bin), else PATH; none: no path
+fn bx_mflash(p: Project*) -> Tool {
+  var t: Tool = tool_none();
+  if (g_bx_mflash_done) {
+    t.path = g_bx_mflash;
+    return t;
+  }
+  g_bx_mflash_done = true;
+  var given: string = env_get("MBUILD_MFLASH");
+  if (slen(given) > 0) {
+    if (!fs_is_file(given)) {
+      fail_hint("MBUILD_MFLASH=" + given + " does not exist", "point MBUILD_MFLASH at mflash, or unset it");
+    }
+    g_bx_mflash = given;
+    t.path = given;
+    return t;
+  }
+  var ds: DepState* = g_bx_ds;
+  if (ds == (DepState*)0) {
+    ds = bx_deps(p);
+  }
+  var i: int64 = 0;
+  while (i < ds->n) {
+    var q: Project* = bx_dep_project(p, &ds->mods[i]);
+    var all: BinSet* = build_bins(q);
+    var names: StrList* = bx_bin_names(all);
+    var has: bool = sl_has(names, "mflash");
+    free(names);
+    if (has) {
+      g_bx_mflash = bx_build_dep_tool(p, &ds->mods[i], q, all, "mflash");
+      t.path = g_bx_mflash;
+      return t;
+    }
+    i = i + 1;
+  }
+  t = sys_find_tool("mflash");
+  g_bx_mflash = t.path;
+  return t;
+}
+
+// builds dependency dm's bin name for the host into this project's
+// build/HOST/PROFILE, as mb_dep_bin does; its path
+fn bx_build_dep_tool(p: Project*, dm: DepModule*, q: Project*, all: BinSet*, name: string) -> string {
+  var saved: BxSess* = g_bx_sess;
+  var saved_units: BxUnits* = g_bx_units;
+  var saved_t: TargetCtx* = g_bx_t;
+  var host: StrList* = sl_of(sys_os());
+  var s: BxSess* = bx_sess(p, host);
+  defer free(s);
+  var ds: BxSess* = new BxSess;
+  ds->p = q;
+  ds->ds = s->ds;
+  ds->targets = host;
+  ds->mettles = s->mettles;
+  ds->host_m = s->host_m;
+  ds->profile = bx_dep_profile(p, q, s->profile);
+  ds->hooks_run = sl_new();
+  ds->dep = dm->module;
+  ds->app = p;
+  ds->app_profile = s->profile;
+  ds->comps = bx_comp_names(q, s->ds);
+  ds->has_cmp = ds->comps->len > 0;
+  g_bx_sess = ds;
+  var us: BxUnits* = bx_bin_units(ds, bx_select_from(q, all, sl_of(name)));
+  g_bx_units = us;
+  bx_components(ds, us, s_empty());
+  bx_graphs(ds, us);
+  var built: StrList* = sl_new();
+  var rc: int32 = bx_compile_units(ds, us, built);
+  free(built);
+  if (rc != 0) {
+    fail("could not build " + name + " from " + dm->module);
+  }
+  g_bx_sess = saved;
+  g_bx_units = saved_units;
+  g_bx_t = saved_t;
+  return bx_bins_dir(p, sys_os(), s->profile) + "/" + name + target_exe_ext(sys_os());
+}
+
+// mbuild monitor [--port TTY] [--until TEXT] [--timeout S]: mflash monitor
+export fn build_cmd_monitor(p: Project*) -> int32 {
+  var t: Tool = bx_mflash(p);
+  if (!tool_found(t)) {
+    fail_hint("mbuild monitor runs mflash monitor, and there is no mflash", "add the flash package (mb_dep(\"flash\", ...)) or install mflash (on PATH, or MBUILD_MFLASH)");
+  }
+  var c: Cmd* = cmd_new(t);
+  defer free(c);
+  cmd_arg(c, "monitor");
+  var keys: StrList* = sl_of("--port");
+  sl_push(keys, "--until");
+  sl_push(keys, "--timeout");
+  var i: int64 = 0;
+  while (i < keys->len) {
+    var v: string = bt_rest_value(p, sl_get(keys, i));
+    if (slen(v) > 0) {
+      cmd_arg(c, sl_get(keys, i));
+      cmd_arg(c, v);
+    }
+    i = i + 1;
+  }
+  free(keys);
+  verbose(cmd_display(c));
+  return proc_run(c);
 }
 
 // the board target `flash` builds: the bin's own triple, one -t, else the
@@ -2956,7 +3121,14 @@ fn bx_flash_target(p: Project*, b: BinInfo*) -> string {
     }
     i = i + 1;
   }
-  return "riscv32-none";
+  var st: Settings* = bx_settings_of(p, build_profile(p), b->name, "riscv32-none");
+  var dflt: string = "riscv32-none";
+  var bd: Board* = rv_board(st->board);
+  if (bd != (Board*)0 && slen(bd->target) > 0) {
+    dflt = bd->target;
+  }
+  free(st);
+  return dflt;
 }
 
 // the mounted RP2350 drive: MBUILD_FLASH_DIR, else a directory named
@@ -3530,6 +3702,8 @@ struct BtCell {
   checks: int64;
   ms: int64;
   native_all: bool;   // an @test file with native=always: no interpreter run
+  flash: Cmd*;        // --on-board: what flashes it before each run (cmd monitors)
+  until: string;      // --on-board: the console text that passes it
 }
 
 struct BtPlan {
@@ -3553,6 +3727,8 @@ struct BtPlan {
   cov: Cov*;          // --coverage, else 0
   cov_fmt: string;    // "", text or html
   cov_out: string;    // where the annotated report goes
+  on_board: bool;     // --on-board
+  board_from: int64;  // runs from here on are on-board runs, run one by one
 }
 
 // names a cached test program's pass stamp includes: "name\tkey" (0 = no cache)
@@ -3794,6 +3970,9 @@ fn bt_add_cell(pl: BtPlan*, t: int64, spec: string) {
 
 // why the cell's target cannot run a test program here, "" when it can
 fn bt_cannot_run(p: Project*, target: string, prog: string) -> string {
+  if (target_is_bare(target) && sl_has(p->opts->rest, "--on-board")) {
+    return s_empty();
+  }
   if (target_is_riscv(target)) {
     var q: SettingsQuery* = new SettingsQuery;
     q->profile = build_profile(p);
@@ -4159,6 +4338,10 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
   if (s_eq(bt_get(p, t->name, "run"), "false")) {
     return;
   }
+  if (pl->on_board && target_is_bare(bx_run_target(j->b, j->t))) {
+    bt_board_cell(pl, s, c, t, j);
+    return;
+  }
   var run_at: string = j->outp;
   var cmd: Cmd* = bx_emu_cmd(s, j->b, j->t, &run_at);
   c->emulated = cmd != (Cmd*)0;
@@ -4180,6 +4363,9 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
 fn bt_no_rvsim(p: Project*, target: string, prog: string) -> string {
   if (!target_is_riscv(target)) {
     return "natively";
+  }
+  if (target_is_bare(target) && sl_has(p->opts->rest, "--on-board")) {
+    return "on the board (--on-board)";
   }
   if (!target_is_bare(target)) {
     if (s_starts(target, "riscv32")) {
@@ -4241,6 +4427,78 @@ fn bt_sim_args(p: Project*, c: BtCell*, t: BtTest*, cmd: Cmd*) {
   cmd_args(cmd, w.words);
 }
 
+// --on-board: a board test program's cell flashes it (as mbuild flash),
+// then mflash monitor waits for exit-on-uart (default PASS); never cached
+fn bt_board_cell(pl: BtPlan*, s: BxSess*, c: BtCell*, t: BtTest*, j: BxJob*) {
+  var p: Project* = pl->p;
+  var target: string = bx_run_target(j->b, j->t);
+  var st: Settings* = bx_settings_of(p, s->profile, j->b->name, target);
+  defer free(st);
+  var port: string = bt_rest_value(p, "--port");
+  var fc: Cmd* = bx_flash_cmd(p, st, port);
+  if (fc == (Cmd*)0) {
+    c->skip = "no mflash to flash board " + st->board;
+    return;
+  }
+  var dir: string = j->t->out_dir;
+  if (bx_rv_image_bin(j->b)) {
+    dir = p_dir(j->t->out_dir);
+    dir = p_dir(dir) + "/" + target + "/" + p_base(j->t->out_dir);
+  }
+  cmd_path(fc, dir + "/" + j->b->name + "." + bx_image_main(st));
+  c->until = st->exit_on_uart;
+  if (slen(c->until) == 0) {
+    c->until = "PASS";
+  }
+  c->emulated = true;
+  c->cached = false;
+  c->stamp = s_empty();
+  var mon: Cmd* = cmd_new(bx_mflash(p));
+  cmd_arg(mon, "monitor");
+  if (slen(port) > 0) {
+    cmd_arg(mon, "--port");
+    cmd_arg(mon, port);
+  }
+  cmd_arg(mon, "--until");
+  cmd_arg(mon, c->until);
+  cmd_arg(mon, "--timeout");
+  cmd_arg(mon, s_int((bt_timeout_ms(p, t->name, true) + 999) / 1000));
+  c->flash = fc;
+  c->cmd = mon;
+}
+
+// the on-board runs, one at a time: flash, then monitor
+fn bt_board_runs(pl: BtPlan*) {
+  var i: int64 = pl->board_from;
+  while (i < pl->nr) {
+    var r: TrnRun* = pl->runs[i];
+    var c: BtCell* = pl->cells[r->cell];
+    var t0: int64 = sys_now_ms();
+    if (r->k == 1) {
+      status("Flashing", pl->tests[r->test]->name + " (" + c->spec + ")");
+    }
+    var cap: Captured = proc_capture_all(c->flash);
+    r->code = (int64)cap.code;
+    r->out = cap.out;
+    if (cap.code != 0) {
+      r->svc_why = "flashing failed (" + p_base(c->flash->tool.path) + " exited with " + s_int((int64)cap.code) + ")";
+    } else {
+      var to: bool = false;
+      var mc: Captured = proc_capture_timeout(r->cmd, r->timeout_ms + 10000, &to);
+      r->code = (int64)mc.code;
+      r->out = mc.out;
+      r->timed_out = to;
+      if (mc.code != 0 && !to) {
+        r->svc_why = "no " + c->until + " on the board's console (mflash monitor exited with " + s_int((int64)mc.code) + ")";
+      }
+    }
+    r->ms = sys_now_ms() - t0;
+    trn_save(r);
+    bt_ended((rawptr)pl, i - pl->run_base);
+    i = i + 1;
+  }
+}
+
 // the per-run timeout: --timeout, else the test's setting, else 30 s
 // under an emulator, else 600 s
 fn bt_timeout_ms(p: Project*, name: string, emulated: bool) -> int64 {
@@ -4259,14 +4517,21 @@ fn bt_run_dir(p: Project*, c: BtCell*, name: string, k: int64) -> string {
   return p->state_dir + "/test-run/" + cell + "/" + bx_safe_name(name) + "/" + s_int(k);
 }
 
+// every run: the on-board ones last, from board_from
 fn bt_runs(pl: BtPlan*) {
+  bt_runs_of(pl, false);
+  pl->board_from = pl->nr;
+  bt_runs_of(pl, true);
+}
+
+fn bt_runs_of(pl: BtPlan*, board: bool) {
   var p: Project* = pl->p;
   var i: int64 = 0;
   while (i < pl->ncells) {
     var c: BtCell* = pl->cells[i];
     var t: BtTest* = pl->tests[c->t];
     i = i + 1;
-    if (slen(c->skip) > 0 || slen(c->pre) > 0 || c->cached || c->cmd == (Cmd*)0) {
+    if (slen(c->skip) > 0 || slen(c->pre) > 0 || c->cached || c->cmd == (Cmd*)0 || (c->flash != (Cmd*)0) != board) {
       continue;
     }
     var args: SvcWords = svc_split(bt_get(p, t->name, "args"));
@@ -5202,6 +5467,10 @@ export fn build_cmd_test(p: Project*) -> int32 {
     fail("--only goes with --bless: mbuild test NAME --bless --only S");
   }
   pl->filter = p->opts->filter;
+  pl->on_board = sl_has(p->opts->rest, "--on-board");
+  if (pl->on_board && !tool_found(bx_mflash(p))) {
+    fail_hint("mbuild test --on-board flashes and monitors with mflash, and there is none", "add the flash package (mb_dep(\"flash\", ...)) or install mflash (on PATH, or MBUILD_MFLASH)");
+  }
   pl->cov_fmt = bt_rest_value(p, "--coverage");
   pl->cov_out = bt_rest_value(p, "--coverage-out");
   if (sl_has(p->opts->rest, "--coverage") || slen(pl->cov_fmt) > 0 || slen(pl->cov_out) > 0) {
@@ -5285,7 +5554,10 @@ export fn build_cmd_test(p: Project*) -> int32 {
     i = i + 1;
   }
   bt_runs(pl);
-  var rc: int32 = trn_exec(pl->runs, pl->nr, bx_parallel(p), (rawptr)pl, &bt_ended);
+  var rc: int32 = trn_exec(pl->runs, pl->board_from, bx_parallel(p), (rawptr)pl, &bt_ended);
+  if (rc != 130) {
+    bt_board_runs(pl);
+  }
   if (rc != 130) {
     rc = bt_native(pl);
   }
@@ -7300,19 +7572,31 @@ fn bx_init_cmds() {
   bx_fl("--only S", "with --bless: only golden paths containing S");
   bx_fl("--coverage[=text|html]", "build counting blocks, run, report functions and lines (approximate) per file and the uncovered functions; =text or =html also writes an annotated copy of each file");
   bx_fl("--coverage-out DIR", "where the annotated report goes (default build/coverage)");
+  bx_fl("--on-board", "run board test programs on the board: flash, then mflash monitor");
+  bx_fl("--port TTY", "with --on-board: the board's serial port");
   bx_note("a test is an @test file (run in the compiler's interpreter), a test program (mb_test_bin, tests/NAME_test.mettle with fn main, mb_test_glob) or a command test (mb_test_cmd); it passes on exit 0. mb_test_set(name, key, value) sets matrix, timeout, repeat, serial, cwd, warnings, checks, args, run and more (docs/project.md).");
   bx_note("each run gets its own directory: TMPDIR (MBUILD_TEST_TMP), MBUILD_TEST_OUT, stdout and stderr; it runs in a process group of its own, which a timeout stops whole.");
   bx_note("golden files: what a run writes to $MBUILD_TEST_OUT must match tests/golden/NAME (the golden-dir setting) byte for byte, PNG files pixel for pixel within png-tolerance; with several cells, each cell's outputs must match the first's (golden-cross).");
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
   bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
+  bx_note("--on-board [--port TTY]: each board test program is flashed (as mbuild flash does), then mflash monitor waits for its exit-on-uart text (default PASS) until the timeout; one at a time. devices cells are skipped.");
   bx_note("mb_test_set(name, \"devices\", \"bme280:t=25; ssd1306:addr=0x3c\") puts each ;-separated spec on rvsim's command line as --device SPEC; cells not on rvsim are skipped. sim-args are words appended to the emulator's command line.");
-  bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");
-  bx_ex("mbuild flash", "build the UF2 and copy it to the Pico 2's drive");
-  bx_ex("mbuild flash -r blink", "");
-  bx_fl("-t T", "the board target (default: the bin's triple, else mb_targets' board target, else riscv32-none)");
-  bx_note("for board pico2: hold BOOTSEL while plugging the board in; its drive (label RP2350) is found under /run/media/$USER, /media/$USER or /mnt, or MBUILD_FLASH_DIR names it. mbuild writes NAME.uf2 there and syncs; the board restarts into it.");
-  bx_note("other boards have no drive: flash them from a project command (fn cmd_upload).");
+  bx_def("flash", "write a board image to the board", "mbuild flash [BIN] [--port TTY] [-t T] [-r | -p PROFILE]", "platforms.md");
+  bx_ex("mbuild flash", "build the image and write it with the board's flash command");
+  bx_ex("mbuild flash -r blink --port /dev/ttyACM0", "");
+  bx_fl("--port TTY", "passed to the flash command");
+  bx_fl("-t T", "the board target (default: the bin's triple, else mb_targets' board target, else the board's target, else riscv32-none)");
+  bx_note("the flash command is the board's (mb_board_set(NAME, \"flash\", ...)), else mflash write --board NAME; the image (its first output that isn't elf) goes last.");
+  bx_note("mflash is MBUILD_MFLASH, else built from a dependency with a bin named mflash (the flash package), else PATH.");
+  bx_note("without mflash, a pico2 image goes to its drive as a UF2: hold BOOTSEL while plugging the board in; the drive (label RP2350) is found under /run/media/$USER, /media/$USER or /mnt, or MBUILD_FLASH_DIR names it. other boards need mflash.");
+  bx_def("monitor", "watch a board's console", "mbuild monitor [--port TTY] [--until TEXT] [--timeout S]", "platforms.md");
+  bx_ex("mbuild monitor --port /dev/ttyACM0", "");
+  bx_ex("mbuild monitor --until PASS --timeout 10", "exit 0 once the console prints PASS");
+  bx_fl("--port TTY", "the serial port (mflash ports lists them)");
+  bx_fl("--until TEXT", "stop when the console prints TEXT");
+  bx_fl("--timeout S", "stop after S seconds");
+  bx_note("runs mflash monitor with these flags; mflash is found as for mbuild flash.");
   bx_def("pgo", "build with a profile of a real run", "mbuild pgo [collect] [BIN] [-t T] [-p PROFILE] [-- ARGS...]", "platforms.md");
   bx_ex("mbuild pgo", "build counting, run it, build release with its profile");
   bx_ex("mbuild pgo collect", "only build counting and run it");

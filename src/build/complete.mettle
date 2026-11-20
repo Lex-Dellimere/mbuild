@@ -15,7 +15,7 @@ export struct CmpSpec {
 // the flags that take a value (--color's is optional); the second list is the
 // command flags among them, which reach a command as --name=VALUE
 var g_cpx_valued: string = "-j --jobs -t --target -p --profile --mettle --filter --color --set --flag --use";
-var g_cpx_cmd_opts: string = "--to --registry --name --from --opt --home --preview --timeout --repeat --only --coverage-out";
+var g_cpx_cmd_opts: string = "--to --registry --name --from --opt --home --preview --timeout --repeat --only --coverage-out --port --until";
 var g_cpx_all: string = "";
 
 // both lists as one string (kept, since the pieces split from it are views)

@@ -169,7 +169,7 @@ bad_proj '  mb_on("riscv32-none");
 mb run -t riscv32-none
 check "a board with no emulator" sh -c 'grep -qF "error: board esp32c3 has no emulator mbuild can run" "$0/last.out" && grep -qF "fn cmd_upload" "$0/last.out" && [ -s build/riscv32-none/debug/bad.bin ]' "$S"
 mb flash -t riscv32-none
-check "flash: a board with no UF2 drive" sh -c 'grep -qF "error: board esp32c3 has no UF2 drive mbuild can copy to" "$0/last.out" && grep -qF "fn cmd_upload" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "flash: a board other than pico2 needs mflash" sh -c 'grep -qF "error: flashing board esp32c3 needs mflash, and there is none" "$0/last.out" && grep -qF "add the flash package" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 bad_proj '  mb_bin("lib", "src/main.mettle");
   mb_bin_kind("lib", "shared", "");'
 mb build -t riscv64-linux
@@ -288,7 +288,16 @@ printf '%s\n' "\$*" >>"$F/rvsim.log"
 echo PASS
 echo "rp2350: UART0 printed the --exit-on-uart string at 1.000 ms" >&2
 EOF
-chmod +x "$F/mettle" "$F/rvsim"
+# F/mflash records its argv; write exits FLASH_EXIT, monitor prints CONSOLE (default PASS) and exits MON_EXIT
+cat > "$F/mflash" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$F/mflash.log"
+case "\$1" in
+  write) exit \${FLASH_EXIT:-0} ;;
+  monitor) echo "\${CONSOLE:-PASS}"; exit \${MON_EXIT:-0} ;;
+esac
+EOF
+chmod +x "$F/mettle" "$F/rvsim" "$F/mflash"
 cd "$W/brd"
 cat > bsp/mbuild.mettle <<'EOF'
 import "mbuild/api";
@@ -299,6 +308,7 @@ fn project() {
   mb_board_set("myboard", "target", "riscv32-none");
   mb_board_set("myboard", "runner", "rvsim --machine rp2350");
   mb_board_set("myboard", "outputs", "bin, uf2");
+  mb_board_set("myboard", "flash", "mflash write --board myboard");
   mb_board("virtboard", "src/board/virtboard.mettle");
   mb_board_set("virtboard", "runner", "qemu-system-riscv32 -M virt -bios none -nographic -kernel");
 }
@@ -325,6 +335,7 @@ fn project() {
   mb_targets("riscv32-none");
   mb_test_targets("riscv32-none");
   mb_test_bin("dev", "tests/dev.mettle");
+  mb_test_bin("plain", "tests/dev.mettle");
   mb_test_set("dev", "devices", "bme280:t=25,p=101325,h=40; ssd1306:addr=0x3c");
   mb_test_set("dev", "sim-args", "--trace-uart");
   mb_profile("debug");
@@ -363,6 +374,32 @@ if [ $have_sys = 1 ]; then
   METTLE="$F/mettle" mb test dev
   check "devices on a runner that isn't rvsim: skipped" sh -c 'grep -qF "test dev (riscv32-none/debug) ... skipped (devices need rvsim, and this cell runs on qemu-system-riscv32)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 fi
+# flash and monitor through mflash
+brd_proj myboard ''
+rm -f "$F/mflash.log"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb flash --port /dev/ttyFAKE
+check "flash: the board's flash command, --port, the image" sh -c 'grep -qF "Flashing build/riscv32-none/debug/app.bin (mflash)" "$0/last.out" && grep -qxF "write --board myboard --port /dev/ttyFAKE $1/build/riscv32-none/debug/app.bin" "$2/mflash.log" && [ "$(cat "$0/last.code")" = 0 ]' "$S" "$W/brd/app" "$F"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb monitor --port /dev/ttyFAKE --until DONE --timeout 5
+check "monitor: mflash monitor with its flags" sh -c 'grep -qxF "monitor --port /dev/ttyFAKE --until DONE --timeout 5" "$1/mflash.log" && grep -qxF PASS "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S" "$F"
+METTLE="$F/mettle" mb flash
+check "flash: no mflash, a board other than pico2" sh -c 'grep -qF "error: flashing board myboard needs mflash, and there is none" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+mb monitor
+check "monitor: no mflash" has "error: mbuild monitor runs mflash monitor, and there is no mflash"
+rm -f "$F/mflash.log"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb test --on-board --port /dev/ttyFAKE
+check "test --on-board: flash, then monitor until PASS" sh -c 'grep -qF "test plain (riscv32-none/debug) ... ok" "$0/last.out" && grep -qxF "write --board myboard --port /dev/ttyFAKE $1/.mbuild/test-bins/riscv32-none/debug/plain.bin" "$2/mflash.log" && grep -qxF "monitor --port /dev/ttyFAKE --until PASS --timeout 30" "$2/mflash.log" && [ "$(cat "$0/last.code")" = 0 ]' "$S" "$W/brd/app" "$F"
+check "test --on-board: devices are skipped" has "test dev (riscv32-none/debug) ... skipped (devices need rvsim, and this cell runs on the board (--on-board))"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" CONSOLE=FAIL MON_EXIT=1 mb test --on-board plain
+check "test --on-board: no PASS fails" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): no PASS on the board'"'"'s console (mflash monitor exited with 1)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" FLASH_EXIT=3 mb test --on-board plain
+check "test --on-board: a failed flash fails" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): flashing failed (mflash exited with 3)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+mkdir -p "$W/brd/flash/src"
+printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("flash", "0.1.0");\n  mb_bin("mflash", "src/main.mettle");\n}\n' > "$W/brd/flash/mbuild.mettle"
+printf 'import "std/io";\nfn main() -> int32 {\n  println("mflash of the flash package");\n  return 0;\n}\n' > "$W/brd/flash/src/main.mettle"
+brd_proj myboard '  mb_dep_path("flash", "../flash");
+'
+mb monitor
+check "mflash built from a dependency" sh -c 'grep -qF "Compiling flash/mflash (linux, debug)" "$0/last.out" && grep -qF "mflash of the flash package" "$0/last.out" && [ -x build/linux/debug/mflash ] && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 brd_proj myboard '  mb_dep_path("bsp2", "../bsp2");
 '
 mb build
