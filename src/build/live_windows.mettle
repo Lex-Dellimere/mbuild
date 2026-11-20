@@ -1,4 +1,4 @@
-// live_windows: `mettle live` run plainly; no events yet (reports/mbuild/missing.md).
+// live_windows: mettle live run plainly, without events
 
 import "../core/base";
 import "../core/proc";

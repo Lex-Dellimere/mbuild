@@ -1,16 +1,4 @@
-// live: the preview side of `mbuild live` and `mbuild shell`: the mb_watch
-// files polled for changes, the events file the program reads through
-// mbuild/live, and the preview hint (docs/project.md#live-preview).
-//
-// The events file is .mbuild/live/<bin>.events, emptied at start; each
-// event is one whole line "KIND PAYLOAD" (KIND alone when there is none),
-// added in one write.
-//
-// Every save of the program's source files ends with one result: patched
-// lines or built, or patch-error. `mettle live` reports one per patch run
-// and loses a save made while a patch is in flight, so the saves are
-// counted here too (settled changes of the files in <exe>.live.files) and
-// one that gets no result in time is answered by the compiler's check.
+// live: the mb_watch files, the events file and the preview hint of mbuild live and shell
 
 import "std/mem";
 import "../core/base";
@@ -58,7 +46,7 @@ export struct LiveSess {
 const LV_PEND_MAX: int64 = 64;
 const LV_WAIT_MS: int64 = 2000;
 
-// --preview SIDE (taken out of rest), else mb_preview; "" none.
+// --preview SIDE (taken out of rest), else mb_preview; "" none
 fn lv_preview(p: Project*) -> string {
   var v: string = s_empty();
   var i: int64 = 0;
@@ -80,7 +68,7 @@ fn lv_preview(p: Project*) -> string {
   return v;
 }
 
-// The session for bin: its events file emptied, the watched files' state.
+// the session for bin: its events file emptied, the watched files' state
 export fn lv_open(p: Project*, bin: string) -> LiveSess* {
   var lv: LiveSess* = new LiveSess;
   lv->root = p->root;
@@ -122,7 +110,7 @@ export fn lv_open(p: Project*, bin: string) -> LiveSess* {
 }
 
 // exe's source list and the command that checks the entry (to the object
-// obj): what the results of saves are made from.
+// obj): what the results of saves are made from
 export fn lv_track(lv: LiveSess*, exe: string, chk: Cmd*, obj: string) {
   lv->listf = exe + ".live.files";
   lv->listc = s_dup(lv->listf);
@@ -130,7 +118,6 @@ export fn lv_track(lv: LiveSess*, exe: string, chk: Cmd*, obj: string) {
   lv->chk_obj = obj;
 }
 
-// The program's environment: the events file and the preview hint.
 export fn lv_env(lv: LiveSess*, env: StrList*) {
   if (s_eq(sys_os(), "linux")) {
     var ev: string = "MBUILD_LIVE_EVENTS=" + lv->events;
@@ -142,7 +129,7 @@ export fn lv_env(lv: LiveSess*, env: StrList*) {
   }
 }
 
-// One event line; payload "" for a bare KIND. Newlines in it become spaces.
+// one event line; payload "" for a bare KIND. newlines in it become spaces
 export fn lv_emit(lv: LiveSess*, kind: string, payload: string) {
   var b: Buf* = buf_new();
   buf_add(b, kind);
@@ -164,15 +151,13 @@ export fn lv_emit(lv: LiveSess*, kind: string, payload: string) {
   free(line.chars);
 }
 
-// ---------------------------------------------------------------------------
 // mb_watch: globs, polled
-// ---------------------------------------------------------------------------
 
 fn lv_wild(s: string) -> bool {
   return s_find_byte(s, 42) >= 0 || s_find_byte(s, 63) >= 0;
 }
 
-// * and ? within a segment, ** across any number of them.
+// * and ? within a segment, ** across any number of them
 fn lv_glob(p: string, pi: int64, s: string, si: int64) -> bool {
   var np: int64 = slen(p);
   var ns: int64 = slen(s);
@@ -222,13 +207,13 @@ fn lv_glob(p: string, pi: int64, s: string, si: int64) -> bool {
   return si == ns;
 }
 
-// Whether path s (relative, '/' separators) matches glob pat.
+// whether path s (relative, '/' separators) matches glob pat
 export fn lv_glob_match(pat: string, s: string) -> bool {
   return lv_glob(pat, 0, s, 0);
 }
 
-// Files below root/rel into out as "REL\tSTAMP" when pat matches; dot
-// directories and the root's build/ are not entered.
+// files below root/rel into out as "REL\tSTAMP" when pat matches; dot
+// directories and the root's build/ are not entered
 fn lv_walk(lv: LiveSess*, rel: string, pat: string, out: StrList*) {
   var dir: string = lv->root;
   if (slen(rel) > 0) {
@@ -263,7 +248,6 @@ fn lv_walk(lv: LiveSess*, rel: string, pat: string, out: StrList*) {
   free(dirs);
 }
 
-// The watched files now, sorted.
 fn lv_scan(lv: LiveSess*) -> StrList* {
   var out: StrList* = sl_new();
   var i: int64 = 0;
@@ -309,7 +293,7 @@ fn lv_key(e: string) -> string {
   return s_sub(e, 0, s_find_byte(e, 9));
 }
 
-// At most every 150 ms: changed and removed events since the last scan.
+// at most every 150 ms: changed and removed events since the last scan
 export fn lv_poll(lv: LiveSess*) {
   if (lv->globs->len == 0 || sys_now_ms() - lv->last_ms < 150) {
     return;
@@ -346,12 +330,10 @@ export fn lv_poll(lv: LiveSess*) {
   lv->snap = now;
 }
 
-// ---------------------------------------------------------------------------
-// The compiler's output
-// ---------------------------------------------------------------------------
+// the compiler's output
 
-// s without ANSI escapes.
-fn lv_plain(s: string) -> string {
+// text without ANSI escape sequences (ESC [ ... final byte)
+export fn lv_plain(s: string) -> string {
   if (s_find_byte(s, 27) < 0) {
     return s;
   }
@@ -372,7 +354,7 @@ fn lv_plain(s: string) -> string {
   return buf_take(b);
 }
 
-// A path the compiler printed, from the root (or the shell's tree).
+// a path the compiler printed, from the root (or the shell's tree)
 export fn lv_rel(lv: LiveSess*, f: string) -> string {
   if (slen(lv->tree) > 0 && p_has_prefix_dir(f, lv->tree)) {
     return p_rel(lv->tree, f);
@@ -383,7 +365,7 @@ export fn lv_rel(lv: LiveSess*, f: string) -> string {
   return f;
 }
 
-// "Patch N: a, b (600 bytes)": a patched line per function.
+// "Patch N: a, b (600 bytes)": a patched line per function
 export fn lv_patch_line(lv: LiveSess*, l: string) -> bool {
   if (!s_starts(l, "Patch ")) {
     return false;
@@ -406,8 +388,8 @@ export fn lv_patch_line(lv: LiveSess*, l: string) -> bool {
   return true;
 }
 
-// An error's first line as "FILE:LINE:COL: MESSAGE" (the location when the
-// "-- FILE:LINE:COL" line came first); "" when l is no error line.
+// an error's first line as "FILE:LINE:COL: MESSAGE" (the location when the
+// "-- FILE:LINE:COL" line came first); "" when l is no error line
 fn lv_error(lv: LiveSess*, l: string) -> string {
   if (s_starts(l, "-- ")) {
     // "-- FILE:LINE:COL", ruled out to the width on some terminals
@@ -451,9 +433,7 @@ fn lv_error(lv: LiveSess*, l: string) -> string {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// A result per save
-// ---------------------------------------------------------------------------
+// a result per save
 
 fn lv_pop(lv: LiveSess*) {
   var i: int64 = 0;
@@ -464,7 +444,7 @@ fn lv_pop(lv: LiveSess*) {
   lv->pend_n = lv->pend_n - 1;
 }
 
-// A save settled: its change stopped moving for one tick.
+// a save settled: its change stopped moving for one tick
 export fn lv_settled(lv: LiveSess*) {
   if (lv->pend_n < LV_PEND_MAX) {
     lv->pend[lv->pend_n] = sys_now_ms();
@@ -472,8 +452,8 @@ export fn lv_settled(lv: LiveSess*) {
   }
 }
 
-// `mettle live` reported a result: it is the oldest save's. A save made
-// while that patch ran is not reported, it stays and times out.
+// `mettle live` reported a result: it is the oldest save's. a save made
+// while that patch ran is not reported, it stays and times out
 fn lv_resolve(lv: LiveSess*) {
   var now: int64 = sys_now_ms();
   if (lv->pend_n > 0) {
@@ -494,7 +474,7 @@ fn lv_resolve(lv: LiveSess*) {
   lv->last_res = now;
 }
 
-// How long a save waits for `mettle live`: 2 s, more after a slow patch.
+// how long a save waits for `mettle live`: 2 s, more after a slow patch
 fn lv_wait(lv: LiveSess*) -> int64 {
   var w: int64 = LV_WAIT_MS;
   if (lv->lat * 3 / 2 > w) {
@@ -503,7 +483,7 @@ fn lv_wait(lv: LiveSess*) -> int64 {
   return w;
 }
 
-// True (and a check begun) when the oldest save has waited long enough.
+// true (and a check begun) when the oldest save has waited long enough
 export fn lv_check_due(lv: LiveSess*) -> bool {
   if (lv->chk == (Cmd*)0 || lv->chk_on || lv->pend_n == 0) {
     return false;
@@ -522,8 +502,8 @@ export fn lv_check_due(lv: LiveSess*) -> bool {
   return true;
 }
 
-// The check's output: the result of the saves it covers (those before it
-// began), unless `mettle live` answered them meanwhile.
+// the check's output: the result of the saves it covers (those before it
+// began), unless `mettle live` answered them meanwhile
 export fn lv_check_done(lv: LiveSess*, out: string, code: int64) {
   lv->chk_on = false;
   if (lv->chk_void) {
@@ -550,7 +530,7 @@ export fn lv_check_done(lv: LiveSess*, out: string, code: int64) {
   lv->last_res = sys_now_ms();
 }
 
-// One line of `mettle live`'s stdout or stderr.
+// one line of `mettle live`'s stdout or stderr
 fn lv_line(lv: LiveSess*, raw: string) {
   var l: string = s_trim(lv_plain(raw));
   if (lv_patch_line(lv, l)) {
@@ -604,7 +584,7 @@ fn lv_line(lv: LiveSess*, raw: string) {
   }
 }
 
-// Output in b so far: the whole lines parsed and taken out (flush: all).
+// output in b so far: the whole lines parsed and taken out (flush: all)
 export fn lv_feed(lv: LiveSess*, b: Buf*, flush: bool) {
   var start: int64 = 0;
   var i: int64 = 0;
@@ -627,7 +607,7 @@ export fn lv_feed(lv: LiveSess*, b: Buf*, flush: bool) {
   b->len = k;
 }
 
-// The first error of a compiler's output as an error event; true when one.
+// the first error of a compiler's output as an error event; true when one
 export fn lv_errors(lv: LiveSess*, kind: string, out: string) -> bool {
   var lines: StrList* = s_lines(lv_plain(out));
   defer free(lines);

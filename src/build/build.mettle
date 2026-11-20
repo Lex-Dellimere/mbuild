@@ -1,8 +1,4 @@
-// build: project discovery, help and the commands: build / run / live /
-// test / check / clean / init / new / publish and the rest, plus the small
-// shortcuts to the compiler (mettle, trace, why, explain) and doctor.
-// Dependency resolution, native code, compiler selection, mbuild.mettle,
-// components and registries live in their own modules; this one calls them.
+// build: project discovery, help and the commands
 
 import "std/io";
 import "std/mem";
@@ -51,7 +47,6 @@ var g_bx_warned: bool = false;
 // mbuild test --coverage: builds count blocks into .mbuild/coverage/
 var g_bx_cov: bool = false;
 
-// One program to build.
 export struct BinInfo {
   name: string;
   main: string;       // as written in the manifest, relative to the root
@@ -67,7 +62,7 @@ export struct BinSet {
   root: string;
 }
 
-// Everything one command needs for a set of targets.
+// everything one command needs for a set of targets
 struct BxSess {
   p: Project*;
   ds: DepState*;
@@ -86,34 +81,32 @@ struct BxSess {
   tests: bool;         // the units are test programs (mb_test_bin)
 }
 
-// Objects other modules may keep pointers to: held here, never freed.
+// objects other modules may keep pointers to: held here, never freed
 var g_bx_ds: DepState* = (DepState*)0;
 var g_bx_sess: BxSess* = (BxSess*)0;
 var g_bx_t: TargetCtx* = (TargetCtx*)0;
 
-// Settings warnings already shown, flag sets already probed (this command).
+// settings warnings already shown, flag sets already probed (this command)
 var g_bx_seen_warn: StrList* = (StrList*)0;
 var g_bx_probed: StrList* = (StrList*)0;
-// [tools] values applied to the environment: "ENV=file".
+// [tools] values applied to the environment: "ENV=file"
 var g_bx_tools: StrList* = (StrList*)0;
 var g_bx_verify_said: bool = false;
-// cfg_info of mbuild.mettle, scanned once per command.
+// cfg_info of mbuild.mettle, scanned once per command
 var g_bx_info: MbfInfo* = (MbfInfo*)0;
-// The units, target contexts and requests of the command.
+// the units, target contexts and requests of the command
 var g_bx_units: BxUnits* = (BxUnits*)0;
 var g_bx_dep_bins: BxDepBins* = (BxDepBins*)0;
 var g_bx_tctxs: TargetCtx** = (TargetCtx**)0;
 var g_bx_nls: NatLink** = (NatLink**)0;
 var g_bx_ini: IniRequest* = (IniRequest*)0;
-// Held for the whole command (rollback state, plans).
+// held for the whole command (rollback state, plans)
 var g_bx_snap: DepSnap* = (DepSnap*)0;
 var g_bx_plan: UpdatePlan* = (UpdatePlan*)0;
 var g_bx_req: UpdateReq* = (UpdateReq*)0;
 var g_bx_proj: Project* = (Project*)0;
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
+// small helpers
 
 fn bx_slash(p: string) -> string {
   return s_replace_byte(p, 92, 47);
@@ -132,7 +125,7 @@ fn bx_secs(ms: int64) -> string {
   return "{whole}.{tenth}s";
 }
 
-// A path for messages: relative to the working directory when inside it.
+// a path for messages: relative to the working directory when inside it
 fn bx_show(p: string) -> string {
   return p_rel(bx_cwd(), p);
 }
@@ -152,7 +145,7 @@ fn bx_print_block(text: string) {
   flush_out();
 }
 
-// The compiler's output minus its "Built executable" chatter.
+// the compiler's output minus its "Built executable" chatter
 fn bx_compiler_output(text: string) -> string {
   if (g_verbose) {
     return text;
@@ -162,7 +155,7 @@ fn bx_compiler_output(text: string) -> string {
   var i: int64 = 0;
   while (i < lines->len) {
     var line: string = sl_get(lines, i);
-    var plain: string = bx_strip_ansi(line);
+    var plain: string = lv_plain(line);
     if (!s_starts(plain, "Built executable") && !s_starts(plain, "Built object") && !s_starts(plain, "Wrote flat image") && !s_starts(plain, "Wrote UF2 file") && !s_starts(plain, "Wrote Intel HEX file") && !s_starts(plain, "Wrote ELF file")) {
       buf_line(b, line);
     }
@@ -171,7 +164,7 @@ fn bx_compiler_output(text: string) -> string {
   free(lines->items);
   free(lines);
   var s: string = buf_take(b);
-  if (slen(s_trim(bx_strip_ansi(s))) == 0) {
+  if (slen(s_trim(lv_plain(s))) == 0) {
     return s_empty();
   }
   return s;
@@ -181,7 +174,6 @@ fn bx_has_arg(l: StrList*, a: string) -> bool {
   return sl_has(l, a);
 }
 
-// Positional arguments that are not flags.
 fn bx_positional(l: StrList*) -> StrList* {
   var r: StrList* = sl_new();
   var i: int64 = 0;
@@ -195,12 +187,10 @@ fn bx_positional(l: StrList*) -> StrList* {
   return r;
 }
 
-// ---------------------------------------------------------------------------
-// Project discovery
-// ---------------------------------------------------------------------------
+// project discovery
 
-// The nearest directory at or above start holding mbuild.mettle or an old
-// mbuild.toml (which build_open refuses), "" when none.
+// the nearest directory at or above start holding mbuild.mettle or an old
+// mbuild.toml (which build_open refuses), "" when none
 export fn build_find_root(start: string) -> string {
   var dir: string = p_clean(bx_slash(start));
   while (true) {
@@ -232,7 +222,7 @@ fn bx_safe_name(s: string) -> string {
   return d;
 }
 
-// A directory name as a package name: lower case, '_' for anything else.
+// a directory name as a package name: lower case, '_' for anything else
 fn bx_pkg_name(s: string) -> string {
   var d: string = s_lower(s_dup(s));
   var i: int64 = 0;
@@ -255,7 +245,7 @@ fn bx_pkg_name(s: string) -> string {
   return d;
 }
 
-// cfg_load (mbuild.mettle, with mbuild.local.mettle in m->local).
+// cfg_load (mbuild.mettle, with mbuild.local.mettle in m->local)
 fn bx_load_manifest(p: Project*) {
   var m: Manifest* = cfg_load(p);
   if (!g_bx_warned) {
@@ -271,8 +261,8 @@ fn bx_load_manifest(p: Project*) {
   p->has_manifest = true;
 }
 
-// The environment variable a [tools] key stands for ("" for the compilers,
-// which toolchain.mettle reads itself to name their origin).
+// the environment variable a [tools] key stands for ("" for the compilers,
+// which toolchain.mettle reads itself to name their origin)
 fn bx_tool_env(key: string) -> string {
   if (s_eq(key, "curl")) { return "MBUILD_CURL"; }
   if (s_eq(key, "cc")) { return "CC"; }
@@ -282,7 +272,7 @@ fn bx_tool_env(key: string) -> string {
   return s_empty();
 }
 
-// [tools] values go into the environment where it does not set them.
+// [tools] values go into the environment where it does not set them
 fn bx_apply_tools(m: Manifest*) {
   if (g_bx_tools == (StrList*)0) {
     g_bx_tools = sl_new();
@@ -305,9 +295,9 @@ fn bx_apply_tools(m: Manifest*) {
   }
 }
 
-// Finds the project from the working directory without loading it: the
+// finds the project from the working directory without loading it: the
 // nearest mbuild.mettle (p->mbfile), an mbuild.toml (p->legacy_toml), or a
-// zero-config project in the working directory.
+// zero-config project in the working directory
 export fn build_find(opts: Options*) -> Project* {
   var p: Project* = new Project;
   p->opts = opts;
@@ -335,7 +325,6 @@ fn bx_refuse_legacy(p: Project*) {
   }
 }
 
-// build_find, then the configuration from mbuild.mettle.
 export fn build_open(opts: Options*) -> Project* {
   var p: Project* = build_find(opts);
   bx_refuse_legacy(p);
@@ -347,7 +336,7 @@ export fn build_open(opts: Options*) -> Project* {
 
 // build_open for the commands that only read registries (search, info): with
 // no compiler to evaluate mbuild.mettle, the project stays unloaded, so only
-// the registries that need no evaluation are used.
+// the registries that need no evaluation are used
 export fn build_open_soft(opts: Options*) -> Project* {
   var p: Project* = build_find(opts);
   bx_refuse_legacy(p);
@@ -357,27 +346,19 @@ export fn build_open_soft(opts: Options*) -> Project* {
   return p;
 }
 
-// True after build_open_soft left a project unloaded for want of a compiler.
+// true after build_open_soft left a project unloaded for want of a compiler
 export fn build_registries_skipped(p: Project*) -> bool {
   return slen(p->mbfile) > 0 && !p->has_manifest;
 }
 
-// Loads the project's configuration (fails with the compiler's absence).
-export fn build_load(p: Project*) {
-  bx_refuse_legacy(p);
-  bx_load_manifest(p);
-}
-
-// After an edit of mbuild.mettle (deps_add_missing, cfg_set_dep).
+// after an edit of mbuild.mettle (deps_add_missing, cfg_set_dep)
 fn bx_reload(p: Project*) {
   if (slen(p->mbfile) > 0) {
     bx_load_manifest(p);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Bins, targets, profiles
-// ---------------------------------------------------------------------------
+// bins, targets, profiles
 
 fn bx_binset_push(bs: BinSet*, name: string, mainp: string) {
   var i: int64 = 0;
@@ -402,7 +383,7 @@ fn bx_binset_push(bs: BinSet*, name: string, mainp: string) {
 // [bin.*] sections; else main.mettle or src/main.mettle (named after the
 // package) plus every cmd/<name>/main.mettle; else top-level files with a main.
 // [bin.NAME] without main: cmd/NAME/main.mettle, src/NAME.mettle,
-// src/main.mettle, main.mettle, the first that exists.
+// src/main.mettle, main.mettle, the first that exists
 fn bx_default_main(root: string, name: string) -> string {
   var cands: StrList* = sl_new();
   sl_push(cands, "cmd/" + name + "/main.mettle");
@@ -512,9 +493,9 @@ fn bx_is_lib_file(name: string) -> bool {
   return s_ends(name, ".mettle") && !s_ends(name, "_test.mettle") && !s_starts(name, "test_");
 }
 
-// A library package (a manifest, no bins): its top-level, src/ and import
+// a library package (a manifest, no bins): its top-level, src/ and import
 // root .mettle files but the project files, each one an entry for `check`.
-// Empty for anything else.
+// empty for anything else
 fn bx_lib_set(p: Project*) -> BinSet* {
   var bs: BinSet* = new BinSet;
   bs->items = (BinInfo*)0;
@@ -557,7 +538,7 @@ fn bx_lib_set(p: Project*) -> BinSet* {
   return bs;
 }
 
-// The bins named in `names` (all when empty); unknown names are errors.
+// the bins named in `names` (all when empty); unknown names are errors
 fn bx_select_bins(p: Project*, names: StrList*) -> BinSet* {
   var all: BinSet* = build_bins(p);
   if (all->n == 0) {
@@ -597,7 +578,7 @@ fn bx_select_from(p: Project*, all: BinSet*, names: StrList*) -> BinSet* {
   return sel;
 }
 
-// all: the targets mb_targets declares, else linux and windows.
+// all: the targets mb_targets declares, else linux and windows
 fn bx_add_target(p: Project*, l: StrList*, t: string) {
   if (s_eq(t, "all")) {
     if (p->man->targets->len == 0) {
@@ -626,7 +607,7 @@ fn bx_add_target(p: Project*, l: StrList*, t: string) {
   }
 }
 
-// -t values, else [build] targets, else the host.
+// -t values, else [build] targets, else the host
 export fn build_targets(p: Project*) -> StrList* {
   var l: StrList* = sl_new();
   var src: StrList* = p->opts->targets;
@@ -644,7 +625,7 @@ export fn build_targets(p: Project*) -> StrList* {
   return l;
 }
 
-// -t values, else the host only (commands that act on one compiler).
+// -t values, else the host only (commands that act on one compiler)
 fn bx_targets_or_host(p: Project*) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -687,9 +668,7 @@ export fn build_profile(p: Project*) -> string {
   return prof;
 }
 
-// ---------------------------------------------------------------------------
-// Sessions: dependencies, compilers, components, hooks, import graphs
-// ---------------------------------------------------------------------------
+// sessions: dependencies, compilers, components, hooks, import graphs
 
 fn bx_fill_dirs(m: Mettle*) {
   var exe: string = m->path;
@@ -722,7 +701,7 @@ fn bx_mettle(p: Project*, target: string) -> Mettle* {
   return m;
 }
 
-// Dependencies, then the AGENT.rules block that points at them (16.3).
+// dependencies, then the AGENT.rules block that points at them
 fn bx_deps(p: Project*) -> DepState* {
   var ds: DepState* = deps_ensure(p);
   g_bx_ds = ds;
@@ -734,7 +713,7 @@ fn bx_sess(p: Project*, targets: StrList*) -> BxSess* {
   return bx_sess_x(p, targets, true);
 }
 
-// "first line\n  help: rest" (a message with its help) as error and help.
+// "first line\n  help: rest" (a message with its help) as error and help
 fn bx_fail_text(e: string) {
   var at: int64 = s_find(e, "\n  help: ");
   if (at < 0) {
@@ -743,7 +722,6 @@ fn bx_fail_text(e: string) {
   fail_hint(s_sub(e, 0, at), s_from(e, at + 9));
 }
 
-// Names of every component of the build (root and dependencies).
 fn bx_comp_names(p: Project*, ds: DepState*) -> StrList* {
   var l: StrList* = sl_new();
   var all: CompSpec** = cmp_all(p, ds);
@@ -756,7 +734,7 @@ fn bx_comp_names(p: Project*, ds: DepState*) -> StrList* {
   return l;
 }
 
-// check_min: fail when a compiler is older than a package needs (12.11).
+// check_min: fail when a compiler is older than a package needs
 fn bx_sess_x(p: Project*, targets: StrList*, check_min: bool) -> BxSess* {
   var s: BxSess* = new BxSess;
   s->p = p;
@@ -804,7 +782,7 @@ fn bx_sess_comps(s: BxSess*) {
   }
 }
 
-// The compiler that builds freestanding bins: the host's (15.7).
+// the compiler that builds freestanding bins: the host's
 fn bx_host_mettle(s: BxSess*) -> Mettle* {
   if (s->host_m == (Mettle*)0) {
     s->host_m = bx_mettle(s->p, sys_os());
@@ -816,7 +794,7 @@ fn bx_freestanding(b: BinInfo*) -> bool {
   return b != (BinInfo*)0 && s_ends(b->triple, "-none");
 }
 
-// One compile: a bin or a file for one target, with its component selection.
+// one compile: a bin or a file for one target, with its component selection
 struct BxUnit {
   b: BinInfo*;       // 0 for a file that is no bin (tests, library checks)
   file: string;      // absolute source entry
@@ -857,8 +835,8 @@ fn bx_unit_add(us: BxUnits*, b: BinInfo*, file: string, ti: int64, target: strin
   us->n = us->n + 1;
 }
 
-// Every bin for every session target; a freestanding bin once, by the host
-// compiler, whatever -t says.
+// every bin for every session target; a freestanding bin once, by the host
+// compiler, whatever -t says
 fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
   var us: BxUnits* = bx_units_new();
   var ci: int64 = 0;
@@ -891,7 +869,7 @@ fn bx_bin_units(s: BxSess*, bs: BinSet*) -> BxUnits* {
   return us;
 }
 
-// A bin that cannot be built as declared stops the command (15.7).
+// a bin that cannot be built as declared stops the command
 fn bx_check_bin(s: BxSess*, b: BinInfo*) {
   var i: int64 = 0;
   while (i < s->p->man->nbins) {
@@ -911,7 +889,7 @@ fn bx_check_bin(s: BxSess*, b: BinInfo*) {
   }
 }
 
-// The component selection of every unit (15.5, 15.6); errors stop the command.
+// the component selection of every unit; errors stop the command
 fn bx_components(s: BxSess*, us: BxUnits*, bin_for_files: string) {
   if (!s->has_cmp) {
     return;
@@ -958,13 +936,13 @@ fn bx_unit_bin(u: BxUnit*) -> string {
   return u->b->name;
 }
 
-// The OS a unit's import guards see: "linux" for riscv*-linux, "none" for a
-// freestanding triple or a board image.
+// the OS a unit's import guards see: "linux" for riscv*-linux, "none" for a
+// freestanding triple or a board image
 fn bx_unit_os(u: BxUnit*) -> string {
   return target_os(u->target);
 }
 
-// A kind the target cannot build stops the command.
+// a kind the target cannot build stops the command
 fn bx_check_kind(b: BinInfo*, target: string) {
   if (s_eq(b->kind, "shared") && target_is_riscv(target)) {
     fail_hint("bin " + b->name + " is a shared library, and " + target + " builds static executables and objects only", "build it with -t linux or -t windows");
@@ -974,7 +952,7 @@ fn bx_check_kind(b: BinInfo*, target: string) {
   }
 }
 
-// A board image: an exe or flat bin for riscv32-none or riscv64-none.
+// a board image: an exe or flat bin for riscv32-none or riscv64-none
 fn bx_is_image(u: BxUnit*) -> bool {
   return u->b != (BinInfo*)0 && (s_eq(u->b->kind, "exe") || s_eq(u->b->kind, "flat")) && target_is_bare(u->target);
 }
@@ -986,7 +964,6 @@ fn bx_unit_gen(u: BxUnit*) -> string {
   return u->cmp->gen_dir;
 }
 
-// The hooks mbuild.mettle defines ("pre_build", "post_build").
 fn bx_has_hook(p: Project*, name: string) -> bool {
   if (slen(p->mbfile) == 0 || p->opts->no_hooks) {
     return false;
@@ -997,8 +974,8 @@ fn bx_has_hook(p: Project*, name: string) -> bool {
   return sl_has(g_bx_info->hooks, name) || sl_has(g_bx_info->hooks, "hook_" + name);
 }
 
-// Runs hook_NAME once per (target, profile) of the command (13.7);
-// cfg_run_hook prints the Running line and the failure.
+// runs hook_NAME once per (target, profile) of the command;
+// cfg_run_hook prints the Running line and the failure
 fn bx_hook(s: BxSess*, name: string, target: string, out_dir: string, bins: StrList*, built: StrList*) {
   var p: Project* = s->p;
   if (!bx_has_hook(p, name)) {
@@ -1027,7 +1004,6 @@ fn bx_unit_out_dir(s: BxSess*, target: string) -> string {
   return s->p->root + "/build/" + target + "/" + s->profile;
 }
 
-// The bins of the units for one target.
 fn bx_unit_bins(us: BxUnits*, target: string) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -1041,7 +1017,6 @@ fn bx_unit_bins(us: BxUnits*, target: string) -> StrList* {
   return l;
 }
 
-// The targets of the units, in order.
 fn bx_unit_targets(us: BxUnits*) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -1066,7 +1041,7 @@ fn bx_pre_hooks(s: BxSess*, us: BxUnits*) {
   free(ts);
 }
 
-// built: "target bin" of every unit that was compiled.
+// built: "target bin" of every unit that was compiled
 fn bx_post_hooks(s: BxSess*, us: BxUnits*, built: StrList*) {
   if (!bx_has_hook(s->p, "post_build")) {
     return;
@@ -1119,7 +1094,7 @@ fn bx_first_component(imp: string) -> string {
   return s_sub(imp, 0, cut);
 }
 
-// The selected dependency an import names by its first component, -1.
+// the selected dependency an import names by its first component, -1
 fn bx_dep_of_import(ds: DepState*, imp: string) -> int64 {
   var first: string = bx_first_component(imp);
   if (slen(first) >= slen(imp)) {
@@ -1135,7 +1110,7 @@ fn bx_dep_of_import(ds: DepState*, imp: string) -> int64 {
   return -1;
 }
 
-// What follows the dependency's name in the import ("" for the package itself).
+// what follows the dependency's name in the import ("" for the package itself)
 fn bx_rest_in_dep(dm: DepModule*, imp: string) -> string {
   if (slen(imp) <= slen(dm->module) + 1) {
     return s_empty();
@@ -1143,9 +1118,9 @@ fn bx_rest_in_dep(dm: DepModule*, imp: string) -> string {
   return s_from(imp, slen(dm->module) + 1);
 }
 
-// The package an unresolved import may name (14.5): "NAME/FILE" with a
+// the package an unresolved import may name: "NAME/FILE" with a
 // valid, unreserved package name that is no component and no directory next
-// to the importing file; "" otherwise.
+// to the importing file; "" otherwise
 fn bx_import_package(s: BxSess*, from: string, imp: string) -> string {
   var first: string = bx_first_component(imp);
   if (slen(first) >= slen(imp) || !man_is_package_name(first)) {
@@ -1160,8 +1135,8 @@ fn bx_import_package(s: BxSess*, from: string, imp: string) -> string {
   return first;
 }
 
-// Packages named by imports that did not resolve and that are not selected
-// already (an import into a selected package is a wrong file name).
+// packages named by imports that did not resolve and that are not selected
+// already (an import into a selected package is a wrong file name)
 fn bx_missing_packages(s: BxSess*, us: BxUnits*) -> StrList* {
   var names: StrList* = sl_new();
   var i: int64 = 0;
@@ -1184,7 +1159,7 @@ fn bx_missing_packages(s: BxSess*, us: BxUnits*) -> StrList* {
   return names;
 }
 
-// The .mettle files (stems) directly in dir.
+// the .mettle files (stems) directly in dir
 fn bx_mettle_stems(dir: string) -> StrList* {
   var stems: StrList* = sl_new();
   var files: StrList* = sl_new();
@@ -1215,8 +1190,8 @@ fn bx_dir_is_empty(dir: string) -> bool {
   return empty;
 }
 
-// Whether the manifest m, or a package it requires (through ds), declares
-// the dependency target; seen guards cycles.
+// whether the manifest m, or a package it requires (through ds), declares
+// the dependency target; seen guards cycles
 fn bx_reaches(ds: DepState*, m: Manifest*, target: string, seen: StrList*) -> bool {
   var i: int64 = 0;
   while (i < m->ndeps) {
@@ -1241,9 +1216,9 @@ fn bx_reaches(ds: DepState*, m: Manifest*, target: string, seen: StrList*) -> bo
   return false;
 }
 
-// An import of a package that is in the resolved graph but that the importing
+// an import of a package that is in the resolved graph but that the importing
 // package (the project or one of its path packages) does not declare: says
-// how it got there and what to add. False when the case does not apply.
+// how it got there and what to add. false when the case does not apply
 fn bx_report_undeclared(s: BxSess*, loc: string, file: string, imp: string, dm: DepModule*) -> bool {
   var ds: DepState* = s->ds;
   var owner: string = s->p->man->name;
@@ -1304,8 +1279,8 @@ fn bx_report_undeclared(s: BxSess*, loc: string, file: string, imp: string, dm: 
   return true;
 }
 
-// An import into a selected dependency that names no file: says what is
-// there instead.
+// an import into a selected dependency that names no file: says what is
+// there instead
 fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
   var rest: string = bx_rest_in_dep(dm, imp);
   var ver: string = dm->version;
@@ -1373,11 +1348,11 @@ fn bx_report_bad_file(loc: string, imp: string, dm: DepModule*) {
   free(stems);
 }
 
-// Components, the pre-build hook, then every unit's graph. Missing packages
+// components, the pre-build hook, then every unit's graph. missing packages
 // are added (unless --locked/--offline; one no registry has is left to the
 // compiler's E0006); an import into a selected package that names no file
 // stops the command with file:line. bin_for_files names the gen dir of
-// units without a bin ("test").
+// units without a bin ("test")
 fn bx_prepare(s: BxSess*, us: BxUnits*, bin_for_files: string) {
   var p: Project* = s->p;
   bx_components(s, us, bin_for_files);
@@ -1430,11 +1405,9 @@ fn bx_prepare(s: BxSess*, us: BxUnits*, bin_for_files: string) {
   free(missing);
 }
 
-// ---------------------------------------------------------------------------
-// Compiling
-// ---------------------------------------------------------------------------
+// compiling
 
-// -I for the unit's gen dir (when it has one), then for .mbuild/deps.
+// -I for the unit's gen dir (when it has one), then for .mbuild/deps
 fn bx_add_include(c: Cmd*, p: Project*, ds: DepState*, gen: string) {
   if (slen(gen) > 0) {
     cmd_arg(c, "-I");
@@ -1444,13 +1417,13 @@ fn bx_add_include(c: Cmd*, p: Project*, ds: DepState*, gen: string) {
   cmd_path(c, bx_rel(p, ds->include_dir));
 }
 
-// A manifest message names the file by its absolute path: show it from the root.
+// a manifest message names the file by its absolute path: show it from the root
 fn bx_unroot(p: Project*, msg: string) -> string {
   var pre: string = p->root + "/";
   return s_replace(msg, pre, "");
 }
 
-// The build settings of one compile (12.12); problems stop the command.
+// the build settings of one compile; problems stop the command
 fn bx_settings_of(p: Project*, prof: string, bin: string, target: string) -> Settings* {
   var q: SettingsQuery* = new SettingsQuery;
   q->profile = prof;
@@ -1487,7 +1460,7 @@ fn bx_settings_of(p: Project*, prof: string, bin: string, target: string) -> Set
   return st;
 }
 
-// --pgo-gen: "gen", --pgo-use[=FILE]: "use", else "".
+// --pgo-gen: "gen", --pgo-use[=FILE]: "use", else ""
 fn bx_pgo_mode(p: Project*) -> string {
   var mode: string = s_empty();
   var i: int64 = 0;
@@ -1509,8 +1482,8 @@ fn bx_pgo_mode(p: Project*) -> string {
   return mode;
 }
 
-// The profile of a bin on a target: --pgo-use=FILE (from the working
-// directory), else .mbuild/pgo/<bin>-<target>.prof.
+// the profile of a bin on a target: --pgo-use=FILE (from the working
+// directory), else .mbuild/pgo/<bin>-<target>.prof
 fn bx_pgo_file(p: Project*, bin: string, target: string) -> string {
   var i: int64 = 0;
   while (i < p->opts->rest->len) {
@@ -1527,7 +1500,7 @@ fn bx_pgo_file(p: Project*, bin: string, target: string) -> string {
   return p->state_dir + "/pgo/" + bx_safe_name(name) + "-" + target + ".prof";
 }
 
-// The typed key behind a flag that v0.17.0 lacks, "" for any other flag.
+// the typed key behind a flag that v0.17.0 lacks, "" for any other flag
 fn bx_typed_key(flag: string) -> string {
   if (s_eq(flag, "--check-overflow")) { return "check-overflow"; }
   if (s_eq(flag, "--check-proofs")) { return "check-proofs"; }
@@ -1566,7 +1539,7 @@ fn bx_inherits(m: Manifest*, name: string) -> string {
   return v;
 }
 
-// The profile and its ancestors, child first.
+// the profile and its ancestors, child first
 fn bx_profile_chain(m: Manifest*, prof: string) -> StrList* {
   var chain: StrList* = sl_new();
   var name: string = prof;
@@ -1577,7 +1550,7 @@ fn bx_profile_chain(m: Manifest*, prof: string) -> StrList* {
   return chain;
 }
 
-// Where a typed key of this compile is set: "--set", "[bin.X]", "[profile.X]".
+// where a typed key of this compile is set: "--set", "[bin.X]", "[profile.X]"
 fn bx_key_where(p: Project*, prof: string, bin: string, key: string) -> string {
   var i: int64 = 0;
   while (i < p->opts->sets->len) {
@@ -1609,7 +1582,7 @@ fn bx_key_where(p: Project*, prof: string, bin: string, key: string) -> string {
   return found;
 }
 
-// file:line of the raw flags list holding flag, or "--flag".
+// file:line of the raw flags list holding flag, or "--flag"
 fn bx_raw_where(p: Project*, prof: string, bin: string, flag: string) -> string {
   if (sl_has(p->opts->flags, flag)) {
     return "--flag";
@@ -1644,8 +1617,8 @@ fn bx_raw_where(p: Project*, prof: string, bin: string, flag: string) -> string 
   return found;
 }
 
-// Probes the flags v0.17.0 lacks and every raw flag (once per compiler and
-// flag set in a command); an unsupported one stops the command.
+// probes the flags v0.17.0 lacks and every raw flag (once per compiler and
+// flag set in a command); an unsupported one stops the command
 fn bx_check_support(s: BxSess*, u: BxUnit*, st: Settings*, flags: StrList*, bin: string) {
   var p: Project* = s->p;
   var m: Mettle* = u->m;
@@ -1715,8 +1688,8 @@ fn bx_check_support(s: BxSess*, u: BxUnit*, st: Settings*, flags: StrList*, bin:
   exit_with(1);
 }
 
-// Adds the compile flags of one bin (0: a file that is no bin) for session
-// target ti: typed settings, raw flags, then --flag. Answers the settings.
+// adds the compile flags of one bin (0: a file that is no bin) for session
+// target ti: typed settings, raw flags, then --flag. answers the settings
 fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
   var p: Project* = s->p;
   var bin: string = bx_unit_bin(u);
@@ -1756,7 +1729,7 @@ fn bx_add_flags(c: Cmd*, s: BxSess*, u: BxUnit*) -> Settings* {
 }
 
 // flags without -s (no crash report on RISC-V, the compiler notes it on
-// every compile) and --check-effects (refused: no runtime for the stack).
+// every compile) and --check-effects (refused: no runtime for the stack)
 fn bx_riscv_flags(flags: StrList*) -> StrList* {
   var out: StrList* = sl_new();
   var i: int64 = 0;
@@ -1772,7 +1745,7 @@ fn bx_riscv_flags(flags: StrList*) -> StrList* {
   return out;
 }
 
-// A board image needs a board the compiler has.
+// a board image needs a board the compiler has
 fn bx_check_board(p: Project*, m: Mettle*, label: string, target: string, st: Settings*) {
   var boards: StrList* = tc_boards(m);
   var choices: string = sl_join(boards, ", ");
@@ -1792,15 +1765,15 @@ fn bx_check_board(p: Project*, m: Mettle*, label: string, target: string, st: Se
   }
 }
 
-// The recorded profile a pgo = "use" build reads is an input of it.
+// the recorded profile a pgo = "use" build reads is an input of it
 fn bx_hash_pgo(h: Hasher*, p: Project*, st: Settings*) {
   if (s_eq(st->pgo, "use")) {
     h_str(h, fs_hash_file(p_join(p->root, st->pgo_file)));
   }
 }
 
-// An argument as it goes into a fingerprint: the project root (in either
-// its own or its wine Z: spelling) replaced by "@root", backslashes as '/'.
+// an argument as it goes into a fingerprint: the project root (in either
+// its own or its wine Z: spelling) replaced by "@root", backslashes as '/'
 fn bx_arg_key(p: Project*, a: string) -> string {
   var k: string = bx_slash(a);
   var root: string = bx_slash(p->root);
@@ -1811,8 +1784,8 @@ fn bx_arg_key(p: Project*, a: string) -> string {
   return k;
 }
 
-// The compiler's identity without its location: file name, size and
-// modification time (whole seconds since 1970, from either host's clock).
+// the compiler's identity without its location: file name, size and
+// modification time (whole seconds since 1970, from either host's clock)
 fn bx_compiler_key(m: Mettle*) -> string {
   var parts: StrList* = s_split(m->id, 124);
   var n: int64 = parts->len;
@@ -1836,8 +1809,8 @@ fn bx_compiler_key(m: Mettle*) -> string {
   return s_lower(p_base(bx_slash(real))) + "|" + size + "|" + s_int(secs);
 }
 
-// The compiler argv (not the program that runs it, not the environment:
-// both differ between a Linux host and wine for the same build).
+// the compiler argv (not the program that runs it, not the environment:
+// both differ between a linux host and wine for the same build)
 fn bx_hash_cmd(h: Hasher*, p: Project*, m: Mettle*, c: Cmd*) {
   h_str(h, bx_compiler_key(m));
   var i: int64 = 0;
@@ -1862,8 +1835,8 @@ fn bx_locale_utf8() -> bool {
   return s_contains(low, "utf-8") || s_contains(low, "utf8");
 }
 
-// Compiler diagnostics are captured, so the compiler never sees a terminal:
-// pass on mbuild's colour decision and whether the terminal shows Unicode.
+// compiler diagnostics are captured, so the compiler never sees a terminal:
+// pass on mbuild's colour decision and whether the terminal shows Unicode
 fn bx_diag_env(c: Cmd*) {
   if (g_color) {
     cmd_env(c, "CLICOLOR_FORCE", "1");
@@ -1881,32 +1854,8 @@ fn bx_diag_env(c: Cmd*) {
   }
 }
 
-// text without ANSI escape sequences (ESC [ ... final byte).
-fn bx_strip_ansi(text: string) -> string {
-  if (s_find_byte(text, 27) < 0) {
-    return text;
-  }
-  var b: Buf* = buf_new();
-  var i: int64 = 0;
-  var n: int64 = slen(text);
-  while (i < n) {
-    var c: int32 = s_byte(text, i);
-    if (c == 27 && i + 1 < n && s_byte(text, i + 1) == 91) {
-      i = i + 2;
-      while (i < n && !(s_byte(text, i) >= 64 && s_byte(text, i) <= 126)) {
-        i = i + 1;
-      }
-      i = i + 1;
-    } else {
-      buf_addb(b, c);
-      i = i + 1;
-    }
-  }
-  return buf_take(b);
-}
-
-// The output of a bin by kind (15.7): <bin><ext>, lib<bin>.so / <bin>.dll,
-// <bin>.o / <bin>.obj, <bin>.bin.
+// the output of a bin by kind: <bin><ext>, lib<bin>.so / <bin>.dll,
+// <bin>.o / <bin>.obj, <bin>.bin
 fn bx_out_name(b: BinInfo*, target: string) -> string {
   if (s_eq(b->kind, "shared")) {
     if (s_eq(target, "windows")) {
@@ -1930,7 +1879,7 @@ fn bx_out_path(t: TargetCtx*, b: BinInfo*) -> string {
   return t->out_dir + "/" + bx_out_name(b, t->target);
 }
 
-// The files a board image writes, by extension: outputs, else bin and elf.
+// the files a board image writes, by extension: outputs, else bin and elf
 fn bx_image_outputs(st: Settings*) -> StrList* {
   if (slen(st->outputs) == 0) {
     var dflt: StrList* = sl_of("bin");
@@ -1940,7 +1889,7 @@ fn bx_image_outputs(st: Settings*) -> StrList* {
   return man_outputs(st->outputs);
 }
 
-// The image file the compiler writes first: the first output that is not elf.
+// the image file the compiler writes first: the first output that is not elf
 fn bx_image_main(st: Settings*) -> string {
   var outs: StrList* = bx_image_outputs(st);
   defer free(outs);
@@ -1995,12 +1944,12 @@ fn bx_copy_beside(nl: NatLink*, t: TargetCtx*) {
   }
 }
 
-// Recorded when a test program (by its compile fingerprint) passed.
+// recorded when a test program (by its compile fingerprint) passed
 fn bx_test_pass_stamp(p: Project*, fp: string) -> string {
   return p->state_dir + "/stamps/test-bin-" + fp;
 }
 
-// One (bin, target) compile.
+// one (bin, target) compile
 struct BxJob {
   elf: string;      // a board image's ELF file, else ""
   extra: StrList*;  // a board image's other flat files (uf2, hex)
@@ -2018,7 +1967,6 @@ struct BxJob {
   pass: string;     // a test program's pass stamp, "" when not cached
 }
 
-// The compiler arguments that make the output of the unit's bin kind.
 fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, j: BxJob*) {
   var b: BinInfo* = u->b;
   var outp: string = j->outp;
@@ -2071,7 +2019,7 @@ fn bx_kind_args(c: Cmd*, p: Project*, u: BxUnit*, j: BxJob*) {
   cmd_path(c, bx_rel(p, outp));
 }
 
-// c writing its flat image to outp instead, without --emit-elf.
+// c writing its flat image to outp instead, without --emit-elf
 fn bx_cmd_reflat(c: Cmd*, outp: string) -> Cmd* {
   var d: Cmd* = cmd_new(c->tool);
   var i: int64 = 0;
@@ -2097,7 +2045,7 @@ fn bx_cmd_reflat(c: Cmd*, outp: string) -> Cmd* {
   return d;
 }
 
-// Every file the job writes is there.
+// every file the job writes is there
 fn bx_job_files(j: BxJob*) -> bool {
   if (!fs_is_file(j->outp) || (slen(j->elf) > 0 && !fs_is_file(j->elf))) {
     return false;
@@ -2112,8 +2060,8 @@ fn bx_job_files(j: BxJob*) -> bool {
   return true;
 }
 
-// Prepares the compile of one unit; a Fresh output is reported and
-// finished here.
+// prepares the compile of one unit; a Fresh output is reported and
+// finished here
 fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   var p: Project* = s->p;
   var b: BinInfo* = u->b;
@@ -2219,7 +2167,7 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   return j;
 }
 
-// After the compiler ran: its output, the stamp. 0 on success.
+// after the compiler ran: its output, the stamp. 0 on success
 fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
   var p: Project* = s->p;
   var b: BinInfo* = j->b;
@@ -2234,9 +2182,9 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
   }
   if (code != 0) {
     if (j->u->ti >= 0) {
-      nat_explain_failure(p, s->ds, t, bx_strip_ansi(output));
+      nat_explain_failure(p, s->ds, t, lv_plain(output));
     }
-    bx_explain_clash(s->ds, j->g, bx_strip_ansi(output));
+    bx_explain_clash(s->ds, j->g, lv_plain(output));
     error_msg("could not compile " + b->name + " (" + t->target + ", " + t->profile + ")");
     return 1;
   }
@@ -2259,7 +2207,7 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
   }
   bx_copy_beside(j->nl, t);
   if (s->tests) {
-    var warns: StrList* = trn_warnings(bx_strip_ansi(output));
+    var warns: StrList* = trn_warnings(lv_plain(output));
     fs_write(j->outp + ".warnings", sl_join(warns, "\n"));
     free(warns);
   }
@@ -2275,7 +2223,7 @@ fn bx_parallel(p: Project*) -> int64 {
   return proc_jobs();
 }
 
-// bx_run_jobs' state for the pool's events.
+// bx_run_jobs' state for the pool's events
 struct BxRun {
   s: BxSess*;
   jobs: BxJob**;
@@ -2286,8 +2234,8 @@ struct BxRun {
   rc: int32;
 }
 
-// A compile starts (code -1) or ends: ended ones are finished in plan order;
-// after a failure no new compile starts.
+// a compile starts (code -1) or ends: ended ones are finished in plan order;
+// after a failure no new compile starts
 fn bx_job_event(arg: rawptr, i: int64, code: int32) -> bool {
   var r: BxRun* = (BxRun*)arg;
   if (code < 0) {
@@ -2313,8 +2261,8 @@ fn bx_job_event(arg: rawptr, i: int64, code: int32) -> bool {
   return r->rc == 0;
 }
 
-// Runs the compiles, at most -j at a time; each compiler's output is printed
-// once it is done, in plan order. After a failure no new compile starts.
+// runs the compiles, at most -j at a time; each compiler's output is printed
+// once it is done, in plan order. after a failure no new compile starts
 fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   var p: Project* = s->p;
   var par: int64 = bx_parallel(p);
@@ -2357,7 +2305,7 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   return r.rc;
 }
 
-// Where bins and test programs are built (coverage builds apart).
+// where bins and test programs are built (coverage builds apart)
 fn bx_bins_dir(p: Project*, target: string, profile: string) -> string {
   if (g_bx_cov) {
     return p->state_dir + "/coverage/" + target + "/" + profile + "/bin";
@@ -2372,7 +2320,6 @@ fn bx_progs_dir(p: Project*, target: string, profile: string) -> string {
   return p->state_dir + "/test-bins/" + target + "/" + profile;
 }
 
-// The stamp name prefix of a session's builds.
 fn bx_stamp_tag(tests: bool) -> string {
   var tag: string = "";
   if (g_bx_cov) {
@@ -2390,7 +2337,7 @@ fn bx_tctx_new(s: BxSess*, target: string, m: Mettle*) -> TargetCtx* {
   if (s->tests) {
     t->out_dir = bx_progs_dir(s->app, target, s->app_profile);
   }
-  // A dependency's bins share the app's native cache: its C builds once.
+  // a dependency's bins share the app's native cache: its C builds once
   t->cache_dir = s->app->state_dir + "/cache/" + target;
   t->app = s->app;
   t->app_profile = s->app_profile;
@@ -2403,8 +2350,8 @@ fn bx_targetctx(s: BxSess*, ti: int64) -> TargetCtx* {
   return bx_tctx_new(s, sl_get(s->targets, ti), s->mettles[ti]);
 }
 
-// The TargetCtx of every session target, then one per freestanding triple
-// (index targets->len + k, in unit order).
+// the TargetCtx of every session target, then one per freestanding triple
+// (index targets->len + k, in unit order)
 fn bx_unit_tctx(s: BxSess*, u: BxUnit*, ctxs: TargetCtx**, nls: NatLink**) -> int64 {
   if (u->ti >= 0) {
     return u->ti;
@@ -2422,7 +2369,7 @@ fn bx_unit_tctx(s: BxSess*, u: BxUnit*, ctxs: TargetCtx**, nls: NatLink**) -> in
   return k;
 }
 
-// C code and C libraries stop a RISC-V build: mbuild has no RISC-V C toolchain.
+// C code and C libraries stop a RISC-V build: mbuild has no RISC-V C toolchain
 fn bx_rv_no_native(s: BxSess*, target: string) {
   var who: string = s_empty();
   if (bx_has_native(s->p->man)) {
@@ -2459,8 +2406,8 @@ fn bx_has_native(m: Manifest*) -> bool {
   return false;
 }
 
-// Builds every unit and the dependencies' bins (mb_dep_bin), then runs the
-// post-build hooks. 0 on success.
+// builds every unit and the dependencies' bins (mb_dep_bin), then runs the
+// post-build hooks. 0 on success
 fn bx_build_units(s: BxSess*, us: BxUnits*) -> int32 {
   var t0: int64 = sys_now_ms();
   bx_prepare(s, us, s_empty());
@@ -2476,8 +2423,8 @@ fn bx_build_units(s: BxSess*, us: BxUnits*) -> int32 {
   return 0;
 }
 
-// Compiles the prepared units (Fresh ones are only reported); built gets
-// "target bin" for each one compiled. 0 on success.
+// compiles the prepared units (Fresh ones are only reported); built gets
+// "target bin" for each one compiled. 0 on success
 fn bx_compile_units(s: BxSess*, us: BxUnits*, built: StrList*) -> int32 {
   var nt: int64 = s->targets->len + us->n + 1;
   var ctxs: TargetCtx** = (TargetCtx**)malloc(nt * 8);
@@ -2532,12 +2479,10 @@ fn bx_compile_units(s: BxSess*, us: BxUnits*, built: StrList*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Dependency bins (mb_dep_bin)
-// ---------------------------------------------------------------------------
+// dependency bins (mb_dep_bin)
 
-// The dependency as a project of its own: its directory and manifest, its
-// state under .mbuild/dep-bins/NAME, no hooks.
+// the dependency as a project of its own: its directory and manifest, its
+// state under .mbuild/dep-bins/NAME, no hooks
 fn bx_dep_project(p: Project*, dm: DepModule*) -> Project* {
   var q: Project* = new Project;
   q->opts = p->opts;
@@ -2553,8 +2498,8 @@ fn bx_dep_project(p: Project*, dm: DepModule*) -> Project* {
   return q;
 }
 
-// The profile a dependency builds with: the project's, else the nearest
-// ancestor it knows (debug or release at the latest).
+// the profile a dependency builds with: the project's, else the nearest
+// ancestor it knows (debug or release at the latest)
 fn bx_dep_profile(p: Project*, q: Project*, prof: string) -> string {
   var chain: StrList* = bx_profile_chain(p->man, prof);
   var i: int64 = 0;
@@ -2570,7 +2515,7 @@ fn bx_dep_profile(p: Project*, q: Project*, prof: string) -> string {
   return "debug";
 }
 
-// The bins of dep the project names, checked against the dependency's bins.
+// the bins of dep the project names, checked against the dependency's bins
 fn bx_dep_binset(s: BxSess*, q: Project*, dep: string) -> BinSet* {
   var all: BinSet* = build_bins(q);
   var known: StrList* = bx_bin_names(all);
@@ -2602,15 +2547,15 @@ fn bx_dep_binset(s: BxSess*, q: Project*, dep: string) -> BinSet* {
   return bx_select_from(q, all, names);
 }
 
-// One dependency's bins to build: its session and units.
+// one dependency's bins to build: its session and units
 struct BxDepBins {
   s: BxSess*;
   us: BxUnits*;
 }
 
-// The bins mb_dep_bin names, checked and prepared for the session's targets:
+// the bins mb_dep_bin names, checked and prepared for the session's targets:
 // each dependency as a project with its own manifest, building into this
-// project's output directories. Ends with a zero entry.
+// project's output directories. ends with a zero entry
 fn bx_dep_bins_prepare(s: BxSess*) -> BxDepBins* {
   var p: Project* = s->p;
   var deps: StrList* = sl_new();
@@ -2677,9 +2622,7 @@ fn bx_build_all(s: BxSess*, bs: BinSet*) -> int32 {
   return bx_build_units(s, bx_bin_units(s, bs));
 }
 
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
+// commands
 
 export fn build_cmd_build(p: Project*) -> int32 {
   var lib: BinSet* = bx_lib_set(p);
@@ -2699,13 +2642,13 @@ fn bx_runnable(b: BinInfo*) -> bool {
   return (s_eq(b->kind, "exe") && !bx_freestanding(b)) || bx_rv_image_bin(b);
 }
 
-// A bin declared as a RISC-V board image (its own riscv*-none triple).
+// a bin declared as a RISC-V board image (its own riscv*-none triple)
 fn bx_rv_image_bin(b: BinInfo*) -> bool {
   return target_is_bare(b->triple) && (s_eq(b->kind, "exe") || s_eq(b->kind, "flat"));
 }
 
-// The one bin `run` / `live` starts: named, the only runnable one, or the
-// one named after the package.
+// the one bin `run` / `live` starts: named, the only runnable one, or the
+// one named after the package
 fn bx_run_bin(p: Project*, cmd: string) -> BinSet* {
   var names: StrList* = bx_positional(p->opts->rest);
   defer free(names);
@@ -2752,7 +2695,7 @@ fn bx_run_bin(p: Project*, cmd: string) -> BinSet* {
   return bs;
 }
 
-// One target for `run`: -t, else the host when [build] targets has it.
+// one target for `run`: -t, else the host when [build] targets has it
 fn bx_run_targets(p: Project*) -> StrList* {
   var targets: StrList* = build_targets(p);
   if (targets->len > 1) {
@@ -2880,7 +2823,7 @@ export fn build_cmd_run(p: Project*) -> int32 {
 
 // mbuild pgo [collect] [BIN]: build counting (--pgo-gen), run it to record
 // the profile, then build with it (--pgo-use); collect stops after the run.
-// Both builds use one profile (release unless -p), so the blocks match.
+// both builds use one profile (release unless -p), so the blocks match
 export fn build_cmd_pgo(p: Project*) -> int32 {
   var rest: StrList* = sl_new();
   var collect: bool = false;
@@ -2917,7 +2860,7 @@ export fn build_cmd_pgo(p: Project*) -> int32 {
 }
 
 // mbuild flash [BIN]: the bin's UF2 image, built and copied to the board's
-// drive (an RP2350 in BOOTSEL mode mounts as a drive named RP2350).
+// drive (an RP2350 in BOOTSEL mode mounts as a drive named RP2350)
 export fn build_cmd_flash(p: Project*) -> int32 {
   var bs: BinSet* = bx_run_bin(p, "flash");
   var b: BinInfo* = &bs->items[0];
@@ -2961,8 +2904,8 @@ export fn build_cmd_flash(p: Project*) -> int32 {
   return 0;
 }
 
-// The board target `flash` builds: the bin's own triple, one -t, else the
-// first board target of mb_targets, else riscv32-none.
+// the board target `flash` builds: the bin's own triple, one -t, else the
+// first board target of mb_targets, else riscv32-none
 fn bx_flash_target(p: Project*, b: BinInfo*) -> string {
   if (bx_rv_image_bin(b)) {
     return b->triple;
@@ -2993,9 +2936,9 @@ fn bx_flash_target(p: Project*, b: BinInfo*) -> string {
   return "riscv32-none";
 }
 
-// The mounted RP2350 drive: MBUILD_FLASH_DIR, else a directory named
+// the mounted RP2350 drive: MBUILD_FLASH_DIR, else a directory named
 // RP2350 (or whose INFO_UF2.TXT names it) under /run/media/$USER,
-// /media/$USER or /mnt. Fails when there's none.
+// /media/$USER or /mnt. fails when there's none
 fn bx_flash_drive() -> string {
   var given: string = env_get("MBUILD_FLASH_DIR");
   var looked: string = s_empty();
@@ -3043,7 +2986,7 @@ fn bx_flash_drive() -> string {
   return s_empty();
 }
 
-// The target a bin runs as: its own riscv*-none triple, else the session's.
+// the target a bin runs as: its own riscv*-none triple, else the session's
 fn bx_run_target(b: BinInfo*, t: TargetCtx*) -> string {
   if (bx_rv_image_bin(b)) {
     return b->triple;
@@ -3051,7 +2994,7 @@ fn bx_run_target(b: BinInfo*, t: TargetCtx*) -> string {
   return t->target;
 }
 
-// --timeout SECS in ms; else 30 s for a program under an emulator, else 0 (none).
+// --timeout SECS in ms; else 30 s for a program under an emulator, else 0 (none)
 fn bx_timeout_ms(p: Project*, emulated: bool) -> int64 {
   var i: int64 = 0;
   while (i < p->opts->rest->len) {
@@ -3072,8 +3015,8 @@ fn bx_timeout_ms(p: Project*, emulated: bool) -> int64 {
   return 0;
 }
 
-// The emulator command of a RISC-V bin, else 0 (it runs natively or through
-// wine). *outp becomes the file the emulator loads.
+// the emulator command of a RISC-V bin, else 0 (it runs natively or through
+// wine). *outp becomes the file the emulator loads
 fn bx_emu_cmd(s: BxSess*, b: BinInfo*, t: TargetCtx*, outp: string*) -> Cmd* {
   var target: string = bx_run_target(b, t);
   if (!target_is_riscv(target)) {
@@ -3101,7 +3044,7 @@ fn bx_emu_cmd(s: BxSess*, b: BinInfo*, t: TargetCtx*, outp: string*) -> Cmd* {
 }
 
 // mbuild live [BIN] [-p PROFILE] [-- args]: `mettle live` with the build's
-// setup, host target only (15.4).
+// setup, host target only
 export fn build_cmd_live(p: Project*) -> int32 {
   var bs: BinSet* = bx_run_bin(p, "live");
   var lv: LiveSess* = lv_open(p, bs->items[0].name);
@@ -3125,7 +3068,7 @@ export fn build_cmd_live(p: Project*) -> int32 {
   var outp: string = t->out_dir + "/" + u->b->name + target_exe_ext(t->target);
   if (bx_has_hook(p, "post_build")) {
     // `mettle live` builds and starts in one step: build first so the hook
-    // runs between (it then builds again, unchanged).
+    // runs between (it then builds again, unchanged)
     var fc: Cmd* = bx_live_cmd(s, u, nl, outp, true);
     defer free(fc);
     var fr: Captured = proc_capture_all(fc);
@@ -3153,7 +3096,7 @@ export fn build_cmd_live(p: Project*) -> int32 {
   return lv_run(lv, c);
 }
 
-// The command of `mettle live`, or (first) of the build it starts with.
+// the command of `mettle live`, or (first) of the build it starts with
 fn bx_live_cmd(s: BxSess*, u: BxUnit*, nl: NatLink*, outp: string, first: bool) -> Cmd* {
   var p: Project* = s->p;
   var c: Cmd* = tc_cmd(u->m);
@@ -3180,8 +3123,8 @@ fn bx_live_cmd(s: BxSess*, u: BxUnit*, nl: NatLink*, outp: string, first: bool) 
   return c;
 }
 
-// What `mbuild shell` needs of the bin's build: its compiler with the
-// build's flags and -I (no input, no -o), and the project files it is made of.
+// what `mbuild shell` needs of the bin's build: its compiler with the
+// build's flags and -I (no input, no -o), and the project files it is made of
 export struct ShellBuild {
   p: Project*;
   m: Mettle*;
@@ -3298,7 +3241,6 @@ fn bx_walk_owned(root: string, rel: string, skip: StrList*, found: StrList*) {
   free(dirs);
 }
 
-// Absolute directories of the root's local path packages.
 fn bx_path_pkg_dirs(p: Project*) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -3312,9 +3254,9 @@ fn bx_path_pkg_dirs(p: Project*) -> StrList* {
   return l;
 }
 
-// The project's own .mettle files, relative to the root and sorted: not in
+// the project's own .mettle files, relative to the root and sorted: not in
 // dot directories, build/ directories, nested projects (a directory with its
-// own mbuild.mettle) or local path packages.
+// own mbuild.mettle) or local path packages
 fn bx_owned_files(p: Project*) -> StrList* {
   var found: StrList* = sl_new();
   var skip: StrList* = bx_path_pkg_dirs(p);
@@ -3324,8 +3266,8 @@ fn bx_owned_files(p: Project*) -> StrList* {
   return found;
 }
 
-// Test programs: mb_test_bin, else tests/<name>_test.mettle files with fn
-// main; then every main file an mb_test_glob matches, named by its stem.
+// test programs: mb_test_bin, else tests/<name>_test.mettle files with fn
+// main; then every main file an mb_test_glob matches, named by its stem
 fn bx_test_bins(p: Project*) -> BinSet* {
   var bs: BinSet* = bx_test_bins_declared(p);
   if (p->man->test_globs->len == 0) {
@@ -3405,7 +3347,7 @@ fn bx_test_bins_declared(p: Project*) -> BinSet* {
   return bs;
 }
 
-// Files with @test functions, but the main files of test programs.
+// files with @test functions, but the main files of test programs
 fn bx_test_files(p: Project*, progs: BinSet*, files: StrList*) {
   var all: StrList* = bx_owned_files(p);
   defer free(all);
@@ -3421,7 +3363,7 @@ fn bx_test_files(p: Project*, progs: BinSet*, files: StrList*) {
   }
 }
 
-// The bin whose main file is `file`, 0 when none.
+// the bin whose main file is `file`, 0 when none
 fn bx_bin_of_entry(bs: BinSet*, file: string) -> BinInfo* {
   var i: int64 = 0;
   while (i < bs->n) {
@@ -3433,7 +3375,7 @@ fn bx_bin_of_entry(bs: BinSet*, file: string) -> BinInfo* {
   return (BinInfo*)0;
 }
 
-// c without the flags in names (space-separated) and their values.
+// c without the flags in names (space-separated) and their values
 fn bx_drop_valued(c: Cmd*, names: string) {
   var drop: StrList* = s_split(names, 32);
   defer free(drop);
@@ -3455,9 +3397,9 @@ fn bx_drop_valued(c: Cmd*, names: string) {
   free(kinds);
 }
 
-// A pico2 program never exits: a test program passes when its console
-// prints exit-on-uart (default PASS), which stops rvsim. That string, after
-// adding it and a 10 s until-ms when unset to c; "" for other targets.
+// a pico2 program never exits: a test program passes when its console
+// prints exit-on-uart (default PASS), which stops rvsim. that string, after
+// adding it and a 10 s until-ms when unset to c; "" for other targets
 fn bx_console_pass(s: BxSess*, b: BinInfo*, t: TargetCtx*, c: Cmd*) -> string {
   var target: string = bx_run_target(b, t);
   if (!target_is_bare(target)) {
@@ -3489,64 +3431,8 @@ fn bx_no_test_bins(p: Project*) -> BinSet* {
   return none;
 }
 
-// The test programs whose names contain s ("" = all).
-fn bx_filter_bins(p: Project*, all: BinSet*, s: string) -> BinSet* {
-  var names: StrList* = sl_new();
-  defer free(names);
-  var i: int64 = 0;
-  while (i < all->n) {
-    if (slen(s) == 0 || s_contains(all->items[i].name, s)) {
-      sl_push(names, all->items[i].name);
-    }
-    i = i + 1;
-  }
-  if (names->len == all->n) {
-    return all;
-  }
-  if (names->len == 0) {
-    return bx_no_test_bins(p);
-  }
-  return bx_select_from(p, all, names);
-}
-
-// The default set without what mb_test_exclude names (programs by name,
-// @test files by their path from the root).
-fn bx_drop_excluded(p: Project*, progs: BinSet*, files: StrList*) -> BinSet* {
-  var ex: StrList* = p->man->test_exclude;
-  if (ex->len == 0) {
-    return progs;
-  }
-  var keep: StrList* = sl_new();
-  defer free(keep);
-  var i: int64 = 0;
-  while (i < files->len) {
-    if (!sl_has(ex, p_rel(p->root, sl_get(files, i)))) {
-      sl_push(keep, sl_get(files, i));
-    }
-    i = i + 1;
-  }
-  files->len = 0;
-  sl_extend(files, keep);
-  var names: StrList* = sl_new();
-  defer free(names);
-  i = 0;
-  while (i < progs->n) {
-    if (!sl_has(ex, progs->items[i].name)) {
-      sl_push(names, progs->items[i].name);
-    }
-    i = i + 1;
-  }
-  if (names->len == progs->n) {
-    return progs;
-  }
-  if (names->len == 0) {
-    return bx_no_test_bins(p);
-  }
-  return bx_select_from(p, progs, names);
-}
-
-// The matrix: -t, else mb_test_targets, else the host; all and host
-// expanded, TARGET:BOARD kept.
+// the matrix: -t, else mb_test_targets, else the host; all and host
+// expanded, TARGET:BOARD kept
 fn bx_mx_entries(p: Project*) -> StrList* {
   var src: StrList* = p->opts->targets;
   if (src->len == 0) {
@@ -3573,9 +3459,7 @@ fn bx_mx_entries(p: Project*) -> StrList* {
   return l;
 }
 
-// ---------------------------------------------------------------------------
-// mbuild test (16.1): a plan of tests x cells x repeats, run by trn_exec
-// ---------------------------------------------------------------------------
+// mbuild test: a plan of tests x cells x repeats, run by trn_exec
 
 const BT_FILE: int32 = 0;   // an @test file, in the interpreter
 const BT_PROG: int32 = 1;   // a test program
@@ -3594,14 +3478,13 @@ struct BtTest {
   ended: int64;
   printed: bool;
   hold: bool;         // printed later: native runs, cross-cell check, bless
-  native: string;     // its native setting
+  native: string;
   golden: string;     // its golden setting: files, files,stdout, off
   gdir: string;       // its golden directory, absolute, and as shown
   gshown: string;
   keep_first: bool;   // each cell's first run is kept for the cross check or bless
 }
 
-// One (test, cell).
 struct BtCell {
   t: int64;
   spec: string;       // "linux/debug", "riscv32-none:pico2/release"
@@ -3649,7 +3532,7 @@ struct BtPlan {
   cov_out: string;    // where the annotated report goes
 }
 
-// Names a cached test program's pass stamp includes: "name\tkey" (0 = no cache).
+// names a cached test program's pass stamp includes: "name\tkey" (0 = no cache)
 var g_bt_keys: StrList* = (StrList*)0;
 var g_bt_plan: BtPlan* = (BtPlan*)0;
 
@@ -3665,7 +3548,7 @@ fn bt_rest_value(p: Project*, flag: string) -> string {
   return s_empty();
 }
 
-// A test's setting with the command line's overrides.
+// a test's setting with the command line's overrides
 fn bt_get(p: Project*, name: string, key: string) -> string {
   if (s_eq(key, "warnings") && sl_has(p->opts->rest, "--deny-warnings")) {
     return "error";
@@ -3679,7 +3562,7 @@ fn bt_get(p: Project*, name: string, key: string) -> string {
   return man_test_get(p->man, name, key);
 }
 
-// Every setting of the test and its environment, for its pass stamp.
+// every setting of the test and its environment, for its pass stamp
 fn bt_settings_key(p: Project*, name: string) -> string {
   var h: Hasher = h_new();
   h_str(&h, "mbuild-test-v4");
@@ -3697,7 +3580,6 @@ fn bt_settings_key(p: Project*, name: string) -> string {
   return h_hex(&h);
 }
 
-// A test's golden directory, from the root.
 fn bt_golden_dir(p: Project*, name: string) -> string {
   var d: string = bt_get(p, name, "golden-dir");
   if (slen(d) == 0) {
@@ -3706,9 +3588,9 @@ fn bt_golden_dir(p: Project*, name: string) -> string {
   return d;
 }
 
-// The cells of a test: --matrix=CSV, else -r / -p, else its matrix
+// the cells of a test: --matrix=CSV, else -r / -p, else its matrix
 // setting; a cell without a target runs on each default target (-t, else
-// mb_test_targets, else the host).
+// mb_test_targets, else the host)
 fn bt_cells_of(p: Project*, name: string, dflt_targets: StrList*) -> StrList* {
   var spec: string = bt_rest_value(p, "--matrix");
   if (slen(spec) == 0 && p->opts->release) {
@@ -3765,8 +3647,8 @@ fn bt_add_test(pl: BtPlan*, name: string, kind: int32) -> BtTest* {
   return t;
 }
 
-// The tests to run: the names given (test programs, command tests, @test
-// files), else every test but the excluded ones, --filter applied.
+// the tests to run: the names given (test programs, command tests, @test
+// files), else every test but the excluded ones, --filter applied
 fn bt_select(pl: BtPlan*) {
   var p: Project* = pl->p;
   var progs: BinSet* = bx_test_bins(p);
@@ -3887,7 +3769,7 @@ fn bt_add_cell(pl: BtPlan*, t: int64, spec: string) {
   pl->ncells = pl->ncells + 1;
 }
 
-// Why the cell's target cannot run a test program here, "" when it can.
+// why the cell's target cannot run a test program here, "" when it can
 fn bt_cannot_run(p: Project*, target: string, prog: string) -> string {
   if (target_is_riscv(target)) {
     var q: SettingsQuery* = new SettingsQuery;
@@ -3912,7 +3794,7 @@ fn bt_cannot_run(p: Project*, target: string, prog: string) -> string {
   return s_empty();
 }
 
-// The interpreter command of an @test file in the cell's session.
+// the interpreter command of an @test file in the cell's session
 fn bt_file_cell(s: BxSess*, u: BxUnit*, c: BtCell*, name: string) {
   var p: Project* = s->p;
   bx_unit_cmp(s, u, "test-" + bx_safe_name(name));
@@ -3940,8 +3822,8 @@ fn bt_file_cell(s: BxSess*, u: BxUnit*, c: BtCell*, name: string) {
   c->cmd = cmd;
 }
 
-// A command test's words: the first resolved against the cell's test
-// programs and bins (out dirs), then a path or PATH.
+// a command test's words: the first resolved against the cell's test
+// programs and bins (out dirs), then a path or PATH
 fn bt_cmd_cell(p: Project*, c: BtCell*, cmdline: string, progs_dir: string, bins_dir: string, progs: StrList*, bins: StrList*) {
   var w: SvcWords = svc_split(cmdline);
   if (!w.ok || w.words->len == 0) {
@@ -3973,8 +3855,8 @@ fn bt_cmd_cell(p: Project*, c: BtCell*, cmdline: string, progs_dir: string, bins
   c->cmd = cmd;
 }
 
-// The prefix of a test program's pass stamp, so bx_plan can skip one that
-// passed with the same build and settings ("" = no cache).
+// the prefix of a test program's pass stamp, so bx_plan can skip one that
+// passed with the same build and settings ("" = no cache)
 fn bt_key_of(name: string) -> string {
   if (g_bt_keys == (StrList*)0) {
     return s_empty();
@@ -3991,7 +3873,7 @@ fn bt_key_of(name: string) -> string {
   return s_empty();
 }
 
-// Builds what the cells with this spec need and sets their commands.
+// builds what the cells with this spec need and sets their commands
 fn bt_spec(pl: BtPlan*, spec: string) {
   var p: Project* = pl->p;
   var mine: StrList* = sl_new();      // indexes of the cells, as text
@@ -4158,8 +4040,8 @@ fn bt_spec(pl: BtPlan*, spec: string) {
   p->opts->release = saved_rel;
 }
 
-// The first word of cmdline into progs or bins when it names a test program
-// or a bin of this project or of mb_dep_bin.
+// the first word of cmdline into progs or bins when it names a test program
+// or a bin of this project or of mb_dep_bin
 fn bt_first_word(cmdline: string, all_progs: StrList*, proj_bins: StrList*, dep_bins: StrList*, progs: StrList*, bins: StrList*) {
   var w: SvcWords = svc_split(cmdline);
   if (w.ok && w.words->len > 0) {
@@ -4173,7 +4055,7 @@ fn bt_first_word(cmdline: string, all_progs: StrList*, proj_bins: StrList*, dep_
   free(w.words);
 }
 
-// The unit of an @test file cell, by its place in fcells.
+// the unit of an @test file cell, by its place in fcells
 fn bt_unit_at(fcells: StrList*, pl: BtPlan*, c: BtCell*) -> int64 {
   var i: int64 = 0;
   while (i < fcells->len) {
@@ -4220,7 +4102,7 @@ fn bt_pre_all(pl: BtPlan*, mine: StrList*, why: string) {
   }
 }
 
-// A cell's pass stamp, and whether it holds.
+// a cell's pass stamp, and whether it holds
 fn bt_cache(pl: BtPlan*, c: BtCell*) {
   if (pl->nocache || pl->tests[c->t]->kind == BT_CMD || slen(c->fp) == 0) {
     return;
@@ -4229,7 +4111,7 @@ fn bt_cache(pl: BtPlan*, c: BtCell*) {
   c->cached = bx_stamp_ok(pl->p, c->stamp, c->fp);
 }
 
-// A test program's cell: compiled, warnings allowed, its command.
+// a test program's cell: compiled, warnings allowed, its command
 fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
   var p: Project* = pl->p;
   var u: BxUnit* = bt_unit_of(us, t->name);
@@ -4265,8 +4147,8 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
   c->cmd = cmd;
 }
 
-// The per-run timeout: --timeout, else the test's setting, else 30 s
-// under an emulator, else 600 s.
+// the per-run timeout: --timeout, else the test's setting, else 30 s
+// under an emulator, else 600 s
 fn bt_timeout_ms(p: Project*, name: string, emulated: bool) -> int64 {
   var cli: string = bt_rest_value(p, "--timeout");
   if (slen(cli) > 0) {
@@ -4283,7 +4165,6 @@ fn bt_run_dir(p: Project*, c: BtCell*, name: string, k: int64) -> string {
   return p->state_dir + "/test-run/" + cell + "/" + bx_safe_name(name) + "/" + s_int(k);
 }
 
-// The runs of every cell that runs.
 fn bt_runs(pl: BtPlan*) {
   var p: Project* = pl->p;
   var i: int64 = 0;
@@ -4339,7 +4220,6 @@ fn bt_runs(pl: BtPlan*) {
   }
 }
 
-// The services a test names.
 fn bt_svc_names(p: Project*, name: string) -> StrList* {
   var l: StrList* = sl_new();
   var parts: StrList* = s_split(bt_get(p, name, "services"), 44);
@@ -4355,8 +4235,8 @@ fn bt_svc_names(p: Project*, name: string) -> StrList* {
   return l;
 }
 
-// A run's fixtures: ports (auto ones from the pool, into vars), words
-// expanded, programs resolved in the cell, cwd the run's tmp/.
+// a run's fixtures: ports (auto ones from the pool, into vars), words
+// expanded, programs resolved in the cell, cwd the run's tmp/
 fn bt_fixtures(p: Project*, c: BtCell*, r: TrnRun*, svs: StrList*, vars: StrList*) {
   var m: Manifest* = p->man;
   var ports: StrList* = svc_ports_for(p, m, svs, vars);
@@ -4427,7 +4307,7 @@ fn bt_is_dep_bin(m: Manifest*, name: string) -> bool {
   return false;
 }
 
-// Why a run failed, "" when it passed; its checks.
+// why a run failed, "" when it passed; its checks
 fn bt_judge(pl: BtPlan*, r: TrnRun*, checks: int64*) -> string {
   var p: Project* = pl->p;
   var t: BtTest* = pl->tests[r->test];
@@ -4457,8 +4337,8 @@ fn bt_judge(pl: BtPlan*, r: TrnRun*, checks: int64*) -> string {
   return why;
 }
 
-// The cells of a test as its line shows them: profiles alone when every
-// cell is on the host.
+// the cells of a test as its line shows them: profiles alone when every
+// cell is on the host
 fn bt_cells_label(pl: BtPlan*, t: BtTest*) -> string {
   var host: bool = true;
   var k: int64 = 0;
@@ -4563,7 +4443,7 @@ fn bt_print(pl: BtPlan*, t: BtTest*) {
   bt_print_skips(pl, t, skipped);
 }
 
-// "    riscv64-linux/debug skipped: why" under a test that ran elsewhere.
+// "    riscv64-linux/debug skipped: why" under a test that ran elsewhere
 fn bt_print_skips(pl: BtPlan*, t: BtTest*, skipped: int64) {
   if (skipped == 0 || skipped == t->nc) {
     return;
@@ -4578,7 +4458,7 @@ fn bt_print_skips(pl: BtPlan*, t: BtTest*, skipped: int64) {
   }
 }
 
-// Prints the tests whose runs all ended, in plan order.
+// prints the tests whose runs all ended, in plan order
 fn bt_print_ready(pl: BtPlan*) {
   while (pl->next_print < pl->nt) {
     var t: BtTest* = pl->tests[pl->next_print];
@@ -4633,7 +4513,7 @@ fn bt_ended(arg: rawptr, i: int64) -> bool {
   return true;
 }
 
-// Each failed cell once: why, the end of its output, the kept directory.
+// each failed cell once: why, the end of its output, the kept directory
 fn bt_failures(pl: BtPlan*) {
   var p: Project* = pl->p;
   var n: int64 = 0;
@@ -4684,7 +4564,6 @@ fn bt_failures(pl: BtPlan*) {
   flush_out();
 }
 
-// Stamps the cells that passed and could be cached.
 fn bt_stamp(pl: BtPlan*) {
   var i: int64 = 0;
   while (i < pl->ncells) {
@@ -4700,7 +4579,7 @@ fn bt_stamp(pl: BtPlan*) {
   }
 }
 
-// Outputs of tests that are gone: test-bins files and stamps, run dirs.
+// outputs of tests that are gone: test-bins files and stamps, run dirs
 fn bt_clean_stale(p: Project*) {
   var names: StrList* = bx_bin_names(bx_test_bins(p));
   defer free(names);
@@ -4815,11 +4694,8 @@ fn bt_clean_stale(p: Project*) {
   }
 }
 
-
-// ---------------------------------------------------------------------------
 // @test files natively (testnative): what the interpreter skipped, or every
 // test with native=always, as a program per file and cell
-// ---------------------------------------------------------------------------
 
 fn bt_native_name(rel: string) -> string {
   var stem: string = rel;
@@ -4829,8 +4705,8 @@ fn bt_native_name(rel: string) -> string {
   return bx_safe_name(stem) + "__mbt";
 }
 
-// The tests a file cell runs natively: "name\t1" entries, none when it
-// needs no native run.
+// the tests a file cell runs natively: "name\t1" entries, none when it
+// needs no native run
 fn bt_native_tests(pl: BtPlan*, c: BtCell*, text: string) -> StrList* {
   var t: BtTest* = pl->tests[c->t];
   var all: StrList* = tnv_tests(text);
@@ -4867,7 +4743,7 @@ fn bt_native_tests(pl: BtPlan*, c: BtCell*, text: string) -> StrList* {
   return picked;
 }
 
-// Writes the copies of one spec's file cells, builds them, adds their runs.
+// writes the copies of one spec's file cells, builds them, adds their runs
 fn bt_native_spec(pl: BtPlan*, spec: string) {
   var p: Project* = pl->p;
   var cells: StrList* = sl_new();
@@ -4988,7 +4864,7 @@ fn bt_native_spec(pl: BtPlan*, spec: string) {
   p->opts->release = saved_rel;
 }
 
-// After the interpreter's runs: the native ones. trn_exec's code.
+// after the interpreter's runs: the native ones. trn_exec's code
 fn bt_native(pl: BtPlan*) -> int32 {
   var from: int64 = pl->nr;
   var specs: StrList* = sl_new();
@@ -5020,7 +4896,7 @@ fn bt_native(pl: BtPlan*) -> int32 {
   return trn_exec(&pl->runs[from], pl->nr - from, bx_parallel(pl->p), (rawptr)pl, &bt_ended);
 }
 
-// The first run of cell ci (not a native one), 0 when it did not run.
+// the first run of cell ci (not a native one), 0 when it did not run
 fn bt_first_run(pl: BtPlan*, ci: int64) -> TrnRun* {
   var i: int64 = 0;
   while (i < pl->nr) {
@@ -5033,7 +4909,7 @@ fn bt_first_run(pl: BtPlan*, ci: int64) -> TrnRun* {
   return (TrnRun*)0;
 }
 
-// Whether every cell of t that ran passed.
+// whether every cell of t that ran passed
 fn bt_all_passed(pl: BtPlan*, t: BtTest*) -> bool {
   var k: int64 = 0;
   while (k < t->nc) {
@@ -5047,7 +4923,7 @@ fn bt_all_passed(pl: BtPlan*, t: BtTest*) -> bool {
 }
 
 // golden-cross: once every cell passed, each cell's outputs byte-identical
-// to the first cell's.
+// to the first cell's
 fn bt_cross(pl: BtPlan*) {
   var i: int64 = 0;
   while (i < pl->nt) {
@@ -5081,7 +4957,7 @@ fn bt_cross(pl: BtPlan*) {
   }
 }
 
-// --bless: each test that passed gets its first cell's outputs as goldens.
+// --bless: each test that passed gets its first cell's outputs as goldens
 fn bt_bless(pl: BtPlan*) {
   if (!pl->bless) {
     return;
@@ -5105,15 +4981,15 @@ fn bt_bless(pl: BtPlan*) {
   }
 }
 
-// --coverage: each run writes its own profile into its directory.
+// --coverage: each run writes its own profile into its directory
 fn bt_cov_env(r: TrnRun*) {
   if (g_bx_cov) {
     sl_push(r->cmd->env, "METTLE_PROFILE_OUT=" + r->dir + "/cov.mprof");
   }
 }
 
-// One program's profile, joined with its build's annot.json when bin is
-// one of ours.
+// one program's profile, joined with its build's annot.json when bin is
+// one of ours
 fn bt_cov_merge(c: Cov*, prof: string, bin: string, what: string) {
   var stem: string = bin;
   if (s_ends(stem, ".exe")) {
@@ -5129,7 +5005,7 @@ fn bt_cov_merge(c: Cov*, prof: string, bin: string, what: string) {
   }
 }
 
-// A run that ended: its profiles (the test's, its services'), merged.
+// a run that ended: its profiles (the test's, its services'), merged
 fn bt_cov_run(pl: BtPlan*, r: TrnRun*) {
   var c: Cov* = pl->cov;
   r->err = cov_strip_report(r->err);
@@ -5151,8 +5027,8 @@ fn bt_cov_run(pl: BtPlan*, r: TrnRun*) {
   }
 }
 
-// The project's own files, for --coverage: no tests, examples, cmd/ or
-// dependencies.
+// the project's own files, for --coverage: no tests, examples, cmd/ or
+// dependencies
 fn bt_cov_files(p: Project*, c: Cov*) {
   var all: StrList* = bx_owned_files(p);
   defer free(all);
@@ -5170,8 +5046,8 @@ fn bt_cov_files(p: Project*, c: Cov*) {
   }
 }
 
-// The coverage table and the annotated report; why coverage-min fails (""
-// when it holds).
+// the coverage table and the annotated report; why coverage-min fails (""
+// when it holds)
 fn bt_cov_report(pl: BtPlan*) -> string {
   var p: Project* = pl->p;
   var c: Cov* = pl->cov;
@@ -5217,7 +5093,7 @@ fn bt_cov_report(pl: BtPlan*) -> string {
 }
 
 // mbuild test [NAME | FILE]...: every test in every cell of its matrix,
-// repeated, in parallel; a line per test, the failures, one result.
+// repeated, in parallel; a line per test, the failures, one result
 export fn build_cmd_test(p: Project*) -> int32 {
   var t0: int64 = sys_now_ms();
   bx_timeout_ms(p, false);
@@ -5450,7 +5326,7 @@ export fn build_cmd_check(p: Project*) -> int32 {
 }
 
 // --target and the output of a compile only checked: an object, or for a
-// board target the flat image it can only write.
+// board target the flat image it can only write
 fn bx_scratch_out(c: Cmd*, p: Project*, u: BxUnit*, out: string) {
   if (u->ti < 0 || target_is_riscv(u->target)) {
     cmd_arg(c, "--target");
@@ -5464,7 +5340,7 @@ fn bx_scratch_out(c: Cmd*, p: Project*, u: BxUnit*, out: string) {
   cmd_path(c, bx_rel(p, out));
 }
 
-// The compiler's check of u's entry: an object at obj (to be deleted).
+// the compiler's check of u's entry: an object at obj (to be deleted)
 fn bx_check_cmd(s: BxSess*, u: BxUnit*, obj: string) -> Cmd* {
   var p: Project* = s->p;
   var c: Cmd* = tc_cmd(u->m);
@@ -5478,7 +5354,7 @@ fn bx_check_cmd(s: BxSess*, u: BxUnit*, obj: string) -> Cmd* {
   return c;
 }
 
-// Compiles each entry in bs to an object (deleted afterwards).
+// compiles each entry in bs to an object (deleted afterwards)
 fn bx_check_set(p: Project*, bs: BinSet*) -> int32 {
   var t0: int64 = sys_now_ms();
   var s: BxSess* = bx_sess(p, build_targets(p));
@@ -5502,7 +5378,7 @@ fn bx_check_set(p: Project*, bs: BinSet*) -> int32 {
     sys_remove_file(obj + ".o");
     sys_remove_file(obj + ".obj");
     if (cap.code != 0) {
-      bx_explain_clash(s->ds, u->g, bx_strip_ansi(cap.out));
+      bx_explain_clash(s->ds, u->g, lv_plain(cap.out));
       error_msg("`" + b->name + "` (" + u->target + ") has errors");
       bad = 1;
     }
@@ -5538,8 +5414,8 @@ export fn build_cmd_clean(p: Project*) -> int32 {
   return 0;
 }
 
-// The value of a `--name=VALUE` command flag in rest (the last one), taken
-// out of rest; "" when absent.
+// the value of a `--name=VALUE` command flag in rest (the last one), taken
+// out of rest; "" when absent
 fn bx_take_opt(p: Project*, name: string) -> string {
   var v: string = s_empty();
   var l: StrList* = bx_take_opts(p, name);
@@ -5550,7 +5426,7 @@ fn bx_take_opt(p: Project*, name: string) -> string {
   return v;
 }
 
-// Every value of a repeatable `--name=VALUE` command flag, in order.
+// every value of a repeatable `--name=VALUE` command flag, in order
 fn bx_take_opts(p: Project*, name: string) -> StrList* {
   var vals: StrList* = sl_new();
   var pre: string = name + "=";
@@ -5567,8 +5443,8 @@ fn bx_take_opts(p: Project*, name: string) -> StrList* {
   return vals;
 }
 
-// The skeleton of 13.10 in dir: mbuild.mettle, src/main.mettle (unless a
-// main file exists) and the .gitignore lines.
+// the skeleton in dir: mbuild.mettle, src/main.mettle (unless a
+// main file exists) and the .gitignore lines
 fn bx_init_files(dir: string, name: string, dry: bool) {
   var verb: string = "Created";
   var upd: string = "Updated";
@@ -5640,7 +5516,7 @@ fn bx_check_pkg_name(name: string) {
   }
 }
 
-// mbuild init [NAME] [--package] | init --from PKG[@V]: in the working directory.
+// mbuild init [NAME] [--package] | init --from PKG[@V]: in the working directory
 export fn build_cmd_init(opts: Options*) -> int32 {
   var dir: string = p_clean(bx_cwd());
   var p0: Project* = new Project;
@@ -5748,8 +5624,8 @@ export fn build_cmd_new(p: Project*) -> int32 {
   return ini_run(p, r);
 }
 
-// The first bin (or library file) for the host target with its gen dir,
-// for the compiler shortcuts (15.6). 0 when the project has none.
+// the first bin (or library file) for the host target with its gen dir,
+// for the compiler shortcuts. 0 when the project has none
 fn bx_tool_unit(p: Project*) -> BxUnit* {
   var bs: BinSet* = build_bins(p);
   if (bs->n == 0) {
@@ -5773,7 +5649,7 @@ fn bx_one_mettle(p: Project*) -> Mettle* {
   return bx_mettle(p, sl_get(targets, 0));
 }
 
-// mbuild mettle [-t T] -- ARGS, with the gen dir of the first bin.
+// mbuild mettle [-t T] -- ARGS, with the gen dir of the first bin
 export fn build_cmd_mettle(p: Project*) -> int32 {
   var u: BxUnit* = (BxUnit*)0;
   if (p->has_manifest) {
@@ -5800,7 +5676,7 @@ export fn build_cmd_mettle(p: Project*) -> int32 {
   return proc_run(c);
 }
 
-// mbuild trace FN [args] / mbuild why A B: on the first bin's main file.
+// mbuild trace FN [args] / mbuild why A B: on the first bin's main file
 export fn build_cmd_trace(p: Project*, sub: string) -> int32 {
   if (p->opts->rest->len == 0) {
     if (s_eq(sub, "why")) {
@@ -5924,10 +5800,10 @@ export fn build_cmd_doctor(p: Project*) -> int32 {
   return rc;
 }
 
-// The package one import of a root-owned file counts for, "" when it names
+// the package one import of a root-owned file counts for, "" when it names
 // none: "NAME/FILE" of a selected package -> NAME; a file inside a local
 // path package -> its name; an unselected "NAME/FILE" that is no component
-// and no directory next to the file -> NAME (14.5).
+// and no directory next to the file -> NAME
 fn bx_used_key(ds: DepState*, comps: StrList*, pdirs: StrList*, ctxs: GraphCtx**, file: string, imp: string) -> string {
   var at: int64 = bx_dep_of_import(ds, imp);
   if (at >= 0) {
@@ -5956,10 +5832,10 @@ fn bx_used_key(ds: DepState*, comps: StrList*, pdirs: StrList*, ctxs: GraphCtx**
   return s_empty();
 }
 
-// Modules the project's own files import directly (for `mbuild tidy`).
+// modules the project's own files import directly (for `mbuild tidy`).
 // Root-owned files are those bx_owned_files lists: dependencies, build
 // outputs, nested projects and path packages do not count, so a module only
-// a dependency imports is not "used" by the root.
+// a dependency imports is not "used" by the root
 export fn build_used_modules(p: Project*, ds: DepState*) -> StrList* {
   var used: StrList* = sl_new();
   var comps: StrList* = bx_comp_names(p, ds);
@@ -6018,11 +5894,9 @@ export fn build_used_modules(p: Project*, ds: DepState*) -> StrList* {
   return used;
 }
 
-// ---------------------------------------------------------------------------
-// Owners of files, compiler diagnostics, name clashes
-// ---------------------------------------------------------------------------
+// owners of files, compiler diagnostics, name clashes
 
-// The selected module whose directory holds file (longest match), -1.
+// the selected module whose directory holds file (longest match), -1
 fn bx_dep_of_file(ds: DepState*, file: string) -> int64 {
   var best: int64 = -1;
   var best_len: int64 = -1;
@@ -6046,7 +5920,7 @@ fn bx_dep_of_file(ds: DepState*, file: string) -> int64 {
   return best;
 }
 
-// file relative to the package that owns it (the project root for its own).
+// file relative to the package that owns it (the project root for its own)
 fn bx_owner_rel(ds: DepState*, file: string) -> string {
   var at: int64 = bx_dep_of_file(ds, file);
   var root: string = p_dir(p_dir(ds->include_dir));
@@ -6093,7 +5967,7 @@ export fn build_owner_of(ds: DepState*, file: string) -> string {
   return s_empty();
 }
 
-// A JSON string or number field of one diagnostic line ("" when absent).
+// a JSON string or number field of one diagnostic line ("" when absent)
 fn bx_json_field(line: string, key: string) -> string {
   var pat: string = "\"" + key + "\":";
   var at: int64 = s_find(line, pat);
@@ -6139,9 +6013,9 @@ fn bx_json_field(line: string, key: string) -> string {
   return buf_take(b);
 }
 
-// The first `most` errors of --error-format=json output, as
+// the first `most` errors of --error-format=json output, as
 // "file:line: message (code)", the file prefixed by its owner when it is
-// not this project's.
+// not this project's
 fn bx_diag_lines(p: Project*, ds: DepState*, text: string, most: int64) -> StrList* {
   var res: StrList* = sl_new();
   var lines: StrList* = s_lines(text);
@@ -6176,7 +6050,7 @@ fn bx_diag_lines(p: Project*, ds: DepState*, text: string, most: int64) -> StrLi
   return res;
 }
 
-// The name of a duplicate declaration the compiler reported, "".
+// the name of a duplicate declaration the compiler reported, ""
 fn bx_clash_name(text: string) -> string {
   var lines: StrList* = s_lines(text);
   var found: string = "";
@@ -6201,7 +6075,7 @@ fn bx_clash_name(text: string) -> string {
   return found;
 }
 
-// "github.com/x/y v1.0.0" -> "github.com/x/y"; "path package k" -> "k".
+// "github.com/x/y v1.0.0" -> "github.com/x/y"; "path package k" -> "k"
 fn bx_owner_label(owner: string) -> string {
   if (s_starts(owner, "path package ")) {
     return s_from(owner, 13);
@@ -6216,8 +6090,8 @@ fn bx_owner_label(owner: string) -> string {
   return owner;
 }
 
-// After a failed compile: a name two packages export explains a duplicate
-// declaration (plain imports share one namespace).
+// after a failed compile: a name two packages export explains a duplicate
+// declaration (plain imports share one namespace)
 fn bx_explain_clash(ds: DepState*, g: Graph*, text: string) {
   if (g == (Graph*)0) {
     return;
@@ -6295,9 +6169,7 @@ fn bx_explain_clash(ds: DepState*, g: Graph*, text: string) {
   free(owners);
 }
 
-// ---------------------------------------------------------------------------
-// Verification (12.13)
-// ---------------------------------------------------------------------------
+// verification
 
 struct BxVerify {
   ok: bool;
@@ -6312,7 +6184,7 @@ fn bx_first_error(v: BxVerify*) -> string {
 }
 
 // Type-checks every bin (or library file) for every target with the
-// current dependencies; with_test also runs `mbuild test`.
+// current dependencies; with_test also runs `mbuild test`
 fn bx_verify(p: Project*, with_test: bool) -> BxVerify* {
   var v: BxVerify* = new BxVerify;
   v->ok = true;
@@ -6451,7 +6323,7 @@ fn bx_free_verify(v: BxVerify*) {
   free(v);
 }
 
-// Takes every `name` out of the positional arguments; true when present.
+// takes every `name` out of the positional arguments; true when present
 fn bx_take_flag(p: Project*, name: string) -> bool {
   var found: bool = false;
   var at: int64 = sl_index(p->opts->rest, name);
@@ -6463,7 +6335,7 @@ fn bx_take_flag(p: Project*, name: string) -> bool {
   return found;
 }
 
-// "name version" for each package in mbuild.lock.
+// "name version" for each package in mbuild.lock
 fn bx_lock_map(p: Project*) -> StrList* {
   var l: StrList* = sl_new();
   var r: FsRead = fs_read(p->root + "/mbuild.lock");
@@ -6500,7 +6372,7 @@ fn bx_lock_ver(l: StrList*, module: string) -> string {
   return s_empty();
 }
 
-// True when mbuild.mettle, mbuild.lock or the local lock differ from the snapshot.
+// true when mbuild.mettle, mbuild.lock or the local lock differ from the snapshot
 fn bx_snap_changed(s: DepSnap*) -> bool {
   var i: int64 = 0;
   while (i < s->files->len) {
@@ -6531,7 +6403,7 @@ fn bx_print_errors(v: BxVerify*) {
   }
 }
 
-// The API changes of module between two versions, "" when none or unknown.
+// the API changes of module between two versions, "" when none or unknown
 fn bx_api(p: Project*, module: string, from: string, to: string, added: bool) -> string {
   if (!sv_is(from) || !sv_is(to) || s_eq(from, to)) {
     return s_empty();
@@ -6562,7 +6434,7 @@ fn bx_help(text: string) {
   flush_out();
 }
 
-// The package names of get's arguments (NAME[@VERSION]).
+// the package names of get's arguments (NAME[@VERSION])
 fn bx_get_modules(p: Project*) -> StrList* {
   var names: StrList* = sl_new();
   var i: int64 = 0;
@@ -6645,7 +6517,7 @@ export fn build_cmd_get(p: Project*) -> int32 {
   return 1;
 }
 
-// remove and tidy: verify the result, roll back when it breaks the project.
+// remove and tidy: verify the result, roll back when it breaks the project
 fn bx_verify_or_restore(p: Project*, snap: DepSnap*, with_test: bool, what: string, again: string) -> int32 {
   if (!bx_snap_changed(snap)) {
     return 0;
@@ -6692,9 +6564,7 @@ export fn build_cmd_tidy(p: Project*) -> int32 {
   return bx_verify_or_restore(p, snap, with_test, "mbuild tidy", "mbuild tidy");
 }
 
-// ---------------------------------------------------------------------------
-// mbuild update (12.13)
-// ---------------------------------------------------------------------------
+// mbuild update
 
 fn bx_say_newer(plan: UpdatePlan*) {
   var k: int64 = 0;
@@ -6706,7 +6576,7 @@ fn bx_say_newer(plan: UpdatePlan*) {
   }
 }
 
-// A trial: its edit is undone, so it prints nothing (the kept one prints once).
+// a trial: its edit is undone, so it prints nothing (the kept one prints once)
 fn bx_apply_one(p: Project*, module: string, version: string) {
   var mods: StrList* = sl_of(module);
   var vers: StrList* = sl_of(version);
@@ -6719,7 +6589,7 @@ fn bx_apply_one(p: Project*, module: string, version: string) {
   bx_reload(p);
 }
 
-// The versions an update of plan entry i tries, newest first.
+// the versions an update of plan entry i tries, newest first
 fn bx_cands(plan: UpdatePlan*, i: int64) -> StrList* {
   var c: string = sl_get(plan->cands, i);
   if (slen(s_trim(c)) == 0) {
@@ -6934,9 +6804,7 @@ export fn build_cmd_update(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// mbuild profiles (12.12)
-// ---------------------------------------------------------------------------
+// mbuild profiles
 
 fn bx_val_text(v: TomlValue*, key: string) -> string {
   if (v->kind == 3) {
@@ -6951,8 +6819,8 @@ fn bx_val_text(v: TomlValue*, key: string) -> string {
   return key + "=" + v->text;
 }
 
-// The keys of one section with where they are set ("inherits" and "main"
-// left out): the mb_set line of mbuild.mettle when mbf_locate finds it.
+// the keys of one section with where they are set ("inherits" and "main"
+// left out): the mb_set line of mbuild.mettle when mbf_locate finds it
 fn bx_section_keys(p: Project*, doc: Toml*, sec: string, file: string, parts: StrList*) {
   var text: string = "";
   if (s_eq(file, "mbuild.mettle")) {
@@ -6993,7 +6861,6 @@ fn bx_flags_text(p: Project*, prof: string, bin: string, target: string) -> stri
   return s_trim(txt);
 }
 
-// mbuild services
 export fn build_cmd_services(p: Project*) -> int32 {
   return svc_cmd_list(p);
 }
@@ -7021,7 +6888,7 @@ export fn build_cmd_profiles(p: Project*) -> int32 {
     var sec: string = "profile." + name;
     var parts: StrList* = sl_new();
     var head: string = "";
-    // The built-in setting, unless the project sets that key itself.
+    // the built-in setting, unless the project sets that key itself
     var bkey: string = "";
     if (s_eq(name, "debug")) {
       bkey = "stack-trace";
@@ -7085,15 +6952,13 @@ export fn build_cmd_profiles(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
 // fetch, components, use, agents
-// ---------------------------------------------------------------------------
 
 export fn build_cmd_fetch(p: Project*) -> int32 {
   return deps_cmd_fetch(p);
 }
 
-// mbuild components [--check]: --check stays in rest for cmp_cmd_components.
+// mbuild components [--check]: --check stays in rest for cmp_cmd_components
 export fn build_cmd_components(p: Project*) -> int32 {
   return cmp_cmd_components(p, bx_deps(p));
 }
@@ -7113,9 +6978,7 @@ export fn build_cmd_agents(p: Project*) -> int32 {
   return agt_cmd_agents(p, ds);
 }
 
-// ---------------------------------------------------------------------------
-// Help and project commands (13.6)
-// ---------------------------------------------------------------------------
+// help and project commands
 
 struct BxCmd {
   name: string;
@@ -7154,7 +7017,7 @@ fn bx_def(name: string, summary: string, usage: string, doc: string) {
   g_bx_ncmds = g_bx_ncmds + 1;
 }
 
-// An example invocation of the last command, with a short comment or "".
+// an example invocation of the last command, with a short comment or ""
 fn bx_ex(line: string, why: string) {
   sl_push(g_bx_cmds[g_bx_ncmds - 1].ex, line);
   sl_push(g_bx_cmds[g_bx_ncmds - 1].ex_why, why);
@@ -7445,12 +7308,12 @@ fn bx_find_cmd(name: string) -> BxCmd* {
   return (BxCmd*)0;
 }
 
-// True when name is a built-in command (they shadow project commands).
+// true when name is a built-in command (they shadow project commands)
 export fn build_is_builtin(name: string) -> bool {
   return bx_find_cmd(name) != (BxCmd*)0;
 }
 
-// "    a    why" rows, the whys lined up; a row with no why gets no padding.
+// "    a    why" rows, the whys lined up; a row with no why gets no padding
 fn bx_say_rows(indent: string, left: StrList*, right: StrList*, prefix: string) {
   var w: int64 = 0;
   var i: int64 = 0;
@@ -7472,7 +7335,7 @@ fn bx_say_rows(indent: string, left: StrList*, right: StrList*, prefix: string) 
   }
 }
 
-// The global flags and what they do.
+// the global flags and what they do
 fn bx_global_rows(l: StrList*, r: StrList*) {
   sl_push(l, "-v, --verbose");   sl_push(r, "print every command mbuild runs");
   sl_push(l, "-q, --quiet");     sl_push(r, "only errors and program output");
@@ -7502,7 +7365,7 @@ fn bx_global_help() {
   free(r);
 }
 
-// mbuild.mettle's commands, scanned (nothing is compiled); 0 when none.
+// mbuild.mettle's commands, scanned (nothing is compiled); 0 when none
 fn bx_project_info(p: Project*) -> MbfInfo* {
   if (p == (Project*)0 || slen(p->mbfile) == 0) {
     return (MbfInfo*)0;
@@ -7513,7 +7376,7 @@ fn bx_project_info(p: Project*) -> MbfInfo* {
   return g_bx_info;
 }
 
-// The project command `name` (cmd_gen_docs answers gen-docs and gen_docs), 0.
+// the project command `name` (cmd_gen_docs answers gen-docs and gen_docs), 0
 fn bx_project_cmd(info: MbfInfo*, name: string) -> MbfCommand* {
   if (info == (MbfInfo*)0) {
     return (MbfCommand*)0;
@@ -7533,8 +7396,8 @@ fn bx_project_cmd(info: MbfInfo*, name: string) -> MbfCommand* {
 
 var g_bx_sug_proj: bool = false;
 
-// The closest built-in or project command to name, "" when none is close;
-// on a tie the project's command wins (helo: hello, not help).
+// the closest built-in or project command to name, "" when none is close;
+// on a tie the project's command wins (helo: hello, not help)
 fn bx_suggest(info: MbfInfo*, name: string) -> string {
   bx_init_cmds();
   var cands: StrList* = sl_new();
@@ -7557,7 +7420,7 @@ fn bx_suggest(info: MbfInfo*, name: string) -> string {
   return sug;
 }
 
-// error: no command named x + a suggestion over built-ins and project commands.
+// error: no command named x + a suggestion over built-ins and project commands
 fn bx_unknown_cmd(info: MbfInfo*, name: string) {
   var sug: string = bx_suggest(info, name);
   var msg: string = "no command named " + name;
@@ -7570,7 +7433,7 @@ fn bx_unknown_cmd(info: MbfInfo*, name: string) {
   fail_hint(msg, "did you mean " + sug + "?");
 }
 
-// mbuild help X with no command X.
+// mbuild help X with no command X
 fn bx_unknown_topic(info: MbfInfo*, name: string) {
   var sug: string = bx_suggest(info, name);
   error_msg("no command named " + name);
@@ -7642,7 +7505,7 @@ fn bx_say_project_cmd_help(pc: MbfCommand*) {
   say("From: mbuild.mettle:" + s_int(pc->line) + " (fn " + pc->fn_name + ")");
 }
 
-// mbuild help [topic]. p may be unloaded (build_find): help compiles nothing.
+// mbuild help [topic]. p may be unloaded (build_find): help compiles nothing
 export fn build_help(p: Project*, topic: string) -> int32 {
   bx_init_cmds();
   var info: MbfInfo* = bx_project_info(p);
@@ -7726,9 +7589,9 @@ export fn build_help(p: Project*, topic: string) -> int32 {
   return 0;
 }
 
-// mbuild NAME [args]: cmd_NAME of mbuild.mettle, args untouched (13.6).
+// mbuild NAME [args]: cmd_NAME of mbuild.mettle, args untouched.
 // p comes from build_find: the configuration is loaded only for a command
-// that exists.
+// that exists
 export fn build_cmd_project(p: Project*, name: string) -> int32 {
   bx_refuse_legacy(p);
   var info: MbfInfo* = bx_project_info(p);
@@ -7743,9 +7606,7 @@ export fn build_cmd_project(p: Project*, name: string) -> int32 {
   return cfg_run_command(p, c->name, p->opts->rest);
 }
 
-// ---------------------------------------------------------------------------
-// Shell completion
-// ---------------------------------------------------------------------------
+// shell completion
 
 // mbuild completion bash|zsh|fish
 export fn build_cmd_completion(o: Options*) -> int32 {
@@ -7811,7 +7672,7 @@ export fn build_cmd_completion(o: Options*) -> int32 {
   return 0;
 }
 
-// The package names in the cached indexes of every registry.
+// the package names in the cached indexes of every registry
 fn bx_complete_packages(p: Project*, out: StrList*) {
   var regs: RegList* = reg_list(p);
   defer free(regs);
@@ -7827,7 +7688,7 @@ fn bx_complete_packages(p: Project*, out: StrList*) {
   }
 }
 
-// The candidates of one kind (build_complete).
+// the candidates of one kind (build_complete)
 fn bx_complete_kind(p: Project*, kind: string, out: StrList*) {
   bx_init_cmds();
   if (s_eq(kind, "targets")) {
@@ -7895,8 +7756,8 @@ fn bx_complete_kind(p: Project*, kind: string, out: StrList*) {
 
 // mbuild __complete KIND [PREFIX]: the candidates of KIND (commands, bins,
 // tests, deps, packages, components, profiles, targets) starting with PREFIX,
-// one per line, for the completion scripts. Quiet and offline; a project that
-// can't be read gives nothing.
+// one per line, for the completion scripts. quiet and offline; a project that
+// can't be read gives nothing
 export fn build_complete(p: Project*) -> int32 {
   g_quiet = true;
   p->opts->offline = true;
@@ -7921,11 +7782,9 @@ export fn build_complete(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Registries: publish, yank, registry init (14.7)
-// ---------------------------------------------------------------------------
+// registries: publish, yank, registry init
 
-// A directory argument as an absolute path ('/' separators).
+// a directory argument as an absolute path ('/' separators)
 fn bx_abs_dir(arg: string) -> string {
   var d: string = bx_slash(arg);
   if (!p_is_abs(d)) {
@@ -7934,8 +7793,8 @@ fn bx_abs_dir(arg: string) -> string {
   return p_clean(d);
 }
 
-// The registry directory of --to DIR, else of --registry NAME (default
-// "default") when it has a path or file:// URL.
+// the registry directory of --to DIR, else of --registry NAME (default
+// "default") when it has a path or file:// URL
 fn bx_registry_dir(p: Project*, to: string, registry: string) -> string {
   if (slen(to) > 0) {
     var td: string = bx_abs_dir(to);
@@ -7960,7 +7819,7 @@ fn bx_registry_dir(p: Project*, to: string, registry: string) -> string {
   return dir;
 }
 
-// The versions in the index of name in a registry directory, yanked ones too.
+// the versions in the index of name in a registry directory, yanked ones too
 fn bx_index_versions(dir: string, name: string) -> StrList* {
   var vers: StrList* = sl_new();
   var rd: FsRead = fs_read(dir + "/index/" + name);
@@ -8046,7 +7905,7 @@ fn bx_pub_walk(root: string, rel: string, out: StrList*) {
   free(dirs);
 }
 
-// "" when rel (relative to the root) may be packed, else why it never is.
+// "" when rel (relative to the root) may be packed, else why it never is
 fn bx_pub_refusal(rel: string) -> string {
   if (p_is_abs(rel) || s_eq(rel, "..") || s_starts(rel, "../")) {
     return "is outside the package";
@@ -8074,7 +7933,7 @@ fn bx_pub_refusal(rel: string) -> string {
   return s_empty();
 }
 
-// The files a publish packs (14.7 step 6), sorted, relative to the root.
+// the files a publish packs, sorted, relative to the root
 fn bx_pub_files(p: Project*) -> StrList* {
   var out: StrList* = sl_new();
   var inc: StrList* = p->man->include;
@@ -8138,7 +7997,7 @@ fn bx_pub_package_key(key: string) -> bool {
   return s_eq(key, "name") || s_eq(key, "version") || s_eq(key, "description") || s_eq(key, "license") || s_eq(key, "repository") || s_eq(key, "authors") || s_eq(key, "mettle") || s_eq(key, "import-root");
 }
 
-// A TOML key as written ("a" or a), unquoted.
+// a TOML key as written ("a" or a), unquoted
 fn bx_toml_key(k: string) -> string {
   var t: string = s_trim(k);
   if (slen(t) >= 2 && s_starts(t, "\"") && s_ends(t, "\"")) {
@@ -8147,8 +8006,8 @@ fn bx_toml_key(k: string) -> string {
   return t;
 }
 
-// The emitted TOML reduced to what users read (14.7 step 7); pins holds
-// "name=version" per mb_dep_path_v, written as name = "version".
+// the emitted TOML reduced to what users read; pins holds
+// "name=version" per mb_dep_path_v, written as name = "version"
 fn bx_pub_manifest(p: Project*, pins: StrList*) -> string {
   var lines: StrList* = s_lines(cfg_manifest_text(p));
   var b: Buf* = buf_new();
@@ -8201,7 +8060,7 @@ fn bx_pub_manifest(p: Project*, pins: StrList*) -> string {
 }
 
 // mbuild publish [--to DIR] [--registry NAME] [--dry-run] [--allow-breaking] [--no-verify]
-// mb_doc_out, else docs/API.md.
+// mb_doc_out, else docs/API.md
 fn bx_doc_out(p: Project*) -> string {
   if (slen(p->man->doc_out) > 0) {
     return p->man->doc_out;
@@ -8209,8 +8068,8 @@ fn bx_doc_out(p: Project*) -> string {
   return "docs/API.md";
 }
 
-// A file that is part of the documented API: not a test, example, command
-// or the project's own mbuild files.
+// a file that is part of the documented API: not a test, example, command
+// or the project's own mbuild files
 fn bx_doc_api_file(rel: string) -> bool {
   var base_name: string = p_base(rel);
   if (s_ends(base_name, "_test.mettle") || s_starts(base_name, "test_")) {
@@ -8222,7 +8081,7 @@ fn bx_doc_api_file(rel: string) -> bool {
   return !s_eq(rel, "mbuild.mettle") && !s_eq(rel, "mbuild.local.mettle");
 }
 
-// The package file an import of rel names, "" when it is not one.
+// the package file an import of rel names, "" when it is not one
 fn bx_doc_import(p: Project*, rel: string, path: string) -> string {
   if (s_starts(path, "std/")) {
     return s_empty();
@@ -8245,8 +8104,8 @@ fn bx_doc_import(p: Project*, rel: string, path: string) -> string {
   return s_empty();
 }
 
-// The documented files: the facade and what it imports within the package
-// (breadth first, in import order), else every API file sorted by path.
+// the documented files: the facade and what it imports within the package
+// (breadth first, in import order), else every API file sorted by path
 fn bx_doc_files(p: Project*) -> StrList* {
   var facade: string = p->man->doc_facade;
   if (slen(facade) == 0) {
@@ -8289,7 +8148,7 @@ fn bx_doc_files(p: Project*) -> StrList* {
   return files;
 }
 
-// The Markdown files mb_doc_snippets names, sorted; never the output.
+// the Markdown files mb_doc_snippets names, sorted; never the output
 fn bx_doc_md_files(p: Project*, out: string) -> StrList* {
   var found: StrList* = sl_new();
   if (p->man->doc_snippets->len == 0) {
@@ -8313,8 +8172,8 @@ fn bx_doc_md_files(p: Project*, out: string) -> StrList* {
   return found;
 }
 
-// Each snippet of o compiled as a program (.mbuild/doc/snip/N.mettle) for
-// the host; the number that failed.
+// each snippet of o compiled as a program (.mbuild/doc/snip/N.mettle) for
+// the host; the number that failed
 fn bx_doc_snippets(p: Project*, o: DocOut*) -> int64 {
   var dir: string = p->state_dir + "/doc/snip";
   sys_remove_tree(dir);
@@ -8381,7 +8240,7 @@ fn bx_doc_snippets(p: Project*, o: DocOut*) -> int64 {
   return bad;
 }
 
-// The first line where a and b differ (1-based).
+// the first line where a and b differ (1-based)
 fn bx_first_diff(a: string, b: string) -> int64 {
   var la: StrList* = s_lines(a);
   var lb: StrList* = s_lines(b);
@@ -8395,7 +8254,7 @@ fn bx_first_diff(a: string, b: string) -> int64 {
 }
 
 // `mbuild doc`: the reference written (or with check, compared, the
-// snippets compiled, nothing written); 1 on a finding under check.
+// snippets compiled, nothing written); 1 on a finding under check
 fn bx_doc(p: Project*, check: bool) -> int32 {
   var cfg: DocCfg* = new DocCfg;
   defer free(cfg);
@@ -8480,9 +8339,9 @@ export fn build_cmd_doc(p: Project*) -> int32 {
   return bx_doc(p, check);
 }
 
-// An mb_dep_path_v package of a publish into dir: in dir's index, else
+// an mb_dep_path_v package of a publish into dir: in dir's index, else
 // published first (with_paths, by an mbuild run in its directory, which does
-// the same for its own); the version the published manifest names.
+// the same for its own); the version the published manifest names
 fn bx_pub_path_dep(p: Project*, d: DepSpec*, dir: string, with_paths: bool, dry: bool, allow: bool, no_verify: bool) -> string {
   var pdir: string = p_clean(p_join(p->root, d->path));
   var pm: Manifest* = cfg_load_dir(p, pdir, d->key);
