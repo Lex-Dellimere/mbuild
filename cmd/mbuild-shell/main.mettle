@@ -1,8 +1,7 @@
-// mbuild-shell: `mbuild shell` full screen (lib/tui). Started by mbuild on a
-// terminal as `mbuild-shell --dir SESSION -- MBUILD shell ... --serve`; it
-// runs that command with its stdin and stdout on two FIFOs in SESSION and
-// draws what comes back: program output (byte 31 first), status (29), the
-// end of an answer (30), anything else an answer line.
+// mbuild-shell: `mbuild shell` full screen (lib/tui). mbuild starts it on a terminal as
+// `mbuild-shell --dir SESSION -- MBUILD shell ... --serve`; it runs that command with stdin and stdout
+// on two FIFOs in SESSION and draws what comes back: program output (byte 31 first), status (29),
+// the end of an answer (30), anything else an answer line.
 //
 //   header      program, running/paused, tick, patches
 //   scrollback  ❯ inputs, their answers, program output while streaming
@@ -11,7 +10,7 @@
 //   ─────
 //   footer      status, key hints
 //
-// Views over it (Esc back): /inspect EXPR, /code [NAME], /watch, /log, F1.
+// views over it (Esc back): /inspect EXPR, /code [NAME], /watch, /log, F1.
 
 import "std/io";
 import "std/mem";
@@ -31,7 +30,7 @@ const P_NONE = 0;
 const P_PALETTE = 1;
 const P_COMPLETE = 2;
 
-// A line being edited: text and the cursor (a byte offset).
+// a line being edited: text and the cursor (a byte offset).
 struct Ed {
   s: string;
   at: int64;
@@ -117,9 +116,7 @@ struct Sh {
 
 var g_sh: Sh*;
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
+// small helpers
 
 fn ed_new(s: string) -> Ed* {
   var e: Ed* = new Ed;
@@ -172,7 +169,7 @@ fn ed_set(e: Ed*, s: string) {
   e->at = slen(s);
 }
 
-// Editing keys on e; true when the key was one.
+// editing keys on e; true when the key was one.
 fn ed_key(e: Ed*, ev: TuiEvent*) -> bool {
   if (ev->kind == TUI_EV_PASTE) {
     var p: string = s_replace(s_replace(ev->text, "\r\n", " "), "\n", " ");
@@ -250,7 +247,6 @@ fn ed_draw(t: Tui*, e: Ed*, x: int64, y: int64, cols: int64) {
   if (cols > 1 && bw >= cols) {
     skip = bw - cols + 1;
   }
-  // drop skip columns from the front
   var s: string = e->s;
   var i: int64 = 0;
   var w: int64 = 0;
@@ -263,14 +259,6 @@ fn ed_draw(t: Tui*, e: Ed*, x: int64, y: int64, cols: int64) {
   var shown: string = s_from(s, i);
   tui_print(t, x, y, shown, cols, TUI_DEFAULT, TUI_DEFAULT, 0);
   tui_cursor(t, x + bw - w, y);
-}
-
-fn lpad(s: string, w: int64) -> string {
-  var n: int64 = tui_width(s);
-  if (n >= w) {
-    return s;
-  }
-  return s + s_repeat(" ", w - n);
 }
 
 fn kv(line: string, key: string) -> string {
@@ -300,9 +288,7 @@ fn tab_field(l: string, n: int64) -> string {
   return r;
 }
 
-// ---------------------------------------------------------------------------
-// The backend
-// ---------------------------------------------------------------------------
+// the backend
 
 fn push(sh: Sh*, kind: string, text: string) {
   sl_push(sh->skind, kind);
@@ -400,7 +386,7 @@ fn decls_done(sh: Sh*) {
   sh->csrc_name = s_empty();
 }
 
-// Inspect: the answer to :fields for node at (-1: a new root).
+// inspect: the answer to :fields for node at (-1: a new root).
 fn fields_done(sh: Sh*, at: int64) {
   if (sh->resp->len == 0 || s_find_byte(sl_get(sh->resp, 0), 9) != 0) {
     var msg: string = "no answer";
@@ -516,7 +502,7 @@ fn fields_done(sh: Sh*, at: int64) {
   free(tail_o);
 }
 
-// A path of names (world.a->b) is used as it is, anything else in parentheses.
+// a path of names (world.a->b) is used as it is, anything else in parentheses.
 fn is_path(e: string) -> bool {
   var i: int64 = 0;
   while (i < slen(e)) {
@@ -541,7 +527,7 @@ fn changes_code(text: string) -> bool {
   return s_starts(t, "fn ") || s_starts(t, "export fn ") || s_eq(t, "r") || s_eq(t, "undo") || s_starts(t, "undo ") || s_starts(t, "edit ");
 }
 
-// The answer to the oldest request is complete.
+// the answer to the oldest request is complete.
 fn done(sh: Sh*) {
   if (sh->qkind->len == 0) {
     sh->ready = true;
@@ -630,7 +616,7 @@ fn s_trim_right(s: string) -> string {
   return s_sub(s, 0, n);
 }
 
-// Whole lines from the backend, handled.
+// whole lines from the backend, handled.
 fn drain(sh: Sh*) {
   if (sys_fd_drain(sh->fout, sh->rbuf) == 0) {
     return;
@@ -662,7 +648,7 @@ fn check_ended(sh: Sh*) {
   push(sh, "dim", "the shell has ended · ctrl+d exits");
 }
 
-// Starts CMD... with stdin and stdout on the FIFOs.
+// starts CMD... with stdin and stdout on the FIFOs.
 fn start_backend(sh: Sh*, cmd: StrList*) -> bool {
   sh->fin = sys_fifo_open(sh->dir + "/tui.in");
   sh->fout = sys_fifo_open(sh->dir + "/tui.out");
@@ -700,9 +686,7 @@ fn start_backend(sh: Sh*, cmd: StrList*) -> bool {
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
+// commands
 
 fn palette_names() -> StrList* {
   return s_split("inspect code watch unwatch log pause step pause-when edit undo reload ls apropos explain status stream help quit", 32);
@@ -770,7 +754,7 @@ fn open_code(sh: Sh*, name: string) {
   send(sh, "decls", "", ":decls");
 }
 
-// The editor gets the terminal until the backend answers.
+// the editor gets the terminal until the backend answers.
 fn edit(sh: Sh*, name: string) {
   push(sh, "in", "edit " + name);
   tui_suspend(sh->t);
@@ -871,9 +855,7 @@ fn submit(sh: Sh*, text: string) {
   send(sh, "input", t, t);
 }
 
-// ---------------------------------------------------------------------------
-// Popups under the input: the palette, completions
-// ---------------------------------------------------------------------------
+// popups under the input: the palette, completions
 
 fn palette_update(sh: Sh*) {
   var s: string = sh->ed->s;
@@ -1003,9 +985,7 @@ fn accept_pop(sh: Sh*) {
   sh->pop = P_NONE;
 }
 
-// ---------------------------------------------------------------------------
-// Drawing
-// ---------------------------------------------------------------------------
+// drawing
 
 fn state_word(sh: Sh*) -> string {
   if (sh->ended || !sh->alive && sh->ready) {
@@ -1079,7 +1059,7 @@ fn draw_footer(sh: Sh*, hints: string) {
   tui_print(t, t->w - 1 - tui_width(h), y, h, room, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
 }
 
-// As many of the " · " separated hints as fit in room, the last one kept.
+// as many of the " · " separated hints as fit in room, the last one kept.
 fn fit_hints(hints: string, room: int64) -> string {
   if (tui_width(hints) <= room) {
     return hints;
@@ -1180,7 +1160,6 @@ fn draw_main(sh: Sh*) {
   if (!sh->ready && slen(sh->ed->s) == 0) {
     tui_print(t, 3, y_in, "starting…", W - 4, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
   }
-  // the popup
   var k: int64 = 0;
   while (k < npop) {
     var i: int64 = sh->plist->top + k;
@@ -1205,7 +1184,6 @@ fn draw_main(sh: Sh*) {
     }
     k = k + 1;
   }
-  // scrollback
   var top: int64 = 1;
   var bottom: int64 = y_rule1 - 1;
   if (y_rule1 < 1) {
@@ -1279,7 +1257,6 @@ fn draw_inspect(sh: Sh*) {
   }
   var n: int64 = sh->nexpr->len;
   tui_list_fit(sh->ilist, n, rows);
-  // column widths
   var nw: int64 = 4;
   var tw: int64 = 4;
   var i: int64 = 0;
@@ -1414,7 +1391,6 @@ fn draw_code(sh: Sh*) {
     }
     k = k + 1;
   }
-  // the source of the selected one
   var name: string = code_selected(sh);
   if (slen(name) == 0) {
     tui_print(t, 3, top, "nothing here", lw, TUI_DEFAULT, TUI_DEFAULT, TUI_DIM);
@@ -1584,9 +1560,7 @@ fn draw(sh: Sh*) {
   tui_present(t);
 }
 
-// ---------------------------------------------------------------------------
-// Keys
-// ---------------------------------------------------------------------------
+// keys
 
 fn is_ctrl(ev: TuiEvent*, c: int32) -> bool {
   return ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_CHAR && (ev->mods & TUI_MOD_CTRL) != 0 && ev->cp == c;
@@ -1596,7 +1570,7 @@ fn is_char(ev: TuiEvent*, c: int32) -> bool {
   return ev->kind == TUI_EV_KEY && ev->key == TUI_KEY_CHAR && ev->mods == 0 && ev->cp == c;
 }
 
-// Keys every view shares; true when handled.
+// keys every view shares; true when handled.
 fn global_key(sh: Sh*, ev: TuiEvent*) -> bool {
   if (is_ctrl(ev, 100)) {
     sh->quit = true;
@@ -1768,7 +1742,6 @@ fn key_inspect(sh: Sh*, ev: TuiEvent*) {
         sl_remove_at(sh->nopen, i + 1);
       }
     } else {
-      // to the parent
       var d2: int64 = s_to_int(sl_get(sh->ndepth, i));
       while (i > 0 && s_to_int(sl_get(sh->ndepth, i)) >= d2) {
         i = i - 1;
@@ -1914,9 +1887,7 @@ fn on_key(sh: Sh*, ev: TuiEvent*) {
   }
 }
 
-// ---------------------------------------------------------------------------
 // main
-// ---------------------------------------------------------------------------
 
 fn sh_new(dir: string) -> Sh* {
   var sh: Sh* = new Sh;
