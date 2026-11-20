@@ -7172,7 +7172,7 @@ fn bx_init_cmds() {
   bx_ex("mbuild vendor --remove", "");
   bx_note("while vendor/ matches mbuild.lock, builds use it and touch no registry.");
   bx_group("packages");
-  bx_def("publish", "put this package in a registry", "mbuild publish [--to DIR | --registry NAME] [--dry-run]", "dependencies.md");
+  bx_def("publish", "put this package in a registry", "mbuild publish [--to DIR | --registry NAME] [--dry-run] [--with-path-deps]", "dependencies.md");
   bx_ex("mbuild publish --dry-run", "the files and the manifest");
   bx_ex("mbuild publish --to ../registry", "");
   bx_fl("--to DIR", "the registry directory");
@@ -7180,6 +7180,7 @@ fn bx_init_cmds() {
   bx_fl("--dry-run", "show it, write nothing");
   bx_fl("--allow-breaking", "publish API breaks in the same line");
   bx_fl("--no-verify", "skip the verify build");
+  bx_fl("--with-path-deps", "publish its mb_dep_path_v packages first");
   bx_note("checks the version, init.rules and the API against the last version in its line. you upload the directory.");
   bx_def("yank", "mark a published version as yanked", "mbuild yank NAME@VERSION --to DIR [--undo]", "dependencies.md");
   bx_ex("mbuild yank strutil@v1.2.0 --to ../registry", "");
@@ -7943,8 +7944,18 @@ fn bx_pub_package_key(key: string) -> bool {
   return s_eq(key, "name") || s_eq(key, "version") || s_eq(key, "description") || s_eq(key, "license") || s_eq(key, "repository") || s_eq(key, "authors") || s_eq(key, "mettle") || s_eq(key, "import-root");
 }
 
-// The emitted TOML reduced to what users read (14.7 step 7).
-fn bx_pub_manifest(p: Project*) -> string {
+// A TOML key as written ("a" or a), unquoted.
+fn bx_toml_key(k: string) -> string {
+  var t: string = s_trim(k);
+  if (slen(t) >= 2 && s_starts(t, "\"") && s_ends(t, "\"")) {
+    return s_sub(t, 1, slen(t) - 1);
+  }
+  return t;
+}
+
+// The emitted TOML reduced to what users read (14.7 step 7); pins holds
+// "name=version" per mb_dep_path_v, written as name = "version".
+fn bx_pub_manifest(p: Project*, pins: StrList*) -> string {
   var lines: StrList* = s_lines(cfg_manifest_text(p));
   var b: Buf* = buf_new();
   var sec: string = "";
@@ -7963,9 +7974,29 @@ fn bx_pub_manifest(p: Project*) -> string {
     if (!bx_pub_section_kept(sec)) {
       continue;
     }
+    var eq: int64 = s_find_byte(t, 61);
     if (s_eq(sec, "package") && slen(t) > 0 && !s_starts(t, "#")) {
-      var eq: int64 = s_find_byte(t, 61);
       if (eq > 0 && !bx_pub_package_key(s_trim(s_sub(t, 0, eq)))) {
+        continue;
+      }
+      if (eq > 0 && slen(p->man->version_from) > 0 && s_eq(s_trim(s_sub(t, 0, eq)), "version")) {
+        buf_line(b, "version = \"" + p->man->version + "\"");
+        continue;
+      }
+    }
+    if (s_eq(sec, "dependencies") && eq > 0) {
+      var key: string = bx_toml_key(s_sub(t, 0, eq));
+      var pre: string = key + "=";
+      var k: int64 = 0;
+      var pinned: bool = false;
+      while (k < pins->len && !pinned) {
+        if (s_starts(sl_get(pins, k), pre)) {
+          buf_line(b, key + " = \"" + s_from(sl_get(pins, k), slen(pre)) + "\"");
+          pinned = true;
+        }
+        k = k + 1;
+      }
+      if (pinned) {
         continue;
       }
     }
@@ -8255,12 +8286,62 @@ export fn build_cmd_doc(p: Project*) -> int32 {
   return bx_doc(p, check);
 }
 
+// An mb_dep_path_v package of a publish into dir: in dir's index, else
+// published first (with_paths, by an mbuild run in its directory, which does
+// the same for its own); the version the published manifest names.
+fn bx_pub_path_dep(p: Project*, d: DepSpec*, dir: string, with_paths: bool, dry: bool, allow: bool, no_verify: bool) -> string {
+  var pdir: string = p_clean(p_join(p->root, d->path));
+  var pm: Manifest* = cfg_load_dir(p, pdir, d->key);
+  if (pm == (Manifest*)0 || !sv_is(pm->version)) {
+    fail(d->key + " (" + d->path + ") has no mbuild.mettle with a version; a published package needs one");
+  }
+  var have: string = sv_canonical(pm->version);
+  var want: string = d->pver;
+  if (slen(want) == 0) {
+    want = have;
+  }
+  var what: string = d->key + " " + have + " (" + d->path + ")";
+  var vers: StrList* = bx_index_versions(dir, d->key);
+  var there: bool = sl_has(vers, have);
+  free(vers);
+  if (there) {
+    if (with_paths) {
+      status("Skipping", what + ": already in " + bx_show(dir));
+    }
+    return want;
+  }
+  if (!with_paths) {
+    fail_hint(what + " is not in " + bx_show(dir), "publish it first, or pass --with-path-deps");
+  }
+  var t: Tool = tool_none();
+  t.path = sys_self_exe();
+  var c: Cmd* = cmd_new(t);
+  defer free(c);
+  cmd_arg(c, "publish");
+  cmd_arg(c, "--to");
+  cmd_path(c, dir);
+  cmd_arg(c, "--with-path-deps");
+  if (dry) { cmd_arg(c, "--dry-run"); }
+  if (allow) { cmd_arg(c, "--allow-breaking"); }
+  if (no_verify) { cmd_arg(c, "--no-verify"); }
+  if (g_quiet) { cmd_arg(c, "--quiet"); }
+  cmd_env(c, "MBUILD_PUBLISH_NESTED", "1");
+  c->cwd = pdir;
+  var code: int32 = proc_run(c);
+  if (code != 0) {
+    error_msg("publishing " + what + " failed");
+    exit_with(code);
+  }
+  return want;
+}
+
 export fn build_cmd_publish(p: Project*) -> int32 {
   var to: string = bx_take_opt(p, "--to");
   var registry: string = bx_take_opt(p, "--registry");
   var dry: bool = bx_take_flag(p, "--dry-run");
   var allow: bool = bx_take_flag(p, "--allow-breaking");
   var no_verify: bool = bx_take_flag(p, "--no-verify");
+  var with_paths: bool = bx_take_flag(p, "--with-path-deps");
   var m: Manifest* = p->man;
   if (!p->has_manifest) {
     fail_hint("no mbuild.mettle here: nothing to publish", "run `mbuild init --package` to make a package");
@@ -8298,11 +8379,16 @@ export fn build_cmd_publish(p: Project*) -> int32 {
   if (slen(ierr) > 0) {
     fail(ierr);
   }
+  var pins: StrList* = sl_new();
+  defer free(pins);
   i = 0;
   while (i < m->ndeps) {
     var d: DepSpec* = man_dep(m, i);
-    if (slen(d->path) > 0) {
-      fail_hint("dependency " + d->key + " is a path package (" + d->path + "): users of " + name + " cannot resolve it", "publish " + d->key + " too and depend on a version");
+    if (slen(d->path) > 0 && !d->pathv) {
+      fail_hint("dependency " + d->key + " is a path package (" + d->path + "): users of " + name + " cannot resolve it", "publish " + d->key + " too and give its version: mb_dep_path_v(\"" + d->key + "\", \"" + d->path + "\", \"v0.1.0\")");
+    }
+    if (d->pathv) {
+      sl_push(pins, d->key + "=" + bx_pub_path_dep(p, d, dir, with_paths, dry, allow, no_verify));
     }
     i = i + 1;
   }
@@ -8325,7 +8411,7 @@ export fn build_cmd_publish(p: Project*) -> int32 {
     }
   }
   var files: StrList* = bx_pub_files(p);
-  var manifest: string = bx_pub_manifest(p);
+  var manifest: string = bx_pub_manifest(p, pins);
   var stage: string = p->state_dir + "/tmp/publish";
   sys_remove_tree(stage);
   var total: int64 = 0;
@@ -8383,7 +8469,7 @@ export fn build_cmd_publish(p: Project*) -> int32 {
     sha = s_sub(sha, 0, 8);
   }
   status("Published", name + " " + version + " to " + dir + " (sha256 " + sha + ")");
-  if (!g_quiet) {
+  if (!g_quiet && slen(env_get("MBUILD_PUBLISH_NESTED")) == 0) {
     say("  next: upload " + dir + " to the host that serves it");
   }
   return 0;

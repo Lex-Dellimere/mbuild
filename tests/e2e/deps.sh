@@ -633,6 +633,50 @@ mb "$P" deps
 check "deps names the bins built here" has "$S/last.out" "[bins built here: render]"
 MBUILD_REGISTRY="$R"
 
+echo "== path dependencies with a version"
+V="$S/raize"
+rm -rf "$V" "$S/pvreg"
+mkdir -p "$V"
+mb "$V" init raize --package
+for n in core signal; do
+  mkdir -p "$V/libs/$n"
+  mb "$V/libs/$n" init "raize_$n" --package
+  rm "$V/libs/$n/src/main.mettle"
+  printf 'export fn %s_x() -> int32 { return 1; }\n' "$n" >"$V/libs/$n/src/$n.mettle"
+done
+sed -i 's|^fn deps() {|fn deps() {\n  mb_dep_path_v("raize_core", "../core", "v0.1.0");|' "$V/libs/signal/mbuild.mettle"
+sed -i 's|^fn deps() {|fn deps() {\n  mb_dep_path_v("raize_signal", "libs/signal", "v0.1.0");\n  mb_dep_path_v("raize_core", "libs/core", "v0.1.0");|' "$V/mbuild.mettle"
+mb "$V" build
+check "mb_dep_path_v builds from the path" code_is 0
+mb "$V" deps
+check "deps shows its version and path" sh -c 'grep -qx "raize_signal v0.1.0 (path libs/signal)" "$0" && grep -qx "raize_core v0.1.0 (path libs/core)" "$0"' "$S/last.out"
+check "... and no lock entry" sh -c '! grep -q raize_ "$0/mbuild.lock" 2>/dev/null' "$V"
+sed -i 's/"raize_core", "0.1.0"/"raize_core", "0.0.9"/' "$V/libs/core/mbuild.mettle"
+mb "$V" build
+check "an older path package is an error" eval 'code_is 1 && has "$S/last.out" "error: raize_core: libs/core is v0.0.9, but mbuild.mettle requires v0.1.0"'
+sed -i 's/"raize_core", "0.0.9"/"raize_core", "1.0.0"/' "$V/libs/core/mbuild.mettle"
+mb "$V" build
+check "... and so is another line" has "$S/last.out" "error: raize_core: libs/core is v1.0.0, but mbuild.mettle requires v0.1.0"
+sed -i 's/"raize_core", "1.0.0"/"raize_core", "0.1.0"/' "$V/libs/core/mbuild.mettle"
+mb "$V" get raize_core@v0.2.0
+check "get checks the path package first" eval 'code_is 1 && grep -q "\"libs/core\", \"v0.1.0\")" "$V/mbuild.mettle"'
+mb "$V" registry init "$S/pvreg"
+mb "$V" publish --to "$S/pvreg"
+check "publish names an unpublished path package and the flag" eval 'code_is 1 && has "$S/last.out" "raize_signal v0.1.0 (libs/signal) is not in" && has "$S/last.out" "publish it first, or pass --with-path-deps"'
+mb "$V/libs/core" publish --to "$S/pvreg"
+mb "$V" publish --to "$S/pvreg" --with-path-deps
+check "--with-path-deps publishes them first" code_is 0
+check "... in dependency order, skipping a published one" sh -c 'grep -E "^ *(Published|Skipping)" "$0" | sed "s/ to .*//; s/: already.*//" | tr -s " " | tr "\n" "|" | grep -qx " Skipping raize_core v0.1.0 (../core)| Published raize_signal v0.1.0| Skipping raize_core v0.1.0 (libs/core)| Published raize v0.1.0|"' "$S/last.out"
+check "the published manifest names versions" sh -c 'grep -qx "raize_signal = \"v0.1.0\"" "$0" && grep -qx "raize_core = \"v0.1.0\"" "$0" && ! grep -q path "$0"' "$S/pvreg/pkg/raize/raize-v0.1.0.toml"
+check "... and so does the path package's" grep -qx 'raize_core = "v0.1.0"' "$S/pvreg/pkg/raize_signal/raize_signal-v0.1.0.toml"
+check "the root archive leaves the nested packages out" sh -c '! tar -tzf "$0/pvreg/pkg/raize/raize-v0.1.0.tar.gz" | grep -q libs/' "$S"
+mkdir -p "$V/integrations/x"
+mb "$V/integrations/x" init raize_x --package
+sed -i 's|mb_package("raize_x", "0.1.0");|mb_package("raize_x", "");\n  mb_version_from("../..");|; s|^fn deps() {|fn deps() {\n  mb_dep_path_v("raize", "../..", "");|' "$V/integrations/x/mbuild.mettle"
+mb "$V/integrations/x" publish --to "$S/pvreg"
+check "mb_version_from: the version of the package there" has "$S/last.out" "Published raize_x v0.1.0"
+check "... and \"\" follows the path package" sh -c 'grep -qx "version = \"v0.1.0\"" "$0" && grep -qx "raize = \"v0.1.0\"" "$0" && ! grep -q version-from "$0"' "$S/pvreg/pkg/raize_x/raize_x-v0.1.0.toml"
+
 echo "== undeclared transitive dependencies"
 T="$S/tx"
 rm -rf "$T"

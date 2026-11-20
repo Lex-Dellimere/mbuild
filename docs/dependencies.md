@@ -496,7 +496,8 @@ Before writing, publish checks:
 
 - the version isn't published yet;
 - `init.rules` exists and runs with its defaults ([packages](packages.md));
-- no `mb_dep_path` (users couldn't resolve it); replacements get a warning,
+- no `mb_dep_path` (users couldn't resolve it), and every `mb_dep_path_v`
+  package already in the registry (below); replacements get a warning,
   since users ignore them;
 - the API against the newest earlier version in the same line: a removed or
   changed export needs a new line;
@@ -528,6 +529,50 @@ instead (`--undo` takes it back):
 $ mbuild yank greet@v0.1.1 --to ~/www/registry
       Yanked greet v0.1.1 in /home/you/www/registry
 ```
+
+### Several packages in one repository
+
+`mb_dep_path_v(name, path, version)` builds `name` from `path` like
+`mb_dep_path`, and publishes as `mb_dep(name, version)`. The package at
+`path` must be `version` or a later one of its line; `""` takes whatever it
+is. `mb_version_from(dir)` in `fn project()` (with `mb_package(name, "")`)
+gives a package the version of the one in `dir`, for sub-packages released
+with their parent.
+
+```mettle
+fn deps() {
+  mb_dep_path_v("raize_core", "libs/core", "v0.1.0");
+  mb_dep_path_v("raize_signal", "libs/signal", "v0.1.0");   // which needs ../core
+}
+```
+
+```text
+$ mbuild deps
+raize_core v0.1.0 (path libs/core)
+raize_signal v0.1.0 (path libs/signal)
+$ mbuild publish --to /home/me/reg
+error: raize_core v0.1.0 (libs/core) is not in /home/me/reg
+  help: publish it first, or pass --with-path-deps
+$ mbuild publish --to /home/me/reg --with-path-deps
+   Verifying 1 file for linux
+   Packaging raize_core v0.1.0 (4 files, 905 B)
+   Published raize_core v0.1.0 to /home/me/reg (sha256 59546b2c)
+    Skipping raize_core v0.1.0 (../core): already in /home/me/reg
+   Verifying 1 file for linux
+   Packaging raize_signal v0.1.0 (4 files, 963 B)
+   Published raize_signal v0.1.0 to /home/me/reg (sha256 e90c3535)
+   Verifying 1 bin for linux
+   Packaging raize v0.1.0 (4 files, 1.0 KB)
+   Published raize v0.1.0 to /home/me/reg (sha256 b672ff55)
+  next: upload /home/me/reg to the host that serves it
+$ mbuild build      # after libs/core went back to 0.0.9
+error: raize_core: libs/core is v0.0.9, but mbuild.mettle requires v0.1.0
+```
+
+`--with-path-deps` publishes each path package first, its own ones before
+it, and skips a version the registry has. The published `raize` manifest
+says `raize_core = "v0.1.0"`; nested packages are never in the root's
+archive. `mbuild get raize_core@v0.2.0` edits the version argument.
 
 ### The registry layout
 
