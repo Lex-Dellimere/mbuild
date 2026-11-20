@@ -297,7 +297,7 @@ working. two packages declaring one name is an error naming both.
 |---|---|
 | `target` | the target `flash`, `monitor` and on-board tests use when nothing else names one |
 | `outputs` | the default for the projects that use it; their own `outputs` wins |
-| `runner` | what runs its images for `run` and `test`, instead of mbuild's choice by name: `rvsim ...` gets `--load NAME.bin` and the rvsim settings, any other program the image's path (`.bin`, else `.elf`) last; `none` for no emulator |
+| `runner` | what runs its images for `run` and `test`, instead of mbuild's choice by name: `rvsim ...` gets `--load NAME.bin` and the rvsim settings, any other program the image's path (`.bin`, else `.elf`) last (`mflash` is found as `mbuild flash` finds it; [tests](#runners-from-packages)); `none` for no emulator |
 | `flash` | the command `mbuild flash` runs, the image's path last |
 
 `mbuild boards` lists them, then the compiler's:
@@ -425,6 +425,27 @@ stderr:
 kept: .mbuild/test-run/riscv32-none-pico2-debug/hang/1
 
 test result: FAILED. 1 passed, 1 failed (3.9s)
+```
+
+### runners from packages
+
+a board whose `runner` starts with `mflash` gets mflash as `mbuild flash`
+does (`MBUILD_MFLASH`, a dependency's bin named `mflash`, PATH), then
+`--until TEXT --timeout S` (the test's `exit-on-uart`, default `PASS`, and
+its time limit) and the image's path last. its exit status says whether the
+text came. whatever the runner, exit status 77 means the emulator isn't
+installed: the cell is skipped with that reason and the run doesn't fail.
+
+```text
+$ mbuild test
+   Compiling test boot (riscv32-none, debug)
+test boot (riscv32-none:hwsim/debug) ... ok  0.0s
+test result: ok. 1 passed, 0 failed (0.1s)
+$ mbuild -v test --force
+  > ... mflash run --board hwsim --until booted --timeout 10 .mbuild/test-bins/riscv32-none/debug/boot.bin
+$ HW=absent mbuild test --force
+test boot (riscv32-none:hwsim/debug) ... skipped (emulator not installed: mflash exited 77)
+test result: ok. 0 passed, 0 failed, 1 skipped (0.1s)
 ```
 
 ### flashing and monitoring

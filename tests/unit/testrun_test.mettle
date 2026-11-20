@@ -56,6 +56,17 @@ fn test_outputs() {
   r->code = 0;
   r->console = "PASS";
   t_eq("why: no console line", trn_exit_why(r), "no PASS on the console");
+  r->console = "DONE";
+  r->out = "rp2350: UART0 printed the --exit-on-uart string at 1.000 ms";
+  t_eq("why: console line seen", trn_exit_why(r), "");
+  r->out = "";
+  r->by_exit = true;
+  t_eq("why: by exit, passed", trn_exit_why(r), "");
+  r->code = 1;
+  r->cmd->tool.path = "/x/mflash";
+  t_eq("why: by exit, the text and the status", trn_exit_why(r), "no DONE on the console (mflash exited with 1)");
+  r->by_exit = false;
+  r->console = "";
 }
 
 fn test_native() {

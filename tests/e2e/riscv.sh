@@ -297,14 +297,16 @@ cat > "$F/rvsim" <<EOF
 printf '%s\n' "\$*" >>"$F/rvsim.log"
 echo PASS
 [ -n "\${RVSIM_QUIET:-}" ] || echo "rp2350: UART0 printed the --exit-on-uart string at 1.000 ms" >&2
+exit \${RVSIM_EXIT:-0}
 EOF
-# F/mflash records its argv; write exits FLASH_EXIT, monitor prints CONSOLE (default PASS) and exits MON_EXIT
+# F/mflash records its argv; write exits FLASH_EXIT, monitor and run print CONSOLE (default PASS) and exit MON_EXIT, RUN_EXIT
 cat > "$F/mflash" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >>"$F/mflash.log"
 case "\$1" in
   write) exit \${FLASH_EXIT:-0} ;;
   monitor) echo "\${CONSOLE:-PASS}"; exit \${MON_EXIT:-0} ;;
+  run) echo "\${CONSOLE:-PASS}"; exit \${RUN_EXIT:-0} ;;
 esac
 EOF
 chmod +x "$F/mettle" "$F/rvsim" "$F/mflash"
@@ -321,11 +323,15 @@ fn project() {
   mb_board_set("myboard", "flash", "mflash write --board myboard");
   mb_board("virtboard", "src/board/virtboard.mettle");
   mb_board_set("virtboard", "runner", "qemu-system-riscv32 -M virt -bios none -nographic -kernel");
+  mb_board("mfboard", "src/board/mfboard.mettle");
+  mb_board_set("mfboard", "target", "riscv32-none");
+  mb_board_set("mfboard", "runner", "mflash run --board mfboard");
 }
 EOF
 printf 'export fn bsp_ok() -> bool { return true; }\n' > bsp/src/lib.mettle
 printf '// a board\n' > bsp/src/board/myboard.mettle
 printf '// a board\n' > bsp/src/board/virtboard.mettle
+printf '// a board\n' > bsp/src/board/mfboard.mettle
 cat > bsp2/mbuild.mettle <<'EOF'
 import "mbuild/api";
 
@@ -420,6 +426,25 @@ check "sim settings: \"*\" over the bin's, the bin's text kept" sh -c 'l=$(grep 
 check "sim settings: both pass" sh -c 'grep -qF "test plain (riscv32-none/debug) ... ok" "$0/last.out" && grep -qF "test dev (riscv32-none/debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 RVSIM_QUIET=1 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain --force
 check "sim settings: the failure names the text waited for" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): no DONE on the console" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+RVSIM_EXIT=77 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain --force
+check "exit 77 from a runner: skipped, not failed" sh -c 'grep -qF "test plain (riscv32-none/debug) ... skipped (emulator not installed: rvsim exited 77)" "$0/last.out" && grep -qF "0 passed, 0 failed, 1 skipped" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+# a board whose runner is mflash: --until and --timeout, the image last
+brd_proj mfboard ''
+rm -f "$F/mflash.log"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb test plain
+check "mflash runner: defaults PASS and 30 s" sh -c 'grep -qF "test plain (riscv32-none/debug) ... ok" "$0/last.out" && grep -qxF "run --board mfboard --until PASS --timeout 30 $1/.mbuild/test-bins/riscv32-none/debug/plain.bin" "$2/mflash.log"' "$S" "$W/brd/app" "$F"
+brd_proj mfboard '' '  mb_test_set("plain", "exit-on-uart", "DONE");
+  mb_test_set("plain", "timeout", "7");
+'
+rm -f "$F/mflash.log"
+METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb test plain
+check "mflash runner: the test's text and time limit" sh -c 'grep -qxF "run --board mfboard --until DONE --timeout 7 $0/.mbuild/test-bins/riscv32-none/debug/plain.bin" "$1/mflash.log"' "$W/brd/app" "$F"
+RUN_EXIT=1 METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb test plain --force
+check "mflash runner: no text fails, naming it" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): no DONE on the console (mflash exited with 1)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+RUN_EXIT=77 METTLE="$F/mettle" MBUILD_MFLASH="$F/mflash" mb test plain --force
+check "mflash runner: exit 77 is a skip" sh -c 'grep -qF "test plain (riscv32-none/debug) ... skipped (emulator not installed: mflash exited 77)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+METTLE="$F/mettle" mb test plain
+check "mflash runner: no mflash is a skip" sh -c 'grep -qF "test plain (riscv32-none/debug) ... skipped (no mflash (board mfboard'"'"'s runner))" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 mkdir -p "$W/brd/flash/src"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("flash", "0.1.0");\n  mb_bin("mflash", "src/main.mettle");\n}\n' > "$W/brd/flash/mbuild.mettle"
 printf 'import "std/io";\nfn main() -> int32 {\n  println("mflash of the flash package");\n  return 0;\n}\n' > "$W/brd/flash/src/main.mettle"
@@ -427,6 +452,10 @@ brd_proj myboard '  mb_dep_path("flash", "../flash");
 '
 mb monitor
 check "mflash built from a dependency" sh -c 'grep -qF "Compiling flash/mflash (linux, debug)" "$0/last.out" && grep -qF "mflash of the flash package" "$0/last.out" && [ -x build/linux/debug/mflash ] && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+brd_proj mfboard '  mb_dep_path("flash", "../flash");
+'
+METTLE="$F/mettle" mb test plain
+check "mflash runner: a dependency's mflash" sh -c 'grep -qF "test plain (riscv32-none/debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 brd_proj myboard '  mb_dep_path("bsp2", "../bsp2");
 '
 mb build

@@ -114,11 +114,23 @@ export fn rv_board_apply(st: Settings*) {
   }
 }
 
+// the mflash a runner named mflash starts, set by the build when it found one
+var g_rv_mflash: string = "";
+
+export fn rv_set_mflash(path: string) {
+  g_rv_mflash = path;
+}
+
 // the program of a declared runner's first word: a path from the project,
 // else rvsim as mbuild finds it, else PATH
 fn rvx_runner_tool(p: Project*, m: Mettle*, w0: string) -> Tool {
   if (s_eq(w0, "rvsim")) {
     return rvx_rvsim(m);
+  }
+  if (s_eq(w0, "mflash") && slen(g_rv_mflash) > 0) {
+    var mt: Tool = tool_none();
+    mt.path = g_rv_mflash;
+    return mt;
   }
   if (s_find_byte(w0, 47) >= 0) {
     var t: Tool = tool_none();
@@ -138,7 +150,7 @@ fn rvx_runner_missing(st: Settings*) -> string {
     return "board " + st->board + ": its runner `" + st->board_runner + "` does not split into words";
   }
   var w0: string = sl_get(w.words, 0);
-  if (s_eq(w0, "rvsim")) {
+  if (s_eq(w0, "rvsim") || (s_eq(w0, "mflash") && slen(g_rv_mflash) > 0)) {
     return s_empty();
   }
   if (s_find_byte(w0, 47) >= 0 || tool_found(sys_find_tool(w0))) {

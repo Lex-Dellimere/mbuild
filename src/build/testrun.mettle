@@ -26,7 +26,8 @@ export struct TrnRun {
   dir: string;        // .mbuild/test-run/<cell>/<name>/<k>
   timeout_ms: int64;  // 0 = none
   serial: bool;
-  console: string;    // a pico2 run passes on this console line
+  console: string;    // a board run passes on this console line
+  by_exit: bool;      // its runner reports the line by exit status (mflash)
   native: bool;       // an @test file run as a program (testnative)
   svcs: TrnSvc*;
   nsvcs: int64;
@@ -94,7 +95,15 @@ export fn trn_secs(ms: int64) -> string {
   return s_int(tenths / 10) + "." + s_int(tenths % 10) + "s";
 }
 
-// why a run that ended failed by its exit alone; "" when it passed
+// "exit 3", "signal 11"
+fn trn_exit_text(r: TrnRun*) -> string {
+  if (r->code > 128 && r->code < 128 + 65 && !s_eq(sys_os(), "windows")) {
+    return "signal " + s_int(r->code - 128);
+  }
+  return "exit " + s_int(r->code);
+}
+
+// why a run that ended failed by its exit and output; "" when it passed
 export fn trn_exit_why(r: TrnRun*) -> string {
   if (slen(r->svc_why) > 0) {
     return r->svc_why;
@@ -105,13 +114,12 @@ export fn trn_exit_why(r: TrnRun*) -> string {
   if (r->code == 127 && slen(r->out) == 0 && slen(r->err) == 0) {
     return "could not start " + r->cmd->tool.path;
   }
-  if (r->code > 128 && r->code < 128 + 65 && !s_eq(sys_os(), "windows")) {
-    return "signal " + s_int(r->code - 128);
-  }
   if (r->code != 0) {
-    return "exit " + s_int(r->code);
-  }
-  if (slen(r->console) > 0 && !s_contains(r->out + r->err, "printed the --exit-on-uart string")) {
+    if (r->by_exit && slen(r->console) > 0) {
+      return "no " + r->console + " on the console (" + p_base(r->cmd->tool.path) + " exited with " + s_int(r->code) + ")";
+    }
+    return trn_exit_text(r);
+  } else if (slen(r->console) > 0 && !r->by_exit && !s_contains(r->out + r->err, "printed the --exit-on-uart string")) {
     return "no " + r->console + " on the console";
   }
   return s_empty();
