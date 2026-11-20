@@ -4923,6 +4923,62 @@ fn bt_failures(pl: BtPlan*) {
   flush_out();
 }
 
+// over more than one cell: a row per test, a column per cell (ok, FAIL,
+// skip[N] with its reason below, - for a cell it isn't in)
+fn bt_table(pl: BtPlan*) -> bool {
+  if (pl->nspecs < 2 || g_quiet) {
+    return false;
+  }
+  var specs: StrList* = sl_new();
+  defer free(specs);
+  var i: int64 = 0;
+  while (i < pl->ncells) {
+    sl_add_uniq(specs, pl->cells[i]->spec);
+    i = i + 1;
+  }
+  var whys: StrList* = sl_new();
+  defer free(whys);
+  var rows: StrList** = (StrList**)malloc((pl->nt + 1) * 8);
+  defer free(rows);
+  rows[0] = sl_of("test");
+  sl_extend(rows[0], specs);
+  i = 0;
+  while (i < pl->nt) {
+    var t: BtTest* = pl->tests[i];
+    var r: StrList* = sl_of(t->name);
+    var k: int64 = 0;
+    while (k < specs->len) {
+      var word: string = "-";
+      var c: int64 = 0;
+      while (c < t->nc) {
+        var cell: BtCell* = pl->cells[t->c0 + c];
+        if (s_eq(cell->spec, sl_get(specs, k))) {
+          word = "ok";
+          if (slen(cell->skip) > 0) {
+            sl_add_uniq(whys, cell->skip);
+            word = "skip[" + s_int(sl_index(whys, cell->skip) + 1) + "]";
+          } else if (slen(cell->pre) > 0 || cell->failed > 0) {
+            word = "FAIL";
+          }
+        }
+        c = c + 1;
+      }
+      sl_push(r, word);
+      k = k + 1;
+    }
+    rows[i + 1] = r;
+    i = i + 1;
+  }
+  say("");
+  bx_say_table(rows, pl->nt + 1);
+  i = 0;
+  while (i < whys->len) {
+    say("[" + s_int(i + 1) + "] " + sl_get(whys, i));
+    i = i + 1;
+  }
+  return true;
+}
+
 fn bt_stamp(pl: BtPlan*) {
   var i: int64 = 0;
   while (i < pl->ncells) {
@@ -5584,6 +5640,7 @@ export fn build_cmd_test(p: Project*) -> int32 {
   if (pl->cov != (Cov*)0) {
     cov_why = bt_cov_report(pl);
   }
+  var tabled: bool = bt_table(pl);
   var passed: int64 = 0;
   var cached: int64 = 0;
   var skipped: int64 = 0;
@@ -5671,6 +5728,9 @@ export fn build_cmd_test(p: Project*) -> int32 {
     say("");
     say("test result: " + red("FAILED") + ". " + line);
     return 1;
+  }
+  if (tabled) {
+    say("");
   }
   say("test result: " + green("ok") + ". " + line);
   return 0;
@@ -7578,6 +7638,7 @@ fn bx_init_cmds() {
   bx_note("each run gets its own directory: TMPDIR (MBUILD_TEST_TMP), MBUILD_TEST_OUT, stdout and stderr; it runs in a process group of its own, which a timeout stops whole.");
   bx_note("golden files: what a run writes to $MBUILD_TEST_OUT must match tests/golden/NAME (the golden-dir setting) byte for byte, PNG files pixel for pixel within png-tolerance; with several cells, each cell's outputs must match the first's (golden-cross).");
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
+  bx_note("over more than one cell, a table ends the run: a row per test, a column per cell (ok, FAIL, skip[N] with its reason below, - when not in it). skips never fail the run.");
   bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
   bx_note("--on-board [--port TTY]: each board test program is flashed (as mbuild flash does), then mflash monitor waits for its exit-on-uart text (default PASS) until the timeout; one at a time. devices cells are skipped.");

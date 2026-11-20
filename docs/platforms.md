@@ -349,6 +349,12 @@ stderr:
   rp2350: stopped at --until-ms (300.000 ms of simulated time)
 kept: .mbuild/test-run/riscv32-none-pico2-debug/fail/1
 
+test             linux/debug  riscv64-linux/debug  riscv32-none:pico2/debug
+src/main.mettle  ok           ok                   skip[1]
+pass             ok           ok                   ok
+fail             FAIL         FAIL                 FAIL
+[1] @test functions run on hosted targets
+
 test result: FAILED. 2 passed, 1 failed, 1 skipped, 1 check (0.8s)
 ```
 

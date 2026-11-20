@@ -255,11 +255,13 @@ printf 'import "std/io";\nimport "plat";\nfn main() -> int32 {\n  plat_init();\n
 mb test
 check "matrix: mb_test_targets gives the cells" sh -c 'grep -qF "test pass (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... " "$0/last.out" && grep -qF "test fail (linux/debug, riscv64-linux/debug, riscv32-none:pico2/debug) ... FAILED" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 check "matrix: the host cell fails" has "---- fail (linux/debug): exit 1"
+check "matrix: the table, a row per test and a column per cell" sh -c 'grep -qE "^test +linux/debug +riscv64-linux/debug +riscv32-none:pico2/debug$" "$0/last.out" && grep -qE "^src/main.mettle +ok +[^ ]+ +skip\[[0-9]\]$" "$0/last.out" && grep -qE "^fail +FAIL " "$0/last.out" && grep -qE "^\[[0-9]\] @test functions run on hosted targets$" "$0/last.out"' "$S"
 [ $have_user = 1 ] && check "matrix: the riscv64-linux cell fails" has "---- fail (riscv64-linux/debug): exit 1"
 if [ $have_rvsim = 1 ]; then
   check "matrix: pico2 cell, @test skipped with why" sh -c 'grep -qF "    riscv32-none:pico2/debug skipped: @test functions run on hosted targets" "$0/last.out" && grep -qF -- "---- fail (riscv32-none:pico2/debug): no PASS on the console" "$0/last.out"' "$S"
 fi
 MBUILD_QEMU_USER_DIR="$W" MBUILD_RVSIM="$W/nope" mb test --matrix -t host,riscv64-linux,riscv32-none:pico2 pass
+check "matrix: skips in the table, with their reasons" sh -c 'grep -qE "^pass +ok +skip\[1\] +skip\[2\]$" "$0/last.out" && grep -qE "^\[1\] MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^\[2\] MBUILD_RVSIM=.* does not exist$" "$0/last.out"' "$S"
 check "matrix: a missing emulator is skipped, not failed" sh -c 'grep -qE "^    riscv64-linux/debug skipped: MBUILD_QEMU_USER_DIR=.* has no qemu-riscv64$" "$0/last.out" && grep -qE "^    riscv32-none:pico2/debug skipped: MBUILD_RVSIM=.* does not exist$" "$0/last.out" && grep -qE "1 passed, 0 failed.*, 2 skipped" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
 mb test --matrix -t riscv32-none:
 check "matrix: a board target without its board" has 'error: `riscv32-none:` is not a board target with its board'

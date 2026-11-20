@@ -253,8 +253,19 @@ stdout:
   lost an update on run 7
 kept: .mbuild/test-run/linux-release/stress/7
 
+test             linux/debug  linux/release
+src/calc.mettle  ok           ok
+parse            ok           ok
+stress           FAIL         FAIL
+plot             ok           ok
+
 test result: FAILED. 3 passed, 1 failed, 4 checks (0.3s)
 ```
+
+over more than one cell the run ends with a table: a row per test, a
+column per cell, each `ok`, `FAIL`, `skip[N]` (its reason in a footnote
+`[N] ...`) or `-` for a cell the test isn't in, then the totals. skips never
+fail the run.
 
 `mbuild test NAME...` runs those (a test program, command test or `@test`
 file); `--filter S` the ones whose names contain `S`; `--matrix=CELLS`,
@@ -310,12 +321,19 @@ kept: .mbuild/test-run/linux-debug/plot/1
   written:  2,8
 kept: .mbuild/test-run/linux-release/plot/1
 
+test  linux/debug  linux/release
+plot  FAIL         FAIL
+
 test result: FAILED. 0 passed, 1 failed (0.0s)
 $ mbuild test plot --bless
      Testing linux/debug
      Testing linux/release
 test plot (debug, release) ... ok  0.0s
     Blessing tests/golden/plot/line.csv
+
+test  linux/debug  linux/release
+plot  ok           ok
+
 test result: ok. 1 passed, 0 failed (0.0s)
 ```
 

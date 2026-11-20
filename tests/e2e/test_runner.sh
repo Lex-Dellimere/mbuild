@@ -112,6 +112,7 @@ EOF2
 printf 'echo solo >> order.log\n' > tests/solo.sh
 mb test -j 4
 check "runner: a line per test" sh -c 'grep -q "^test count (debug) ... ok .*  3 checks$" "$0/last.out" && grep -qF "test both (debug, release) ... ok" "$0/last.out" && grep -qF "test iso1 (debug) ... ok" "$0/last.out" && grep -qF "test iso2 (debug) ... ok" "$0/last.out" && grep -qF "test intmp (debug) ... ok" "$0/last.out"' "$S"
+check "runner: the table: - for a cell a test isn't in" sh -c 'grep -qE "^test +linux/debug +linux/release$" "$0/last.out" && grep -qE "^both +ok +ok$" "$0/last.out" && grep -qE "^iso1 +ok +-$" "$0/last.out"' "$S"
 check "runner: run=false only builds" sh -c 'grep -qF "test nobuild (debug) ... ok" "$0/last.out" && grep -qF "Compiling test nobuild (linux, debug)" "$0/last.out"' "$S"
 check "runner: timeout" line "test hang (debug) ... TIMEOUT 1.0s"
 check "runner: the timeout reaches what the test forked" sh -c '! ps -eo args | grep -v grep | grep -q "$0/run/.mbuild/test-bins/linux/debug/hang"' "$W"
