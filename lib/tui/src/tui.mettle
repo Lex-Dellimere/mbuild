@@ -1,9 +1,8 @@
-// tui: a small terminal UI in Mettle (Linux, raw syscalls, no C).
+// tui: a small terminal UI in mettle (linux, raw syscalls, no C).
 //
-// A grid of cells drawn into a back buffer; tui_present writes only what
-// changed since the last frame, as one write. Input comes as events (keys,
-// paste, resize, another fd readable). Technique after termbox2: termios
-// raw mode, the alternate screen, TIOCGWINSZ, SIGWINCH through a signalfd.
+// a grid of cells drawn into a back buffer; tui_present writes only what changed since the last frame, as one write.
+// input comes as events (keys, paste, resize, another fd readable). after termbox2: termios raw mode,
+// the alternate screen, TIOCGWINSZ, SIGWINCH through a signalfd.
 //
 //   var t: Tui* = tui_open();      // raw mode, alternate screen
 //   tui_clear(t);
@@ -13,8 +12,7 @@
 //   tui_poll(t, 100, -1, &ev);
 //   tui_close(t);                  // the terminal as it was
 //
-// tui_fake(w, h) gives a Tui that keeps its output in t->out instead of
-// writing it (tests).
+// tui_fake(w, h) gives a Tui that keeps its output in t->out instead of writing it (tests).
 
 import "std/mem";
 
@@ -36,7 +34,7 @@ export const TUI_EV_PASTE = 3;
 export const TUI_EV_FD = 4;        // the extra fd given to tui_poll is readable
 export const TUI_EV_QUIT = 5;      // SIGTERM, SIGHUP or SIGINT
 
-// Keys; a character is TUI_KEY_CHAR with cp set (ctrl+a: cp 'a', TUI_MOD_CTRL).
+// keys; a character is TUI_KEY_CHAR with cp set (ctrl+a: cp 'a', TUI_MOD_CTRL).
 export const TUI_KEY_CHAR = 1;
 export const TUI_KEY_ENTER = 2;
 export const TUI_KEY_TAB = 3;
@@ -101,9 +99,7 @@ export struct Tui {
   py: int64;
 }
 
-// ---------------------------------------------------------------------------
-// Strings and UTF-8
-// ---------------------------------------------------------------------------
+// strings and UTF-8
 
 fn tui_view(p: uint8*, n: int64) -> string {
   var s: string;
@@ -147,7 +143,7 @@ fn tui_has(s: string, needle: string) -> bool {
   return false;
 }
 
-// The codepoint at s[*at], *at moved past it; a bad byte reads as U+FFFD.
+// the codepoint at s[*at], *at moved past it; a bad byte reads as U+FFFD.
 export fn tui_utf8_next(s: string, at: int64*) -> int32 {
   var n: int64 = (int64)s.length;
   var i: int64 = *at;
@@ -216,8 +212,7 @@ fn tui_in(cp: int32, lo: int32, hi: int32) -> bool {
   return cp >= lo && cp <= hi;
 }
 
-// Columns cp takes: 0 combining and zero-width, 2 wide (CJK, most emoji),
-// -1 a control character, else 1. A compact table after wcwidth.
+// columns cp takes: 0 combining and zero-width, 2 wide (CJK, most emoji), -1 a control character, else 1; a compact table after wcwidth.
 export fn tui_cp_width(cp: int32) -> int32 {
   if (cp == 0) {
     return 0;
@@ -259,7 +254,7 @@ export fn tui_cp_width(cp: int32) -> int32 {
   return 1;
 }
 
-// Columns s takes on screen (control characters count as one, as drawn).
+// columns s takes on screen (control characters count as one, as drawn).
 export fn tui_width(s: string) -> int64 {
   var n: int64 = (int64)s.length;
   var at: int64 = 0;
@@ -274,7 +269,7 @@ export fn tui_width(s: string) -> int64 {
   return w;
 }
 
-// The longest start of s that fits in cols columns, never cutting a character.
+// the longest start of s that fits in cols columns, never cutting a character.
 export fn tui_clip(s: string, cols: int64) -> string {
   var n: int64 = (int64)s.length;
   var at: int64 = 0;
@@ -294,17 +289,14 @@ export fn tui_clip(s: string, cols: int64) -> string {
   return tui_view(s.chars, at);
 }
 
-// ---------------------------------------------------------------------------
-// Colours
-// ---------------------------------------------------------------------------
+// colours
 
-// A 24-bit colour; drawn as the nearest 256- or 16-colour one when the
-// terminal has fewer.
+// a 24-bit colour; drawn as the nearest 256- or 16-colour one when the terminal has fewer.
 export fn tui_rgb(r: int32, g: int32, b: int32) -> int32 {
   return 0x1000000 | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
 }
 
-// One of the 256 palette colours (0-15 the basic ones).
+// one of the 256 palette colours (0-15 the basic ones).
 export fn tui_index(i: int32) -> int32 {
   return i & 255;
 }
@@ -383,9 +375,7 @@ fn tui_to16(c: int32) -> int32 {
   return idx | bright;
 }
 
-// ---------------------------------------------------------------------------
-// Output bytes
-// ---------------------------------------------------------------------------
+// output bytes
 
 fn tui_put(t: Tui*, p: uint8*, n: int64) {
   if (t->olen + n > t->ocap) {
@@ -400,7 +390,7 @@ fn tui_put(t: Tui*, p: uint8*, n: int64) {
   t->olen = t->olen + n;
 }
 
-// Raw text for the terminal, sent with the next tui_flush or tui_present.
+// raw text for the terminal, sent with the next tui_flush or tui_present.
 export fn tui_write(t: Tui*, s: string) {
   tui_put(t, s.chars, (int64)s.length);
 }
@@ -423,7 +413,7 @@ fn tui_csi(t: Tui*) {
   tui_byte(t, 91);
 }
 
-// What is buffered, to the terminal (kept in t->out when fake).
+// what is buffered, to the terminal (kept in t->out when fake).
 export fn tui_flush(t: Tui*) {
   if (t->fake) {
     return;
@@ -442,9 +432,7 @@ export fn tui_flush(t: Tui*) {
   t->olen = 0;
 }
 
-// ---------------------------------------------------------------------------
-// The grid
-// ---------------------------------------------------------------------------
+// the grid
 
 fn tui_alloc(t: Tui*) {
   var n: int64 = t->w * t->h;
@@ -489,7 +477,7 @@ fn tui_new(w: int64, h: int64) -> Tui* {
   return t;
 }
 
-// A terminal kept in memory: what present writes stays in t->out.
+// a terminal kept in memory: what present writes stays in t->out.
 export fn tui_fake(w: int64, h: int64) -> Tui* {
   var t: Tui* = tui_new(w, h);
   t->fake = true;
@@ -510,7 +498,7 @@ fn tui_query_size(t: Tui*) {
   }
 }
 
-// The terminal's size again; the next present redraws everything.
+// the terminal's size again; the next present redraws everything.
 export fn tui_resize(t: Tui*) {
   if (!t->fake) {
     tui_query_size(t);
@@ -522,14 +510,14 @@ export fn tui_resize(t: Tui*) {
   tui_write(t, "2J");
 }
 
-// A new size for a fake terminal.
+// a new size for a fake terminal.
 export fn tui_fake_resize(t: Tui*, w: int64, h: int64) {
   t->w = w;
   t->h = h;
   tui_resize(t);
 }
 
-// The next present draws every cell.
+// the next present draws every cell.
 export fn tui_invalidate(t: Tui*) {
   var i: int64 = 0;
   while (i < t->w * t->h) {
@@ -553,7 +541,7 @@ export fn tui_clear(t: Tui*) {
   t->cy = -1;
 }
 
-// One cell; a wide cp also takes the cell to its right (dropped at the edge).
+// one cell; a wide cp also takes the cell to its right (dropped at the edge).
 export fn tui_set(t: Tui*, x: int64, y: int64, cp: int32, fg: int32, bg: int32, at: int32) {
   if (x < 0 || y < 0 || x >= t->w || y >= t->h) {
     return;
@@ -591,8 +579,7 @@ export fn tui_set(t: Tui*, x: int64, y: int64, cp: int32, fg: int32, bg: int32, 
   }
 }
 
-// s at x,y clipped to cols columns; combining marks are dropped. The
-// columns used.
+// s at x,y clipped to cols columns, combining marks dropped; the columns used.
 export fn tui_print(t: Tui*, x: int64, y: int64, s: string, cols: int64, fg: int32, bg: int32, at: int32) -> int64 {
   var n: int64 = (int64)s.length;
   var i: int64 = 0;
@@ -619,7 +606,7 @@ export fn tui_print(t: Tui*, x: int64, y: int64, s: string, cols: int64, fg: int
   return col;
 }
 
-// Cells x .. x+cols-1 of row y as spaces in bg.
+// cells x .. x+cols-1 of row y as spaces in bg.
 export fn tui_fill(t: Tui*, x: int64, y: int64, cols: int64, bg: int32) {
   var k: int64 = 0;
   while (k < cols) {
@@ -628,7 +615,7 @@ export fn tui_fill(t: Tui*, x: int64, y: int64, cols: int64, bg: int32) {
   }
 }
 
-// A horizontal rule across row y.
+// a horizontal rule across row y.
 export fn tui_hline(t: Tui*, y: int64, fg: int32, at: int32) {
   var x: int64 = 0;
   while (x < t->w) {
@@ -637,13 +624,13 @@ export fn tui_hline(t: Tui*, y: int64, fg: int32, at: int32) {
   }
 }
 
-// Leaves the cursor shown at x,y after present (x < 0: hidden).
+// leaves the cursor shown at x,y after present (x < 0: hidden).
 export fn tui_cursor(t: Tui*, x: int64, y: int64) {
   t->cx = x;
   t->cy = y;
 }
 
-// The text of row y as it is in the frame being drawn (tests, captures).
+// the text of row y as it is in the frame being drawn (tests, captures).
 export fn tui_row_text(t: Tui*, y: int64) -> string {
   var p: uint8* = (uint8*)malloc(t->w * 4 + 1);
   var n: int64 = 0;
@@ -755,8 +742,7 @@ fn tui_same(a: TuiCell*, b: TuiCell*) -> bool {
   return a->cp == b->cp && a->fg == b->fg && a->bg == b->bg && a->at == b->at;
 }
 
-// The frame to the terminal: the cells that changed since the last one, in
-// runs, as one write. The bytes written (tests look at t->out).
+// the frame to the terminal: the changed cells since the last one, in runs, as one write; the bytes written (tests look at t->out).
 export fn tui_present(t: Tui*) -> int64 {
   tui_csi(t);
   tui_write(t, "?25l");
@@ -820,9 +806,7 @@ export fn tui_present(t: Tui*) -> int64 {
   return n;
 }
 
-// ---------------------------------------------------------------------------
-// The terminal
-// ---------------------------------------------------------------------------
+// the terminal
 
 fn tui_colors_of_env() -> int32 {
   if ((int64)tui_env("NO_COLOR").length > 0) {
@@ -854,8 +838,7 @@ fn tui_signals_on(t: Tui*) {
   }
 }
 
-// The signals back to normal (children inherit the mask: call this before
-// starting one, tui_resume after).
+// the signals back to normal (children inherit the mask: call before starting one, tui_resume after).
 fn tui_signals_off(t: Tui*) {
   var set: int64[1];
   set[0] = tui_sigset();
@@ -886,8 +869,7 @@ fn tui_enter(t: Tui*) {
   tui_flush(t);
 }
 
-// Raw mode on the terminal (stdin, stdout), the alternate screen, the
-// cursor hidden; 0 when stdin or stdout is no terminal.
+// raw mode on the terminal (stdin, stdout), the alternate screen, the cursor hidden; 0 when stdin or stdout is no terminal.
 export fn tui_open() -> Tui* {
   var t: Tui* = tui_new(80, 24);
   t->term = (uint8*)malloc(64);
@@ -909,9 +891,7 @@ export fn tui_open() -> Tui* {
   return t;
 }
 
-// The terminal as before tui_open: cooked mode, the main screen, the
-// cursor shown, signals unblocked. For running a child (an editor) in
-// between; tui_resume takes it back.
+// the terminal as before tui_open (cooked mode, main screen, cursor shown, signals unblocked), for running a child such as an editor; tui_resume takes it back.
 export fn tui_suspend(t: Tui*) {
   if (t->fake) {
     return;
@@ -937,7 +917,7 @@ export fn tui_resume(t: Tui*) {
   tui_resize(t);
 }
 
-// The Tui's memory (after tui_close for a real terminal).
+// the Tui's memory (after tui_close for a real terminal).
 export fn tui_free(t: Tui*) {
   free((rawptr)t->cur);
   free((rawptr)t->last);
@@ -957,9 +937,7 @@ export fn tui_close(t: Tui*) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Input
-// ---------------------------------------------------------------------------
+// input
 
 fn tui_key(ev: TuiEvent*, key: int32, mods: int32, cp: int32) {
   ev->kind = TUI_EV_KEY;
@@ -1030,7 +1008,7 @@ fn tui_find_bytes(p: uint8*, n: int64, from: int64, s: string) -> int64 {
   return -1;
 }
 
-// A control byte or plain character c as a key.
+// a control byte or plain character c as a key.
 fn tui_plain(ev: TuiEvent*, c: int32, mods: int32) {
   if (c == 13 || c == 10) {
     tui_key(ev, TUI_KEY_ENTER, mods, 0);
@@ -1051,8 +1029,7 @@ fn tui_plain(ev: TuiEvent*, c: int32, mods: int32) {
   }
 }
 
-// One event from the bytes p[0..n): the bytes it took, 0 when they are a
-// start that needs more (a lone ESC is one too: tui_poll times it out).
+// one event from the bytes p[0..n): the bytes it took, 0 when they are a start that needs more (a lone ESC is one: tui_poll times it out).
 export fn tui_parse(p: uint8*, n: int64, ev: TuiEvent*) -> int64 {
   ev->kind = TUI_EV_NONE;
   ev->key = 0;
@@ -1196,7 +1173,7 @@ fn tui_now_ms() -> int64 {
   return ts[0] * 1000 + ts[1] / 1000000;
 }
 
-// Bytes for the parser as if typed (tests).
+// bytes for the parser as if typed (tests).
 export fn tui_feed(t: Tui*, s: string) {
   var n: int64 = (int64)s.length;
   if (t->ilen + n > 4096) {
@@ -1234,9 +1211,7 @@ fn tui_take(t: Tui*, ev: TuiEvent*) -> bool {
   return ev->kind != TUI_EV_NONE || true;
 }
 
-// The next event, waiting up to ms (0: none waiting, -1: forever). extra:
-// an fd to watch too (TUI_EV_FD when it is readable; -1 none). TUI_EV_NONE
-// when the time ran out.
+// the next event, waiting up to ms (0: none waiting, -1: forever); extra: an fd to watch too (TUI_EV_FD when readable, -1 none); TUI_EV_NONE when the time ran out.
 export fn tui_poll(t: Tui*, ms: int64, extra: int32, ev: TuiEvent*) -> int32 {
   ev->kind = TUI_EV_NONE;
   ev->text = tui_view((uint8*)"".chars, 0);
@@ -1318,9 +1293,7 @@ export fn tui_poll(t: Tui*, ms: int64, extra: int32, ev: TuiEvent*) -> int32 {
   return TUI_EV_NONE;
 }
 
-// ---------------------------------------------------------------------------
-// A list with a selection
-// ---------------------------------------------------------------------------
+// a list with a selection
 
 export struct TuiList {
   n: int64;         // items
@@ -1336,7 +1309,7 @@ export fn tui_list_new() -> TuiList* {
   return l;
 }
 
-// The selection kept in 0..n-1 and shown in rows rows.
+// the selection kept in 0..n-1 and shown in rows rows.
 export fn tui_list_fit(l: TuiList*, n: int64, rows: int64) {
   l->n = n;
   if (l->sel >= n) {
@@ -1356,8 +1329,7 @@ export fn tui_list_fit(l: TuiList*, n: int64, rows: int64) {
   }
 }
 
-// Up, down, page up and down, home and end move the selection; true when
-// the key was one of them.
+// up, down, page up and down, home and end move the selection; true when the key was one of them.
 export fn tui_list_key(l: TuiList*, ev: TuiEvent*, rows: int64) -> bool {
   if (ev->kind != TUI_EV_KEY) {
     return false;
