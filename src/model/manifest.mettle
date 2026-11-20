@@ -2292,6 +2292,18 @@ export fn man_test_get(m: Manifest*, name: string, key: string) -> string {
   return man_test_default(key);
 }
 
+// whether the test itself (not "*") sets key.
+export fn man_test_own(m: Manifest*, name: string, key: string) -> bool {
+  var i: int64 = 0;
+  while (i < m->ntest_sets) {
+    if (s_eq(m->test_sets[i].key, key) && s_eq(m->test_sets[i].name, name)) {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 // whether the test itself or "*" sets key.
 export fn man_test_has(m: Manifest*, name: string, key: string) -> bool {
   var i: int64 = 0;

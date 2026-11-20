@@ -281,6 +281,35 @@ calling those tests), builds it as a test program in each cell with `-I`
 the original's directory, and its result counts. `native=always` runs every
 `@test` of the file that way, in every cell.
 
+**program images in command tests.** `{image:NAME}` and `{elf:NAME}` in a
+`mb_test_cmd` line stand for the output of test program `NAME` in the cell
+being run: its executable, or for a board image its main file (`.bin`, say)
+and its `.elf`, as absolute paths. mbuild builds `NAME` first, also when
+only the command test is selected, and the command test runs once per cell
+of `NAME` (its `matrix`, unless the command test sets its own). in
+`mbuild.mettle` a brace in a string is doubled, so the spelling is
+`{{image:NAME}`:
+
+```mettle
+  mb_test_bin("crash", "tests/crash.mettle");
+  mb_test_set("crash", "matrix", "debug, release");
+  mb_test_cmd("stop_report", "sh tests/report.sh {{image:crash}");
+```
+
+```text
+$ mbuild test stop_report
+     Testing linux/debug
+   Compiling test crash (linux, debug)
+     Testing linux/release
+   Compiling test crash (linux, release)
+test stop_report (debug, release) ... ok  0.0s
+
+test         linux/debug  linux/release
+stop_report  ok           ok
+
+test result: ok. 1 passed, 0 failed (0.0s)
+```
+
 **fixtures** are `mb_service`s named in `services`, started for each run as
 `mbuild run` starts them, with cwd the run's `tmp/`, and stopped after it
 (on timeout too). `mb_service_port(name, 0)` gives each run a free port, so

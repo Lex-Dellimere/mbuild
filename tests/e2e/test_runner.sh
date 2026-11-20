@@ -288,6 +288,29 @@ sed -i 's|  mb_test_cmd("img", |  mb_test_set("img", "png-tolerance", "3,0.01,48
 mb test img
 check "png: within png-tolerance" line "test img (debug) ... ok  0.0s"
 
+# --- {image:NAME} in a command test: built on demand, once per cell of the program
+proj "$W/image" <<'EOF2'
+  mb_test_bin("hello", "tests/hello.mettle");
+  mb_test_set("hello", "matrix", "debug, release");
+  mb_test_cmd("show", "sh tests/show.sh {{image:hello} {{elf:hello}");
+  mb_test_cmd("own", "sh tests/show.sh {{image:hello}");
+  mb_test_set("own", "matrix", "release");
+  mb_test_cmd("nope", "sh tests/show.sh {{image:ghost}");
+EOF2
+cd "$W/image" || exit 1
+prog tests/hello.mettle 0
+printf 'echo "$1"\ntest -x "$1" || exit 1\n"$1" || exit 1\n' > tests/show.sh
+mb test show --keep
+check "image: the command test builds the program" sh -c 'grep -qF "Compiling test hello (linux, debug)" "$0/last.out" && grep -qF "Compiling test hello (linux, release)" "$0/last.out" && [ -x .mbuild/test-bins/linux/debug/hello ] && [ -x .mbuild/test-bins/linux/release/hello ]' "$S"
+check "image: one run per cell of the program" sh -c 'grep -qF "test show (debug, release) ... ok" "$0/last.out" && grep -qF "hello" .mbuild/test-run/linux-release/show/1/stdout' "$S"
+check "image: the cell's absolute path" sh -c 'grep -qxF "$1/.mbuild/test-bins/linux/debug/hello" .mbuild/test-run/linux-debug/show/1/stdout && grep -qxF "$1/.mbuild/test-bins/linux/release/hello" .mbuild/test-run/linux-release/show/1/stdout' "$S" "$W/image"
+mb test own
+check "image: the test's own matrix wins" line "test own (release) ... ok  0.0s"
+mb test nope
+check "image: a name that is no test program" has "---- nope (linux/debug): no test program \`ghost\` for {image:ghost}"
+mb test hello show
+check "image: the program and its command test" sh -c 'grep -qF "test hello (debug, release) ... ok" "$0/last.out" && grep -qF "test show (debug, release) ... ok" "$0/last.out"' "$S"
+
 done
 echo "test_runner: $pass passed, $failed failed"
 [ $failed = 0 ]

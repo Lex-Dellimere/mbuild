@@ -3692,6 +3692,7 @@ struct BtTest {
   file: string;       // BT_FILE: absolute
   b: BinInfo*;        // BT_PROG
   cmdline: string;    // BT_CMD
+  images: StrList*;   // BT_CMD: "image:NAME" / "elf:NAME" of its {image:NAME} words
   c0: int64;          // its cells: plan cells [c0, c0 + nc)
   nc: int64;
   repeat: int64;
@@ -3813,17 +3814,18 @@ fn bt_golden_dir(p: Project*, name: string) -> string {
   return d;
 }
 
-// the cells of a test: --matrix=CSV, else -r / -p, else its matrix
+// the cells of a test (owner: whose matrix setting; a command test naming a
+// test program's image takes the program's): --matrix=CSV, else -r / -p, else its matrix
 // setting; a cell without a target runs on each default target (-t, else
 // mb_test_targets, else the host)
-fn bt_cells_of(p: Project*, name: string, dflt_targets: StrList*) -> StrList* {
+fn bt_cells_of(p: Project*, owner: string, dflt_targets: StrList*) -> StrList* {
   var spec: string = bt_rest_value(p, "--matrix");
   if (slen(spec) == 0 && p->opts->release) {
     spec = "release";
   } else if (slen(spec) == 0 && !s_eq(p->opts->profile, "debug") && slen(p->opts->profile) > 0) {
     spec = p->opts->profile;
   } else if (slen(spec) == 0) {
-    spec = man_test_get(p->man, name, "matrix");
+    spec = man_test_get(p->man, owner, "matrix");
   }
   var out: StrList* = sl_new();
   var parts: StrList* = s_split(spec, 44);
@@ -3860,6 +3862,7 @@ fn bt_add_test(pl: BtPlan*, name: string, kind: int32) -> BtTest* {
   t->file = s_empty();
   t->b = (BinInfo*)0;
   t->cmdline = s_empty();
+  t->images = sl_new();
   t->c0 = 0;
   t->nc = 0;
   t->repeat = 1;
@@ -3870,6 +3873,39 @@ fn bt_add_test(pl: BtPlan*, name: string, kind: int32) -> BtTest* {
   pl->tests[pl->nt] = t;
   pl->nt = pl->nt + 1;
   return t;
+}
+
+fn bt_set_cmd(t: BtTest*, line: string) {
+  t->cmdline = line;
+  t->images = bt_image_refs(line);
+}
+
+// the {image:NAME} and {elf:NAME} words of a command line: "image:NAME", once each
+fn bt_image_refs(line: string) -> StrList* {
+  var l: StrList* = sl_new();
+  var rest: string = line;
+  while (true) {
+    var open: int64 = s_find_byte(rest, 123);
+    if (open < 0) {
+      break;
+    }
+    var tail: string = s_from(rest, open);
+    var close: int64 = s_find_byte(tail, 125);
+    if (close < 0) {
+      break;
+    }
+    var inner: string = s_sub(tail, 1, close);
+    if ((s_starts(inner, "image:") && slen(inner) > 6) || (s_starts(inner, "elf:") && slen(inner) > 4)) {
+      sl_add_uniq(l, inner);
+    }
+    rest = s_from(tail, close + 1);
+  }
+  return l;
+}
+
+// NAME of "image:NAME"
+fn bt_ref_name(ref: string) -> string {
+  return s_from(ref, s_find_byte(ref, 58) + 1);
 }
 
 // the tests to run: the names given (test programs, command tests, @test
@@ -3902,7 +3938,7 @@ fn bt_select(pl: BtPlan*) {
       } else if (sl_has(cmd_names, arg)) {
         var ct: BtTest* = bt_add_test(pl, arg, BT_CMD);
         var ce: string = sl_get(p->man->test_cmds, sl_index(cmd_names, arg));
-        ct->cmdline = s_from(ce, s_find_byte(ce, 61) + 1);
+        bt_set_cmd(ct, s_from(ce, s_find_byte(ce, 61) + 1));
       } else if (fs_is_file(a)) {
         var ft: BtTest* = bt_add_test(pl, bx_rel(p, a), BT_FILE);
         ft->file = a;
@@ -3953,7 +3989,7 @@ fn bt_select(pl: BtPlan*) {
     } else if (slen(f) == 0 || s_contains(cn, f)) {
       var ct2: BtTest* = bt_add_test(pl, cn, BT_CMD);
       var ce2: string = sl_get(p->man->test_cmds, i);
-      ct2->cmdline = s_from(ce2, s_find_byte(ce2, 61) + 1);
+      bt_set_cmd(ct2, s_from(ce2, s_find_byte(ce2, 61) + 1));
     }
     i = i + 1;
   }
@@ -4158,6 +4194,8 @@ fn bt_spec(pl: BtPlan*, spec: string) {
   var all_progs: BinSet* = bx_test_bins(p);
   var all_prog_names: StrList* = bx_bin_names(all_progs);
   defer free(all_prog_names);
+  var img_names: StrList* = sl_new();
+  defer free(img_names);
   var why_run: string = s_empty();
   i = 0;
   while (i < mine->len) {
@@ -4171,6 +4209,14 @@ fn bt_spec(pl: BtPlan*, spec: string) {
       sl_add_uniq(prog_names, t->name);
     } else if (t->kind == BT_CMD) {
       bt_first_word(t->cmdline, all_prog_names, proj_bins, dep_bins, prog_names, bin_names);
+      var ii: int64 = 0;
+      while (ii < t->images->len) {
+        var inm: string = bt_ref_name(sl_get(t->images, ii));
+        if (sl_has(all_prog_names, inm)) {
+          sl_add_uniq(img_names, inm);
+        }
+        ii = ii + 1;
+      }
     }
     if (slen(c->skip) == 0) {
       // the programs of its fixtures
@@ -4208,8 +4254,14 @@ fn bt_spec(pl: BtPlan*, spec: string) {
   }
   s->tests = true;
   var us: BxUnits* = (BxUnits*)0;
-  if (prog_names->len > 0 && slen(why_run) == 0) {
-    us = bx_bin_units(s, bx_select_from(p, all_progs, prog_names));
+  var build_names: StrList* = sl_new();
+  defer free(build_names);
+  if (slen(why_run) == 0) {
+    sl_extend(build_names, prog_names);
+  }
+  sl_extend_uniq(build_names, img_names);
+  if (build_names->len > 0) {
+    us = bx_bin_units(s, bx_select_from(p, all_progs, build_names));
     g_bx_units = us;
     bx_prepare(s, us, s_empty());
     bx_compile_units(s, us, built);
@@ -4252,7 +4304,8 @@ fn bt_spec(pl: BtPlan*, spec: string) {
       }
       continue;
     }
-    if (slen(why_run) > 0) {
+    var needs_run: bool = t2->kind != BT_CMD || t2->images->len == 0 || bt_cmd_runs(t2->cmdline, prog_names, bin_names);
+    if (slen(why_run) > 0 && needs_run) {
       c2->skip = why_run;
       continue;
     }
@@ -4260,6 +4313,9 @@ fn bt_spec(pl: BtPlan*, spec: string) {
       bt_prog_cell(pl, s, us, c2, t2);
     } else {
       bt_cmd_cell(p, c2, t2->cmdline, progs_dir, bins_dir, all_prog_names, bin_names);
+      if (slen(c2->pre) == 0 && t2->images->len > 0) {
+        bt_expand_images(p, s, us, c2, t2);
+      }
       var w2: SvcWords = svc_split(t2->cmdline);
       if (slen(c2->pre) == 0 && w2.ok && sl_has(prog_names, sl_get(w2.words, 0)) && us != (BxUnits*)0 && !bt_unit_ok(us, sl_get(w2.words, 0))) {
         c2->pre = sl_get(w2.words, 0) + " did not compile";
@@ -4269,6 +4325,86 @@ fn bt_spec(pl: BtPlan*, spec: string) {
   p->opts->sets = saved_sets;
   p->opts->profile = saved_prof;
   p->opts->release = saved_rel;
+}
+
+// whether the command line starts a test program or bin (it needs the cell's emulator)
+fn bt_cmd_runs(cmdline: string, progs: StrList*, bins: StrList*) -> bool {
+  var w: SvcWords = svc_split(cmdline);
+  var runs: bool = w.ok && w.words->len > 0 && (sl_has(progs, sl_get(w.words, 0)) || sl_has(bins, sl_get(w.words, 0)));
+  free(w.words);
+  return runs;
+}
+
+// where a board test program's image files are written
+fn bt_image_dir(j: BxJob*, target: string) -> string {
+  var dir: string = j->t->out_dir;
+  if (bx_rv_image_bin(j->b)) {
+    dir = p_dir(j->t->out_dir);
+    dir = p_dir(dir) + "/" + target + "/" + p_base(j->t->out_dir);
+  }
+  return dir;
+}
+
+// the path ref ("image:NAME", "elf:NAME") stands for in cell c: its test
+// program's output; "" with c->pre set when there is none
+fn bt_image_path(p: Project*, s: BxSess*, us: BxUnits*, c: BtCell*, ref: string) -> string {
+  var name: string = bt_ref_name(ref);
+  var u: BxUnit* = (BxUnit*)0;
+  if (us != (BxUnits*)0) {
+    u = bt_unit_of(us, name);
+  }
+  if (u == (BxUnit*)0) {
+    c->pre = "no test program `" + name + "` for {{" + ref + "}";
+    return s_empty();
+  }
+  if (!bt_unit_ok(us, name)) {
+    c->pre = name + " did not compile";
+    return s_empty();
+  }
+  var j: BxJob* = u->job;
+  var target: string = bx_run_target(j->b, j->t);
+  if (!target_is_bare(target)) {
+    return j->outp;
+  }
+  var st: Settings* = bx_settings_of(p, s->profile, name, target);
+  defer free(st);
+  var base: string = bt_image_dir(j, target) + "/" + name;
+  if (s_starts(ref, "elf:")) {
+    var outs: StrList* = bx_image_outputs(st);
+    var has: bool = sl_has(outs, "elf");
+    free(outs);
+    if (!has) {
+      c->pre = name + " writes no .elf (outputs = \"" + st->outputs + "\"): add \"elf\" to outputs";
+      return s_empty();
+    }
+    return base + ".elf";
+  }
+  return base + "." + bx_image_main(st);
+}
+
+// the {image:NAME} and {elf:NAME} in a command test's arguments, as paths
+fn bt_expand_images(p: Project*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
+  var i: int64 = 0;
+  while (i < c->cmd->args->len) {
+    var word: string = sl_get(c->cmd->args, i);
+    var refs: StrList* = bt_image_refs(word);
+    var k: int64 = 0;
+    while (k < refs->len && slen(c->pre) == 0) {
+      var ref: string = sl_get(refs, k);
+      var path: string = bt_image_path(p, s, us, c, ref);
+      var what: string = "{{" + ref + "}";
+      if (slen(c->pre) == 0) {
+        word = s_replace(word, what, path);
+      }
+      k = k + 1;
+    }
+    free(refs);
+    if (slen(c->pre) > 0) {
+      return;
+    }
+    sl_set(c->cmd->args, i, word);
+    i = i + 1;
+  }
 }
 
 // the first word of cmdline into progs or bins when it names a test program
@@ -4466,11 +4602,7 @@ fn bt_board_cell(pl: BtPlan*, s: BxSess*, c: BtCell*, t: BtTest*, j: BxJob*) {
     c->skip = "no mflash to flash board " + st->board;
     return;
   }
-  var dir: string = j->t->out_dir;
-  if (bx_rv_image_bin(j->b)) {
-    dir = p_dir(j->t->out_dir);
-    dir = p_dir(dir) + "/" + target + "/" + p_base(j->t->out_dir);
-  }
+  var dir: string = bt_image_dir(j, target);
   cmd_path(fc, dir + "/" + j->b->name + "." + bx_image_main(st));
   c->until = st->exit_on_uart;
   if (slen(c->until) == 0) {
@@ -5603,7 +5735,11 @@ export fn build_cmd_test(p: Project*) -> int32 {
     t->golden = bt_get(p, t->name, "golden");
     t->gshown = bt_golden_dir(p, t->name);
     t->gdir = p_join(p->root, t->gshown);
-    var cells: StrList* = bt_cells_of(p, t->name, dflt);
+    var owner: string = t->name;
+    if (t->images->len > 0 && !man_test_own(p->man, t->name, "matrix")) {
+      owner = bt_ref_name(sl_get(t->images, 0));
+    }
+    var cells: StrList* = bt_cells_of(p, owner, dflt);
     t->c0 = pl->ncells;
     t->nc = cells->len;
     var k: int64 = 0;
@@ -7667,6 +7803,7 @@ fn bx_init_cmds() {
   bx_note("over more than one cell, a table ends the run: a row per test, a column per cell (ok, FAIL, skip[N] with its reason below, - when not in it). skips never fail the run.");
   bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000). mb_test_set(name, \"exit-on-uart\" | \"until-ms\" | \"uart-script\", ...) sets them per test (\"*\" for all) over the bin's; a failure names the text waited for.");
+  bx_note("{{image:NAME} and {{elf:NAME} in a mb_test_cmd line are test program NAME's output in the cell (absolute paths; in mbuild.mettle write {{{{image:NAME}). NAME is built first, and the command runs once per cell of NAME.");
   bx_note("--on-board [--port TTY]: each board test program is flashed (as mbuild flash does), then mflash monitor waits for its exit-on-uart text (default PASS) until the timeout; one at a time. devices cells are skipped.");
   bx_note("mb_test_set(name, \"devices\", \"bme280:t=25; ssd1306:addr=0x3c\") puts each ;-separated spec on rvsim's command line as --device SPEC; cells not on rvsim are skipped. sim-args are words appended to the emulator's command line.");
   bx_def("flash", "write a board image to the board", "mbuild flash [BIN] [--port TTY] [-t T] [-r | -p PROFILE]", "platforms.md");
