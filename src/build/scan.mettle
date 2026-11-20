@@ -900,3 +900,27 @@ export fn scan_uses(text: string, names: StrList*) -> StrList* {
   free(lx);
   return found;
 }
+
+// the `chip: "..."` field of the first BoardDesc literal, "" when none
+export fn scan_board_chip(text: string) -> string {
+  var lx: ScxLex* = scx_tokenize(text);
+  var out: string = s_empty();
+  var i: int64 = 0;
+  var in_desc: bool = false;
+  while (i < lx->n && slen(out) == 0) {
+    var t: ScxTok* = &lx->toks[i];
+    if (!in_desc) {
+      if (t->kind == 1 && s_eq(t->text, "BoardDesc") && t->depth == 0) {
+        in_desc = true;
+      }
+    } else if (t->kind == 4 && s_eq(t->text, ";") && t->depth == 0) {
+      break;
+    } else if (t->kind == 1 && s_eq(t->text, "chip") && t->depth == 1 && scx_is(lx, i + 1, 4, ":") && scx_kind(lx, i + 2) == 2) {
+      out = s_dup(lx->toks[i + 2].text);
+    }
+    i = i + 1;
+  }
+  free(lx->toks);
+  free(lx);
+  return out;
+}

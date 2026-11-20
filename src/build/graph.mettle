@@ -23,6 +23,12 @@ export struct GraphCtx {
   cwd: string;          // the compiler's working directory
   dcache: GxDepsFile**;
   ndcache: int64;
+  bare: bool;           // a riscv*-none target
+  rv_bits: int64;       // 64 | 32 on riscv*-linux, else 0
+  board: string;        // the --board value (a file or a name), "" = none
+  board_name: string;   // the variant name: the board file's stem, else board
+  chip: string;         // the board file's chip
+  board_file: string;   // canonical, "" when not found (set by graph_build)
 }
 
 export struct Graph {
@@ -51,7 +57,33 @@ export fn graph_ctx_new(os: string, stdlib_dir: string) -> GraphCtx* {
   c->cwd = sys_cwd();
   c->dcache = (GxDepsFile**)0;
   c->ndcache = 0;
+  c->bare = false;
+  c->rv_bits = 0;
+  c->board = s_empty();
+  c->board_name = s_empty();
+  c->chip = s_empty();
+  c->board_file = s_empty();
   return c;
+}
+
+// the compiler's import variants for target and its --board value
+export fn graph_ctx_target(c: GraphCtx*, target: string, board: string) {
+  c->bare = s_starts(target, "riscv") && s_ends(target, "-none");
+  if (s_eq(target, "riscv64-linux")) {
+    c->rv_bits = 64;
+  } else if (s_eq(target, "riscv32-linux")) {
+    c->rv_bits = 32;
+  }
+  if (!c->bare || slen(board) == 0) {
+    return;
+  }
+  c->board = board;
+  var name: string = gx_slash(board);
+  name = s_from(name, s_rfind_byte(name, 47) + 1);
+  if (s_ends(name, ".mettle") && slen(name) > 7) {
+    name = s_sub(name, 0, slen(name) - 7);
+  }
+  c->board_name = name;
 }
 
 fn gx_slash(p: string) -> string {
@@ -90,6 +122,76 @@ fn gx_candidate(base: string) -> string {
     }
   }
   return s_empty();
+}
+
+// '-' as '_', as the compiler names variant files
+fn gx_variant(name: string) -> string {
+  return s_replace_byte(name, 45, 95);
+}
+
+// base.<board>, base.<chip>, base.bare, then base itself on a board target
+fn gx_board_candidate(c: GraphCtx*, base: string) -> string {
+  if (c->bare && slen(c->board_name) > 0 && slen(base) > 0 && !gx_has_ext(base)) {
+    var names: StrList* = sl_of(c->board_name);
+    if (slen(c->chip) > 0) {
+      sl_push(names, c->chip);
+    }
+    sl_push(names, "bare");
+    var i: int64 = 0;
+    while (i < names->len) {
+      var cand: string = base + "." + gx_variant(sl_get(names, i)) + ".mettle";
+      i = i + 1;
+      if (fs_is_file(cand)) {
+        free(names->items);
+        free(names);
+        return gx_canon(cand);
+      }
+    }
+    free(names->items);
+    free(names);
+  }
+  return gx_candidate(base);
+}
+
+fn gx_std_variant(c: GraphCtx*, imp: string, suffix: string) -> string {
+  var v: string = imp + "." + suffix;
+  return gx_candidate(p_join(c->stdlib_dir, v));
+}
+
+// the compiler's platform variant of a std import, "" when none
+fn gx_std_platform(c: GraphCtx*, imp: string) -> string {
+  if (gx_has_ext(imp)) {
+    return s_empty();
+  }
+  var r: string = s_empty();
+  if (c->bare) {
+    if (slen(c->board_name) > 0) {
+      r = gx_std_variant(c, imp, gx_variant(c->board_name));
+      if (slen(r) == 0 && slen(c->chip) > 0) {
+        r = gx_std_variant(c, imp, gx_variant(c->chip));
+      }
+    }
+    if (slen(r) == 0) {
+      r = gx_std_variant(c, imp, "bare");
+    }
+    return r;
+  }
+  if (c->rv_bits > 0) {
+    r = gx_std_variant(c, imp, "riscv" + s_int(c->rv_bits));
+    if (slen(r) == 0) {
+      r = gx_std_variant(c, imp, "nolibc");
+    }
+    if (slen(r) == 0 && s_starts(imp, "std/rt/") && s_find_byte(s_from(imp, 7), 47) < 0) {
+      r = gx_candidate(p_join(c->stdlib_dir, imp));
+    }
+    if (slen(r) > 0) {
+      return r;
+    }
+  }
+  if (s_eq(c->os, "linux")) {
+    r = gx_std_variant(c, imp, "linux");
+  }
+  return r;
 }
 
 fn gx_parse_deps(dir: string) -> GxDepsFile* {
@@ -174,10 +276,11 @@ fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string, main_module: bo
           var cand: string = sl_get(d->roots, i);
           if (slen(rest) > 0) {
             cand = p_join(cand, rest);
-          } else if (main_module) {
+          }
+          if (main_module) {
             cand = p_join(cand, first);
           }
-          var r: string = gx_candidate(cand);
+          var r: string = gx_board_candidate(c, cand);
           if (slen(r) > 0) {
             return r;
           }
@@ -195,10 +298,13 @@ fn gx_resolve_deps(c: GraphCtx*, from_file: string, imp: string, main_module: bo
 }
 
 // where the compiler finds `imp` named in from_file (canonical); "" when it does not
-// the compiler's order: absolute; std/ under the stdlib (a .linux variant first on linux);
+// the compiler's order: absolute; std/ under the stdlib (its platform variant first:
+// on a board target .<board>, .<chip>, .bare; on riscv*-linux .riscv64/.riscv32,
+// .nolibc, then .linux; on linux .linux);
 // mettle.deps files walking up from the importing file, nearest first; relative to the
 // importing file; each -I; the working directory; last, a one-component import as <root>/<name>.
-// a candidate is tried as written, then with .mettle appended
+// a candidate is tried as written, then with .mettle appended; on a board target a
+// mettle.deps or relative candidate tries X.<board>, X.<chip>, X.bare before X
 export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string {
   if (slen(imp) == 0) {
     return s_empty();
@@ -207,11 +313,9 @@ export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string 
     return gx_candidate(imp);
   }
   if (slen(c->stdlib_dir) > 0 && (s_starts(imp, "std/") || s_starts(imp, "std\\"))) {
-    if (s_eq(c->os, "linux") && !gx_has_ext(imp)) {
-      var v: string = gx_candidate(p_join(c->stdlib_dir, imp + ".linux"));
-      if (slen(v) > 0) {
-        return v;
-      }
+    var v: string = gx_std_platform(c, imp);
+    if (slen(v) > 0) {
+      return v;
     }
     var sr: string = gx_candidate(p_join(c->stdlib_dir, imp));
     if (slen(sr) > 0) {
@@ -222,7 +326,7 @@ export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string 
   if (slen(dr) > 0) {
     return dr;
   }
-  var lr: string = gx_candidate(p_join(p_dir(from_file), imp));
+  var lr: string = gx_board_candidate(c, p_join(p_dir(from_file), imp));
   if (slen(lr) > 0) {
     return lr;
   }
@@ -242,6 +346,49 @@ export fn graph_resolve(c: GraphCtx*, from_file: string, imp: string) -> string 
     return cr;
   }
   return gx_resolve_deps(c, from_file, imp, true);
+}
+
+// the board module the compiler reads for --board: the file itself, else
+// std/board/NAME, else <package root>/board/NAME of a mettle.deps package
+fn gx_board_file(c: GraphCtx*, entry: string) -> string {
+  if (s_ends(c->board, ".mettle")) {
+    if (fs_is_file(c->board)) {
+      return gx_canon(c->board);
+    }
+    return s_empty();
+  }
+  var vname: string = gx_variant(c->board);
+  if (slen(c->stdlib_dir) > 0) {
+    var sf: string = p_join(c->stdlib_dir, "std/board/" + vname + ".mettle");
+    if (fs_is_file(sf)) {
+      return gx_canon(sf);
+    }
+  }
+  var file1: string = "board/" + c->board + ".mettle";
+  var file2: string = "board/" + vname + ".mettle";
+  var dir: string = p_dir(entry);
+  while (true) {
+    var d: GxDepsFile* = gx_deps_for(c, dir);
+    var i: int64 = 0;
+    while (d->exists && i < d->roots->len) {
+      var root: string = sl_get(d->roots, i);
+      i = i + 1;
+      var a: string = p_join(root, file1);
+      if (fs_is_file(a)) {
+        return gx_canon(a);
+      }
+      var b: string = p_join(root, file2);
+      if (fs_is_file(b)) {
+        return gx_canon(b);
+      }
+    }
+    var up: string = p_dir(dir);
+    if (s_eq(up, dir) || gx_is_root(up) || s_eq(up, ".")) {
+      break;
+    }
+    dir = up;
+  }
+  return s_empty();
 }
 
 fn gx_missing(g: Graph*, what: string, from_file: string, line: string) {
@@ -273,6 +420,21 @@ export fn graph_build(c: GraphCtx*, entry: string) -> Graph* {
   }
   var todo: StrList* = sl_of(g->entry);
   var seen: StrList* = sl_of(g->entry);
+  // the board module is an import of the entry, and its chip picks variants
+  if (c->bare && slen(c->board) > 0) {
+    c->board_file = gx_board_file(c, g->entry);
+    if (slen(c->board_file) > 0) {
+      var br: FsRead = fs_read(c->board_file);
+      if (br.ok) {
+        c->chip = scan_board_chip(br.data);
+      }
+      sl_add_uniq(seen, c->board_file);
+      sl_add_uniq(todo, c->board_file);
+    } else {
+      gx_missing(g, c->board, g->entry, "0");
+      sl_push(g->missing_kinds, "board");
+    }
+  }
   var at: int64 = 0;
   while (at < todo->len) {
     var file: string = sl_get(todo, at);

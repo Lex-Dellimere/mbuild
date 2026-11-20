@@ -529,6 +529,78 @@ EOF
   MBUILD_METTLE_LINUX="$METTLE" METTLE="$W/fake/bin/mettle" MBUILD_RVSIM="$MBUILD_HOME/tools/rvsim" mb run -r -t riscv32-none --pgo-gen
   check "pgo on pico2 without the capture script" sh -c 'grep -qF "has no tools/riscv-pgo-capture.py" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 fi
+# --- board variant imports: X.<board>, X.<chip>, X.bare, X; the board file and its imports are inputs
+ECO="${METTLE_BOARDS:-$here/../Mettle.eco-s5/bin/mettle}"
+V="$W/bv"
+mkdir -p "$V/src/board" && cd "$V"
+cat > mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("bv", "0.1.0");
+  mb_import_root("src");
+  mb_board("dev-kit", "src/board/dev-kit.mettle");
+  mb_board_set("dev-kit", "target", "riscv32-none");
+  mb_board_set("dev-kit", "runner", "none");
+  mb_board_set("dev-kit", "outputs", "bin");
+  mb_bin("app", "src/main.mettle");
+  mb_bin_kind("app", "exe", "riscv32-none");
+  mb_for_bin("app");
+  mb_set("board", "dev-kit");
+}
+EOF
+bv_board() { cat > src/board/dev-kit.mettle <<EOF
+import "std/board_desc";
+import "bv/kit";
+
+const BOARD: BoardDesc = {
+  name: "dev-kit",
+  chip: "$1",
+  widths: [32],
+  load_base: 0x80000000,
+  ram_base: 0x80000000,
+  ram_size: 0x100000,
+  isa: ["rv32imac"]
+};
+
+export fn mettle_board_putc(byte: uint8) {
+  kit_putc(byte);
+}
+EOF
+}
+bv_board soc-x1
+bv_kit() { printf 'export fn kit_putc(byte: uint8) {\n  var x: uint8 = byte;\n}\nexport fn kit_base() -> int32 {\n  return %s;\n}\n' "$1" > src/kit.mettle; }
+bv_led() { printf 'import "bv/kit";\nexport fn led_value() -> int32 {\n  return kit_base() + %s;\n}\n' "$2" > "src/led$1.mettle"; }
+bv_kit 100
+bv_led "" 1; bv_led .dev_kit 2; bv_led .soc_x1 3; bv_led .bare 4
+printf 'import "bv/led";\nfn main() -> int32 {\n  return led_value();\n}\n' > src/main.mettle
+bv_sum() { md5sum build/riscv32-none/debug/app.bin 2>/dev/null | cut -d' ' -f1; }
+# bv_step NAME: the build after a change compiles again and writes another image
+bv_step() { before=$(bv_sum); METTLE="$ECO" mb build; check "board variants: $1" sh -c 'grep -qF "Compiling app (riscv32-none, debug)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ] && [ -n "$1" ] && [ "$1" != "$(md5sum build/riscv32-none/debug/app.bin | cut -d" " -f1)" ]' "$S" "$before"; }
+if [ ! -x "$ECO" ]; then
+  [ $mode = debug ] && echo "note: board variant imports skipped (no compiler that takes a board file at $ECO; set METTLE_BOARDS)"
+else
+  METTLE="$ECO" mb build
+  if grep -qF "is not a board name" "$S/last.out"; then
+    [ $mode = debug ] && echo "note: board variant imports skipped ($ECO takes only board names for --board)"
+  else
+    check "board variants: the first build" code_is 0
+    METTLE="$ECO" mb build
+    check "board variants: fresh" has "Fresh app (riscv32-none, debug)"
+    bv_led .dev_kit 12; bv_step "X.<board> changed"
+    bv_kit 200; bv_step "an import of the board file changed"
+    rm src/led.dev_kit.mettle; bv_step "X.<board> gone: X.<chip>"
+    bv_led .soc_x1 13; bv_step "X.<chip> changed"
+    bv_board soc-x2; bv_step "the board file names another chip: X.bare"
+    bv_led .bare 14; bv_step "X.bare changed"
+    rm src/led.bare.mettle; bv_step "X.bare gone: X"
+    bv_led "" 11; bv_step "X changed"
+    bv_led .soc_x2 5; bv_step "a new X.<chip>"
+    METTLE="$ECO" mb build
+    check "board variants: fresh at the end" has "Fresh app (riscv32-none, debug)"
+  fi
+fi
+
 done
 
 echo

@@ -1073,6 +1073,16 @@ fn bx_unit_ctx(s: BxSess*, u: BxUnit*) -> GraphCtx* {
   }
   sl_push(c->includes, s->ds->include_dir);
   c->cwd = s->p->root;
+  var board: string = s_empty();
+  if (target_is_bare(u->target)) {
+    var st: Settings* = bx_settings_of(s->p, s->profile, bx_unit_bin(u), u->target);
+    board = st->board;
+    if (slen(st->board_file) > 0) {
+      board = st->board_file;
+    }
+    free(st);
+  }
+  graph_ctx_target(c, u->target, board);
   return c;
 }
 
