@@ -589,6 +589,7 @@ targets first ([platforms](platforms.md#risc-v)).
 | `debug-info` | bool (false) | `-g` |
 | `crash-report` | bool (true) | `--no-crash-report` when false |
 | `native-heap` | bool (false) | `--native-heap` |
+| `pie` | bool (false) | `--pie`; `riscv64-linux` / `riscv32-linux` only, with a compiler that has it |
 | `profile-runtime` | bool (false) | `--profile-runtime` |
 | `check-overflow`, `check-proofs`, `check-effects`, `check-deadlines`, `check-tasks` | bool (false) | the flag of that name |
 | `assume-no-signed-overflow` | bool (false) | `--assume-no-signed-overflow` |

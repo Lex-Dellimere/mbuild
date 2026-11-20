@@ -210,11 +210,12 @@ the image exits through QEMU's test device, so the exit status is what
 | `objective` | `balanced`, `size`, `speed` | what `--release` optimizes for |
 | `isa` | e.g. `rv32imac_zba_zbb_zbs_zcb_zcmp` | starts with the target's `rv32` / `rv64` |
 | `abi` | `ilp32`, `ilp32e`, `ilp32f`, `ilp32d`, `lp64`, `lp64f`, `lp64d` | of the target's width; the compiler has no `lp64e` |
+| `pie` | bool (false) | `riscv*-linux` only: a position-independent executable (`--pie`), with a compiler that has it |
 
 `optimize` and `debug-info` work as on linux; `stack-trace` and
 `check-effects` are left out (a RISC-V program has no crash report and no
-effect runtime). the compiler has no position-independent executables: a
-`riscv*-linux` program is static. a setting on the wrong target stops the
+effect runtime). a `riscv*-linux` program is static unless `pie = true`
+makes it position-independent. a setting on the wrong target stops the
 build and says where it goes:
 
 ```text

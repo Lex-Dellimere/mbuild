@@ -152,6 +152,7 @@ export struct Settings {
   debug_info: bool;
   crash_report: bool;
   native_heap: bool;
+  pie: bool;              // riscv*-linux: a position-independent executable
   verify: bool;
   assume_nso: bool;
   check_overflow: bool;
@@ -771,7 +772,7 @@ fn mnx_unknown_keys(m: Manifest*, sec: string) {
 // build settings
 
 fn mnx_typed_words() -> string {
-  return "optimize safe stack-trace debug-info crash-report native-heap check-overflow check-proofs check-effects check-deadlines check-tasks assume-no-signed-overflow pgo pgo-file verify ml-opt subsystem profile-runtime image-base board objective isa abi outputs rvsim-until-ms exit-on-uart uart-script pins";
+  return "optimize safe stack-trace debug-info crash-report native-heap pie check-overflow check-proofs check-effects check-deadlines check-tasks assume-no-signed-overflow pgo pgo-file verify ml-opt subsystem profile-runtime image-base board objective isa abi outputs rvsim-until-ms exit-on-uart uart-script pins";
 }
 
 fn mnx_enum_words(key: string) -> string {
@@ -1115,6 +1116,7 @@ fn mnx_assign(st: Settings*, key: string, v: TomlValue*) {
   else if (s_eq(key, "debug-info")) { st->debug_info = on; }
   else if (s_eq(key, "crash-report")) { st->crash_report = on; }
   else if (s_eq(key, "native-heap")) { st->native_heap = on; }
+  else if (s_eq(key, "pie")) { st->pie = on; }
   else if (s_eq(key, "verify")) { st->verify = on; }
   else if (s_eq(key, "assume-no-signed-overflow")) { st->assume_nso = on; }
   else if (s_eq(key, "check-overflow")) { st->check_overflow = on; }
@@ -1153,6 +1155,7 @@ fn mnx_covered(flag: string) -> string {
   if (s_eq(flag, "-g")) { return "debug-info = true"; }
   if (s_eq(flag, "--no-crash-report")) { return "crash-report = false"; }
   if (s_eq(flag, "--native-heap")) { return "native-heap = true"; }
+  if (s_eq(flag, "--pie")) { return "pie = true"; }
   if (s_eq(flag, "--check-overflow")) { return "check-overflow = true"; }
   if (s_eq(flag, "--check-proofs")) { return "check-proofs = true"; }
   if (s_eq(flag, "--check-effects")) { return "check-effects = true"; }
@@ -2784,6 +2787,7 @@ export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
   if (st->debug_info) { sl_push(res, "-g"); }
   if (!st->crash_report) { sl_push(res, "--no-crash-report"); }
   if (st->native_heap) { sl_push(res, "--native-heap"); }
+  if (st->pie) { sl_push(res, "--pie"); }
   if (st->check_overflow) { sl_push(res, "--check-overflow"); }
   if (st->check_proofs) { sl_push(res, "--check-proofs"); }
   if (st->check_effects) { sl_push(res, "--check-effects"); }

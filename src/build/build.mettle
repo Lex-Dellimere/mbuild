@@ -1520,6 +1520,7 @@ fn bx_typed_key(flag: string) -> string {
   if (s_eq(flag, "--check-deadlines")) { return "check-deadlines"; }
   if (s_eq(flag, "--check-tasks")) { return "check-tasks"; }
   if (s_eq(flag, "--assume-no-signed-overflow")) { return "assume-no-signed-overflow"; }
+  if (s_eq(flag, "--pie")) { return "pie"; }
   if (s_eq(flag, "--pgo-gen") || s_starts(flag, "--pgo-use=")) { return "pgo"; }
   return s_empty();
 }
@@ -1531,6 +1532,7 @@ fn bx_typed_on(st: Settings*, flag: string) -> bool {
   if (s_eq(flag, "--check-deadlines")) { return st->check_deadlines; }
   if (s_eq(flag, "--check-tasks")) { return st->check_tasks; }
   if (s_eq(flag, "--assume-no-signed-overflow")) { return st->assume_nso; }
+  if (s_eq(flag, "--pie")) { return st->pie; }
   if (s_eq(flag, "--pgo-gen")) { return s_eq(st->pgo, "instrument"); }
   if (s_starts(flag, "--pgo-use=")) { return s_eq(st->pgo, "use"); }
   return false;

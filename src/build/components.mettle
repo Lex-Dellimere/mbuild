@@ -1217,6 +1217,9 @@ export fn cmp_target_problem(label: string, target: string, st: Settings*) -> st
   if (bare && slen(st->outputs) > 0 && !s_eq(st->board, "pico2") && slen(st->board_file) == 0 && sl_has(man_outputs(st->outputs), "uf2")) {
     return label + ": outputs = " + toml_quote(st->outputs) + ": only board = \"pico2\" writes UF2, and this board is " + toml_quote(st->board) + "; use \"bin\" or \"hex\"";
   }
+  if (st->pie && !(rv && !bare)) {
+    return label + ": pie is for riscv64-linux and riscv32-linux, and this is " + shown + "; set it after mb_on(\"riscv64-linux\") in a profile, or for that bin only";
+  }
   var rv_keys: StrList* = sl_new();
   defer free(rv_keys);
   if (slen(st->objective) > 0) { sl_push(rv_keys, "objective"); }

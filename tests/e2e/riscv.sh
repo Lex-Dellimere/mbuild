@@ -529,6 +529,41 @@ EOF
   MBUILD_METTLE_LINUX="$METTLE" METTLE="$W/fake/bin/mettle" MBUILD_RVSIM="$MBUILD_HOME/tools/rvsim" mb run -r -t riscv32-none --pgo-gen
   check "pgo on pico2 without the capture script" sh -c 'grep -qF "has no tools/riscv-pgo-capture.py" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 fi
+# --- pie: riscv*-linux only, with a compiler that has --pie
+mkdir -p "$W/pie/src" && cd "$W/pie"
+cat > mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("pie", "0.1.0");
+  mb_bin("pie", "src/main.mettle");
+  mb_profile("debug");
+  mb_on("riscv64-linux");
+  mb_set("pie", "true");
+  mb_on("");
+}
+EOF
+printf 'fn main() -> int32 {\n  return 5;\n}\n' > src/main.mettle
+mb build -t linux --set pie=true
+check "pie on linux is an error" sh -c 'grep -qF "pie is for riscv64-linux and riscv32-linux, and this is \"linux\"" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+if "$METTLE" --help 2>&1 | grep -qF -- "--pie"; then
+  [ $mode = debug ] && echo "note: pie without --pie skipped ($METTLE has --pie)"
+else
+  mb build -t riscv64-linux
+  check "pie needs a compiler with --pie" sh -c 'grep -qF "needs a Mettle compiler that has --pie" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+fi
+PIEC="${METTLE_BOARDS:-$here/../Mettle.eco-s5/bin/mettle}"
+if [ -x "$PIEC" ] && "$PIEC" --help 2>&1 | grep -qF -- "--pie"; then
+  METTLE="$PIEC" mb -v build -t riscv64-linux
+  check "pie: --pie, a position-independent executable" sh -c 'grep -qF -- "--pie" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ] && [ "$(od -An -tx1 -j16 -N1 build/riscv64-linux/debug/pie | tr -d " ")" = 03 ]' "$S"
+  if [ $have_user = 1 ]; then
+    METTLE="$PIEC" mb run -t riscv64-linux
+    check "pie: it runs" code_is 5
+  fi
+else
+  [ $mode = debug ] && echo "note: a pie build skipped (no compiler with --pie at $PIEC; set METTLE_BOARDS)"
+fi
+
 # --- board variant imports: X.<board>, X.<chip>, X.bare, X; the board file and its imports are inputs
 # once with a compiler without --emit-deps (mbuild's walk), once with one that has it (its list)
 for ECO in "${METTLE_BOARDS:-$here/../Mettle.eco-s5/bin/mettle}" "${METTLE_DEPS:-$here/../Mettle.eco/bin/mettle}"; do
