@@ -1,13 +1,12 @@
-// api: the exported surface of a package version, the difference between two
-// surfaces, and the report lines. Scanner-based: it sees
-// declarations, not types, so the report is information, not a verdict.
+// api: the exported surface of a package version, the difference between two, and the report lines.
+// scanner-based: it sees declarations, not types, so a report informs and does not judge.
 
 import "std/mem";
 import "../core/base";
 import "../core/fs";
 import "../build/scan";
 
-// Parallel lists, one entry per exported name (the first declaration of a
+// parallel lists, one entry per exported name (the first declaration of a
 // name wins). sigs hold the display text ("fn al_add(a: int32) -> int32",
 // "struct AlPair { a: int32; b: int32 }"), files the path relative to the
 // surface's directory, lines the declaration line.
@@ -19,8 +18,8 @@ export struct ApiSurface {
   lines: StrList*;
 }
 
-// One entry per difference: what is "removed", "changed" or "added"; old_sigs
-// is "" for added, new_sigs "" for removed. Order: removed, changed (both in
+// one entry per difference: what is "removed", "changed" or "added"; old_sigs
+// is "" for added, new_sigs "" for removed. order: removed, changed (both in
 // the old surface's order), then added (in the new surface's order).
 export struct ApiDiff {
   what: StrList*;
@@ -39,7 +38,7 @@ fn apx_new_surface() -> ApiSurface* {
   return s;
 }
 
-// The text a report shows for an export.
+// the text a report shows for an export.
 fn apx_display(it: ExportItem*) -> string {
   if (s_eq(it->kind, "fn")) {
     return "fn " + it->name + it->sig;
@@ -62,7 +61,7 @@ fn apx_display(it: ExportItem*) -> string {
   return it->kind + " " + it->name + ": " + it->sig;
 }
 
-// Files that are part of a package's API: .mettle files except tests,
+// files that are part of a package's API: .mettle files except tests,
 // examples and commands.
 fn apx_api_file(rel: string) -> bool {
   var slash: int64 = s_rfind_byte(rel, 47);
@@ -94,7 +93,7 @@ fn apx_add_file(s: ApiSurface*, rel: string, text: string) {
   free(l);
 }
 
-// The exported surface of the package in dir: every top-level `export` of
+// the exported surface of the package in dir: every top-level `export` of
 // its .mettle files (sorted by path), except *_test.mettle, test_*.mettle
 // and files under tests/, examples/ and cmd/ (dot-directories are skipped).
 export fn api_surface_dir(dir: string) -> ApiSurface* {
@@ -123,7 +122,7 @@ fn apx_push(d: ApiDiff*, what: string, name: string, old_sig: string, new_sig: s
   sl_push(d->new_sigs, new_sig);
 }
 
-// What changed from old to cur: names gone (removed), names whose kind or
+// what changed from old to cur: names gone (removed), names whose kind or
 // display text differs (changed; a struct gaining a field is a change), and
 // new names (added).
 export fn api_diff(old: ApiSurface*, cur: ApiSurface*) -> ApiDiff* {
@@ -160,7 +159,7 @@ export fn api_diff(old: ApiSurface*, cur: ApiSurface*) -> ApiDiff* {
   return d;
 }
 
-// Only the removed and changed entries of d (what breaks callers), e.g. for
+// only the removed and changed entries of d (what breaks callers), e.g. for
 // the report of a failed `get` or `update`.
 export fn api_breaking(d: ApiDiff*) -> ApiDiff* {
   var r: ApiDiff* = new ApiDiff;
@@ -179,7 +178,7 @@ export fn api_breaking(d: ApiDiff*) -> ApiDiff* {
 }
 
 // " used at a:1, b:2" for the uses ("name file:line") of name; "" when none.
-// At most 3 places, then "and N more".
+// at most 3 places, then "and N more".
 fn apx_used_at(uses: StrList*, name: string) -> string {
   if (uses == (StrList*)0) {
     return s_empty();
@@ -227,7 +226,7 @@ fn apx_with_uses(sig: string, used: string) -> string {
   return padded + "   " + used;
 }
 
-// The report lines, joined with "\n" (no trailing newline; "" when d is
+// the report lines, joined with "\n" (no trailing newline; "" when d is
 // empty):
 //     removed  fn al_mul(a: int32, b: int32) -> int32       used at src/main.mettle:5
 //     changed  fn al_add(a: int32, b: int32) -> int32

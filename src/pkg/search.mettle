@@ -1,13 +1,7 @@
-// search: mbuild search [TEXT]: the packages of every registry in the search
-// order, matched (case-insensitively) by name, description or exported function.
-//
-// Functions come from each package's newest non-yanked archive, fetched and
-// unpacked like a dependency's (checksum checked, kept in the download cache),
-// read by the API scanner, and the unpacked copy removed again.
+// search: mbuild search [TEXT]: the packages of every registry matched by name, description or exported function.
 
 import "std/mem";
 import "../core/base";
-import "../core/path";
 import "../core/fs";
 import "../model/semver";
 import "../model/manifest";
@@ -30,7 +24,7 @@ fn sr_has(hay: string, needle: string) -> bool {
   return s_contains(s_lower(hay), needle);
 }
 
-// The newest version that is not yanked; 0 when there is none.
+// the newest version that is not yanked; 0 when there is none.
 export fn sr_newest(ix: RegIndex*) -> RegVersion* {
   var best: RegVersion* = (RegVersion*)0;
   var i: int64 = 0;
@@ -44,7 +38,7 @@ export fn sr_newest(ix: RegIndex*) -> RegVersion* {
   return best;
 }
 
-// A [package] key (description, license, repository, authors) of m, "" when absent.
+// a [package] key (description, license, repository, authors) of m, "" when absent.
 export fn sr_meta(m: Manifest*, key: string) -> string {
   var i: int64 = 0;
   while (i < m->meta->len) {
@@ -65,14 +59,14 @@ export fn sr_first_line(msg: string) -> string {
   return s_dup(msg);
 }
 
-// An unpacked archive: dir is its package directory, "" when why says it can't be.
+// an unpacked archive: dir is its package directory, "" when why says it can't be.
 export struct SrUnpacked {
   dir: string;
   why: string;
 }
 
 // rv's archive fetched, checked and unpacked under the home's search/
-// directory. The caller removes dir (or the whole search/ directory).
+// directory. the caller removes dir (or the whole search/ directory).
 export fn sr_unpack(p: Project*, ix: RegIndex*, rv: RegVersion*) -> SrUnpacked* {
   var u: SrUnpacked* = new SrUnpacked;
   u->dir = s_empty();
@@ -94,7 +88,7 @@ export fn sr_unpack(p: Project*, ix: RegIndex*, rv: RegVersion*) -> SrUnpacked* 
   return u;
 }
 
-// Pushes the `export fn` names of rv's archive into out; "" or why it can't.
+// pushes the `export fn` names of rv's archive into out; "" or why it can't.
 fn sr_fns(p: Project*, ix: RegIndex*, rv: RegVersion*, m: Manifest*, out: StrList*) -> string {
   var u: SrUnpacked* = sr_unpack(p, ix, rv);
   defer free(u);
@@ -115,7 +109,7 @@ fn sr_fns(p: Project*, ix: RegIndex*, rv: RegVersion*, m: Manifest*, out: StrLis
   return s_empty();
 }
 
-// The arguments that are not flags.
+// the arguments that are not flags.
 export fn sr_positional(l: StrList*) -> StrList* {
   var r: StrList* = sl_new();
   var i: int64 = 0;

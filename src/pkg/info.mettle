@@ -1,9 +1,4 @@
-// info: mbuild info PKG[@VERSION]: what a package is: description, license,
-// registry, versions, the dependencies of the shown version and every
-// exported function with its signature and the comment above it, file by file.
-//
-// The archive is fetched, checked and unpacked like search does (the download
-// cache, then the unpacked copy removed again).
+// info: mbuild info PKG[@VERSION]: description, license, registry, versions, dependencies and exported functions of a package.
 
 import "std/mem";
 import "../core/base";
@@ -20,7 +15,7 @@ import "../config/config";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
-// The version as its registry spells it (a Mettle registry has no "v"); ix is 0 for a local package.
+// the version as its registry spells it (a Mettle registry has no "v"); ix is 0 for a local package.
 fn inf_ver(ix: RegIndex*, version: string) -> string {
   if (ix != (RegIndex*)0 && s_eq(ix->kind, "json") && s_starts(version, "v")) {
     return s_from(version, 1);
@@ -28,7 +23,7 @@ fn inf_ver(ix: RegIndex*, version: string) -> string {
   return version;
 }
 
-// The versions of ix that are versions, oldest first; only the unyanked ones when asked.
+// the versions of ix that are versions, oldest first; only the unyanked ones when asked.
 fn inf_versions(ix: RegIndex*, unyanked: bool) -> StrList* {
   var vs: StrList* = sl_new();
   var i: int64 = 0;
@@ -49,7 +44,7 @@ fn inf_versions(ix: RegIndex*, unyanked: bool) -> StrList* {
   return vs;
 }
 
-// Numbers written in a version: "v1" 1, "1.2" 2, "v1.2.3-rc.1" 3.
+// numbers written in a version: "v1" 1, "1.2" 2, "v1.2.3-rc.1" 3.
 fn inf_parts(spec: string) -> int64 {
   var core: string = spec;
   var cut: int64 = s_find_byte(core, 45);
@@ -75,7 +70,7 @@ fn inf_in_line(version: string, spec: string) -> bool {
   return slen(w) > 0 && s_starts(v, w + ".") && s_find_byte(v, 45) < 0;
 }
 
-// The version spec names: nothing or "latest" is the newest stable unyanked one (else the
+// the version spec names: nothing or "latest" is the newest stable unyanked one (else the
 // newest unyanked, else the newest);
 // "v1.2.0" or "1.2.0" that one, yanked or not; "v1" or "1.2" the newest stable unyanked one in that line.
 fn inf_pick(ix: RegIndex*, spec: string) -> RegVersion* {
@@ -158,7 +153,7 @@ fn inf_suggest(p: Project*, name: string) -> string {
   return said;
 }
 
-// The comment lines directly above the declaration on line `at` (1-based) of
+// the comment lines directly above the declaration on line `at` (1-based) of
 // lines, trimmed, in order; decorator lines between are skipped.
 fn inf_doc(lines: StrList*, at: int64) -> StrList* {
   var doc: StrList* = sl_new();
@@ -178,7 +173,7 @@ fn inf_doc(lines: StrList*, at: int64) -> StrList* {
   return doc;
 }
 
-// The function list: each file with the signatures and comments of its exported fns;
+// the function list: each file with the signatures and comments of its exported fns;
 // the "Functions:" heading unless the caller has said what the list is.
 fn inf_fns(surf: ApiSurface*, dir: string, heading: bool) {
   var file: string = s_empty();
@@ -237,7 +232,7 @@ fn inf_row(label: string, value: string) {
   }
 }
 
-// The first paragraph of a README: the text after its title up to the first
+// the first paragraph of a README: the text after its title up to the first
 // blank line or heading, one line each; "" when there is none.
 fn inf_intro(text: string) -> string {
   var lines: StrList* = s_lines(text);
@@ -261,7 +256,7 @@ fn inf_intro(text: string) -> string {
   return sl_join(out, "\n  ");
 }
 
-// A [package] key of m, "" when m is 0 (a path package with no mbuild.mettle).
+// a [package] key of m, "" when m is 0 (a path package with no mbuild.mettle).
 fn inf_meta(m: Manifest*, key: string) -> string {
   if (m == (Manifest*)0) {
     return s_empty();
@@ -269,9 +264,9 @@ fn inf_meta(m: Manifest*, key: string) -> string {
   return sr_meta(m, key);
 }
 
-// The report for one package whose files are in dir: head, description, the
+// the report for one package whose files are in dir: head, description, the
 // README's first paragraph, the rows (labels and values, between the
-// metadata and the dependencies), dependencies, functions. With readme, the
+// metadata and the dependencies), dependencies, functions. with readme, the
 // README as is instead, or the functions when there is none. m is 0 when
 // there is no manifest; ix is 0 for a package that is not from a registry.
 fn inf_show(name: string, version: string, yanked: bool, m: Manifest*, desc: string, dir: string, labels: StrList*, values: StrList*, ix: RegIndex*, readme: bool) {
@@ -341,7 +336,7 @@ fn inf_show(name: string, version: string, yanked: bool, m: Manifest*, desc: str
   inf_fns(surf, root, true);
 }
 
-// The package directory arg names in this project: "." is the project, the
+// the package directory arg names in this project: "." is the project, the
 // name of an mb_dep_path dependency its directory; "" for a registry package.
 // rel is how the project spells it.
 fn inf_local(p: Project*, arg: string, rel: StrList*) -> string {

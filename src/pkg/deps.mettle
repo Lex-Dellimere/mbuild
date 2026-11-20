@@ -1,19 +1,4 @@
-// deps: the requirement graph, minimal version selection, mbuild.lock, the
-// packages under .mbuild/deps and the managed mettle.deps blocks
-//.
-//
-// deps_ensure has a fast path that asks no registry: when .mbuild/deps.stamp
-// records the current lock (its hash) and the current requirements (a hash
-// over the root's and the path packages' dependencies and the root's
-// [replace]), and every locked package's directory carries the marker of its
-// version and checksum. Otherwise it resolves: it walks every requirement
-// reachable from the root, reading each visited (package, version)'s
-// manifest from the registry, and selects per package the highest version
-// required inside one compatibility line. The lock pins "latest" and every
-// checksum; only get/update move a pin.
-//
-// Every package gets its own managed mettle.deps block (the root, each
-// package directory, each path package) naming the packages it declares.
+// deps: the requirement graph, minimal version selection, mbuild.lock, the packages under .mbuild/deps and the managed mettle.deps blocks.
 
 import "std/mem";
 import "../core/base";
@@ -32,11 +17,9 @@ import "../build/toolchain";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
-// ---------------------------------------------------------------------------
-// Small containers
-// ---------------------------------------------------------------------------
+// small containers
 
-// One requirement: `from` requires module at spec.
+// one requirement: `from` requires module at spec.
 struct DxReq {
   module: string;
   spec: string;
@@ -46,7 +29,7 @@ struct DxReq {
   fresh: bool;       // "latest" resolved now (not from the lock)
 }
 
-// One package of the graph and the versions of it that were visited.
+// one package of the graph and the versions of it that were visited.
 struct DxMod {
   module: string;
   reqs: DxReqs*;
@@ -58,7 +41,7 @@ struct DxMod {
   ix: RegIndex*;        // its registry index, 0 until needed
 }
 
-// A [replace] { path = ... } package: a link to a local directory.
+// a [replace] { path = ... } package: a link to a local directory.
 struct DxRPath {
   module: string;
   rel: string;
@@ -68,7 +51,7 @@ struct DxRPath {
   reqs: DxReqs*;        // what required it (shown by `why`)
 }
 
-// A local { path = ... } package.
+// a local { path = ... } package.
 struct DxPath {
   key: string;
   rel: string;          // the path as written
@@ -126,7 +109,7 @@ fn drp_push(l: DxRPaths*, v: DxRPath*) {
   l->len = l->len + 1;
 }
 
-// Typed pointer lists (the memory analyser follows typed stores).
+// typed pointer lists (the memory analyser follows typed stores).
 struct DxReqs {
   items: DxReq**;
   len: int64;
@@ -227,13 +210,13 @@ fn dma_push(l: DxMans*, v: Manifest*) {
   l->len = l->len + 1;
 }
 
-// Messages already printed, as a newline-framed set.
+// messages already printed, as a newline-framed set.
 var g_dx_said: string;
 var g_dx_forced: string;
 
 // mbuild update / fetch: refresh the index of every package resolved.
 var g_dx_refresh: bool = false;
-// Packages whose index was refreshed by this process (once per command).
+// packages whose index was refreshed by this process (once per command).
 var g_dx_refreshed: StrList* = 0;
 // mbuild update --all: dx_ensure stops before changing anything when a
 // package the root does not require has a newer version in its line, and
@@ -242,17 +225,17 @@ var g_dx_raise_all: bool = false;
 var g_dx_raise_mods: StrList* = 0;
 var g_dx_raise_vers: StrList* = 0;
 
-// A snapshot of mbuild.mettle, mbuild.local.mettle, mbuild.lock and
+// a snapshot of mbuild.mettle, mbuild.local.mettle, mbuild.lock and
 // .mbuild/local.lock taken by the commands that edit them: an error that
 // stops the process writes it back.
 var g_dx_guard: DepSnap* = 0;
 var g_dx_local_noted: bool = false;
 var g_dx_md_checked: bool = false;
-// Auto-add lookups of this process, found or not.
+// auto-add lookups of this process, found or not.
 var g_dx_looked: StrList* = 0;
-// Resolve from the registry even when vendor/ exists (vendor, get, ...).
+// resolve from the registry even when vendor/ exists (vendor, get, ...).
 var g_dx_no_vendor: bool = false;
-// Indexes are kept for the whole command (registry.mettle may cache them).
+// indexes are kept for the whole command (registry.mettle may cache them).
 var g_dx_last_ix: RegIndex* = 0;
 
 fn dx_mbfile_path(p: Project*) -> string {
@@ -286,7 +269,7 @@ fn dx_snap_take(p: Project*) -> DepSnap* {
   return s;
 }
 
-// Writes the snapshot back; true when a file changed.
+// writes the snapshot back; true when a file changed.
 fn dx_snap_write(s: DepSnap*) -> bool {
   var changed: bool = false;
   var i: int64 = 0;
@@ -350,7 +333,7 @@ fn dx_set_has(set: string, item: string) -> bool {
   return s_contains("\n" + set, "\n" + item + "\n");
 }
 
-// True the first time key is seen by this process.
+// true the first time key is seen by this process.
 fn dx_once(key: string) -> bool {
   if (dx_set_has(g_dx_said, key)) {
     return false;
@@ -365,9 +348,7 @@ fn dx_announce(verb: string, module: string, version_text: string, key: string) 
   }
 }
 
-// ---------------------------------------------------------------------------
-// Paths and files
-// ---------------------------------------------------------------------------
+// paths and files
 
 fn dx_deps_dir(p: Project*) -> string {
   return p->state_dir + "/deps";
@@ -436,7 +417,7 @@ fn dx_parse_manifest(text: string, dir: string, label: string) -> Manifest* {
   return m;
 }
 
-// The configuration of a path package or path replacement (13.9); 0 when it
+// the configuration of a path package or path replacement; 0 when it
 // has no mbuild.mettle.
 fn dx_local_manifest(p: Project*, dir: string, key: string) -> Manifest* {
   if (!fs_is_file(dir + "/mbuild.mettle")) {
@@ -448,9 +429,7 @@ fn dx_local_manifest(p: Project*, dir: string, key: string) -> Manifest* {
   return cfg_load_dir(p, dir, key);
 }
 
-// ---------------------------------------------------------------------------
-// The lock
-// ---------------------------------------------------------------------------
+// the lock
 
 fn dx_local_lock_path(p: Project*) -> string {
   return p->state_dir + "/local.lock";
@@ -486,7 +465,7 @@ fn dx_lock_new() -> DxLock* {
   return l;
 }
 
-// A git-era lock ("module version commit"): its pins are dropped.
+// a git-era lock ("module version commit"): its pins are dropped.
 fn dx_git_era(lines: StrList*) -> bool {
   var i: int64 = 0;
   while (i < lines->len) {
@@ -507,8 +486,8 @@ fn dx_git_era(lines: StrList*) -> bool {
   return false;
 }
 
-// The lock this command reads: .mbuild/local.lock while mbuild.local.mettle
-// replaces packages (when it exists), else mbuild.lock. A lock with merge
+// the lock this command reads: .mbuild/local.lock while mbuild.local.mettle
+// replaces packages (when it exists), else mbuild.lock. a lock with merge
 // conflict markers is repaired: every package line of both sides, the
 // higher version of a package listed twice, and a stale requirements line.
 fn dx_lock_read_file(p: Project*, file: string) -> DxLock* {
@@ -595,7 +574,7 @@ fn dx_lock_read(p: Project*) -> DxLock* {
   return dx_lock_read_file(p, dx_lock_path(p));
 }
 
-// The packages mbuild.local.mettle replaces.
+// the packages mbuild.local.mettle replaces.
 fn dx_local_replaced(p: Project*) -> StrList* {
   var names: StrList* = sl_new();
   var i: int64 = 0;
@@ -643,7 +622,7 @@ fn dx_lock_render(a: DxLockArgs*) -> string {
   return buf_take(b);
 }
 
-// Announces what changes between two locks.
+// announces what changes between two locks.
 fn dx_lock_diff(old: DxLock*, a: DxLockArgs*) {
   var i: int64 = 0;
   while (i < a->mods->len) {
@@ -667,9 +646,7 @@ fn dx_lock_diff(old: DxLock*, a: DxLockArgs*) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Context, path packages, requirement hash
-// ---------------------------------------------------------------------------
+// context, path packages, requirement hash
 
 fn dx_cx_new(p: Project*) -> DxCx* {
   var cx: DxCx* = new DxCx;
@@ -700,7 +677,7 @@ fn dx_req_at(l: DxReqs*, i: int64) -> DxReq* {
   return l->items[i];
 }
 
-// A path package's declared name must be the key it is imported by
+// a path package's declared name must be the key it is imported by
 // (directory names never matter). file_dir is the directory of the
 // mbuild.mettle that names it; "" for mbuild.local.mettle.
 fn dx_check_name(p: Project*, m: Manifest*, key: string, rel: string, call: string, file_dir: string) {
@@ -721,7 +698,7 @@ fn dx_check_name(p: Project*, m: Manifest*, key: string, rel: string, call: stri
   dx_fail_hint(msg, "in " + file + ": point " + call + "(\"" + key + "\", ...) at a package named " + key + ", or remove the replacement");
 }
 
-// An mb_dep_path_v package must be the version it names, or a later one of
+// an mb_dep_path_v package must be the version it names, or a later one of
 // its line (what the registry would select for it).
 fn dx_check_pathv(p: Project*, pm: Manifest*, d: DepSpec*, file_dir: string) {
   if (!d->pathv || slen(d->pver) == 0) {
@@ -743,7 +720,7 @@ fn dx_check_pathv(p: Project*, pm: Manifest*, d: DepSpec*, file_dir: string) {
   }
 }
 
-// A package cannot depend on a package with its own name (the root's name
+// a package cannot depend on a package with its own name (the root's name
 // is the only one imports of it could mean). chain: how the requirer is
 // reached from the root, "" when the root asks itself.
 fn dx_fail_self(name: string, chain: string) {
@@ -758,7 +735,7 @@ fn dx_is_self(p: Project*, key: string) -> bool {
   return p->has_manifest && slen(p->man->name) > 0 && s_eq(p->man->name, key);
 }
 
-// Every local path package reachable from the root (nested ones relative to
+// every local path package reachable from the root (nested ones relative to
 // the package that names them).
 fn dx_collect_paths(cx: DxCx*) {
   var mans: DxMans* = dma_new();
@@ -820,7 +797,7 @@ fn dx_collect_paths(cx: DxCx*) {
   dx_collect_rpaths(cx);
 }
 
-// The root's [replace] { path = ... } entries (mbuild.local.mettle's first).
+// the root's [replace] { path = ... } entries (mbuild.local.mettle's first).
 fn dx_collect_rpaths(cx: DxCx*) {
   var m: Manifest* = cx->p->man;
   var i: int64 = 0;
@@ -916,7 +893,7 @@ fn dx_compute_reqs_hash(cx: DxCx*) -> string {
   return h_hex(&h);
 }
 
-// The stamp's view of mbuild.local.mettle's replacements.
+// the stamp's view of mbuild.local.mettle's replacements.
 fn dx_local_hash(p: Project*) -> string {
   var h: Hasher = h_new();
   var any: bool = false;
@@ -934,7 +911,7 @@ fn dx_local_hash(p: Project*) -> string {
   return h_hex(&h);
 }
 
-// The root itself, a path package or a path replacement: never fetched.
+// the root itself, a path package or a path replacement: never fetched.
 fn dx_is_local_module(cx: DxCx*, module: string) -> bool {
   if (cx->p->has_manifest && s_eq(cx->p->man->name, module)) {
     return true;
@@ -992,9 +969,7 @@ fn dx_first_from(m: DxMod*) -> string {
   return "mbuild.mettle";
 }
 
-// ---------------------------------------------------------------------------
-// Registries and versions
-// ---------------------------------------------------------------------------
+// registries and versions
 
 fn dx_reg_names(p: Project*) -> string {
   var l: RegList* = reg_list(p);
@@ -1010,7 +985,7 @@ fn dx_ix_err(ix: RegIndex*) -> string {
   return reg_error();
 }
 
-// The registry a package is pinned to: the root's mb_dep_from, else the
+// the registry a package is pinned to: the root's mb_dep_from, else the
 // lock's; "" for the search order.
 fn dx_pinned(cx: DxCx*, module: string) -> string {
   var d: DepSpec* = man_dep_find(cx->p->man, module);
@@ -1024,7 +999,7 @@ fn dx_pinned(cx: DxCx*, module: string) -> string {
   return s_empty();
 }
 
-// Package names mbuild knows, with where it knows them from (typo help).
+// package names mbuild knows, with where it knows them from (typo help).
 fn dx_known_names(cx: DxCx*, names: StrList*, wheres: StrList*) {
   var i: int64 = 0;
   while (i < cx->p->man->ndeps) {
@@ -1051,7 +1026,7 @@ fn dx_known_names(cx: DxCx*, names: StrList*, wheres: StrList*) {
     }
     i = i + 1;
   }
-  // The cached indexes: $MBUILD_HOME/registry/<registry>@<hash>/index/<name>
+  // the cached indexes: $MBUILD_HOME/registry/<registry>@<hash>/index/<name>
   var rdir: string = fs_mbuild_home() + "/registry";
   var rf: StrList* = sl_new();
   var regs: StrList* = sl_new();
@@ -1119,7 +1094,7 @@ fn dx_fail_missing(cx: DxCx*, module: string, from: string, pin: string) {
   exit_with(1);
 }
 
-// The index of m's package: from its pinned registry, else the first in
+// the index of m's package: from its pinned registry, else the first in
 // search order that has it. refresh asks the registry again, once per
 // command and package; a package not in any cached index is asked for too.
 fn dx_index(cx: DxCx*, m: DxMod*, refresh: bool) -> RegIndex* {
@@ -1167,7 +1142,7 @@ fn dx_sort_versions(vs: StrList*) {
   }
 }
 
-// The versions in ix, lowest first; yanked ones only with yanked_too.
+// the versions in ix, lowest first; yanked ones only with yanked_too.
 fn dx_versions(ix: RegIndex*, yanked_too: bool) -> StrList* {
   var vs: StrList* = sl_new();
   var i: int64 = 0;
@@ -1182,7 +1157,7 @@ fn dx_versions(ix: RegIndex*, yanked_too: bool) -> StrList* {
   return vs;
 }
 
-// The index entry of version ("v1.0" finds "v1.0.0"); 0 when absent.
+// the index entry of version ("v1.0" finds "v1.0.0"); 0 when absent.
 fn dx_find_version(ix: RegIndex*, version: string) -> RegVersion* {
   var rv: RegVersion* = reg_version(ix, version);
   if (rv != (RegVersion*)0) {
@@ -1237,7 +1212,7 @@ fn dx_available(ix: RegIndex*) -> string {
   return b;
 }
 
-// Number of numeric components written: "v1" 1, "v1.2" 2, "v1.2.3" 3.
+// number of numeric components written: "v1" 1, "v1.2" 2, "v1.2.3" 3.
 fn dx_version_parts(spec: string) -> int64 {
   var s: string = spec;
   if (s_starts(s, "v")) {
@@ -1261,7 +1236,7 @@ fn dx_is_partial(spec: string) -> bool {
   return sv_is(spec) && dx_version_parts(spec) < 3 && s_find_byte(spec, 45) < 0;
 }
 
-// Versions matching a partial version ("v1" -> v1.x.y, "v1.2" -> v1.2.y):
+// versions matching a partial version ("v1" -> v1.x.y, "v1.2" -> v1.2.y):
 // stable ones, or with pre the pre-releases, which only a full version selects.
 fn dx_matching(vs: StrList*, spec: string, pre: bool) -> StrList* {
   var want: SemVer = sv_parse(spec);
@@ -1278,7 +1253,7 @@ fn dx_matching(vs: StrList*, spec: string, pre: bool) -> StrList* {
   return found;
 }
 
-// Whether a locked version satisfies a spec as written.
+// whether a locked version satisfies a spec as written.
 fn dx_spec_matches(spec: string, locked: string) -> bool {
   if (dx_is_partial(spec)) {
     var one: StrList* = sl_of(locked);
@@ -1291,7 +1266,7 @@ fn dx_spec_matches(spec: string, locked: string) -> bool {
   return s_eq(sv_canonical(locked), sv_canonical(spec));
 }
 
-// The newest version in cur's compatibility line (pre-releases only when cur
+// the newest version in cur's compatibility line (pre-releases only when cur
 // is one), "" when none is newer.
 fn dx_newest_in_line(vs: StrList*, cur: string) -> string {
   var cv: SemVer = sv_parse(cur);
@@ -1314,7 +1289,7 @@ fn dx_newest_in_line(vs: StrList*, cur: string) -> string {
   return s_empty();
 }
 
-// The newest stable version of any line, "" when there is none.
+// the newest stable version of any line, "" when there is none.
 fn dx_newest_stable(vs: StrList*) -> string {
   var best: string = "";
   var i: int64 = 0;
@@ -1329,7 +1304,7 @@ fn dx_newest_stable(vs: StrList*) -> string {
   return best;
 }
 
-// Versions after `from` up to `to` (inclusive), newest first, space-separated;
+// versions after `from` up to `to` (inclusive), newest first, space-separated;
 // pre-releases only when `from` is one; in from's line unless cross.
 fn dx_candidates(vs: StrList*, from: string, to: string, cross: bool) -> string {
   var pre_ok: bool = slen(sv_parse(from).pre) > 0;
@@ -1354,7 +1329,7 @@ fn dx_candidates(vs: StrList*, from: string, to: string, cross: bool) -> string 
   return joined;
 }
 
-// The error of 14.4 for an index entry that is not the locked checksum.
+// the error of for an index entry that is not the locked checksum.
 fn dx_check_sha(module: string, version: string, locked: string, ix: RegIndex*, rv: RegVersion*) {
   var have: string = dx_sha(rv);
   if (s_eq(s_lower(locked), have)) {
@@ -1366,7 +1341,7 @@ fn dx_check_sha(module: string, version: string, locked: string, ix: RegIndex*, 
   exit_with(1);
 }
 
-// Takes the locked version of m, checked against the index.
+// takes the locked version of m, checked against the index.
 fn dx_take_locked(cx: DxCx*, m: DxMod*, r: DxReq*, li: int64) {
   var lv: string = sl_get(cx->lock->vers, li);
   var ix: RegIndex* = dx_index(cx, m, false);
@@ -1419,7 +1394,7 @@ fn dx_pick_latest(cx: DxCx*, m: DxMod*, hint: string) -> string {
   return best;
 }
 
-// The first version after a yanked one in its line, "" when none.
+// the first version after a yanked one in its line, "" when none.
 fn dx_after_yanked(ix: RegIndex*, yanked: string) -> string {
   var vs: StrList* = dx_versions(ix, false);
   var found: string = "";
@@ -1435,7 +1410,7 @@ fn dx_after_yanked(ix: RegIndex*, yanked: string) -> string {
   return found;
 }
 
-// The newest version before a yanked one in its line, "" when none.
+// the newest version before a yanked one in its line, "" when none.
 fn dx_before_yanked(ix: RegIndex*, yanked: string) -> string {
   var vs: StrList* = dx_versions(ix, false);
   var found: string = "";
@@ -1451,7 +1426,7 @@ fn dx_before_yanked(ix: RegIndex*, yanked: string) -> string {
   return found;
 }
 
-// A version requirement: the version itself (a minimum), the newest
+// a version requirement: the version itself (a minimum), the newest
 // matching a partial one; a yanked version moves to the next in its line.
 fn dx_pick_version(cx: DxCx*, m: DxMod*, spec: string, from: string) -> string {
   var label: string = "";
@@ -1500,7 +1475,7 @@ fn dx_pick_version(cx: DxCx*, m: DxMod*, spec: string, from: string) -> string {
   return label;
 }
 
-// Resolves one requirement to a version, the lock first.
+// resolves one requirement to a version, the lock first.
 fn dx_resolve_req(cx: DxCx*, m: DxMod*, r: DxReq*) {
   var spec: string = r->spec;
   if (!s_eq(spec, "latest") && !sv_is(spec)) {
@@ -1534,9 +1509,7 @@ fn dx_resolve_req(cx: DxCx*, m: DxMod*, r: DxReq*) {
   r->label = dx_pick_version(cx, m, spec, r->from);
 }
 
-// ---------------------------------------------------------------------------
-// The graph walk and selection
-// ---------------------------------------------------------------------------
+// the graph walk and selection
 
 fn dx_hint_line(cx: DxCx*, module: string) -> string {
   var i: int64 = 0;
@@ -1579,7 +1552,7 @@ fn dx_enqueue(cx: DxCx*, m: Manifest*, from: string, root: bool) {
   }
 }
 
-// The manifest of one visited version, from the registry.
+// the manifest of one visited version, from the registry.
 fn dx_node_manifest(cx: DxCx*, m: DxMod*, version: string) -> Manifest* {
   var nm: Manifest* = reg_manifest(cx->p, dx_index(cx, m, false), version);
   if (nm == (Manifest*)0) {
@@ -1588,7 +1561,7 @@ fn dx_node_manifest(cx: DxCx*, m: DxMod*, version: string) -> Manifest* {
   return nm;
 }
 
-// Records a resolved version of m (once) and queues its requirements.
+// records a resolved version of m (once) and queues its requirements.
 fn dx_visit(cx: DxCx*, m: DxMod*, r: DxReq*) {
   if (sl_index(m->labels, r->label) >= 0) {
     return;
@@ -1646,7 +1619,7 @@ fn dx_walk_once(cx: DxCx*) {
     }
     drq_push(m->reqs, r);
     if (m->rep != (ReplaceSpec*)0 && slen(m->rep->version) > 0) {
-      // Selected exactly as replaced: the requirement itself is not resolved.
+      // selected exactly as replaced: the requirement itself is not resolved.
       if (m->rep_req == (DxReq*)0) {
         var src: string = "mbuild.mettle";
         if (m->rep->local) {
@@ -1664,7 +1637,7 @@ fn dx_walk_once(cx: DxCx*) {
   }
 }
 
-// A requirement counts when its requirer is in the build: the root, a path
+// a requirement counts when its requirer is in the build: the root, a path
 // package, a replacement, or the selected version of a package.
 fn dx_live(cx: DxCx*, r: DxReq*) -> bool {
   if (r->root || s_starts(r->from, "path package ")) {
@@ -1684,7 +1657,7 @@ fn dx_live(cx: DxCx*, r: DxReq*) -> bool {
   return s_eq(sl_get(owner->labels, owner->sel), s_from(r->from, sp + 1));
 }
 
-// The selected index for m from its live requirements, -1 when none is live.
+// the selected index for m from its live requirements, -1 when none is live.
 fn dx_pick(cx: DxCx*, m: DxMod*) -> int64 {
   var any: bool = false;
   var best: string = "";
@@ -1709,7 +1682,7 @@ fn dx_pick(cx: DxCx*, m: DxMod*) -> int64 {
   return sl_index(m->labels, best);
 }
 
-// Selection to a fixed point: a package whose selected version changes can
+// selection to a fixed point: a package whose selected version changes can
 // drop or bring back the requirements of the versions it no longer selects.
 fn dx_select_all(cx: DxCx*) {
   var i: int64 = 0;
@@ -1737,7 +1710,7 @@ fn dx_select_all(cx: DxCx*) {
 
 // `latest` stated by the root and resolved now: when the package's other
 // live requirements all name one line, take the newest version in that line
-// instead (so `latest` never makes a conflict). True when a hint was added.
+// instead (so `latest` never makes a conflict). true when a hint was added.
 fn dx_latest_hints(cx: DxCx*) -> bool {
   var added: bool = false;
   var i: int64 = 0;
@@ -1855,7 +1828,7 @@ fn dx_live_reqs(cx: DxCx*, m: DxMod*) -> DxReqs* {
   return l;
 }
 
-// Insertion sort of "version<TAB>text" entries by version, then text.
+// insertion sort of "version<TAB>text" entries by version, then text.
 fn dx_sort_by_version(l: StrList*) {
   var a: int64 = 1;
   while (a < l->len) {
@@ -1880,7 +1853,7 @@ fn dx_vt_cmp(x: string, y: string) -> int32 {
   return s_cmp(x, y);
 }
 
-// For a requirer "R V" on a losing line: R's newest version after V (at most
+// for a requirer "R V" on a losing line: R's newest version after V (at most
 // 20 manifests read) that requires the package in the winning line.
 fn dx_upgrade_help(cx: DxCx*, module: string, from: string, win: string) -> string {
   var sp: int64 = s_find_byte(from, 32);
@@ -1962,7 +1935,7 @@ fn dx_conflict_lines(cx: DxCx*, m: DxMod*, vers: DxReqs*) {
   exit_with(1);
 }
 
-// Checks the selection of m against its live requirements (12.3).
+// checks the selection of m against its live requirements.
 fn dx_check_select(cx: DxCx*, m: DxMod*) {
   var live: DxReqs* = dx_live_reqs(cx, m);
   var i: int64 = 0;
@@ -2003,11 +1976,9 @@ fn dx_sort_mods(cx: DxCx*) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Package directories, mettle.deps, the DepState
-// ---------------------------------------------------------------------------
+// package directories, mettle.deps, the DepState
 
-// The .mbuild-pkg line (14.4).
+// the .mbuild-pkg line.
 fn dx_marker_line(name: string, version: string, sha: string, registry: string) -> string {
   return name + " " + version + " " + sha + " " + registry;
 }
@@ -2016,14 +1987,14 @@ fn dx_has_marker(dest: string, marker: string) -> bool {
   return !sys_is_link(dest) && s_eq(s_trim(reg_marker(dest)), marker);
 }
 
-// Extracts the selected version of a package into .mbuild/deps/<name>
+// extracts the selected version of a package into .mbuild/deps/<name>
 // unless its marker already names it.
 fn dx_materialise(cx: DxCx*, ix: RegIndex*, rv: RegVersion*) {
   var name: string = ix->name;
   var dest: string = dx_deps_dir(cx->p) + "/" + name;
   var marker: string = dx_marker_line(name, rv->version, dx_sha(rv), ix->registry);
   if (sys_is_link(dest)) {
-    // It was a local replacement: the link goes, its target stays.
+    // it was a local replacement: the link goes, its target stays.
     verbose("removing the link " + dest);
     sys_remove_link(dest);
   }
@@ -2050,7 +2021,7 @@ fn dx_materialise(cx: DxCx*, ix: RegIndex*, rv: RegVersion*) {
   }
 }
 
-// Links .mbuild/deps/<name> to target (an absolute directory).
+// links .mbuild/deps/<name> to target (an absolute directory).
 fn dx_link(dest: string, target: string) {
   if (!sys_is_link(dest) && fs_exists(dest)) {
     verbose("removing " + dest + " (now a link to " + target + ")");
@@ -2083,8 +2054,8 @@ fn dx_links_present(cx: DxCx*) -> bool {
   return true;
 }
 
-// Removes package directories (with a .mbuild-pkg) no longer selected, and
-// links no longer wanted. Never enters a link.
+// removes package directories (with a .mbuild-pkg) no longer selected, and
+// links no longer wanted. never enters a link.
 fn dx_prune(cx: DxCx*, selected: StrList*) {
   var root: string = dx_deps_dir(cx->p);
   var files: StrList* = sl_new();
@@ -2121,8 +2092,8 @@ fn dx_block_begin() -> string {
   return "# >>> mbuild: generated, edits inside this block are overwritten";
 }
 
-// Replaces (or adds, or drops) the managed block of dir/mettle.deps; lines
-// outside the block are the user's and are kept. Written only on change.
+// replaces (or adds, or drops) the managed block of dir/mettle.deps; lines
+// outside the block are the user's and are kept. written only on change.
 fn dx_write_mettle_deps(dir: string, lines: StrList*) {
   var file: string = dir + "/mettle.deps";
   var r: FsRead = fs_read(file);
@@ -2184,7 +2155,7 @@ fn dx_write_mettle_deps(dir: string, lines: StrList*) {
   fs_write_if_changed(file, text);
 }
 
-// What one package's mettle.deps block publishes to that package's own
+// what one package's mettle.deps block publishes to that package's own
 // files (the compiler takes the nearest mettle.deps first).
 struct DxBlock {
   cx: DxCx*;
@@ -2208,7 +2179,7 @@ fn dx_path_by_dir(cx: DxCx*, dir: string) -> DxPath* {
   return (DxPath*)0;
 }
 
-// The directory the compiler should see for a selected package.
+// the directory the compiler should see for a selected package.
 fn dx_pkg_dir(cx: DxCx*, name: string) -> string {
   if (dx_rpath_find(cx, name) != (DxRPath*)0) {
     return dx_deps_dir(cx->p) + "/" + name;
@@ -2216,7 +2187,7 @@ fn dx_pkg_dir(cx: DxCx*, name: string) -> string {
   return cx->deps_root + "/" + name;
 }
 
-// The manifest of a selected package, 0 when it has none.
+// the manifest of a selected package, 0 when it has none.
 fn dx_block_man(bl: DxBlock*, name: string) -> Manifest* {
   var rp: DxRPath* = dx_rpath_find(bl->cx, name);
   if (rp != (DxRPath*)0) {
@@ -2229,7 +2200,7 @@ fn dx_block_man(bl: DxBlock*, name: string) -> Manifest* {
   return bl->mans->items[at];
 }
 
-// The packages the manifest declares (14.5), its path packages, itself
+// the packages the manifest declares, its path packages, itself
 // (`name=.`) and, for the root, the mbuild API; each names the package's
 // import root.
 fn dx_block_write(bl: DxBlock*) {
@@ -2300,7 +2271,7 @@ fn dx_replaced_kind(rs: ReplaceSpec*) -> string {
   return "version";
 }
 
-// The DepState for the selected packages (already in place) and the path
+// the DepState for the selected packages (already in place) and the path
 // packages; also writes the mettle.deps blocks: the root's, and one in every
 // path package, package directory and path replacement.
 fn dx_finish(cx: DxCx*, a: DxLockArgs*, mans: DxMans*) -> DepState* {
@@ -2404,8 +2375,8 @@ fn dx_finish(cx: DxCx*, a: DxLockArgs*, mans: DxMans*) -> DepState* {
   return ds;
 }
 
-// The lines of the root mettle.deps outside mbuild's block: warnings once
-// per command (12.6).
+// the lines of the root mettle.deps outside mbuild's block: warnings once
+// per command.
 fn dx_check_user_lines(cx: DxCx*) {
   var r: FsRead = fs_read(cx->p->root + "/mettle.deps");
   if (!r.ok) {
@@ -2460,7 +2431,7 @@ fn dx_stamp_text(cx: DxCx*) -> string {
   return "mbuild-deps-3\nlock " + hash_string(cx->lock->text) + "\nreqs " + cx->reqs_hash + "\nlocal " + dx_local_hash(cx->p) + "\n";
 }
 
-// A manifest from the registry cache only (the fast path); 0 when missing.
+// a manifest from the registry cache only (the fast path); 0 when missing.
 fn dx_cached_manifest(cx: DxCx*, name: string, version: string, registry: string) -> Manifest* {
   var ix: RegIndex* = reg_index(cx->p, registry, name, false);
   g_dx_last_ix = ix;
@@ -2479,7 +2450,7 @@ fn dx_lock_args(cx: DxCx*) -> DxLockArgs* {
   return a;
 }
 
-// No registry: the stamp matches, every package directory carries the
+// no registry: the stamp matches, every package directory carries the
 // marker of its locked version, and the replacement links are there.
 fn dx_fast(cx: DxCx*) -> DepState* {
   var st: FsRead = fs_read(dx_stamp_path(cx->p));
@@ -2515,7 +2486,7 @@ fn dx_fast(cx: DxCx*) -> DepState* {
 
 // update --all: every selected package the root does not require whose
 // selected version has a newer one in its line goes to g_dx_raise_mods /
-// g_dx_raise_vers. True when there is one.
+// g_dx_raise_vers. true when there is one.
 fn dx_find_raises(cx: DxCx*) -> bool {
   g_dx_raise_mods = sl_new();
   g_dx_raise_vers = sl_new();
@@ -2550,7 +2521,7 @@ fn dx_find_raises(cx: DxCx*) -> bool {
   return g_dx_raise_mods->len > 0;
 }
 
-// vendor/ in place of the registry (14.5): its modules.txt must name the
+// vendor/ in place of the registry: its modules.txt must name the
 // current lock. 0 when there is no vendor/.
 fn dx_vendor_state(cx: DxCx*) -> DepState* {
   var p: Project* = cx->p;
@@ -2604,7 +2575,7 @@ fn dx_vendor_state(cx: DxCx*) -> DepState* {
   return ds;
 }
 
-// The whole of deps_ensure. unpin: packages whose lock pins are ignored;
+// the whole of deps_ensure. unpin: packages whose lock pins are ignored;
 // slow: skip the fast path (fetch, update).
 fn dx_ensure(p: Project*, unpin: StrList*, slow: bool) -> DepState* {
   var cx: DxCx* = dx_cx_new(p);
@@ -2720,9 +2691,7 @@ export fn deps_ensure(p: Project*) -> DepState* {
   return dx_ensure(p, sl_new(), false);
 }
 
-// ---------------------------------------------------------------------------
-// Editing mbuild.mettle (through config.mettle)
-// ---------------------------------------------------------------------------
+// editing mbuild.mettle (through config.mettle)
 
 fn dx_set_dep(p: Project*, name: string, version: string) {
   if (!cfg_set_dep(p, name, version)) {
@@ -2749,7 +2718,7 @@ fn dx_refuse_locked(p: Project*, what: string) {
   }
 }
 
-// The concrete version `want` names for a package, as written into
+// the concrete version `want` names for a package, as written into
 // mbuild.mettle (the index is refreshed first).
 fn dx_pick_for_get(cx: DxCx*, m: DxMod*, want: string) -> string {
   dx_index(cx, m, true);
@@ -2775,11 +2744,9 @@ fn dx_vendor_note(p: Project*) {
   free(lock);
 }
 
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
+// commands
 
-// A package name an import names that the manifest does not declare and
+// a package name an import names that the manifest does not declare and
 // that is not local or a component: an import of it must be added.
 fn dx_needs_adding(cx: DxCx*, m: Manifest*, name: string) -> bool {
   if (!man_is_package_name(name) || s_eq(name, "std") || s_eq(name, "mbuild")) {
@@ -2788,7 +2755,7 @@ fn dx_needs_adding(cx: DxCx*, m: Manifest*, name: string) -> bool {
   return man_dep_find(m, name) == (DepSpec*)0 && !dx_is_local_module(cx, name) && man_comp_find(cx->p->man, name) == (CompSpec*)0;
 }
 
-// The local path package an import names that the manifest does not declare
+// the local path package an import names that the manifest does not declare
 // (it reaches the project through another package): 0 when none.
 fn dx_undeclared_path(cx: DxCx*, m: Manifest*, name: string) -> DxPath* {
   if (!man_is_package_name(name) || man_dep_find(m, name) != (DepSpec*)0 || man_comp_find(cx->p->man, name) != (CompSpec*)0) {
@@ -2808,9 +2775,9 @@ fn dx_undeclared_path(cx: DxCx*, m: Manifest*, name: string) -> DxPath* {
   return (DxPath*)0;
 }
 
-// Declares an imported package: at the version mbuild.lock already selects
+// declares an imported package: at the version mbuild.lock already selects
 // (a direct import of a transitive package never moves it), else at the
-// newest stable version. False when no registry has it.
+// newest stable version. false when no registry has it.
 fn dx_add_import(cx: DxCx*, name: string) -> bool {
   var p: Project* = cx->p;
   var label: string = "";
@@ -3031,7 +2998,7 @@ export fn deps_cmd_update(p: Project*) -> int32 {
 }
 
 // used_modules: the package names imported directly by the root package's
-// own files. Requirements (path packages included) nothing there imports
+// own files. requirements (path packages included) nothing there imports
 // are removed; imported packages the root does not declare are added, at
 // the version already selected when the package is in the graph.
 export fn deps_cmd_tidy(p: Project*, used_modules: StrList*) -> int32 {
@@ -3098,7 +3065,7 @@ export fn deps_cmd_tidy(p: Project*, used_modules: StrList*) -> int32 {
   return 0;
 }
 
-// The libraries of one section family ("c" or "link": the section and its
+// the libraries of one section family ("c" or "link": the section and its
 // .linux / .windows variants), `key` lists merged. linked: a section exists.
 fn dx_section_libs(m: Manifest*, family: string, key: string, libs: StrList*) -> bool {
   var secs: StrList* = sl_of(family);
@@ -3281,7 +3248,7 @@ export fn deps_cmd_list(p: Project*) -> int32 {
   return 0;
 }
 
-// Indexes, manifests and archives for everything in the lock, so --offline
+// indexes, manifests and archives for everything in the lock, so --offline
 // builds work afterwards.
 export fn deps_cmd_fetch(p: Project*) -> int32 {
   var refresh_was: bool = g_dx_refresh;
@@ -3307,9 +3274,7 @@ export fn deps_cmd_fetch(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Interface types
-// ---------------------------------------------------------------------------
+// interface types
 
 export struct DepSnap {
   files: StrList*;
@@ -3341,9 +3306,7 @@ export struct ApiQuery {
   with_added: bool;     // also list `added` entries (default: only what breaks callers)
 }
 
-// ---------------------------------------------------------------------------
-// The resolved graph without extracting (why, outdated)
-// ---------------------------------------------------------------------------
+// the resolved graph without extracting (why, outdated)
 
 fn dx_graph(p: Project*) -> DxCx* {
   var cx: DxCx* = dx_cx_new(p);
@@ -3354,7 +3317,7 @@ fn dx_graph(p: Project*) -> DxCx* {
   return cx;
 }
 
-// The package a command-line name means: a dependency or a package in the
+// the package a command-line name means: a dependency or a package in the
 // lock; "" when it is neither.
 fn dx_name_module(cx: DxCx*, name: string) -> string {
   if (man_dep_find(cx->p->man, name) != (DepSpec*)0 || sl_has(cx->lock->mods, name) || dx_mod_find(cx, name) != (DxMod*)0) {
@@ -3398,7 +3361,7 @@ fn dx_import_hits(dir: string, name: string, label: string, hits: StrList*, abs:
   free(files);
 }
 
-// The project's own files (root and path packages) that import name.
+// the project's own files (root and path packages) that import name.
 fn dx_files_importing(p: Project*, cx: DxCx*, name: string) -> StrList* {
   var hits: StrList* = sl_new();
   dx_import_hits(p->root, name, "", hits, true);
@@ -3413,9 +3376,7 @@ fn dx_files_importing(p: Project*, cx: DxCx*, name: string) -> StrList* {
   return hits;
 }
 
-// ---------------------------------------------------------------------------
-// mbuild why NAME (12.4)
-// ---------------------------------------------------------------------------
+// mbuild why NAME
 
 export fn deps_cmd_why(p: Project*) -> int32 {
   if (p->opts->rest->len != 1) {
@@ -3521,9 +3482,7 @@ export fn deps_cmd_why(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// mbuild outdated [-v] [NAME] (12.9)
-// ---------------------------------------------------------------------------
+// mbuild outdated [-v] [NAME]
 
 fn dx_outdated_row(cx: DxCx*, m: DxMod*, cells: StrList*, newer: StrList*) {
   var label: string = sl_get(m->labels, m->sel);
@@ -3697,9 +3656,7 @@ export fn deps_cmd_outdated(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// mbuild vendor [--remove] (14.5)
-// ---------------------------------------------------------------------------
+// mbuild vendor [--remove]
 
 fn dx_toml_scalar(kind: string, text: string) -> string {
   if (s_eq(kind, "1")) {
@@ -3818,12 +3775,10 @@ export fn deps_cmd_vendor(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// mettle.deps adoption (12.6)
-// ---------------------------------------------------------------------------
+// mettle.deps adoption
 
-// Adds an `mb_dep_path("name", "dir");` line per pair ("name\ndir") where a
-// new dependency goes (13.8).
+// adds an `mb_dep_path("name", "dir");` line per pair ("name\ndir") where a
+// new dependency goes.
 fn dx_add_path_deps(p: Project*, pairs: StrList*) {
   var file: string = dx_mbfile_path(p);
   var r: FsRead = fs_read(file);
@@ -3851,7 +3806,7 @@ fn dx_add_path_deps(p: Project*, pairs: StrList*) {
   }
 }
 
-// Moves plain `name=dir` lines of the root mettle.deps into mbuild.mettle;
+// moves plain `name=dir` lines of the root mettle.deps into mbuild.mettle;
 // answers the names adopted (with write false: the names it would adopt).
 fn dx_adopt(p: Project*, write: bool) -> StrList* {
   var adopted: StrList* = sl_new();
@@ -3934,16 +3889,14 @@ export fn deps_adopt_mettle_deps(p: Project*, write: bool) -> int32 {
   return (int32)n;
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot, restore, update plans (12.9; build drives verification)
-// ---------------------------------------------------------------------------
+// snapshot, restore, update plans (12.9; build drives verification)
 
 export fn deps_snapshot(p: Project*) -> DepSnap* {
   return dx_snap_take(p);
 }
 
-// Writes the snapshot back and extracts the old versions again (from the
-// download cache). Prints nothing.
+// writes the snapshot back and extracts the old versions again (from the
+// download cache). prints nothing.
 export fn deps_restore(p: Project*, s: DepSnap*) {
   var armed: DepSnap* = g_dx_guard;
   g_dx_guard = (DepSnap*)0;
@@ -4057,7 +4010,7 @@ export fn deps_plan_update(p: Project*, r: UpdateReq*) -> UpdatePlan* {
         target = dx_newest_in_line(vs, cur);
       }
       if (!direct && !r->all) {
-        // A named transitive package moves only with --all.
+        // a named transitive package moves only with --all.
         target = s_empty();
       }
       if (slen(target) > 0) {
@@ -4130,17 +4083,15 @@ fn dx_apply(p: Project*, mods: StrList*, vers: StrList*, quiet: bool) -> DepStat
   return ds;
 }
 
-// Prints no status lines (build prints the summary); warnings still show.
-// An error that stops resolution writes the files back first.
+// prints no status lines (build prints the summary); warnings still show.
+// an error that stops resolution writes the files back first.
 export fn deps_apply(p: Project*, mods: StrList*, vers: StrList*) -> DepState* {
   return dx_apply(p, mods, vers, true);
 }
 
-// ---------------------------------------------------------------------------
-// API reports (12.9, 14.5, 14.7)
-// ---------------------------------------------------------------------------
+// API reports
 
-// The exported surface of one version from its archive, extracted into
+// the exported surface of one version from its archive, extracted into
 // .mbuild/tmp/api/<name>@<version>; 0 when it cannot be had.
 fn dx_surface_ix(p: Project*, ix: RegIndex*, version: string) -> ApiSurface* {
   var rv: RegVersion* = dx_find_version(ix, version);
@@ -4168,8 +4119,8 @@ fn dx_surface_ix(p: Project*, ix: RegIndex*, version: string) -> ApiSurface* {
   return surf;
 }
 
-// The surface of module at version: .mbuild/deps/<name> when it holds that
-// version, else the archive. Both start at the version's import root.
+// the surface of module at version: .mbuild/deps/<name> when it holds that
+// version, else the archive. both start at the version's import root.
 fn dx_surface(p: Project*, module: string, version: string) -> ApiSurface* {
   var cur: string = dx_deps_dir(p) + "/" + module;
   var mk: StrList* = s_fields(reg_marker(cur));
@@ -4251,7 +4202,7 @@ export fn deps_api_report(p: Project*, q: ApiQuery*) -> string {
   return report;
 }
 
-// The first version of the next line: v1.4.2 -> v2.0.0, v0.3.1 -> v0.4.0.
+// the first version of the next line: v1.4.2 -> v2.0.0, v0.3.1 -> v0.4.0.
 fn dx_next_line(version: string) -> string {
   var v: SemVer = sv_parse(version);
   if (v.major == 0) {
@@ -4260,7 +4211,7 @@ fn dx_next_line(version: string) -> string {
   return "v" + s_int(v.major + 1) + ".0.0";
 }
 
-// publish step 4 (14.7): the project's surface against the newest earlier
+// publish step 4: the project's surface against the newest earlier
 // version of name in version's line, from the registry directory dir (""
 // = the registry order). "" when nothing breaks (or there is no earlier
 // version), else the error with its help line; added exports with only a
@@ -4269,7 +4220,7 @@ export fn deps_api_breaks(p: Project*, name: string, version: string, dir: strin
   if (!sv_is(version)) {
     return s_empty();
   }
-  // A registry directory needs no network: read it even with --offline.
+  // a registry directory needs no network: read it even with --offline.
   var offline: bool = p->opts->offline;
   if (slen(dir) > 0) {
     p->opts->offline = false;
@@ -4293,7 +4244,7 @@ fn dx_api_breaks(p: Project*, name: string, version: string, dir: string) -> str
   if (!ix->ok || !ix->found) {
     return s_empty();
   }
-  // Yanked versions count: people may still depend on them.
+  // yanked versions count: people may still depend on them.
   var vs: StrList* = dx_versions(ix, true);
   var prev: string = "";
   var i: int64 = 0;
@@ -4336,11 +4287,9 @@ fn dx_api_breaks(p: Project*, name: string, version: string, dir: string) -> str
   return name + " " + version + " breaks the API of " + shown + " (inside line " + sv_line(version) + ", which should not break):\n" + listed + "\n  help: a breaking change needs a new line: publish " + dx_next_line(version) + " (or pass --allow-breaking)";
 }
 
-// ---------------------------------------------------------------------------
-// Mettle version requirements (12.7)
-// ---------------------------------------------------------------------------
+// Mettle version requirements
 
-// The highest [package] mettle among the selected packages:
+// the highest [package] mettle among the selected packages:
 // ["v0.99.0", "needs v1.0.0"], or empty.
 export fn deps_mettle_minimum(ds: DepState*) -> StrList* {
   var need: string = "";
@@ -4368,7 +4317,7 @@ export fn deps_mettle_minimum(ds: DepState*) -> StrList* {
   return l;
 }
 
-// For who = "NAME VERSION": ", or require NAME vX, the newest version that
+// for who = "NAME VERSION": ", or require NAME vX, the newest version that
 // supports Mettle HAVE" (the newest stable version before VERSION, at most
 // 20 manifests read, whose [package] mettle is absent or <= have), or "".
 export fn deps_mettle_fallback(p: Project*, who: string, have: string) -> string {
@@ -4415,7 +4364,7 @@ export fn deps_mettle_fallback(p: Project*, who: string, have: string) -> string
   return ", or require " + module + " " + found + ", the newest version that supports Mettle " + have;
 }
 
-// The whole 12.7 check for one compiler: "" or the error text (without
+// the whole check for one compiler: "" or the error text (without
 // "error: "), the project's own [package] mettle included.
 export fn deps_mettle_check(p: Project*, ds: DepState*, m: Mettle*) -> string {
   var l: StrList* = deps_mettle_minimum(ds);

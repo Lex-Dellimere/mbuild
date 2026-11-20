@@ -1,12 +1,4 @@
-// registry: package registries: the search order, the index,
-// manifests and archives in the download cache, extraction, publishing.
-//
-// A registry is a static tree of one of two kinds: mbuild's own (index/<name>,
-// pkg/<name>/<name>-<v>.toml and .tar.gz) or the Mettle project's (13.9:
-// v1/index.json, v1/archives/*.tar holding a mettle.package). Remote ones (http, https) are read with curl, local ones (a path
-// or file://) with fs_*; either way every file goes through the cache at
-// $MBUILD_HOME/registry/<name>@<hash12(url)>/, so --offline behaves the same
-// for both. Everything but an index is immutable once published.
+// registry: the search order, indexes, manifests and archives in the download cache, extraction, publishing.
 
 import "std/io";
 import "std/mem";
@@ -22,7 +14,7 @@ import "../model/semver";
 import "../model/manifest";
 import "../model/project";
 
-// The registry named `default` when neither MBUILD_REGISTRY nor the project
+// the registry named `default` when neither MBUILD_REGISTRY nor the project
 // names one.
 const REG_DEFAULT_URL: string = "https://the-mettle-project.github.io/Mettle/registry/";
 
@@ -52,7 +44,7 @@ export struct RegList {
   urls: StrList*;
 }
 
-// Every package of one registry (reg_all); partial: an mbuild registry with
+// every package of one registry (reg_all); partial: an mbuild registry with
 // no list of its packages, so only the ones in the download cache.
 export struct RegAll {
   registry: string;
@@ -75,12 +67,12 @@ export struct RegPublish {
 
 var g_rgx_err: string;
 var g_rgx_kind: string;
-// Per command: the cached path of every index fetched (or found missing),
+// per command: the cached path of every index fetched (or found missing),
 // registries warned about.
 var g_rgx_fetched: StrList* = (StrList*)0;
 var g_rgx_warned: StrList* = (StrList*)0;
 var g_rgx_seq: int64 = 0;
-// Per command: "<cache dir> <kind>" of every registry probed.
+// per command: "<cache dir> <kind>" of every registry probed.
 var g_rgx_kinds: StrList* = (StrList*)0;
 
 fn rgx_set(kind: string, msg: string) {
@@ -93,7 +85,7 @@ fn rgx_clear() {
   g_rgx_err = s_empty();
 }
 
-// True the first time key is seen in this command.
+// true the first time key is seen in this command.
 fn rgx_once(key: string) -> bool {
   if (g_rgx_warned == (StrList*)0) {
     g_rgx_warned = sl_new();
@@ -128,9 +120,7 @@ fn rgx_bare_sha(s: string) -> string {
   return s;
 }
 
-// ---------------------------------------------------------------------------
-// Registries and their URLs
-// ---------------------------------------------------------------------------
+// registries and their URLs
 
 fn rgx_env_name(name: string) -> string {
   var b: Buf* = buf_new();
@@ -199,7 +189,7 @@ fn rgx_is_remote(url: string) -> bool {
   return s_starts(url, "https://") || s_starts(url, "http://");
 }
 
-// The directory of a path or file:// URL (relative paths against the root).
+// the directory of a path or file:// URL (relative paths against the root).
 fn rgx_local_dir(p: Project*, url: string) -> string {
   var d: string = url;
   if (s_starts(d, "file://")) {
@@ -224,7 +214,7 @@ fn rgx_trim_slash(url: string) -> string {
   return u;
 }
 
-// The URL of registry `name`, "" (with the error set) when it has none.
+// the URL of registry `name`, "" (with the error set) when it has none.
 fn rgx_lookup(p: Project*, name: string) -> string {
   var l: RegList* = reg_list(p);
   var at: int64 = sl_index(l->names, name);
@@ -263,9 +253,7 @@ fn rgx_cache_dir(registry: string, url: string) -> string {
   return fs_mbuild_home() + "/registry/" + registry + "@" + s_sub(h, 0, 12);
 }
 
-// ---------------------------------------------------------------------------
-// Getting one file into the cache
-// ---------------------------------------------------------------------------
+// getting one file into the cache
 
 fn rgx_host_tool(name: string, env_override: string) -> Tool {
   var ev: string = env_get(env_override);
@@ -331,8 +319,8 @@ fn rgx_tmp_name(dest: string) -> string {
   return dest + ".tmp-" + s_sub(tag, 0, 8);
 }
 
-// Copies or downloads `rel` of the registry at url to dest (temp + rename).
-// False with the error and kind set; the message names the source.
+// copies or downloads `rel` of the registry at url to dest (temp + rename).
+// false with the error and kind set; the message names the source.
 fn rgx_get(p: Project*, registry: string, url: string, rel: string, dest: string) -> bool {
   rgx_clear();
   if (!fs_mkdirs(p_dir(dest))) {
@@ -389,9 +377,7 @@ fn rgx_get(p: Project*, registry: string, url: string, rel: string, dest: string
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// The index
-// ---------------------------------------------------------------------------
+// the index
 
 fn rgx_index_new(name: string, registry: string, url: string) -> RegIndex* {
   var ix: RegIndex* = new RegIndex;
@@ -414,7 +400,7 @@ fn rgx_index_fail(ix: RegIndex*) -> RegIndex* {
   return ix;
 }
 
-// A registry version: semver made only of [0-9A-Za-z.+-] (it becomes part of paths).
+// a registry version: semver made only of [0-9A-Za-z.+-] (it becomes part of paths).
 fn rgx_version_ok(v: string) -> bool {
   if (slen(v) == 0 || slen(v) > 64 || !sv_is(v)) {
     return false;
@@ -477,7 +463,7 @@ export fn reg_index(p: Project*, registry: string, name: string, refresh: bool) 
   return rgx_index(p, registry, url, name, refresh);
 }
 
-// The index of name in the registry directory dir (publish --to DIR), which
+// the index of name in the registry directory dir (publish --to DIR), which
 // need not be one of the project's registries; named after the directory.
 export fn reg_index_dir(p: Project*, dir: string, name: string, refresh: bool) -> RegIndex* {
   rgx_clear();
@@ -536,7 +522,7 @@ fn rgx_index(p: Project*, registry: string, url: string, name: string, refresh: 
     }
     sl_push(g_rgx_fetched, key);
   } else if (!have) {
-    // Already asked in this command and the registry had none.
+    // already asked in this command and the registry had none.
     ix->ok = true;
     rgx_set("missing", "registry " + registry + " has no package named " + name);
     ix->err = g_rgx_err;
@@ -615,7 +601,7 @@ fn rgx_all_push(all: RegAll*, ix: RegIndex*) {
   all->n = all->n + 1;
 }
 
-// The package names of an mbuild registry: its index/ directory, or the
+// the package names of an mbuild registry: its index/ directory, or the
 // cached one when the registry is remote (it has no list) or --offline.
 fn rgx_all_names(p: Project*, all: RegAll*, url: string) -> StrList* {
   var dir: string = s_empty();
@@ -648,7 +634,7 @@ fn rgx_all_names(p: Project*, all: RegAll*, url: string) -> StrList* {
   return names;
 }
 
-// Every package of registry, with its versions (and description, json kind);
+// every package of registry, with its versions (and description, json kind);
 // refresh fetches the index again (once per command).
 export fn reg_all(p: Project*, registry: string, refresh: bool) -> RegAll* {
   rgx_clear();
@@ -728,12 +714,10 @@ export fn reg_all(p: Project*, registry: string, refresh: bool) -> RegAll* {
   return all;
 }
 
-// ---------------------------------------------------------------------------
-// The Mettle registry (13.9): v1/index.json, plain tar archives
-// ---------------------------------------------------------------------------
+// the Mettle registry: v1/index.json, plain tar archives
 
 // "json" when the registry has v1/index.json, else "mbuild"; "" with the
-// error set when it cannot be reached. Probed once and kept in the cache.
+// error set when it cannot be reached. probed once and kept in the cache.
 fn rgx_kind(p: Project*, registry: string, url: string) -> string {
   var cache: string = rgx_cache_dir(registry, url);
   if (g_rgx_kinds == (StrList*)0) {
@@ -784,14 +768,14 @@ fn rgx_kind_probe(p: Project*, registry: string, url: string, cache: string) -> 
     return "mbuild";
   }
   if (fs_is_dir(cache + "/index")) {
-    // An mbuild registry cached before kinds were probed.
+    // an mbuild registry cached before kinds were probed.
     rgx_clear();
     return "mbuild";
   }
   return s_empty();
 }
 
-// A minimal JSON reader, enough for v1/index.json.
+// a minimal JSON reader, enough for v1/index.json.
 struct RgjVal {
   kind: int32;     // 0 null, 1 bool, 2 number, 3 string, 4 array, 5 object
   text: string;    // "true"/"false", the number as written, the decoded string
@@ -890,7 +874,7 @@ fn rgj_utf8(b: Buf*, cp: int64) {
   }
 }
 
-// At the opening quote; the decoded string (the error set on failure).
+// at the opening quote; the decoded string (the error set on failure).
 fn rgj_string(q: RgjP*) -> string {
   var b: Buf* = buf_new();
   q->i = q->i + 1;
@@ -959,7 +943,7 @@ fn rgj_word(q: RgjP*, word: string) -> bool {
   return true;
 }
 
-// One value; 0 with the error set on failure.
+// one value; 0 with the error set on failure.
 fn rgj_value(q: RgjP*) -> RgjVal* {
   rgj_ws(q);
   var c: int32 = rgj_at(q);
@@ -1080,7 +1064,7 @@ fn rgj_str(v: RgjVal*, key: string) -> string {
   return g->text;
 }
 
-// The packages array of index.json text; 0 with the error set.
+// the packages array of index.json text; 0 with the error set.
 fn rgx_json_packages(ix: RegIndex*, text: string) -> RgjVal* {
   var q: RgjP* = new RgjP;
   defer free(q);
@@ -1107,7 +1091,7 @@ fn rgx_json_packages(ix: RegIndex*, text: string) -> RgjVal* {
   return pkgs;
 }
 
-// The description and versions of package entry pk into ix.
+// the description and versions of package entry pk into ix.
 fn rgx_json_fill(ix: RegIndex*, pk: RgjVal*) {
   ix->found = true;
   ix->desc = rgj_str(pk, "description");
@@ -1136,7 +1120,7 @@ fn rgx_json_fill(ix: RegIndex*, pk: RgjVal*) {
   }
 }
 
-// Fills ix from index.json text; false with the error set.
+// fills ix from index.json text; false with the error set.
 fn rgx_parse_json_index(ix: RegIndex*, text: string) -> bool {
   var pkgs: RgjVal* = rgx_json_packages(ix, text);
   if (pkgs == (RgjVal*)0) {
@@ -1153,7 +1137,7 @@ fn rgx_parse_json_index(ix: RegIndex*, text: string) -> bool {
   return true;
 }
 
-// The cached v1/index.json of a json registry, fetched when missing or
+// the cached v1/index.json of a json registry, fetched when missing or
 // refreshed (once per command); "" with the error set.
 fn rgx_json_path(p: Project*, ix: RegIndex*, refresh: bool) -> string {
   var cached: string = rgx_cache_dir(ix->registry, ix->url) + "/v1/index.json";
@@ -1180,7 +1164,7 @@ fn rgx_json_path(p: Project*, ix: RegIndex*, refresh: bool) -> string {
   return cached;
 }
 
-// Like rgx_index for a json registry: one v1/index.json for every package.
+// like rgx_index for a json registry: one v1/index.json for every package.
 fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
   if (p->opts->offline && !fs_is_file(rgx_cache_dir(ix->registry, ix->url) + "/v1/index.json")) {
     ix->ok = true;
@@ -1208,7 +1192,7 @@ fn rgx_index_json(p: Project*, ix: RegIndex*, refresh: bool) -> RegIndex* {
   return ix;
 }
 
-// The NUL-terminated text of a tar header field.
+// the NUL-terminated text of a tar header field.
 fn rgx_tar_field(data: string, at: int64, n: int64) -> string {
   var k: int64 = 0;
   while (k < n && at + k < slen(data) && s_byte(data, at + k) != 0) {
@@ -1232,7 +1216,7 @@ fn rgx_tar_octal(data: string, at: int64, n: int64) -> int64 {
   return v;
 }
 
-// The regular member `name` of an uncompressed tar in data; "" when absent.
+// the regular member `name` of an uncompressed tar in data; "" when absent.
 fn rgx_tar_member(data: string, name: string) -> string {
   var off: int64 = 0;
   while (off + 512 <= slen(data) && s_byte(data, off) != 0) {
@@ -1331,7 +1315,7 @@ fn rgx_package_toml(ix: RegIndex*, v: RegVersion*, text: string) -> string {
   return toml;
 }
 
-// The cached archive of a json-registry version, fetched when missing.
+// the cached archive of a json-registry version, fetched when missing.
 fn rgx_archive_json(p: Project*, ix: RegIndex*, v: RegVersion*) -> string {
   var why: string = rgx_bad_name(v->archive);
   if (slen(v->archive) == 0) {
@@ -1345,7 +1329,7 @@ fn rgx_archive_json(p: Project*, ix: RegIndex*, v: RegVersion*) -> string {
   return rgx_cached(p, ix, v, rel, v->sha, true);
 }
 
-// The manifest of a json-registry version: its archive's mettle.package.
+// the manifest of a json-registry version: its archive's mettle.package.
 fn rgx_manifest_json(p: Project*, ix: RegIndex*, v: RegVersion*) -> Manifest* {
   var path: string = rgx_archive_json(p, ix, v);
   if (slen(path) == 0) {
@@ -1374,7 +1358,7 @@ fn rgx_manifest_json(p: Project*, ix: RegIndex*, v: RegVersion*) -> Manifest* {
   return m;
 }
 
-// Why publish or yank cannot write to registry `name` (dir: its directory,
+// why publish or yank cannot write to registry `name` (dir: its directory,
 // "" when remote); "" when they can.
 export fn reg_write_refusal(p: Project*, name: string, dir: string) -> string {
   var json: bool = false;
@@ -1396,9 +1380,7 @@ export fn reg_write_refusal(p: Project*, name: string, dir: string) -> string {
   return s_empty();
 }
 
-// ---------------------------------------------------------------------------
-// Manifests and archives
-// ---------------------------------------------------------------------------
+// manifests and archives
 
 fn rgx_label(ix: RegIndex*, version: string) -> string {
   return ix->name + " " + version;
@@ -1415,7 +1397,7 @@ fn rgx_source(p: Project*, ix: RegIndex*, rel: string) -> string {
   return rgx_local_dir(p, ix->url) + "/" + rel;
 }
 
-// The cached file `rel` of version v, fetched when missing, checked against
+// the cached file `rel` of version v, fetched when missing, checked against
 // want (hex); a cached copy that does not match is fetched again.
 fn rgx_cached(p: Project*, ix: RegIndex*, v: RegVersion*, rel: string, want: string, announce: bool) -> string {
   rgx_clear();
@@ -1504,9 +1486,7 @@ export fn reg_fetch(p: Project*, ix: RegIndex*, version: string) -> string {
   return rgx_cached(p, ix, v, rel, v->sha, true);
 }
 
-// ---------------------------------------------------------------------------
-// Extraction
-// ---------------------------------------------------------------------------
+// extraction
 
 fn rgx_tar() -> Tool {
   if (s_eq(sys_os(), "windows") && !sys_is_wine() && slen(env_get("MBUILD_TAR")) == 0) {
@@ -1689,9 +1669,7 @@ export fn reg_failure_kind() -> string {
   return g_rgx_kind;
 }
 
-// ---------------------------------------------------------------------------
-// Writing a local registry
-// ---------------------------------------------------------------------------
+// writing a local registry
 
 fn rgx_is_registry(dir: string) -> bool {
   return fs_is_file(dir + "/registry.toml");
@@ -1718,7 +1696,7 @@ export fn reg_init_dir(dir: string, name: string) -> string {
   return s_empty();
 }
 
-// The index line of version, -1 when absent.
+// the index line of version, -1 when absent.
 fn rgx_find_line(lines: StrList*, version: string) -> int64 {
   var i: int64 = 0;
   while (i < lines->len) {
