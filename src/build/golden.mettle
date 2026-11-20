@@ -1,8 +1,4 @@
-// golden: a test's outputs against its golden files (16.2). Every file
-// under the golden directory must exist under the run's out/ and match, and
-// out/ holds nothing else; "stdout" stands for the captured stdout when the
-// test's golden setting includes it. Text mismatches name the first
-// differing line, binary ones the first differing byte.
+// golden: a test's outputs against its golden files
 
 import "std/mem";
 import "../core/base";
@@ -36,7 +32,7 @@ fn gld_walk(root: string, rel: string, out: StrList*) {
   }
 }
 
-// The files below root, relative, '/' separated, sorted.
+// the files below root, relative, '/' separated, sorted
 export fn gld_files(root: string) -> StrList* {
   var l: StrList* = sl_new();
   gld_walk(root, s_empty(), l);
@@ -44,7 +40,7 @@ export fn gld_files(root: string) -> StrList* {
   return l;
 }
 
-// A hash of every file below dir (names and bytes), "" when there is none.
+// a hash of every file below dir (names and bytes), "" when there is none
 export fn gld_hash(dir: string) -> string {
   if (!fs_is_dir(dir)) {
     return s_empty();
@@ -85,8 +81,8 @@ fn gld_clip(s: string) -> string {
   return s;
 }
 
-// Where got differs from want ("" when equal): "at line N" with both lines,
-// or "at byte N".
+// where got differs from want ("" when equal): "at line N" with both lines,
+// or "at byte N"
 export fn gld_diff(want: string, got: string) -> string {
   if (s_eq(want, got)) {
     return s_empty();
@@ -125,9 +121,9 @@ export fn gld_diff(want: string, got: string) -> string {
   return "at line " + s_int(k + 1) + "\n  expected: " + wl + "\n  written:  " + gl;
 }
 
-// Why a run's outputs do not match the golden directory gdir (shown as
+// why a run's outputs do not match the golden directory gdir (shown as
 // gshown), "" when they do. out_dir: the run's out/; stdout: its captured
-// stdout, compared when with_stdout; tol: the png-tolerance setting.
+// stdout, compared when with_stdout; tol: the png-tolerance setting
 export fn gld_compare(gdir: string, gshown: string, out_dir: string, stdout_text: string, with_stdout: bool, tol: string) -> string {
   var want: StrList* = gld_files(gdir);
   defer free(want);
@@ -173,8 +169,8 @@ export fn gld_compare(gdir: string, gshown: string, out_dir: string, stdout_text
   return s_empty();
 }
 
-// Why two runs' outputs differ ("" when byte-identical): out/ files, and
-// stdout when with_stdout.
+// why two runs' outputs differ ("" when byte-identical): out/ files, and
+// stdout when with_stdout
 export fn gld_cross(a_out: string, a_stdout: string, b_out: string, b_stdout: string, with_stdout: bool) -> string {
   var fa: StrList* = gld_files(a_out);
   defer free(fa);
@@ -210,9 +206,9 @@ export fn gld_cross(a_out: string, a_stdout: string, b_out: string, b_stdout: st
   return s_empty();
 }
 
-// Copies a run's outputs into gdir: new and changed files, and removes the
+// copies a run's outputs into gdir: new and changed files, and removes the
 // golden files it no longer writes; only paths containing only ("" = all).
-// Each change is said as "Blessing PATH" / "Removing PATH" (gshown/f).
+// each change is said as "Blessing PATH" / "Removing PATH" (gshown/f)
 export fn gld_bless(gdir: string, gshown: string, out_dir: string, stdout_text: string, with_stdout: bool, only: string) -> int64 {
   var got: StrList* = gld_files(out_dir);
   defer free(got);

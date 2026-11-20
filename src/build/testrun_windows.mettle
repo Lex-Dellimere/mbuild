@@ -1,5 +1,4 @@
-// testrun_windows: trn_exec on Windows, one run at a time; stdout and stderr
-// go to one file. Fixtures start and stop around each run.
+// testrun_windows: trn_exec on windows, one run at a time
 
 import "std/mem";
 import "../core/base";
@@ -7,7 +6,7 @@ import "../core/fs";
 import "testrun";
 import "../core/sys_windows" if windows;
 
-// Starts the run's services in order, each waited for; why one failed, "".
+// starts the run's services in order, each waited for; why one failed, ""
 fn trw_start(r: TrnRun*, jobs: Job**) -> string {
   var i: int64 = 0;
   while (i < r->nsvcs) {

@@ -1,7 +1,4 @@
-// testrun_linux: trn_exec as alph actors. A pool starts one worker per run,
-// at most `parallel` at once, the serial runs alone after the rest; a worker
-// runs its test in a process group of its own, stdout and stderr captured,
-// and on timeout stops the whole group (SIGTERM, SIGKILL after 2 s).
+// testrun_linux: trn_exec as alph actors
 
 import "std/mem";
 import "../core/base";
@@ -58,7 +55,7 @@ struct TrlWork {
   stimer: int64;      // a fixture's deadline or grace timer, or 0
 }
 
-// What h has now into b; false at its end (h closed).
+// what h has now into b; false at its end (h closed)
 fn trl_take(ctx: AlphCtx*, w: TrlWork*, h: int64, b: Buf*) -> bool {
   while (true) {
     var n: int64 = alph_io_read(ctx, h, (rawptr)w->buf, 8192);
@@ -87,7 +84,7 @@ fn trl_io(ctx: AlphCtx*, w: TrlWork*, h: int64) {
   }
 }
 
-// The run is over: its outcome into the run, the pool told.
+// the run is over: its outcome into the run, the pool told
 fn trl_done(ctx: AlphCtx*, w: TrlWork*) -> int64 {
   var r: TrnRun* = w->r;
   r->code = w->code;
@@ -113,7 +110,7 @@ fn trl_quiet(ctx: AlphCtx*, w: TrlWork*) {
   }
 }
 
-// Stops the fixtures from the newest down, then ends the run.
+// stops the fixtures from the newest down, then ends the run
 fn trl_stop_next(ctx: AlphCtx*, w: TrlWork*) -> int64 {
   while (true) {
     w->stopping = w->stopping - 1;
@@ -144,7 +141,7 @@ fn trl_svc_failed(ctx: AlphCtx*, w: TrlWork*, why: string) -> int64 {
   return trl_stop_all(ctx, w, 1);
 }
 
-// The next fixture, or the test once all are up.
+// the next fixture, or the test once all are up
 fn trl_svc_next(ctx: AlphCtx*, w: TrlWork*) -> int64 {
   var r: TrnRun* = w->r;
   if (w->started == r->nsvcs) {
@@ -191,7 +188,7 @@ fn trl_test_start(ctx: AlphCtx*, w: TrlWork*) -> int64 {
   return ALPH_CONTINUE;
 }
 
-// A fixture process ended.
+// a fixture process ended
 fn trl_svc_exit(ctx: AlphCtx*, w: TrlWork*, h: int64, code: int64) -> int64 {
   var i: int64 = 0;
   while (i < w->started) {
@@ -214,7 +211,7 @@ fn trl_svc_exit(ctx: AlphCtx*, w: TrlWork*, h: int64, code: int64) -> int64 {
   return ALPH_CONTINUE;
 }
 
-// The test ended: what it printed, what it left behind, then the fixtures.
+// the test ended: what it printed, what it left behind, then the fixtures
 fn trl_end(ctx: AlphCtx*, w: TrlWork*, code: int64) -> int64 {
   if (w->timer != 0) {
     alph_cancel_timer(ctx, w->timer);
@@ -300,7 +297,7 @@ fn trl_start(ctx: AlphCtx*, s: TrlPool*, i: int64) {
   s->running = s->running + 1;
 }
 
-// Starts what may start now; halts once everything ended.
+// starts what may start now; halts once everything ended
 fn trl_fill(ctx: AlphCtx*, s: TrlPool*) {
   while (!s->stop) {
     var i: int64 = s->next;
@@ -354,9 +351,9 @@ fn trl_pool(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
   return ALPH_CONTINUE;
 }
 
-// Runs runs[0..n): at most parallel at once, the serial ones alone after
+// runs runs[0..n): at most parallel at once, the serial ones alone after
 // the rest; ev(arg, i) as run i ends, and false from it starts no more.
-// 130 after Ctrl-C, else 0.
+// 130 after Ctrl-C, else 0
 export fn trn_exec(runs: TrnRun**, n: int64, parallel: int64, arg: rawptr,
                    ev: fn(rawptr, int64) -> bool with alloc, syscall, asm) -> int32 {
   if (n == 0) {

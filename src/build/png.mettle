@@ -1,7 +1,4 @@
-// png: PNG files for golden compares (16.2). Decoded to RGBA8: bit depth 8,
-// colour types 0, 2, 3, 4 and 6 (tRNS honoured), no interlace; anything
-// else is an error that names it. A failing compare writes a diff image
-// (red where pixels failed) in stored deflate blocks.
+// png: decoding, encoding and comparing png files for golden tests
 
 import "std/mem";
 import "../core/base";
@@ -54,7 +51,7 @@ fn png_paeth(a: int64, b: int64, c: int64) -> int64 {
   return c;
 }
 
-// The PNG in data[0..n).
+// the PNG in data[0..n)
 export fn png_decode(data: uint8*, n: int64) -> PngImage {
   if (n < 8 || data[0] != (uint8)137 || data[1] != (uint8)80 || data[2] != (uint8)78 || data[3] != (uint8)71) {
     return png_err("is not a PNG file");
@@ -243,9 +240,7 @@ export fn png_read(path: string) -> PngImage {
   return png_decode(rd.data.chars, slen(rd.data));
 }
 
-// ---------------------------------------------------------------------------
-// Writing: RGBA8, filter 0, stored deflate blocks
-// ---------------------------------------------------------------------------
+// writing: RGBA8, filter 0, stored deflate blocks
 
 var g_png_crc: uint32* = (uint32*)0;
 
@@ -294,7 +289,7 @@ fn png_chunk(b: Buf*, kind: string, body: Buf*) {
   free(c);
 }
 
-// The bytes of a PNG of w x h RGBA8 pixels.
+// the bytes of a PNG of w x h RGBA8 pixels
 export fn png_encode(w: int64, h: int64, rgba: uint8*) -> string {
   var raw: Buf* = buf_new();
   var y: int64 = 0;
@@ -360,14 +355,12 @@ export fn png_encode(w: int64, h: int64, rgba: uint8*) -> string {
   return buf_take(out);
 }
 
-// ---------------------------------------------------------------------------
-// Compare
-// ---------------------------------------------------------------------------
+// compare
 
-// Why got differs from want beyond the tolerance ("C" or "C,F,H": a pixel
+// why got differs from want beyond the tolerance ("C" or "C,F,H": a pixel
 // fails when a channel differs by more than C; the image when more than a
 // fraction F of pixels fail or any channel differs by more than H), "" when
-// it does not; a failing compare writes diff_out (red where pixels failed).
+// it does not; a failing compare writes diff_out (red where pixels failed)
 export fn png_compare(want_path: string, got_path: string, tol: string, diff_out: string) -> string {
   var a: PngImage = png_read(want_path);
   if (!a.ok) {

@@ -1,6 +1,4 @@
-// testrun: the runs of `mbuild test` (16.1). One TrnRun per test, cell and
-// repeat: its directory and environment, what its output says, the cause of
-// a failure. trn_exec (testrun_linux, testrun_windows) runs them.
+// testrun: one run of mbuild test: its directory, environment and verdict
 
 import "std/mem";
 import "../core/base";
@@ -9,7 +7,7 @@ import "../core/fs";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
-// A fixture of one run: a service started before the test, stopped after.
+// a fixture of one run: a service started before the test, stopped after
 export struct TrnSvc {
   name: string;
   cmd: Cmd*;          // 0 when its program was not found
@@ -33,7 +31,6 @@ export struct TrnRun {
   svcs: TrnSvc*;
   nsvcs: int64;
   nsvcs_up: int64;    // started so far
-  // the outcome
   code: int64;
   timed_out: bool;
   ms: int64;
@@ -57,7 +54,7 @@ export fn trn_run_new(test: int64, cell: int64, k: int64) -> TrnRun* {
   return r;
 }
 
-// An empty run directory (tmp/, out/) and the run's environment and cwd.
+// an empty run directory (tmp/, out/) and the run's environment and cwd
 export fn trn_prepare(r: TrnRun*, root: string, name: string, cell: string, cwd_tmp: bool, env: StrList*) {
   sys_remove_tree(r->dir);
   var tmp: string = r->dir + "/tmp";
@@ -85,19 +82,19 @@ export fn trn_prepare(r: TrnRun*, root: string, name: string, cell: string, cwd_
   }
 }
 
-// What the run printed, into its directory.
+// what the run printed, into its directory
 export fn trn_save(r: TrnRun*) {
   fs_write(r->dir + "/stdout", r->out);
   fs_write(r->dir + "/stderr", r->err);
 }
 
-// Seconds with one decimal: "0.3s".
+// seconds with one decimal: "0.3s"
 export fn trn_secs(ms: int64) -> string {
   var tenths: int64 = (ms + 50) / 100;
   return s_int(tenths / 10) + "." + s_int(tenths % 10) + "s";
 }
 
-// Why a run that ended failed by its exit alone; "" when it passed.
+// why a run that ended failed by its exit alone; "" when it passed
 export fn trn_exit_why(r: TrnRun*) -> string {
   if (slen(r->svc_why) > 0) {
     return r->svc_why;
@@ -120,8 +117,8 @@ export fn trn_exit_why(r: TrnRun*) -> string {
   return s_empty();
 }
 
-// The checks a run reports: a line "mbuild-checks: N" sets it, else the
-// stdout lines starting with prefix ("" = none).
+// the checks a run reports: a line "mbuild-checks: N" sets it, else the
+// stdout lines starting with prefix ("" = none)
 export fn trn_checks(out: string, prefix: string) -> int64 {
   var lines: StrList* = s_lines(out);
   defer free(lines);
@@ -143,8 +140,8 @@ export fn trn_checks(out: string, prefix: string) -> int64 {
   return n;
 }
 
-// The compiler's warnings in output: "CODE at FILE:LINE" each, the
-// interpreter's leak reports (E0003) left out.
+// the compiler's warnings in output: "CODE at FILE:LINE" each, the
+// interpreter's leak reports (E0003) left out
 export fn trn_warnings(output: string) -> StrList* {
   var l: StrList* = sl_new();
   var lines: StrList* = s_lines(output);
@@ -182,7 +179,7 @@ export fn trn_warnings(output: string) -> StrList* {
   return l;
 }
 
-// The first warning the setting denies ("error", "error:M01,W0001"), "".
+// the first warning the setting denies ("error", "error:M01,W0001"), ""
 export fn trn_denied(warns: StrList*, setting: string) -> string {
   if (!s_starts(setting, "error")) {
     return s_empty();
@@ -219,8 +216,8 @@ export fn trn_denied(warns: StrList*, setting: string) -> string {
   return s_empty();
 }
 
-// From `mettle test` output: the passed count, and the names of the tests it
-// skipped (they call C) into skipped.
+// from `mettle test` output: the passed count, and the names of the tests it
+// skipped (they call C) into skipped
 export fn trn_interp(out: string, skipped: StrList*) -> int64 {
   var lines: StrList* = s_lines(out);
   defer free(lines);
@@ -238,7 +235,7 @@ export fn trn_interp(out: string, skipped: StrList*) -> int64 {
   return passed;
 }
 
-// The last n lines of text, each indented.
+// the last n lines of text, each indented
 export fn trn_tail(text: string, n: int64, indent: string) -> string {
   var lines: StrList* = s_lines(text);
   defer free(lines);

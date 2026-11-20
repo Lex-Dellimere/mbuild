@@ -1,14 +1,9 @@
-// testnative: an @test file as a program (16.1), for the tests the
-// interpreter cannot run (they call C) or every test with native=always.
-// The copy keeps every line where it was (diagnostics and assert lines
-// match the original): std/io is imported on line 1, `fn main` becomes
-// mbt_orig_main, and a generated main calls the selected tests in order.
-// A test that a main calls stays in a --build as an ordinary function.
+// testnative: an @test file as a program, for tests the interpreter cannot run
 
 import "std/mem";
 import "../core/base";
 
-// Whether text[at..] starts with word, at a line's first non-blank byte.
+// whether text[at..] starts with word, at a line's first non-blank byte
 fn tnv_at_line_start(text: string, at: int64) -> bool {
   var i: int64 = at - 1;
   while (i >= 0) {
@@ -31,8 +26,8 @@ fn tnv_skip_space(text: string, i: int64) -> int64 {
   return i;
 }
 
-// The @test functions of text in source order: "name\t1" when it returns a
-// value (int32, 0 = passed), "name\t0" when it returns nothing.
+// the @test functions of text in source order: "name\t1" when it returns a
+// value (int32, 0 = passed), "name\t0" when it returns nothing
 export fn tnv_tests(text: string) -> StrList* {
   var l: StrList* = sl_new();
   var n: int64 = slen(text);
@@ -78,8 +73,8 @@ export fn tnv_tests(text: string) -> StrList* {
   return l;
 }
 
-// The program: text with line 1 importing std/io, fn main renamed, and a
-// main that runs tests ("name\t1" / "name\t0" entries) in order.
+// the program: text with line 1 importing std/io, fn main renamed, and a
+// main that runs tests ("name\t1" / "name\t0" entries) in order
 export fn tnv_source(text: string, tests: StrList*) -> string {
   var b: Buf* = buf_new();
   buf_add(b, "import \"std/io\"; ");
@@ -118,7 +113,7 @@ export fn tnv_source(text: string, tests: StrList*) -> string {
   return buf_take(b);
 }
 
-// The entries of all whose names are in names, in all's order.
+// the entries of all whose names are in names, in all's order
 export fn tnv_pick(all: StrList*, names: StrList*) -> StrList* {
   var l: StrList* = sl_new();
   var i: int64 = 0;
@@ -132,7 +127,7 @@ export fn tnv_pick(all: StrList*, names: StrList*) -> StrList* {
   return l;
 }
 
-// The checks of a native run: its "test NAME ... ok" lines.
+// the checks of a native run: its "test NAME ... ok" lines
 export fn tnv_passed(out: string) -> int64 {
   var lines: StrList* = s_lines(out);
   defer free(lines);
