@@ -1,7 +1,7 @@
-# Components and runtime options
+# components and runtime options
 
-A component is an interface with several implementations, one file each.
-Your code imports it by name and mbuild wires in an implementation:
+a component is an interface with several implementations, one file each.
+your code imports it by name and mbuild wires in an implementation:
 
 - `static`: one impl is picked at build time, the others aren't compiled;
 - `dyn`: every impl is linked and the program picks one at run time;
@@ -56,7 +56,7 @@ logger = quiet
 
 `mb_component(name, dir, mode, impls)`: each impl is `<dir>/<impl>.mettle`
 (it may import siblings, so shared code can go in `<dir>/common.mettle`).
-The first impl is the default and defines the interface: every other impl
+the first impl is the default and defines the interface: every other impl
 must export the same names with the same signatures, extra exports are
 fine. `NAME_IMPL` (`LOGGER_IMPL` here) holds the chosen impl's name.
 
@@ -75,12 +75,12 @@ $ mbuild components --check
      Checked 2 static impls, every component's interface
 ```
 
-A component name is a single path component, so it's never mistaken for a
-package. Names must be unique across your project and its dependencies.
+a component name is a single path component, so it's never mistaken for a
+package. names must be unique across your project and its dependencies.
 
-## Which impl is used
+## which impl is used
 
-Later wins:
+later wins:
 
 1. the first impl in the list;
 2. `mb_component_on(name, os, impl)`, a per-OS default;
@@ -111,15 +111,15 @@ $ mbuild use logger
        Using logger = stdout (default)
 ```
 
-Libraries can declare components; only your project chooses.
+libraries can declare components; only your project chooses.
 
-Plain `mettle` and editors don't see the selection, so `import "logger"`
+plain `mettle` and editors don't see the selection, so `import "logger"`
 doesn't resolve for them; `mbuild mettle -- ARGS` runs the compiler with the
 selection of a host debug build.
 
 ## dyn
 
-Every impl is linked; the program picks one by name. The component's
+every impl is linked; the program picks one by name. the component's
 directory holds `<name>.mettle` with exactly one `@dyn export trait`, and
 each impl exports its struct and a constructor `<component>_<impl>_new()`:
 
@@ -179,7 +179,7 @@ fancy costs 5000
 
 mbuild generates `renderer_new(name)` (an unknown name gives the default),
 `renderer_impls()`, `renderer_has(name)` and `RENDERER_IMPL`. `mb_use` sets
-the default. The impl struct must be exported:
+the default. the impl struct must be exported:
 
 ```text
 error: component renderer (dyn): struct Fancy in src/renderer/fancy.mettle implements Renderer but is not exported; export it (`export struct Fancy`): @dyn skips an impl for a private struct of another file
@@ -187,7 +187,7 @@ error: component renderer (dyn): struct Fancy in src/renderer/fancy.mettle imple
 
 ## swap
 
-Every impl is linked and each interface function becomes a slot. The
+every impl is linked and each interface function becomes a slot. the
 program stages another impl, and the switch happens at its next `quiesce;`:
 
 ```mettle
@@ -226,12 +226,12 @@ $ mbuild run
 50
 ```
 
-Rules:
+rules:
 
 - every export of every impl is `@swappable export fn`, with the same
   signatures in all of them;
 - parameters and results are built-in types only (integers, floats, `bool`,
-  `char`, `string`, `cstring`, `rawptr` and pointers to those). Pass a struct
+  `char`, `string`, `cstring`, `rawptr` and pointers to those). pass a struct
   as a `rawptr`:
 
   ```text
@@ -252,7 +252,7 @@ Rules:
 `mbuild live` builds the host target and runs the program under
 `mettle live`: every file you save patches the running program at its next
 `quiesce;`, and `mbuild use` in another terminal switches a component the
-same way. Here `stdout.mettle` is edited after tick 2, and
+same way. here `stdout.mettle` is edited after tick 2, and
 `mbuild use logger=quiet` runs after tick 6:
 
 ```mettle
@@ -290,19 +290,19 @@ Patch 2: log_line (296 bytes)
 [live] /home/you/comp/build/linux/debug/live/comp exited with 0
 ```
 
-`mbuild live [BIN] [-p PROFILE] [-- ARGS]`. The exit code is the program's.
+`mbuild live [BIN] [-p PROFILE] [-- ARGS]`. the exit code is the program's.
 
-Runtime options (`native-heap`, `crash-report`, `safe`, `profile-runtime`,
+runtime options (`native-heap`, `crash-report`, `safe`, `profile-runtime`,
 `subsystem`, ...) are typed settings per profile, bin or OS: see
 [project](project.md#profiles-and-settings).
 
-## Bin kinds
+## bin kinds
 
 `mb_bin_kind(name, kind, triple)`:
 
-| kind | Output |
+| kind | output |
 |---|---|
-| `exe` | `build/<target>/<profile>/<bin>`, `.exe` on Windows (the default) |
+| `exe` | `build/<target>/<profile>/<bin>`, `.exe` on windows (the default) |
 | `shared` | `lib<bin>.so` / `<bin>.dll`; no `main` needed; `mbuild run` refuses it |
 | `object` | `<bin>.o` / `.obj` for the triple (default: the target's), to link elsewhere |
 | `flat` | `<bin>.bin`, a raw image; needs a `*-none` triple and `image-base`, or a RISC-V triple and a `board` |
@@ -327,9 +327,9 @@ Wrote flat image 'build/x86_64-none/debug/kern.bin' at 0x100000
     Finished in 0.0s
 ```
 
-A bin with a `*-none` triple is freestanding: built once per profile into
+a bin with a `*-none` triple is freestanding: built once per profile into
 `build/<triple>/<profile>/`, whatever `-t` says, with no runtime, so no C
-code, no `swap` components, no `safe` or `stack-trace`. Running one is up to
+code, no `swap` components, no `safe` or `stack-trace`. running one is up to
 you:
 
 ```text
@@ -338,7 +338,7 @@ error: bin kern is freestanding (x86_64-none): mbuild cannot run it
   help: write a project command that starts your emulator: fn cmd_qemu
 ```
 
-A bin with a `riscv32-none` or `riscv64-none` triple is a board image: it
+a bin with a `riscv32-none` or `riscv64-none` triple is a board image: it
 needs a board instead of an `image-base`, writes `<bin>.bin` and `<bin>.elf`
 (or the `outputs` it names), and `mbuild run` boots it under an emulator
 ([platforms](platforms.md#risc-v)):
@@ -354,7 +354,7 @@ needs a board instead of an `image-base`, writes `<bin>.bin` and `<bin>.elf`
 `mb_out("game", "host", "release")` answers `build/riscv32-none/release/game.bin`.
 `-t riscv32-none` does the same for every exe bin without a triple of its own.
 
-## Project rules
+## project rules
 
 `mb_rule(file)` attaches a file of `@rule` functions to every bin and test of
 your project, so the compiler checks your whole program against them:
@@ -388,9 +388,9 @@ error[R0002]: rule 'no_recursion' failed: this program forbids recursion
 error: could not compile rl (linux, debug)
 ```
 
-The compiler names `entry.mettle` because mbuild compiles a generated file
-that imports your main file and the rule files. So in a rule, `f.module` of
+the compiler names `entry.mettle` because mbuild compiles a generated file
+that imports your main file and the rule files. so in a rule, `f.module` of
 a function in your main file is its absolute path, not `""`.
 
-Rules of dependencies aren't attached; a library that wants its rules
+rules of dependencies aren't attached; a library that wants its rules
 applied imports them from its own code.

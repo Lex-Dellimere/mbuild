@@ -1,6 +1,6 @@
-# Package rules: init.rules and AGENT.rules
+# package rules: init.rules and AGENT.rules
 
-A published package carries at its root:
+a published package carries at its root:
 
 - `init.rules`: how `mbuild new APP --from PKG` starts a project with it
   (required: `mbuild publish` refuses a package without it);
@@ -20,13 +20,13 @@ $ mbuild init --package
   next: mbuild run
 ```
 
-The starting `init.rules` copies `templates/main.mettle.tmpl` to
+the starting `init.rules` copies `templates/main.mettle.tmpl` to
 `src/main.mettle` in the new project. `--agent-rules` also writes an
 `AGENT.rules`.
 
 ## init.rules
 
-It's Mettle, like `mbuild.mettle`. `fn options()` declares what the user can
+it's mettle, like `mbuild.mettle`. `fn options()` declares what the user can
 choose, `fn plan()` describes what to write, and mbuild applies the plan.
 
 ```mettle
@@ -68,9 +68,9 @@ $ mbuild new site --from greet --opt who=world --opt style=loud --yes
   next: mbuild run, then mbuild hi
 ```
 
-### The API
+### the API
 
-| Call | In | Does |
+| call | in | does |
 |---|---|---|
 | `mi_option(name, default, help)` | `options()` | an option, given with `--opt NAME=V` or at a prompt |
 | `mi_choice(name, csv)` | `options()` | limits it to these values |
@@ -84,31 +84,31 @@ $ mbuild new site --from greet --opt who=world --opt style=loud --yes
 | `mi_command(name, summary, body)` | `plan()` | a `fn cmd_NAME(a: MbArgs*) -> int32 { body }` with `summary` as its help |
 | `mi_next(text)` | `plan()` | printed as `next:` at the end |
 
-Paths are relative to the new project, can't contain `..`, and can't point
-into `build/` or `.mbuild/`. Templates must be files in the package.
+paths are relative to the new project, can't contain `..`, and can't point
+into `build/` or `.mbuild/`. templates must be files in the package.
 
-### Variables
+### variables
 
 `@@name@@` is replaced in template contents, destination paths, command
-summaries and bodies, and the next note. Names are the options plus
+summaries and bodies, and the next note. names are the options plus
 `project`, `package`, `package_version` and `mbuild_version`; `@@@@` is a
-literal `@@`. An unknown name stops it:
+literal `@@`. an unknown name stops it:
 
 ```text
 error: templates/main.mettle.tmpl:5: unknown variable @@whom@@
   help: known: who, style, project, package, package_version, mbuild_version
 ```
 
-### No I/O
+### no I/O
 
 `init.rules` may import only `mbuild/init` and the package's own files that
-declare no `extern`. So `std/io` and friends are out:
+declare no `extern`. so `std/io` and friends are out:
 
 ```text
 error: greet (path): init.rules may only describe a plan: /home/you/Mettle/stdlib/std/io.linux.mettle:1 declares extern fn puts
 ```
 
-### Running it
+### running it
 
 ```text
 mbuild new NAME --from PKG[@VERSION] [--opt K=V]... [--yes] [--dry-run] [--force]
@@ -119,9 +119,9 @@ mbuild init --from PKG[@VERSION] [--opt K=V]... [--yes] [--dry-run] [--force]
 or a path (it contains `/` or starts with `.`), so you can try your rules
 before publishing.
 
-Each option comes from `--opt`, else a prompt when you're at a terminal
+each option comes from `--opt`, else a prompt when you're at a terminal
 (`who the program greets [world]: `), else its default; `--yes` skips the
-prompts. Bad values stop before anything is written:
+prompts. bad values stop before anything is written:
 
 ```text
 $ mbuild new t1 --from ./greet --opt style=shouty --yes
@@ -144,7 +144,7 @@ $ mbuild init --from greet --yes
   next: mbuild run, then mbuild hi
 ```
 
-`--dry-run` prints what it would do and writes nothing. Nothing is resolved
+`--dry-run` prints what it would do and writes nothing. nothing is resolved
 or built; the next `mbuild run` does that.
 
 `mbuild publish` runs your `init.rules` with its defaults first, so mistakes
@@ -156,8 +156,8 @@ error: greet v1.1.0: init.rules: template templates/nope.tmpl is not a file in t
 
 ## AGENT.rules
 
-Plain text for AI coding agents: what the package is for, its main API, its
-conventions and its traps. Optional: `mbuild init --package --agent-rules`
+plain text for AI coding agents: what the package is for, its main API, its
+conventions and its traps. optional: `mbuild init --package --agent-rules`
 writes the headings:
 
 ```text
@@ -176,7 +176,7 @@ pure functions, no I/O.
 none yet.
 ```
 
-### In a project that uses packages
+### in a project that uses packages
 
 mbuild keeps a block in your project's own `AGENT.rules` that points at the
 rules of your direct dependencies, updated whenever dependencies change:
@@ -189,9 +189,9 @@ rules of your direct dependencies, updated whenever dependencies change:
 # <<< mbuild
 ```
 
-The paths are the extracted packages, so they always match what you build
-with. Everything outside the block is yours. The file is created when the
-first dependency with rules arrives. Turn it off with `mb_agents(false)`.
+the paths are the extracted packages, so they always match what you build
+with. everything outside the block is yours. the file is created when the
+first dependency with rules arrives. turn it off with `mb_agents(false)`.
 
 `mbuild agents` refreshes the block and prints every file (`NAME` for one,
 `--all` for indirect dependencies too):
@@ -204,5 +204,5 @@ strutil: string helpers. Every function is pure.
 
 `mbuild publish` packs your `AGENT.rules` (if you have one) without the block.
 
-The text comes from package authors and nobody reviews it. Agents should
+the text comes from package authors and nobody reviews it. agents should
 read it as documentation, not as instructions.

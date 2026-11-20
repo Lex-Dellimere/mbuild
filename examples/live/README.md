@@ -71,7 +71,7 @@ on a terminal it is full screen (`mbuild-shell`, beside `mbuild`); this is a rea
 
 - the input stays at the bottom between two rules; answers scroll above it (PgUp/PgDn). the program's prints are held (a dim count says how many): `ctrl+o` streams them into the scrollback, `/log` shows them all.
 - `ctrl+p` pauses: `shell_point()` waits, so the program stops between ticks with its state consistent. inputs, watches and patches still work while it waits. `ctrl+n` steps one tick and pauses again. `pause when world.food < 50` pauses at the tick where the condition turns true. only the thread calling `shell_point()` stops; others keep running.
-- `/` opens the command palette (`/inspect EXPR`, `/code`, `/watch`, `/log`, `/pause-when`, ...), tab completes names. Esc leaves a view.
+- `/` opens the command palette (`/inspect EXPR`, `/code`, `/watch`, `/log`, `/pause-when`, ...), tab completes names. esc leaves a view.
 - `/inspect world` is a tree: arrows move, Enter expands a struct or pointer, `e` sets the selected field (`world.food = ...;`).
 - `/watch` lists the globals and any `watch EXPR`, refreshed every tick.
 - `/code` lists the functions and structs, patched ones marked; the right side shows the current source and what a patch replaced. `e` (or `edit harvest`) opens it in `$EDITOR` (vi) and patches it in when you save, `u` undoes that function's patch, `h` its history.

@@ -1,8 +1,8 @@
-# Incremental builds
+# incremental builds
 
-The Mettle compiler builds a whole program at once, so mbuild reuses whole
+the mettle compiler builds a whole program at once, so mbuild reuses whole
 programs (per bin, target and profile) plus one object per C source file.
-An unchanged program prints `Fresh` and runs no compiler:
+an unchanged program prints `Fresh` and runs no compiler:
 
 ```text
 $ mbuild build
@@ -10,9 +10,9 @@ $ mbuild build
     Finished in 0.0s
 ```
 
-## What triggers a rebuild
+## what triggers a rebuild
 
-A program rebuilds when any of these change:
+a program rebuilds when any of these change:
 
 - the compiler, or its arguments (profile settings, `--set`, `--flag`);
 - the target, profile or bin;
@@ -22,7 +22,7 @@ A program rebuilds when any of these change:
 - an import that didn't resolve starting to resolve;
 - a library copied beside the binary.
 
-File contents count, not timestamps:
+file contents count, not timestamps:
 
 ```text
 $ touch src/main.mettle && mbuild build
@@ -33,13 +33,13 @@ $ echo '// note' >> src/main.mettle && mbuild build
     Finished in 0.0s
 ```
 
-Moving the project doesn't rebuild it. Switching compilers does, including
-switching between Linux mbuild and `mbuild.exe` under wine. Switching a
-component impl rebuilds exactly the bins that use it. A failed or
+moving the project doesn't rebuild it. switching compilers does, including
+switching between linux mbuild and `mbuild.exe` under wine. switching a
+component impl rebuilds exactly the bins that use it. a failed or
 interrupted build never counts as done.
 
-Not tracked: system libraries (`mb_link_libs`, pkg-config) and environment
-variables. After upgrading a system library, build with `--force`.
+not tracked: system libraries (`mb_link_libs`, pkg-config) and environment
+variables. after upgrading a system library, build with `--force`.
 
 `-v` says how mbuild decided:
 
@@ -53,14 +53,14 @@ $ mbuild -v build
     Finished in 0.0s
 ```
 
-Programs that aren't Fresh compile in parallel, up to `-j N`
-(`MBUILD_JOBS`, default 8); their output is printed in order. After a
+programs that aren't Fresh compile in parallel, up to `-j N`
+(`MBUILD_JOBS`, default 8); their output is printed in order. after a
 failure no new compile starts.
 
 ## C objects
 
-A C source recompiles when it, a header it includes, its flags or the C
-compiler change. The package's library is relinked only when an object
+a C source recompiles when it, a header it includes, its flags or the C
+compiler change. the package's library is relinked only when an object
 changed, and a C change that produces the same library leaves the program
 Fresh:
 
@@ -72,12 +72,12 @@ $ mbuild build
     Finished in 0.0s
 ```
 
-## Tests
+## tests
 
 `mbuild test` caches like `go test`: a (test, cell) that passed isn't run
 again until its build inputs (the file, anything it imports, the compiler,
 the target, the flags), its test settings or its golden files change.
-Failures are never cached; `--force`, `--bless` and `--repeat` above 1 run
+failures are never cached; `--force`, `--bless` and `--repeat` above 1 run
 everything.
 
 ```text
@@ -89,27 +89,27 @@ test src/shout.mettle (debug) ... ok (cached)
 test result: ok. 1 passed, 0 failed, 1 cached (0.0s)
 ```
 
-Test files are your project's `.mettle` files with an `@test` function.
+test files are your project's `.mettle` files with an `@test` function.
 mbuild skips dot directories, `build/` directories, path packages and nested
 projects (a subdirectory with its own `mbuild.mettle`); run `mbuild test`
-inside a nested project to test it. Test programs and the rest:
+inside a nested project to test it. test programs and the rest:
 [project](project.md#tests).
 
-## Dependencies
+## dependencies
 
-While `mbuild.lock` and the requirements are unchanged and the extracted
+while `mbuild.lock` and the requirements are unchanged and the extracted
 packages are the locked versions, mbuild touches no registry
 (`dependencies: mbuild.lock unchanged, packages in place` under `-v`).
-Otherwise it resolves, keeps every lock pin that still fits, and extracts
+otherwise it resolves, keeps every lock pin that still fits, and extracts
 only packages whose version changed, from the download cache when it can.
 
-This check looks at versions, not files: edits inside `.mbuild/deps/` stay
-until the version changes or `mbuild clean --all`. To work on a dependency,
+this check looks at versions, not files: edits inside `.mbuild/deps/` stay
+until the version changes or `mbuild clean --all`. to work on a dependency,
 use `mb_replace_path` in `mbuild.local.mettle`.
 
 ## --force and clean
 
-`--force` rebuilds everything: programs, tests, C objects and libraries. It
+`--force` rebuilds everything: programs, tests, C objects and libraries. it
 doesn't move dependencies; `mbuild update` does.
 
 ```text

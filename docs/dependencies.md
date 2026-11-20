@@ -1,27 +1,27 @@
-# Dependencies
+# dependencies
 
-Packages come from registries: static folders that any web host, file
-share or local directory can serve. Local packages can also be used straight
+packages come from registries: static folders that any web host, file
+share or local directory can serve. local packages can also be used straight
 from a directory.
 
-## Importing a package
+## importing a package
 
-A package import is the package name, then a file inside it:
+a package import is the package name, then a file inside it:
 
 ```mettle
 import "strutil/strutil";      // strutil.mettle at the package root
 import "webfw/http/server";    // http/server.mettle
 ```
 
-An import with a single component (`import "logger"`) is never a package:
+an import with a single component (`import "logger"`) is never a package:
 it's a file next to yours, or a [component](components.md).
 
-### Import roots
+### import roots
 
-A package that keeps its code in `src/` says so with
+a package that keeps its code in `src/` says so with
 `mb_import_root("src")`, and `import "mistplot/core/scale"` then means
-`src/core/scale.mettle`, for its users and for its own files. It holds for
-path and registry packages alike. The directory must exist inside the
+`src/core/scale.mettle`, for its users and for its own files. it holds for
+path and registry packages alike. the directory must exist inside the
 package:
 
 ```text
@@ -29,9 +29,9 @@ $ mbuild check
 error: mbuild.mettle:5: mb_import_root("lib"): lib is not a directory
 ```
 
-### Adding a dependency by importing it
+### adding a dependency by importing it
 
-When an import's first component isn't a dependency yet, mbuild looks the
+when an import's first component isn't a dependency yet, mbuild looks the
 name up in the registries, adds the newest stable version to `mbuild.mettle`,
 and builds:
 
@@ -48,12 +48,12 @@ $ mbuild run
 hi!
 ```
 
-A name no registry has is left to the compiler's error. `--locked` refuses
+a name no registry has is left to the compiler's error. `--locked` refuses
 to add anything.
 
-## Declaring dependencies
+## declaring dependencies
 
-In `fn deps()` of `mbuild.mettle`:
+in `fn deps()` of `mbuild.mettle`:
 
 ```mettle
 fn deps() {
@@ -63,33 +63,33 @@ fn deps() {
 }
 ```
 
-| Version | Means |
+| version | means |
 |---|---|
 | `"v1.2.0"` | 1.2.0 or higher, by minimal version selection (below) |
 | `"v1.2"`, `"v1"` | the newest matching version |
 | `"latest"` | the newest stable version, pinned in the lock on first use |
 
-Branches and commits don't exist here:
+branches and commits don't exist here:
 
 ```text
 $ mbuild get strutil@main
 error: strutil@main: registry packages have versions only (v1.2.0, v1, latest)
 ```
 
-A path package's `mbuild.mettle` is read for its dependencies, C code and
-components; its commands, hooks, profiles and registries are ignored. A
+a path package's `mbuild.mettle` is read for its dependencies, C code and
+components; its commands, hooks, profiles and registries are ignored. a
 directory with no `mbuild.mettle` works too, as plain source: no
-dependencies, no C code, no bins. The name you give must match the
-package's `mb_package` name; the directory name doesn't matter. An absolute
+dependencies, no C code, no bins. the name you give must match the
+package's `mb_package` name; the directory name doesn't matter. an absolute
 path stays absolute in `mettle.deps`.
 
-A dependency's `mbuild.mettle` may only declare things: mbuild refuses `extern`, `syscall`, `asm` and any import but `mbuild/api` and stdlib modules without I/O (naming the file and line), and on linux runs it under the seccomp filter of `init.rules`; your own project's is not restricted.
+a dependency's `mbuild.mettle` may only declare things: mbuild refuses `extern`, `syscall`, `asm` and any import but `mbuild/api` and stdlib modules without I/O (naming the file and line), and on linux runs it under the seccomp filter of `init.rules`; your own project's is not restricted.
 
-## Minimal version selection
+## minimal version selection
 
-Each package's manifest lists its own dependencies. mbuild walks them from
+each package's manifest lists its own dependencies. mbuild walks them from
 your project and picks, for each package, the highest version anyone asked
-for, never something newer. Here `vecmath v0.2.0` needs `strutil v1.1.0` and
+for, never something newer. here `vecmath v0.2.0` needs `strutil v1.1.0` and
 the project asks for `v1.0.0`:
 
 ```text
@@ -117,7 +117,7 @@ strutil v1.1.0 (selected: the highest of the versions required)
     textfmt v0.1.0: textfmt.mettle:1
 ```
 
-A program holds one version of a package. Versions in different
+a program holds one version of a package. versions in different
 compatibility lines (`v1.x` and `v2.x`, or `v0.1.x` and `v0.2.x`) can't be
 reconciled, and mbuild says what would fix it:
 
@@ -134,12 +134,12 @@ error: apilib is required at incompatible versions:
 ```
 
 `mb_replace_version(name, version)` and `mb_replace_path(name, dir)` in
-`fn deps()` override what everyone asks for. Only your project's
-replacements count. For a local checkout you're working on, put
+`fn deps()` override what everyone asks for. only your project's
+replacements count. for a local checkout you're working on, put
 `mb_replace_path` in `mbuild.local.mettle` instead
 ([project](project.md#mbuildlocalmettle)), so it never reaches the lock.
 
-## The lock
+## the lock
 
 ```text
 # mbuild.lock: generated by mbuild. Commit it.
@@ -149,24 +149,24 @@ greet v0.1.0 mine sha256:c64fc9e6735d8f0e392872c8e689109fd568d990be92830f21fbb44
 strutil v1.1.0 default sha256:b825cfc54e55df0c00b962c79a59339607e0eb6e725980d9153e27760e3ed812
 ```
 
-One line per registry package: name, version, the registry's name and the
-archive's sha256. Path packages aren't in it. Commit it: a clone on another
-machine gets the same bytes, and a build never moves a pin. Only `get`,
+one line per registry package: name, version, the registry's name and the
+archive's sha256. path packages aren't in it. commit it: a clone on another
+machine gets the same bytes, and a build never moves a pin. only `get`,
 `update`, `remove`, `tidy` and auto-add change it, and each says how.
 
-A lock from the git era is ignored with a note and resolved again.
+an old git-format lock is ignored with a note and resolved again.
 
-## Commands
+## commands
 
 ### mbuild search [TEXT]
 
-Lists the packages of every registry (the order `get` asks them, from any
+lists the packages of every registry (the order `get` asks them, from any
 directory): name, newest version that isn't yanked, description and the
 `export fn` names of that version's archive, which it fetches and checks like
 a dependency's. `TEXT` keeps the packages with it, in any case, in the name,
 description or a function name. `-q` prints names only, `--offline` uses the
-cached indexes and archives and says which one is missing. A name found in two
-registries is shown for each, with `(registry NAME)`. A registry in mbuild's own
+cached indexes and archives and says which one is missing. a name found in two
+registries is shown for each, with `(registry NAME)`. a registry in mbuild's own
 format has no list of its packages, so over http only those already in the
 download cache are searched.
 
@@ -188,16 +188,16 @@ error: no package matches nothing
 
 ### mbuild info PKG[@VERSION]
 
-Shows one package, like `mix hex.info`: the newest stable version that isn't
+shows one package, like `mix hex.info`: the newest stable version that isn't
 yanked (or the one asked for: `@v1.0.0`, `@1.0.0`, or a line like `@v1`), its
 description and the first paragraph of its README, license, source, registry,
 every version (yanked ones marked), the dependencies of the shown version and
 every exported function with its full signature and the `//` or `///` comment
-directly above it, file by file. The archive is fetched and checked like a
-dependency's. A registry with package pages (the Mettle project's) adds a
+directly above it, file by file. the archive is fetched and checked like a
+dependency's. a registry with package pages (the Mettle project's) adds a
 `Docs:` line with the page. `--readme` prints the whole README.md as is, or
 says the package has none and lists the functions. `--offline` uses the cache.
-An unknown name gets the same errors as `get`, with a did-you-mean. `mbuild info .`
+an unknown name gets the same errors as `get`, with a did-you-mean. `mbuild info .`
 is this project and `mbuild info NAME` an `mb_dep_path` dependency, read from
 their directories the same way (with a `Path:` row and no archive).
 
@@ -232,8 +232,8 @@ error: no registry has a package named gret (searched default)
 
 ### mbuild get NAME[@VERSION]...
 
-Adds or changes a dependency (default: the newest version), then checks
-every bin still compiles. If it doesn't, `mbuild.mettle` and `mbuild.lock`
+adds or changes a dependency (default: the newest version), then checks
+every bin still compiles. if it doesn't, `mbuild.mettle` and `mbuild.lock`
 are put back (`--no-verify` takes it anyway, `--test` runs the tests too).
 
 ```text
@@ -265,8 +265,8 @@ error: removing strutil breaks this project:
 
 ### mbuild update [NAME...]
 
-Moves each requirement to the newest version in its compatibility line and
-verifies the build. A version that breaks your code is held back, and the
+moves each requirement to the newest version in its compatibility line and
+verifies the build. a version that breaks your code is held back, and the
 newest one that works is taken:
 
 ```text
@@ -296,7 +296,7 @@ vecmath  v0.1.0   -           v0.3.0 (new line)  mbuild.mettle
 
 ### mbuild tidy
 
-Adds packages your files import but `mbuild.mettle` doesn't declare, and
+adds packages your files import but `mbuild.mettle` doesn't declare, and
 removes the ones nothing imports:
 
 ```text
@@ -309,7 +309,7 @@ $ mbuild tidy
     Verified
 ```
 
-It also moves hand-written `mettle.deps` lines into `mbuild.mettle` as
+it also moves hand-written `mettle.deps` lines into `mbuild.mettle` as
 `mb_dep_path` calls, and dependency calls in `fn project()` into
 `fn deps()`, each line as written:
 
@@ -328,7 +328,7 @@ strutil v1.1.0 (default)
 textfmt v0.1.0 (default)
 ```
 
-A dependency whose bins this project builds ([`mb_dep_bin`](project.md#bins))
+a dependency whose bins this project builds ([`mb_dep_bin`](project.md#bins))
 says so:
 
 ```text
@@ -356,7 +356,7 @@ error: mbuild get would change mbuild.mettle, and --locked forbids it
 
 ### mbuild vendor
 
-Copies every package into `vendor/`. While `vendor/` matches the lock,
+copies every package into `vendor/`. while `vendor/` matches the lock,
 builds use it and never touch a registry. `mbuild vendor --remove` deletes
 it.
 
@@ -365,9 +365,9 @@ $ mbuild vendor
     Vendored 2 package(s) into vendor/
 ```
 
-## Registries
+## registries
 
-The `default` registry is the Mettle project's,
+the `default` registry is the Mettle project's,
 <https://the-mettle-project.github.io/Mettle/registry/>, unless
 `$MBUILD_REGISTRY` names another:
 
@@ -382,17 +382,17 @@ import "hmac";            // hmac.mettle in the package's root
 import "hmac/other";      // another file in it
 ```
 
-mbuild reads both registry kinds: the Mettle one (`v1/index.json` and plain
+mbuild reads both registry kinds: the mettle one (`v1/index.json` and plain
 tar archives, each with a `mettle.package`) and its own (`mbuild publish`).
-A Mettle package's `require` lines are its dependencies, from the same
-registry; versions there have no `v` (`1.0.0` means `v1.0.0`). Archives are
+a mettle package's `require` lines are its dependencies, from the same
+registry; versions there have no `v` (`1.0.0` means `v1.0.0`). archives are
 checked against the index's SHA-256 and listed before extraction, as for
-mbuild's own. Packages go into the Mettle registry through the Mettle
+mbuild's own. packages go into the mettle registry through the mettle
 repository's `website/registry.py`, so `mbuild publish` and `yank` refuse it.
-The bare `import "hmac";` needs a compiler that loads a package's main
+the bare `import "hmac";` needs a compiler that loads a package's main
 module; older ones need `import "hmac/hmac";`.
 
-Declare more in `fn project()`; they're searched in call order, then
+declare more in `fn project()`; they're searched in call order, then
 `default`:
 
 ```mettle
@@ -400,37 +400,37 @@ Declare more in `fn project()`; they're searched in call order, then
   mb_registry("mine", "../myreg");
 ```
 
-A URL is `https://...` (`http://` only for localhost), `file:///abs/dir`,
+a URL is `https://...` (`http://` only for localhost), `file:///abs/dir`,
 or a plain path (relative to the project root).
 
-A package comes from the registry `mb_dep_from` names, else the first one
-that has it; once locked, only the locked registry is asked. A registry that
+a package comes from the registry `mb_dep_from` names, else the first one
+that has it; once locked, only the locked registry is asked. a registry that
 fails for any reason other than "not found" stops the search, so a flaky
-private registry never falls through to a public one. **Put private
+private registry never falls through to a public one. **put private
 registries first**, so a public package with the same name can't take the
 place of yours.
 
-Dependencies' own `mb_registry` calls are ignored: your project decides.
+dependencies' own `mb_registry` calls are ignored: your project decides.
 
-### Mirrors
+### mirrors
 
 `MBUILD_REGISTRY_<NAME>` (upper case, `-` becomes `_`) or
 `mb_registry(NAME, url)` in `mbuild.local.mettle` points a registry
-somewhere else. The lock records registry names, not URLs, so a mirror that
+somewhere else. the lock records registry names, not URLs, so a mirror that
 serves the same files changes nothing.
 
-### Private registries
+### private registries
 
 mbuild downloads with `curl --netrc-optional`, so an HTTPS registry behind
-basic auth works with an entry in `~/.netrc` (`_netrc` on Windows):
+basic auth works with an entry in `~/.netrc` (`_netrc` on windows):
 
 ```text
 machine pkgs.example.com login me password s3cret
 ```
 
-## Integrity
+## integrity
 
-Archives are checked against the index when downloaded, against the lock
+archives are checked against the index when downloaded, against the lock
 before every extraction, and the lock against the index on every resolve:
 
 ```text
@@ -443,30 +443,30 @@ error: strutil v1.1.0 from registry default does not match mbuild.lock
   help: if you trust the new bytes, delete the strutil line from mbuild.lock and build again (review the change first)
 ```
 
-Archives holding links, absolute paths or `..` are refused. A registry
+archives holding links, absolute paths or `..` are refused. a registry
 package's `mbuild.mettle` is never compiled or run on your machine; mbuild
 reads the manifest frozen when it was published.
 
-## Yanked versions
+## yanked versions
 
-A yanked version is never picked for a new requirement. One already in
+a yanked version is never picked for a new requirement. one already in
 your lock still builds, with a warning that says how to move off it:
 
 ```text
 warning: yanky v1.0.1 is yanked in registry default; no later version of line v1 exists; `mbuild get yanky@v1.0.0` moves back to v1.0.0
 ```
 
-## Publishing
+## publishing
 
-Publishing writes into a directory: the registry itself, or a local copy
-of the site that serves it. Make one:
+publishing writes into a directory: the registry itself, or a local copy
+of the site that serves it. make one:
 
 ```text
 $ mbuild registry init ~/www/registry --name mine
      Created registry mine in /home/you/www/registry
 ```
 
-A package needs a version in `mb_package` and an `init.rules`
+a package needs a version in `mb_package` and an `init.rules`
 ([packages](packages.md); `mbuild init --package` writes one); an
 `AGENT.rules` is optional.
 `--dry-run` shows what would go in:
@@ -489,10 +489,10 @@ $ mbuild publish --to ~/www/registry
   next: upload /home/you/www/registry to the host that serves it
 ```
 
-Without `--to`, it writes into the registry named by `--registry` (default
+without `--to`, it writes into the registry named by `--registry` (default
 `default`) if that one is a path or `file://` URL.
 
-Before writing, publish checks:
+before writing, publish checks:
 
 - the version isn't published yet;
 - `init.rules` exists and runs with its defaults ([packages](packages.md));
@@ -513,16 +513,16 @@ error: greet v1.1.0 breaks the API of v1.0.0 (inside line v1, which should not b
   help: a breaking change needs a new line: publish v2.0.0 (or pass --allow-breaking)
 ```
 
-What gets packed: `mb_publish_include(csv)` when given, else every file
+what gets packed: `mb_publish_include(csv)` when given, else every file
 except `build/`, `.mbuild/`, `vendor/`, `dist/`, `reports/`, dot-files, `mbuild.lock`,
 `mbuild.local.mettle`, `mettle.deps` and subdirectories with their own
 `mbuild.mettle` (nested packages publish on their own). `mbuild.mettle`, `init.rules` and
-`AGENT.rules` (when there is one) always go in. Links, files over 16 MB, keys
+`AGENT.rules` (when there is one) always go in. links, files over 16 MB, keys
 (`*.pem`, `*.key`, `*.p12`, `id_rsa`, ...) and files outside the package are
 refused, and so are dot-files, `reports/` and `mbuild.local.mettle` even when
 `mb_publish_include` names them.
 
-A published version can't be deleted, because locks name it. Yank it
+a published version can't be deleted, because locks name it. yank it
 instead (`--undo` takes it back):
 
 ```text
@@ -530,10 +530,10 @@ $ mbuild yank greet@v0.1.1 --to ~/www/registry
       Yanked greet v0.1.1 in /home/you/www/registry
 ```
 
-### Several packages in one repository
+### several packages in one repository
 
 `mb_dep_path_v(name, path, version)` builds `name` from `path` like
-`mb_dep_path`, and publishes as `mb_dep(name, version)`. The package at
+`mb_dep_path`, and publishes as `mb_dep(name, version)`. the package at
 `path` must be `version` or a later one of its line; `""` takes whatever it
 is. `mb_version_from(dir)` in `fn project()` (with `mb_package(name, "")`)
 gives a package the version of the one in `dir`, for sub-packages released
@@ -570,11 +570,11 @@ error: raize_core: libs/core is v0.0.9, but mbuild.mettle requires v0.1.0
 ```
 
 `--with-path-deps` publishes each path package first, its own ones before
-it, and skips a version the registry has. The published `raize` manifest
+it, and skips a version the registry has. the published `raize` manifest
 says `raize_core = "v0.1.0"`; nested packages are never in the root's
 archive. `mbuild get raize_core@v0.2.0` edits the version argument.
 
-### The registry layout
+### the registry layout
 
 ```text
 registry.toml                     [registry] format = 1, name = "mine"
@@ -583,7 +583,7 @@ pkg/greet/greet-v0.1.0.tar.gz     the files
 pkg/greet/greet-v0.1.0.toml       the manifest, frozen at publish time
 ```
 
-Everything except `index/` is immutable, so a CDN can cache it forever.
+everything except `index/` is immutable, so a CDN can cache it forever.
 
-Packages are extracted into `.mbuild/deps/<name>/`; downloads are kept
+packages are extracted into `.mbuild/deps/<name>/`; downloads are kept
 across projects in `$MBUILD_HOME/registry/<registry>@<hash>/`.

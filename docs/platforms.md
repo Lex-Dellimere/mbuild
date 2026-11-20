@@ -1,18 +1,18 @@
-# Platforms
+# platforms
 
-mbuild runs on Linux and on Windows, and builds for `linux` (ELF
+mbuild runs on linux and on windows, and builds for `linux` (ELF
 executables) and `windows` (PE `.exe` files), both x86-64, and for
-[RISC-V](#risc-v). The Mettle
+[RISC-V](#risc-v). the mettle
 compiler only links executables for the OS it runs on, so each target has
 its own compiler, and mbuild starts each where it can run.
 
-## Hosts and targets
+## hosts and targets
 
 | mbuild runs on | `-t linux` | `-t windows` |
 |---|---|---|
-| Linux | the Linux compiler | the Windows compiler through `wine`; `mbuild run` runs the `.exe` through wine too |
-| Windows | not possible | the Windows compiler |
-| Windows mbuild under wine | the Linux compiler, as a host program | the Windows compiler, inside wine |
+| linux | the linux compiler | the windows compiler through `wine`; `mbuild run` runs the `.exe` through wine too |
+| windows | not possible | the windows compiler |
+| windows mbuild under wine | the linux compiler, as a host program | the windows compiler, inside wine |
 
 ```text
 $ mbuild run -t windows
@@ -22,15 +22,15 @@ $ mbuild run -t windows
 Hello from hw!
 ```
 
-Starting wine costs a second or two per compile; Fresh builds start nothing.
+starting wine costs a second or two per compile; Fresh builds start nothing.
 
-Which targets a command builds:
+which targets a command builds:
 
 - `-t linux`, `-t windows`, a [RISC-V](#risc-v) target, `-t all` or
-  `-t host`. Repeat it or separate with commas: `-t linux,windows`. `all` is
+  `-t host`. repeat it or separate with commas: `-t linux,windows`. `all` is
   the targets `mb_targets` lists, else linux and windows: a RISC-V target
   is built only when it is declared or named.
-- Without `-t`, `build`, `check` and `doctor` use `mb_targets`, else the
+- without `-t`, `build`, `check` and `doctor` use `mb_targets`, else the
   host.
 - `run`, `test`, `live` and `mettle` use the host. `run` takes one target:
 
@@ -40,7 +40,7 @@ Which targets a command builds:
     help: pass -t linux or -t windows
   ```
 
-On Linux, `-t windows` needs wine (`wine` on PATH, or `MBUILD_WINE`):
+on linux, `-t windows` needs wine (`wine` on PATH, or `MBUILD_WINE`):
 
 ```text
 $ MBUILD_WINE=/opt/wine/bin/wine mbuild build -t windows
@@ -50,11 +50,11 @@ error: building for windows on Linux needs wine to run the Windows Mettle compil
 
 C code has the same split: see [native code](native.md#c-compilers).
 
-## Toolchains
+## toolchains
 
-mbuild keeps Mettle compilers side by side in `~/.mbuild/toolchains/<id>/`:
+mbuild keeps mettle compilers side by side in `~/.mbuild/toolchains/<id>/`:
 a release (`v0.17.0`) or a build of a source checkout
-(`dev-<git describe>`). Releases up to v0.17.0 can't build current
+(`dev-<git describe>`). releases up to v0.17.0 can't build current
 projects, so for now install from source:
 
 ```text
@@ -75,41 +75,41 @@ Selected compilers:
            set MBUILD_METTLE_WINDOWS, or mb_tool("mettle-windows", PATH) in mbuild.local.mettle, to a windows build of Mettle
 ```
 
-| Command | Does |
+| command | does |
 |---|---|
 | `mbuild toolchain install VERSION` / `latest` | downloads that release for this OS, checks its sha256, unpacks it |
-| `mbuild toolchain install --from DIR` | runs `make` in a Mettle checkout and copies its compiler in |
+| `mbuild toolchain install --from DIR` | runs `make` in a mettle checkout and copies its compiler in |
 | `mbuild toolchain use V` | pins the project: `mb_toolchain("V")` in `fn project()` |
 | `mbuild toolchain use V --local` | writes `mb_tool("mettle-<os>", PATH)` into `mbuild.local.mettle` instead |
 | `mbuild toolchain default V` | this machine's default |
 | `mbuild toolchain remove V` | deletes it |
 | `mbuild toolchain update` | rebuilds `--from` toolchains whose checkout moved on; names a newer release |
 
-`V` is an id or a version. The host compiler is the first of:
+`V` is an id or a version. the host compiler is the first of:
 
 1. `--mettle PATH`, then `MBUILD_METTLE_LINUX` / `MBUILD_METTLE_WINDOWS`,
    then `$METTLE`;
 2. `mb_tool("mettle-<os>", PATH)` in `mbuild.local.mettle`;
-3. the project's `mb_toolchain` pin. Not installed is an error:
+3. the project's `mb_toolchain` pin. not installed is an error:
 
    ```text
-   error: this project pins Mettle v0.18.0 (mb_toolchain in mbuild.mettle), which is not installed
+   error: this project pins mettle v0.18.0 (mb_toolchain in mbuild.mettle), which is not installed
      help: mbuild toolchain install v0.18.0
    ```
 4. the default toolchain;
 5. `mettle` on PATH.
 
-The Windows target has only steps 1 and 2 (its variable and `mb_tool`).
+the windows target has only steps 1 and 2 (its variable and `mb_tool`).
 `mbuild toolchain` and `-v` say which step won, `mbuild doctor` adds each
 compiler's version, and `mbuild mettle -- ARGS` runs the host's.
 
-## Setup
+## setup
 
-`mbuild setup` creates `~/.mbuild` (`%LOCALAPPDATA%\mbuild` on Windows),
+`mbuild setup` creates `~/.mbuild` (`%LOCALAPPDATA%\mbuild` on windows),
 installs the latest release as the default compiler (`--from DIR` for a
 source checkout, `--yes` for the one `$METTLE` or PATH came from,
 `--no-compiler` for none), checks the tools and whether mbuild is on PATH.
-It never edits shell files:
+it never edits shell files:
 
 ```text
 $ mbuild setup --from ~/Mettle
@@ -130,39 +130,39 @@ PATH  /home/you/.local/bin is not on PATH; add this line to ~/.bashrc (or your s
 ```
 
 `--home DIR` puts the home elsewhere and remembers it in `mbuild.home`
-beside the mbuild binary; `MBUILD_HOME` still wins over it. Offline, setup
-says so in one line and leaves the compiler for later. Any other command run
+beside the mbuild binary; `MBUILD_HOME` still wins over it. offline, setup
+says so in one line and leaves the compiler for later. any other command run
 before setup creates the home and says `Created ~/.mbuild` once.
 
-## Wine
+## wine
 
-### Linux mbuild, Windows target
+### linux mbuild, windows target
 
 `-t windows` runs `wine mettle.exe ...`, and `mbuild run -t windows` runs
 `wine program.exe`, passing its exit code through. DLL directories go in
 front of `WINEPATH` for the compile; at run time the DLLs sit beside the
 `.exe`.
 
-### Windows mbuild under wine
+### windows mbuild under wine
 
-`wine mbuild.exe` runs Linux programs (cc, pkg-config, curl, tar, the Linux
-Mettle compiler) as host programs, searched in `MBUILD_UNIX_PATH` (default
-`/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`). Program
-variables and `MBUILD_HOME` may be given in Linux form. With `MBUILD_HOME`
-unset it shares the host user's `~/.mbuild` with Linux mbuild. The default
+`wine mbuild.exe` runs linux programs (cc, pkg-config, curl, tar, the linux
+mettle compiler) as host programs, searched in `MBUILD_UNIX_PATH` (default
+`/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin`). program
+variables and `MBUILD_HOME` may be given in linux form. with `MBUILD_HOME`
+unset it shares the host user's `~/.mbuild` with linux mbuild. the default
 target is `windows`.
 
-Linux mbuild and wine mbuild see the compilers under different paths, so
+linux mbuild and wine mbuild see the compilers under different paths, so
 switching between them rebuilds once ([incremental builds](incremental.md)).
 
 ## RISC-V
 
-| `-t` | Builds | `mbuild run` / `test` runs it on |
+| `-t` | builds | `mbuild run` / `test` runs it on |
 |---|---|---|
 | `riscv64-linux`, `riscv32-linux` | a static ELF executable | `qemu-riscv64` / `qemu-riscv32` |
 | `riscv64-none`, `riscv32-none` | a board image | board `qemu-virt`: `qemu-system-riscv64` / `-riscv32`; `pico2`: rvsim |
 
-The host's compiler builds them all; output goes to
+the host's compiler builds them all; output goes to
 `build/<target>/<profile>/` as for linux. C code (`[c]`, `[link]`) and
 shared bins are refused for RISC-V.
 
@@ -176,7 +176,7 @@ $ echo $?
 3
 ```
 
-A board target needs a board. Set it, and the other per-target settings,
+a board target needs a board. set it, and the other per-target settings,
 after `mb_on(TARGET)` in a profile, or for the bin:
 
 ```text
@@ -200,10 +200,10 @@ $ mbuild run -t riscv32-none
 Hello from hello!
 ```
 
-The image exits through QEMU's test device, so the exit status is what
+the image exits through QEMU's test device, so the exit status is what
 `main` returned (3 here).
 
-| Setting | Values | |
+| setting | values | |
 |---|---|---|
 | `board` | a board of the compiler (`mettle help riscv`) | board targets only |
 | `outputs` | `bin`, `uf2`, `elf`, `hex` (default `bin, elf`) | `NAME.bin` raw, `NAME.uf2` (pico2 only), `NAME.elf` for a debugger (with `-g`: `debug-info = true`), `NAME.hex` Intel HEX |
@@ -213,15 +213,15 @@ The image exits through QEMU's test device, so the exit status is what
 
 `optimize` and `debug-info` work as on linux; `stack-trace` and
 `check-effects` are left out (a RISC-V program has no crash report and no
-effect runtime). The compiler has no position-independent executables: a
-`riscv*-linux` program is static. A setting on the wrong target stops the
+effect runtime). the compiler has no position-independent executables: a
+`riscv*-linux` program is static. a setting on the wrong target stops the
 build and says where it goes:
 
 ```text
 error: bin hello: board = "qemu-virt" is for a board image (riscv32-none or riscv64-none), and this is "linux"; set it after mb_on("riscv32-none") in a profile, or for that bin only
 ```
 
-A Pico 2 image runs on rvsim, the Mettle project's RP2350 simulator.
+a Pico 2 image runs on rvsim, the Mettle project's RP2350 simulator.
 `rvsim-until-ms`, `exit-on-uart`, `uart-script` (bytes for the console's
 input) and `pins` set it up; the console is its output:
 
@@ -250,10 +250,10 @@ donerp2350: UART0 printed the --exit-on-uart string at 3.854 ms
 ```
 
 `build/riscv32-none/debug/blink.uf2` is the file for the board's drive.
-Other boards have no emulator here: `mbuild run` says so, and a project
+other boards have no emulator here: `mbuild run` says so, and a project
 command (`fn cmd_upload`) can flash them.
 
-Under an emulator `run` and `test` stop the program after 30 seconds, or
+under an emulator `run` and `test` stop the program after 30 seconds, or
 `--timeout SECS`; the status is then 124:
 
 ```text
@@ -266,16 +266,16 @@ error: build/riscv64-linux/debug/spin was stopped after 1.0s (--timeout 1)
 ```
 
 `@test` functions run in the compiler's interpreter whatever the target;
-test programs run on the emulator. A Pico 2 program never exits, so a test
+test programs run on the emulator. a Pico 2 program never exits, so a test
 program there passes when its console prints the `exit-on-uart` string
 (default `PASS`; call `pico2_init()` first) before `rvsim-until-ms`
 (default 10000 for a test) runs out.
 
-### Testing on several targets
+### testing on several targets
 
 `mbuild test` runs each test in every cell of its matrix
 ([project](project.md#tests)); a cell without a target runs on each target
-of `-t`, else of `mb_test_targets`, else the host. A board target names its
+of `-t`, else of `mb_test_targets`, else the host. a board target names its
 board after a colon:
 
 ```mettle
@@ -315,20 +315,20 @@ test result: FAILED. 2 passed, 1 failed, 1 skipped, 1 check (0.8s)
 ```
 
 `@test` functions run for hosted targets (linux, windows, `riscv*-linux`),
-not for a board. Test programs run natively, through wine, under QEMU or on
+not for a board. test programs run natively, through wine, under QEMU or on
 rvsim; when that program is missing, they count as skipped, with the
 reason, and don't fail the run. `--matrix=CELLS` replaces the cells for
-one run: `mbuild test --matrix=linux/release,riscv64-linux/debug`. Code
+one run: `mbuild test --matrix=linux/release,riscv64-linux/debug`. code
 that differs per target can be a [component](components.md) picked with
 `mb_use` after `mb_on`.
 
-### Flashing a Pico 2
+### flashing a Pico 2
 
 `mbuild flash [BIN]` builds the bin's UF2 (adding `uf2` to `outputs` when
-it's missing) and copies it to the board. Hold BOOTSEL while plugging the
+it's missing) and copies it to the board. hold BOOTSEL while plugging the
 board in: it mounts as a drive labelled RP2350, which mbuild looks for
 under `/run/media/$USER`, `/media/$USER` and `/mnt`, or takes from
-`MBUILD_FLASH_DIR`. It writes `NAME.uf2`, syncs, and the board restarts
+`MBUILD_FLASH_DIR`. it writes `NAME.uf2`, syncs, and the board restarts
 into the program:
 
 ```text
@@ -342,14 +342,14 @@ error: no RP2350 drive is mounted (looked in /run/media/you, /media/you, /mnt)
   help: hold BOOTSEL while plugging the board in, then run mbuild flash again (or set MBUILD_FLASH_DIR to the drive)
 ```
 
-The target is the bin's own triple, else `-t`, else the board target of
-`mb_targets`, else `riscv32-none`. Only `pico2` has a UF2 drive; for other
+the target is the bin's own triple, else `-t`, else the board target of
+`mb_targets`, else `riscv32-none`. only `pico2` has a UF2 drive; for other
 boards `flash` says so and points to a project command.
 
-### Profile-guided builds
+### profile-guided builds
 
-A counting build (`--pgo-gen`) records how often each block runs; a build
-with `--pgo-use` optimizes with those counts. By hand:
+a counting build (`--pgo-gen`) records how often each block runs; a build
+with `--pgo-use` optimizes with those counts. by hand:
 
 ```text
 $ mbuild build -r --pgo-gen
@@ -361,51 +361,51 @@ $ mbuild build -r --pgo-use
 
 `mbuild pgo [BIN]` does the three steps (release unless `-p`, the same
 profile for both builds so the blocks match); `mbuild pgo collect` stops
-after the run. `-t` picks the target as for `run`. The profile is
+after the run. `-t` picks the target as for `run`. the profile is
 `.mbuild/pgo/BIN-TARGET.prof`, or `--pgo-use=FILE`.
 
-A Linux program, `riscv*-linux` under QEMU included, writes the profile
-when `main` returns (mbuild sets `METTLE_PROFILE_OUT`). A board prints its
+a linux program, `riscv*-linux` under QEMU included, writes the profile
+when `main` returns (mbuild sets `METTLE_PROFILE_OUT`). a board prints its
 counts on the console instead: mbuild captures the run's console into
 `.mbuild/pgo/BIN-TARGET.prof.console` and turns it into the profile with
-`tools/riscv-pgo-capture.py` of the compiler's Mettle checkout (python3, or
+`tools/riscv-pgo-capture.py` of the compiler's mettle checkout (python3, or
 `MBUILD_PYTHON`). `main` has to return before the emulator stops, so drop
 `exit-on-uart` and leave `rvsim-until-ms` room for the training run.
 RISC-V counting needs a compiler with RISC-V `--pgo-gen`; with an older one
 the run writes no profile and mbuild says so.
 
-Where the emulators come from:
+where the emulators come from:
 
-| Program | Found as |
+| program | found as |
 |---|---|
 | `qemu-riscv64`, `qemu-riscv32` | in `MBUILD_QEMU_USER_DIR`, else `~/.local/opt/qemu-user/bin`, else PATH |
 | `qemu-system-riscv64`, `qemu-system-riscv32` | PATH (Debian: `qemu-system-misc`) |
-| `rvsim` | `MBUILD_RVSIM`, PATH, `$MBUILD_HOME/tools/rvsim`; else built there once with gcc from `tools/riscv-sim/rvsim.c` of the Mettle checkout `$METTLE` or the compiler comes from |
+| `rvsim` | `MBUILD_RVSIM`, PATH, `$MBUILD_HOME/tools/rvsim`; else built there once with gcc from `tools/riscv-sim/rvsim.c` of the mettle checkout `$METTLE` or the compiler comes from |
 
-## Windows programs and batch files
+## windows programs and batch files
 
-A program name without an extension is tried with `.com`, `.exe`, `.bat` and
+a program name without an extension is tried with `.com`, `.exe`, `.bat` and
 `.cmd` (from `PATHEXT`), so a wrapper such as `cc.bat` works wherever mbuild
-takes a program. Every argument reaches the script quoted and literal; `%~1`
-removes the quotes. An argument with a line break can't be passed to a
+takes a program. every argument reaches the script quoted and literal; `%~1`
+removes the quotes. an argument with a line break can't be passed to a
 script.
 
-## Environment variables
+## environment variables
 
-### Locations
+### locations
 
-| Variable | Meaning |
+| variable | meaning |
 |---|---|
-| `MBUILD_HOME` | toolchains, the download cache and scratch files. Default: the `mbuild.home` file beside mbuild, else `~/.mbuild`; on Windows `%LOCALAPPDATA%\mbuild`; under wine the host's `~/.mbuild` |
+| `MBUILD_HOME` | toolchains, the download cache and scratch files. default: the `mbuild.home` file beside mbuild, else `~/.mbuild`; on windows `%LOCALAPPDATA%\mbuild`; under wine the host's `~/.mbuild` |
 | `HOME`, `LOCALAPPDATA`, `USERPROFILE`, `WINEHOMEDIR` | where the default home is |
-| `TEMP`, `TMP` | Windows: where mbuild writes the scripts that run host programs |
+| `TEMP`, `TMP` | windows: where mbuild writes the scripts that run host programs |
 
-### Compilers
+### compilers
 
-| Variable | Meaning |
+| variable | meaning |
 |---|---|
-| `MBUILD_METTLE_LINUX` | the compiler for the Linux target |
-| `MBUILD_METTLE_WINDOWS` | the compiler for the Windows target |
+| `MBUILD_METTLE_LINUX` | the compiler for the linux target |
+| `MBUILD_METTLE_WINDOWS` | the compiler for the windows target |
 | `METTLE` | the compiler for the host target |
 | `MBUILD_METTLE_API` | the release API `mbuild toolchain install` asks (default `https://api.github.com/repos/The-Mettle-Project/Mettle`) |
 | `MBUILD_MAKE`, `MBUILD_GIT` | `make` and `git` for `toolchain install --from` |
@@ -413,17 +413,17 @@ script.
 | `MBUILD_RVSIM` | the rvsim that runs `pico2` images |
 | `MBUILD_FLASH_DIR` | the mounted RP2350 drive `mbuild flash` copies to |
 
-### Registries
+### registries
 
-| Variable | Meaning |
+| variable | meaning |
 |---|---|
-| `MBUILD_REGISTRY` | the `default` registry: a URL or a directory (else the Mettle registry) |
+| `MBUILD_REGISTRY` | the `default` registry: a URL or a directory (else the mettle registry) |
 | `MBUILD_REGISTRY_<NAME>` | another URL for registry `NAME` (upper case, `-` as `_`): a mirror |
 | `MBUILD_CURL`, `MBUILD_TAR` | the programs that download and unpack (also `MBUILD_UNZIP`, `MBUILD_BSDTAR`, `MBUILD_PYTHON` for release zips) |
 
-### Native code
+### native code
 
-| Variable | Meaning |
+| variable | meaning |
 |---|---|
 | `CC`, `CC_WINDOWS` | the C compiler for each target |
 | `PKG_CONFIG`, `PKG_CONFIG_WINDOWS` | the pkg-config program for each target |
@@ -431,14 +431,14 @@ script.
 | `WINEPATH`, `PATH` | mbuild puts DLL directories in front for a compile and keeps yours after them |
 | `WINEPREFIX`, `SystemRoot`, `windir` | where `system32` is, searched when explaining a failed link |
 
-### Running and output
+### running and output
 
-| Variable | Meaning |
+| variable | meaning |
 |---|---|
 | `MBUILD_JOBS` | parallel compiles, default 8; `-j N` overrides it |
 | `MBUILD_WINE` | the wine program |
 | `MBUILD_UNIX_PATH` | under wine: where host programs are searched |
-| `PATHEXT`, `ComSpec` | Windows: extensions tried for program names, and the `cmd.exe` for scripts |
+| `PATHEXT`, `ComSpec` | windows: extensions tried for program names, and the `cmd.exe` for scripts |
 | `MBUILD_COLOR` | `always` or `never`; anything else means auto. `--color` overrides it |
 | `NO_COLOR` | when set, auto colour is off |
 
