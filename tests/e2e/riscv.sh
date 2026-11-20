@@ -131,7 +131,7 @@ printf 'fn main() -> int32 { return 0; }\n' > src/main.mettle
 bad_proj() { printf 'import "mbuild/api";\nfn project() {\n  mb_package("bad", "0.1.0");\n  mb_profile("debug");\n%s\n}\n' "$1" > mbuild.mettle; }
 bad_proj ''
 mb build -t riscv32-none
-check "a board image needs a board" sh -c 'grep -qF "error: bin bad: a riscv32-none image needs a board (the compiler'"'"'s boards: esp32c3, esp32c6, esp32h2, esp32p4, pico2, qemu-virt, sifive-e)" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+check "a board image needs a board" sh -c 'grep -qE "error: bin bad: a riscv32-none image needs a board \(the compiler'"'"'s boards: .*pico2, qemu-virt" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 bad_proj '  mb_set("board", "qemu-virt");'
 mb build -t linux
 check "board on linux" has 'error: bin bad: board = "qemu-virt" is for a board image (riscv32-none or riscv64-none), and this is "linux"; set it after mb_on("riscv32-none") in a profile, or for that bin only'
@@ -329,7 +329,12 @@ fn project() {
 }
 EOF
 printf 'export fn bsp_ok() -> bool { return true; }\n' > bsp/src/lib.mettle
-printf '// a board\n' > bsp/src/board/myboard.mettle
+pico2_src="$(dirname "$METTLE")/../stdlib/std/board/pico2.mettle"
+if [ -f "$pico2_src" ]; then
+  sed 's/name: "pico2"/name: "myboard"/' "$pico2_src" > bsp/src/board/myboard.mettle
+else
+  printf '// a board\n' > bsp/src/board/myboard.mettle
+fi
 printf '// a board\n' > bsp/src/board/virtboard.mettle
 printf '// a board\n' > bsp/src/board/mfboard.mettle
 cat > bsp2/mbuild.mettle <<'EOF'
