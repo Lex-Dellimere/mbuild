@@ -838,6 +838,16 @@ export fn mb_service_env(name: string, kv: string) {
   mbi_append("service." + mbi_key(name), "env", mbi_quote(kv));
 }
 
+// a board this package declares: its file, passed to `mettle --board` for packages that set board = name.
+export fn mb_board(name: string, file: string) {
+  mbi_put("board." + mbi_key(name), "file", mbi_quote(file));
+}
+
+// a board's target, runner ("rvsim ...", "qemu-system-riscv32 -M virt", "none"), outputs or flash command.
+export fn mb_board_set(name: string, key: string, value: string) {
+  mbi_put("board." + mbi_key(name), key, mbi_quote(value));
+}
+
 // a registry, searched in call order before the default one.
 export fn mb_registry(name: string, url: string) {
   mbi_put("registry." + mbi_key(name), "url", mbi_quote(url));

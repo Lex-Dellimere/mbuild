@@ -8,8 +8,144 @@ import "../core/proc";
 import "../model/manifest";
 import "../model/project";
 import "toolchain";
+import "services";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
+
+// a board a package declares (mb_board), as the build sees it
+export struct Board {
+  name: string;
+  pkg: string;
+  file: string;       // absolute
+  target: string;
+  runner: string;
+  outputs: string;
+  flash: string;
+}
+
+var g_rv_boards: Board* = (Board*)0;
+var g_rv_nboards: int64 = 0;
+var g_rv_loaded: bool = false;
+
+fn rvx_boards_add(m: Manifest*, dir: string, pkg: string) {
+  if (m == (Manifest*)0) {
+    return;
+  }
+  var i: int64 = 0;
+  while (i < m->nboards) {
+    var bs: BoardSpec* = &m->boards[i];
+    i = i + 1;
+    var old: Board* = rv_board(bs->name);
+    if (old != (Board*)0) {
+      if (s_eq(old->pkg, pkg)) {
+        continue;
+      }
+      fail_hint("board " + bs->name + " is declared by two packages: " + old->pkg + " and " + pkg, "drop one of the mb_board(\"" + bs->name + "\", ...) calls, or rename one of the boards");
+    }
+    g_rv_boards = (Board*)realloc(g_rv_boards, (g_rv_nboards + 1) * sizeof(Board));
+    var b: Board* = &g_rv_boards[g_rv_nboards];
+    g_rv_nboards = g_rv_nboards + 1;
+    b->name = bs->name;
+    b->pkg = pkg;
+    b->file = p_clean(p_join(dir, bs->file));
+    b->target = bs->target;
+    b->runner = bs->runner;
+    b->outputs = bs->outputs;
+    b->flash = bs->flash;
+  }
+}
+
+// the boards of the project, then of every dependency; two packages
+// declaring one name stop the command
+export fn rv_boards_load(p: Project*, ds: DepState*) {
+  if (g_rv_loaded) {
+    return;
+  }
+  g_rv_loaded = true;
+  rvx_boards_add(p->man, p->root, p->man->name);
+  if (ds == (DepState*)0) {
+    return;
+  }
+  var i: int64 = 0;
+  while (i < ds->n) {
+    rvx_boards_add(ds->mods[i].man, ds->mods[i].dir, ds->mods[i].module);
+    i = i + 1;
+  }
+}
+
+export fn rv_boards_loaded() -> bool {
+  return g_rv_loaded;
+}
+
+export fn rv_board_count() -> int64 {
+  return g_rv_nboards;
+}
+
+export fn rv_board_at(i: int64) -> Board* {
+  return &g_rv_boards[i];
+}
+
+// the declared board of that name, 0 when no package declares it
+export fn rv_board(name: string) -> Board* {
+  var i: int64 = 0;
+  while (i < g_rv_nboards) {
+    if (s_eq(g_rv_boards[i].name, name)) {
+      return &g_rv_boards[i];
+    }
+    i = i + 1;
+  }
+  return (Board*)0;
+}
+
+// a declared board fills in st: its file for --board, its runner, and its
+// outputs when the project sets none
+export fn rv_board_apply(st: Settings*) {
+  if (slen(st->board) == 0) {
+    return;
+  }
+  var b: Board* = rv_board(st->board);
+  if (b == (Board*)0) {
+    return;
+  }
+  st->board_file = b->file;
+  st->board_runner = b->runner;
+  if (slen(st->outputs) == 0) {
+    st->outputs = b->outputs;
+  }
+}
+
+// the program of a declared runner's first word: a path from the project,
+// else rvsim as mbuild finds it, else PATH
+fn rvx_runner_tool(p: Project*, m: Mettle*, w0: string) -> Tool {
+  if (s_eq(w0, "rvsim")) {
+    return rvx_rvsim(m);
+  }
+  if (s_find_byte(w0, 47) >= 0) {
+    var t: Tool = tool_none();
+    t.path = p_join(p->root, w0);
+    return t;
+  }
+  return sys_find_tool(w0);
+}
+
+// why a declared runner can't run here, "" when it can
+fn rvx_runner_missing(st: Settings*) -> string {
+  if (s_eq(st->board_runner, "none")) {
+    return "board " + st->board + " has no runner (mb_board_set(\"" + st->board + "\", \"runner\", \"none\"))";
+  }
+  var w: SvcWords = svc_split(st->board_runner);
+  if (!w.ok || w.words->len == 0) {
+    return "board " + st->board + ": its runner `" + st->board_runner + "` does not split into words";
+  }
+  var w0: string = sl_get(w.words, 0);
+  if (s_eq(w0, "rvsim")) {
+    return s_empty();
+  }
+  if (s_find_byte(w0, 47) >= 0 || tool_found(sys_find_tool(w0))) {
+    return s_empty();
+  }
+  return "no " + w0 + " (board " + st->board + "'s runner)";
+}
 
 // qemu-riscv64 / qemu-riscv32: MBUILD_QEMU_USER_DIR, ~/.local/opt/qemu-user/bin, PATH
 fn rvx_qemu_user(target: string) -> Tool {
@@ -56,7 +192,13 @@ export fn rv_runner_missing(m: Mettle*, target: string, st: Settings*) -> string
     }
     return "no " + name + " (QEMU's user mode)";
   }
-  if (s_eq(st->board, "qemu-virt")) {
+  if (slen(st->board_runner) > 0) {
+    var why: string = rvx_runner_missing(st);
+    if (slen(why) > 0 || !man_board_rvsim(st)) {
+      return why;
+    }
+  }
+  if (s_eq(st->board, "qemu-virt") && slen(st->board_runner) == 0) {
     var q: string = "qemu-system-riscv64";
     if (s_starts(target, "riscv32")) {
       q = "qemu-system-riscv32";
@@ -66,7 +208,7 @@ export fn rv_runner_missing(m: Mettle*, target: string, st: Settings*) -> string
     }
     return "no " + q;
   }
-  if (s_eq(st->board, "pico2")) {
+  if (man_board_rvsim(st)) {
     var given: string = env_get("MBUILD_RVSIM");
     if (slen(given) > 0) {
       if (fs_is_file(given)) {
@@ -103,6 +245,9 @@ export fn rv_program_cmd(target: string, exe: string) -> Cmd* {
 // its extension, outs the files the build wrote (bin, elf, ...)
 export fn rv_image_cmd(p: Project*, m: Mettle*, target: string, base: string, outs: StrList*, st: Settings*) -> Cmd* {
   var board: string = st->board;
+  if (slen(st->board_runner) > 0) {
+    return rvx_declared_cmd(p, m, base, outs, st);
+  }
   if (s_eq(board, "qemu-virt")) {
     var image: string = base + ".bin";
     if (!sl_has(outs, "bin")) {
@@ -134,31 +279,67 @@ export fn rv_image_cmd(p: Project*, m: Mettle*, target: string, base: string, ou
       fail_hint("rvsim loads the raw image, and outputs = \"" + st->outputs + "\" has no bin", "add \"bin\" to outputs");
     }
     var r: Cmd* = cmd_new(rvx_rvsim(m));
-    var raw: string = base + ".bin";
     cmd_arg(r, "--machine");
     cmd_arg(r, "rp2350");
-    cmd_arg(r, "--load");
-    cmd_path(r, raw);
-    if (slen(st->rvsim_until_ms) > 0) {
-      cmd_arg(r, "--until-ms");
-      cmd_arg(r, st->rvsim_until_ms);
-    }
-    if (slen(st->exit_on_uart) > 0) {
-      cmd_arg(r, "--exit-on-uart");
-      cmd_arg(r, st->exit_on_uart);
-    }
-    if (slen(st->uart_script) > 0) {
-      cmd_arg(r, "--uart-in");
-      cmd_path(r, p_join(p->root, st->uart_script));
-    }
-    if (slen(st->pins) > 0) {
-      cmd_arg(r, "--pins");
-      cmd_path(r, p_join(p->root, st->pins));
-    }
+    rvx_rvsim_args(p, r, base, st);
     return r;
   }
   fail_hint("board " + board + " has no emulator mbuild can run", "write a project command that flashes or emulates it: fn cmd_upload in mbuild.mettle (docs/project.md)");
   return (Cmd*)0;
+}
+
+// a declared runner's command: its words, then for rvsim --load and the
+// rvsim settings, else the image's path
+fn rvx_declared_cmd(p: Project*, m: Mettle*, base: string, outs: StrList*, st: Settings*) -> Cmd* {
+  var why: string = rvx_runner_missing(st);
+  if (slen(why) > 0) {
+    fail_hint(why, "install it, or change the board's runner (mb_board_set(\"" + st->board + "\", \"runner\", ...))");
+  }
+  var w: SvcWords = svc_split(st->board_runner);
+  var c: Cmd* = cmd_new(rvx_runner_tool(p, m, sl_get(w.words, 0)));
+  var i: int64 = 1;
+  while (i < w.words->len) {
+    cmd_arg(c, sl_get(w.words, i));
+    i = i + 1;
+  }
+  if (man_board_rvsim(st)) {
+    if (!sl_has(outs, "bin")) {
+      fail_hint("rvsim loads the raw image, and outputs = \"" + st->outputs + "\" has no bin", "add \"bin\" to outputs");
+    }
+    rvx_rvsim_args(p, c, base, st);
+    return c;
+  }
+  if (sl_has(outs, "bin")) {
+    cmd_path(c, base + ".bin");
+  } else if (sl_has(outs, "elf")) {
+    cmd_path(c, base + ".elf");
+  } else {
+    fail_hint("board " + st->board + "'s runner takes the .bin or .elf, and outputs = \"" + st->outputs + "\" has neither", "add \"bin\" to outputs");
+  }
+  return c;
+}
+
+// --load IMAGE.bin and the rvsim settings
+fn rvx_rvsim_args(p: Project*, r: Cmd*, base: string, st: Settings*) {
+  var raw: string = base + ".bin";
+  cmd_arg(r, "--load");
+  cmd_path(r, raw);
+  if (slen(st->rvsim_until_ms) > 0) {
+    cmd_arg(r, "--until-ms");
+    cmd_arg(r, st->rvsim_until_ms);
+  }
+  if (slen(st->exit_on_uart) > 0) {
+    cmd_arg(r, "--exit-on-uart");
+    cmd_arg(r, st->exit_on_uart);
+  }
+  if (slen(st->uart_script) > 0) {
+    cmd_arg(r, "--uart-in");
+    cmd_path(r, p_join(p->root, st->uart_script));
+  }
+  if (slen(st->pins) > 0) {
+    cmd_arg(r, "--pins");
+    cmd_path(r, p_join(p->root, st->pins));
+  }
 }
 
 // turns the console of a --pgo-gen board run into the profile, with

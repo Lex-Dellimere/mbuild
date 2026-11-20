@@ -1205,16 +1205,16 @@ export fn cmp_target_problem(label: string, target: string, st: Settings*) -> st
   if (bare_keys->len > 0 && !bare) {
     return label + ": " + sl_get(bare_keys, 0) + " is for a board image (riscv32-none or riscv64-none), and this is " + shown + "; " + only;
   }
-  if (bare && bare_keys->len > 0 && !s_eq(st->board, "pico2")) {
+  if (bare && bare_keys->len > 0 && !man_board_rvsim(st)) {
     var k: int64 = 0;
     while (k < bare_keys->len) {
       if (!s_eq(sl_get(bare_keys, k), "outputs")) {
-        return label + ": " + sl_get(bare_keys, k) + " sets up rvsim, which runs board = \"pico2\" only, and this board is " + toml_quote(st->board);
+        return label + ": " + sl_get(bare_keys, k) + " sets up rvsim, which runs board = \"pico2\" and boards whose runner is rvsim, and this board is " + toml_quote(st->board);
       }
       k = k + 1;
     }
   }
-  if (bare && slen(st->outputs) > 0 && !s_eq(st->board, "pico2") && sl_has(man_outputs(st->outputs), "uf2")) {
+  if (bare && slen(st->outputs) > 0 && !s_eq(st->board, "pico2") && slen(st->board_file) == 0 && sl_has(man_outputs(st->outputs), "uf2")) {
     return label + ": outputs = " + toml_quote(st->outputs) + ": only board = \"pico2\" writes UF2, and this board is " + toml_quote(st->board) + "; use \"bin\" or \"hex\"";
   }
   var rv_keys: StrList* = sl_new();

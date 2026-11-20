@@ -705,6 +705,7 @@ fn bx_mettle(p: Project*, target: string) -> Mettle* {
 fn bx_deps(p: Project*) -> DepState* {
   var ds: DepState* = deps_ensure(p);
   g_bx_ds = ds;
+  rv_boards_load(p, ds);
   agt_refresh(p, ds);
   return ds;
 }
@@ -1445,6 +1446,7 @@ fn bx_settings_of(p: Project*, prof: string, bin: string, target: string) -> Set
   if (slen(st->error) > 0) {
     fail(bx_unroot(p, st->error));
   }
+  bx_board_apply(p, st);
   if (g_bx_seen_warn == (StrList*)0) {
     g_bx_seen_warn = sl_new();
   }
@@ -1745,8 +1747,26 @@ fn bx_riscv_flags(flags: StrList*) -> StrList* {
   return out;
 }
 
-// a board image needs a board the compiler has
+// a board some package declares: its file, runner and outputs into st
+fn bx_board_apply(p: Project*, st: Settings*) {
+  if (slen(st->board) == 0) {
+    return;
+  }
+  if (!rv_boards_loaded()) {
+    bx_deps(p);
+  }
+  rv_board_apply(st);
+}
+
+// a board image needs a board the compiler has, or one a package declares
 fn bx_check_board(p: Project*, m: Mettle*, label: string, target: string, st: Settings*) {
+  if (slen(st->board_file) > 0) {
+    if (!fs_is_file(st->board_file)) {
+      var b: Board* = rv_board(st->board);
+      fail_hint(label + ": board " + st->board + "'s file " + st->board_file + " does not exist", "fix mb_board(\"" + st->board + "\", ...) in package " + b->pkg);
+    }
+    return;
+  }
   var boards: StrList* = tc_boards(m);
   var choices: string = sl_join(boards, ", ");
   if (boards->len == 0) {
@@ -1769,6 +1789,9 @@ fn bx_check_board(p: Project*, m: Mettle*, label: string, target: string, st: Se
 fn bx_hash_pgo(h: Hasher*, p: Project*, st: Settings*) {
   if (s_eq(st->pgo, "use")) {
     h_str(h, fs_hash_file(p_join(p->root, st->pgo_file)));
+  }
+  if (slen(st->board_file) > 0) {
+    h_str(h, fs_hash_file(st->board_file));
   }
 }
 
@@ -3783,6 +3806,7 @@ fn bt_cannot_run(p: Project*, target: string, prog: string) -> string {
     if (slen(st->error) > 0) {
       why = bx_unroot(p, st->error);
     } else {
+      bx_board_apply(p, st);
       why = rv_runner_missing(tc_select(p, target), target, st);
     }
     free(st);
@@ -6861,6 +6885,82 @@ fn bx_flags_text(p: Project*, prof: string, bin: string, target: string) -> stri
   return s_trim(txt);
 }
 
+// mbuild boards: the boards packages declare (mb_board), then the compiler's
+export fn build_cmd_boards(p: Project*) -> int32 {
+  bx_deps(p);
+  var rows: StrList** = (StrList**)malloc((rv_board_count() + 1) * 8);
+  defer free(rows);
+  rows[0] = sl_of("board");
+  sl_push(rows[0], "package");
+  sl_push(rows[0], "target");
+  sl_push(rows[0], "runner");
+  sl_push(rows[0], "file");
+  var i: int64 = 0;
+  while (i < rv_board_count()) {
+    var b: Board* = rv_board_at(i);
+    var r: StrList* = sl_of(b->name);
+    sl_push(r, b->pkg);
+    sl_push(r, bx_or_dash(b->target));
+    sl_push(r, bx_or_dash(b->runner));
+    sl_push(r, dx_rel(bx_cwd(), b->file));
+    rows[i + 1] = r;
+    i = i + 1;
+  }
+  if (rv_board_count() == 0) {
+    say("no package declares a board (mb_board(\"NAME\", \"src/board/NAME.mettle\") in fn project())");
+  } else {
+    bx_say_table(rows, rv_board_count() + 1);
+  }
+  if (tc_available(p, "riscv32-none")) {
+    var cb: StrList* = tc_boards(tc_select(p, "riscv32-none"));
+    if (cb->len > 0) {
+      say("the compiler's boards: " + sl_join(cb, ", "));
+    }
+  }
+  return 0;
+}
+
+fn bx_or_dash(s: string) -> string {
+  if (slen(s) == 0) {
+    return "-";
+  }
+  return s;
+}
+
+// rows of words, each column padded to its widest; the last left as is
+fn bx_say_table(rows: StrList**, n: int64) {
+  var ncol: int64 = rows[0]->len;
+  var w: int64* = (int64*)malloc(ncol * 8);
+  defer free(w);
+  var c: int64 = 0;
+  while (c < ncol) {
+    w[c] = 0;
+    var r: int64 = 0;
+    while (r < n) {
+      if (c < rows[r]->len && slen(sl_get(rows[r], c)) > w[c]) {
+        w[c] = slen(sl_get(rows[r], c));
+      }
+      r = r + 1;
+    }
+    c = c + 1;
+  }
+  var r2: int64 = 0;
+  while (r2 < n) {
+    var line: string = s_empty();
+    c = 0;
+    while (c < rows[r2]->len) {
+      if (c + 1 < rows[r2]->len) {
+        line = line + s_pad_right(sl_get(rows[r2], c), w[c] + 2);
+      } else {
+        line = line + sl_get(rows[r2], c);
+      }
+      c = c + 1;
+    }
+    say(line);
+    r2 = r2 + 1;
+  }
+}
+
 export fn build_cmd_services(p: Project*) -> int32 {
   return svc_cmd_list(p);
 }
@@ -7262,6 +7362,11 @@ fn bx_init_cmds() {
   bx_ex("mbuild profiles", "settings, where they're set, compiler flags");
   bx_def("services", "list the processes mbuild run starts", "mbuild services", "project.md");
   bx_ex("mbuild services", "name, command, port");
+  bx_def("boards", "list the boards packages declare", "mbuild boards", "platforms.md");
+  bx_ex("mbuild boards", "name, package, target, runner, file; then the compiler's own");
+  bx_note("a package declares a board in fn project(): mb_board(\"pico2\", \"src/board/pico2.mettle\"), then mb_board_set(\"pico2\", KEY, VALUE) for target, runner, outputs and flash.");
+  bx_note("mb_set(\"board\", NAME) finds it in the project, then in every dependency, and passes its file to mettle --board; a name no package declares goes to the compiler as is.");
+  bx_note("its target and outputs are defaults the project can override; its runner (\"rvsim ...\", \"qemu-system-riscv32 -M virt ...\", \"none\") runs its images for mbuild run and test, with --load IMAGE.bin and the rvsim settings for rvsim, else the image's path appended.");
   bx_group("tools");
   bx_def("doctor", "check the environment", "mbuild doctor [-t T]", "native.md");
   bx_ex("mbuild doctor", "tools, compilers, the native-code audit");

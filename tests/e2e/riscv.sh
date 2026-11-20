@@ -163,7 +163,7 @@ bad_proj '  mb_on("riscv32-none");
   mb_set("board", "qemu-virt");
   mb_set("exit-on-uart", "DONE");'
 mb build -t riscv32-none
-check "rvsim keys need pico2" has 'exit-on-uart sets up rvsim, which runs board = "pico2" only'
+check "rvsim keys need pico2" has 'exit-on-uart sets up rvsim, which runs board = "pico2" and boards whose runner is rvsim'
 bad_proj '  mb_on("riscv32-none");
   mb_set("board", "esp32c3");'
 mb run -t riscv32-none
@@ -265,6 +265,101 @@ mb test --matrix -t riscv32-none:
 check "matrix: a board target without its board" has 'error: `riscv32-none:` is not a board target with its board'
 mb test -t linux pass
 check "-t linux: the host cell only" sh -c 'grep -qF "test pass (debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+
+# --- boards from packages: mb_board in a dependency, its file to --board, its runner and outputs
+# F/mettle records its argv and passes a --board path to the real compiler as pico2; F/rvsim records its argv and passes
+F="$W/fake"
+mkdir -p "$F" "$W/brd/bsp/src/board" "$W/brd/bsp2/src/board" "$W/brd/app/src" "$W/brd/app/tests"
+cat > "$F/mettle" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$F/mettle.log"
+prev=
+for a do
+  shift
+  if [ "\$prev" = --board ]; then case "\$a" in */*) a=pico2 ;; esac; fi
+  set -- "\$@" "\$a"
+  prev="\$a"
+done
+exec "$METTLE" "\$@"
+EOF
+cat > "$F/rvsim" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$F/rvsim.log"
+echo PASS
+echo "rp2350: UART0 printed the --exit-on-uart string at 1.000 ms" >&2
+EOF
+chmod +x "$F/mettle" "$F/rvsim"
+cd "$W/brd"
+cat > bsp/mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("bsp", "0.1.0");
+  mb_board("myboard", "src/board/myboard.mettle");
+  mb_board_set("myboard", "target", "riscv32-none");
+  mb_board_set("myboard", "runner", "rvsim --machine rp2350");
+  mb_board_set("myboard", "outputs", "bin, uf2");
+  mb_board("virtboard", "src/board/virtboard.mettle");
+  mb_board_set("virtboard", "runner", "qemu-system-riscv32 -M virt -bios none -nographic -kernel");
+}
+EOF
+printf 'export fn bsp_ok() -> bool { return true; }\n' > bsp/src/lib.mettle
+printf '// a board\n' > bsp/src/board/myboard.mettle
+printf '// a board\n' > bsp/src/board/virtboard.mettle
+cat > bsp2/mbuild.mettle <<'EOF'
+import "mbuild/api";
+
+fn project() {
+  mb_package("bsp2", "0.1.0");
+  mb_board("myboard", "src/board/myboard.mettle");
+}
+EOF
+printf 'export fn bsp2_ok() -> bool { return true; }\n' > bsp2/src/lib.mettle
+printf '// a board\n' > bsp2/src/board/myboard.mettle
+# brd_proj BOARD EXTRA_DEPS
+brd_proj() { cat > "$W/brd/app/mbuild.mettle" <<EOF
+import "mbuild/api";
+
+fn project() {
+  mb_package("app", "0.1.0");
+  mb_targets("riscv32-none");
+  mb_test_targets("riscv32-none");
+  mb_test_bin("dev", "tests/dev.mettle");
+  mb_profile("debug");
+  mb_on("riscv32-none");
+  mb_set("board", "$1");
+  mb_on("");
+}
+
+fn deps() {
+  mb_dep_path("bsp", "../bsp");
+$2}
+EOF
+}
+brd_proj myboard ''
+printf 'import "std/io";\nfn main() -> int32 {\n  println("hi");\n  return 0;\n}\n' > app/src/main.mettle
+printf 'import "std/io";\nfn main() -> int32 {\n  pico2_init();\n  println("PASS");\n  return 0;\n}\n' > app/tests/dev.mettle
+cd app
+mb boards
+check "boards: a dependency's boards, then the compiler's" sh -c 'grep -qE "^board +package +target +runner +file$" "$0/last.out" && grep -qE "^myboard +bsp +riscv32-none +rvsim --machine rp2350 +\.\./bsp/src/board/myboard\.mettle$" "$0/last.out" && grep -qE "^virtboard +bsp +- +qemu-system-riscv32" "$0/last.out" && grep -qF "the compiler" "$0/last.out"' "$S"
+mb -v build
+check "a declared board's file goes to --board" has "--board $W/brd/bsp/src/board/myboard.mettle"
+if grep -qF "is not a board name" "$S/last.out"; then
+  [ $mode = debug ] && echo "note: a real build with a board file skipped (this compiler takes only board names for --board)"
+else
+  check "a declared board builds" code_is 0
+fi
+rm -f "$F/rvsim.log"
+METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb run
+check "its outputs are the default: bin, uf2" sh -c '[ -s build/riscv32-none/debug/app.bin ] && [ -s build/riscv32-none/debug/app.uf2 ] && [ ! -e build/riscv32-none/debug/app.elf ]'
+check "its runner runs it: rvsim, the runner's words, --load" sh -c 'grep -qF "Running build/riscv32-none/debug/app.bin (rvsim)" "$0/last.out" && grep -qxF -- "--machine rp2350 --load $1/build/riscv32-none/debug/app.bin" "$2/rvsim.log" && [ "$(cat "$0/last.code")" = 0 ]' "$S" "$W/brd/app" "$F"
+brd_proj myboard '  mb_dep_path("bsp2", "../bsp2");
+'
+mb build
+check "two packages declare one board" sh -c 'grep -qF "error: board myboard is declared by two packages: bsp and bsp2" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+brd_proj qemu-virt ''
+mb -v build
+check "an undeclared name goes to the compiler as is" has "--board qemu-virt "
 
 # --- pgo: build counting, run, build with the profile
 mkdir -p "$W/pg/src" && cd "$W/pg" || exit 1

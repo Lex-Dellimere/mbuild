@@ -54,6 +54,17 @@ export struct TestSet {
   line: int64;
 }
 
+// one mb_board: [board.NAME] file, target, runner, outputs, flash.
+export struct BoardSpec {
+  name: string;
+  file: string;       // as written, relative to the package
+  target: string;     // "" = none declared
+  runner: string;     // "" = none declared, "none" = no emulator
+  outputs: string;
+  flash: string;
+  line: int64;
+}
+
 export struct RegSpec {
   name: string;
   url: string;
@@ -106,6 +117,8 @@ export struct Manifest {
   test_bins: StrList*;    // [test-bins] as "name=main", in file order
   services: ServiceSpec*; // in declaration order
   nservices: int64;
+  boards: BoardSpec*;     // [board.NAME], in declaration order
+  nboards: int64;
   test_globs: StrList*;   // [tests] globs: mb_test_glob
   test_exclude: StrList*; // [tests] exclude: mb_test_exclude
   test_cmds: StrList*;    // [test-cmds] as "name=cmdline", in file order
@@ -149,6 +162,8 @@ export struct Settings {
   profile_runtime: bool;
   image_base: string;
   board: string;
+  board_file: string;     // a declared board's file, absolute ("" = the compiler's board)
+  board_runner: string;   // a declared board's runner ("" = mbuild's choice by name)
   objective: string;
   isa: string;
   abi: string;
@@ -578,6 +593,7 @@ fn mnx_known_keys(section: string) -> StrList* {
   if (s_starts(section, "component.")) { return mnx_list("dir mode impls linux windows"); }
   if (s_starts(section, "registry.")) { return mnx_list("url"); }
   if (s_starts(section, "service.")) { return mnx_list("cmd port wait env"); }
+  if (s_starts(section, "board.")) { return mnx_list("file target runner outputs flash"); }
   if (s_eq(section, "rules")) { return mnx_list("files"); }
   if (s_eq(section, "tests")) { return mnx_list("globs exclude"); }
   if (s_eq(section, "live")) { return mnx_list("watch preview"); }
@@ -651,7 +667,7 @@ fn mnx_section_known(section: string) -> bool {
     if (s_eq(head, "dependencies") || s_eq(head, "replace")) {
       return true;
     }
-    if ((s_eq(head, "profile") || s_eq(head, "bin") || s_eq(head, "component") || s_eq(head, "registry") || s_eq(head, "service")) && s_find_byte(s_from(section, dot + 1), 46) < 0) {
+    if ((s_eq(head, "profile") || s_eq(head, "bin") || s_eq(head, "component") || s_eq(head, "registry") || s_eq(head, "service") || s_eq(head, "board")) && s_find_byte(s_from(section, dot + 1), 46) < 0) {
       return true;
     }
   }
@@ -954,6 +970,18 @@ fn mnx_is_digits(s: string) -> bool {
   return true;
 }
 
+// the board's image runs on rvsim: its declared runner starts with rvsim, or
+// it declares none and is pico2
+export fn man_board_rvsim(st: Settings*) -> bool {
+  if (slen(st->board_runner) > 0) {
+    var w: StrList* = s_split(st->board_runner, 32);
+    var first: string = sl_get(w, 0);
+    free(w);
+    return s_eq(first, "rvsim") || s_ends(first, "/rvsim");
+  }
+  return s_eq(st->board, "pico2");
+}
+
 // the files a board image writes: "bin, elf" (a string) or ["uf2", "elf"].
 export fn man_outputs(text: string) -> StrList* {
   var out: StrList* = sl_new();
@@ -1035,6 +1063,8 @@ fn mnx_settings_new() -> Settings* {
   st->crash_report = true;
   st->image_base = s_empty();
   st->board = s_empty();
+  st->board_file = s_empty();
+  st->board_runner = s_empty();
   st->objective = s_empty();
   st->isa = s_empty();
   st->abi = s_empty();
@@ -1617,6 +1647,51 @@ fn mnx_services(m: Manifest*) {
     }
     m->services[m->nservices] = sv;
     m->nservices = m->nservices + 1;
+  }
+}
+
+// [board.NAME]: mb_board and mb_board_set
+fn mnx_boards(m: Manifest*) {
+  var i: int64 = 0;
+  while (i < m->doc->sections->len && slen(m->error) == 0) {
+    var sec: string = sl_get(m->doc->sections, i);
+    i = i + 1;
+    if (!mnx_is_named(sec, "board")) {
+      continue;
+    }
+    var b: BoardSpec;
+    b.name = s_from(sec, 6);
+    b.line = mnx_section_line(m->doc, sec);
+    b.file = mnx_str(m, sec, "file");
+    b.target = mnx_str(m, sec, "target");
+    b.runner = s_trim(mnx_str(m, sec, "runner"));
+    b.outputs = mnx_str(m, sec, "outputs");
+    b.flash = s_trim(mnx_str(m, sec, "flash"));
+    if (slen(m->error) > 0) {
+      return;
+    }
+    if (!mnx_is_board_name(b.name)) {
+      mnx_error(m, b.line, "board name '" + b.name + "' may only hold lower-case letters, digits and dashes");
+    } else if (slen(b.file) == 0) {
+      mnx_error(m, b.line, "board " + b.name + " has no file: mb_board(\"" + b.name + "\", \"src/board/" + b.name + ".mettle\")");
+    } else if (p_is_abs(b.file) || s_contains(b.file, "..")) {
+      mnx_error(m, toml_get(m->doc, sec, "file")->line, "mb_board(\"" + b.name + "\", \"" + b.file + "\"): the file is a path inside the package");
+    } else if (slen(b.target) > 0 && !(man_target_name(b.target) && s_ends(b.target, "-none"))) {
+      mnx_error(m, toml_get(m->doc, sec, "target")->line, "mb_board_set(\"" + b.name + "\", \"target\", \"" + b.target + "\"): a board's target is riscv32-none or riscv64-none");
+    } else if (slen(b.outputs) > 0) {
+      var why: string = mnx_outputs_problem(toml_get(m->doc, sec, "outputs"));
+      if (slen(why) > 0) {
+        mnx_error(m, toml_get(m->doc, sec, "outputs")->line, "mb_board_set(\"" + b.name + "\", \"outputs\", ...): " + why);
+      }
+    }
+    if (slen(m->error) > 0) {
+      return;
+    }
+    if (m->nboards % 8 == 0) {
+      m->boards = (BoardSpec*)realloc(m->boards, (m->nboards + 8) * sizeof(BoardSpec));
+    }
+    m->boards[m->nboards] = b;
+    m->nboards = m->nboards + 1;
   }
 }
 
@@ -2382,6 +2457,8 @@ export fn man_empty(dir: string, name: string) -> Manifest* {
   m->test_bins = sl_new();
   m->services = (ServiceSpec*)0;
   m->nservices = 0;
+  m->boards = (BoardSpec*)0;
+  m->nboards = 0;
   m->test_globs = sl_new();
   m->test_exclude = sl_new();
   m->test_cmds = sl_new();
@@ -2518,6 +2595,7 @@ export fn man_parse(doc: Toml*, dir: string) -> Manifest* {
   mnx_dep_bins(m);
   mnx_test_bins(m);
   mnx_services(m);
+  mnx_boards(m);
   mnx_tests(m);
   mnx_doc(m);
   if (slen(m->error) > 0) {
@@ -2678,7 +2756,10 @@ export fn man_settings_flags(st: Settings*, target: string) -> StrList* {
     sl_push(res, "--image-base");
     sl_push(res, st->image_base);
   }
-  if (slen(st->board) > 0) {
+  if (slen(st->board_file) > 0) {
+    sl_push(res, "--board");
+    sl_push(res, st->board_file);
+  } else if (slen(st->board) > 0) {
     sl_push(res, "--board");
     sl_push(res, st->board);
   }

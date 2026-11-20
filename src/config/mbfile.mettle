@@ -580,7 +580,7 @@ fn mfx_all_literal(c: MfxCall*) -> bool {
 // the argument a call's TOML key comes from (the package name of
 // mb_dep_from, the key of mb_raw, the OS of mb_component_on), -1 for none.
 fn mfx_key_index(name: string) -> int64 {
-  if (s_eq(name, "mb_dep_from") || s_eq(name, "mb_raw") || s_eq(name, "mb_component_on") || s_eq(name, "mb_test_set")) {
+  if (s_eq(name, "mb_dep_from") || s_eq(name, "mb_raw") || s_eq(name, "mb_component_on") || s_eq(name, "mb_test_set") || s_eq(name, "mb_board_set")) {
     return 1;
   }
   return 0;
@@ -1025,6 +1025,7 @@ fn mfx_section(cur: MfxCursor*, c: MfxCall*) -> string {
   if (s_eq(f, "mb_bin") || s_eq(f, "mb_bin_kind")) { return "bin." + a0; }
   if (mfx_is_dep_fn(f)) { return "dependencies"; }
   if (s_eq(f, "mb_registry")) { return "registry." + a0; }
+  if (s_eq(f, "mb_board") || s_eq(f, "mb_board_set")) { return "board." + a0; }
   if (s_eq(f, "mb_replace_path") || s_eq(f, "mb_replace_version")) { return "replace"; }
   if (s_eq(f, "mb_component") || s_eq(f, "mb_component_on")) { return "component." + a0; }
   if (s_eq(f, "mb_rule")) { return "rules"; }

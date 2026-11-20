@@ -271,6 +271,43 @@ program there passes when its console prints the `exit-on-uart` string
 (default `PASS`; call `pico2_init()` first) before `rvsim-until-ms`
 (default 10000 for a test) runs out.
 
+### boards from packages
+
+a package can declare boards in `fn project()`; a project that depends on it
+picks one with `mb_set("board", NAME)` as before:
+
+```mettle
+fn project() {
+  mb_package("rp2350", "0.1.0");
+  mb_board("pico2", "src/board/pico2.mettle");
+  mb_board_set("pico2", "target", "riscv32-none");
+  mb_board_set("pico2", "runner", "rvsim --machine rp2350");
+  mb_board_set("pico2", "outputs", "bin, uf2");
+  mb_board_set("pico2", "flash", "mflash write --board pico2");
+}
+```
+
+mbuild looks the name up in the project, then in every dependency (direct
+or not), and passes the board file's absolute path to `mettle --board`. a
+name no package declares goes to the compiler as is, so its own boards keep
+working. two packages declaring one name is an error naming both.
+
+| key | meaning |
+|---|---|
+| `target` | the target `flash`, `monitor` and on-board tests use when nothing else names one |
+| `outputs` | the default for the projects that use it; their own `outputs` wins |
+| `runner` | what runs its images for `run` and `test`, instead of mbuild's choice by name: `rvsim ...` gets `--load NAME.bin` and the rvsim settings, any other program the image's path (`.bin`, else `.elf`) last; `none` for no emulator |
+| `flash` | the command `mbuild flash` runs, the image's path last |
+
+`mbuild boards` lists them, then the compiler's:
+
+```text
+$ mbuild boards
+board  package  target        runner                  file
+pico2  rp2350   riscv32-none  rvsim --machine rp2350  ../rp2350/src/board/pico2.mettle
+the compiler's boards: esp32c3, esp32c6, esp32h2, esp32p4, pico2, qemu-virt, sifive-e
+```
+
 ### testing on several targets
 
 `mbuild test` runs each test in every cell of its matrix
