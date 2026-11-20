@@ -1,6 +1,4 @@
-// inflate: a zlib stream (RFC 1950) holding deflate data (RFC 1951)
-// decoded, for PNG files. Canonical Huffman decoded a bit at a time, as
-// zlib's puff does: small, and fast enough for test images.
+// inflate: zlib (RFC 1950) and deflate (RFC 1951) decoding, for PNG files.
 
 import "std/mem";
 import "base";
@@ -73,7 +71,7 @@ fn inf_huff_free(h: InfHuff*) {
   free(h);
 }
 
-// The table of n code lengths; false when the lengths over-subscribe.
+// the table of n code lengths; false when the lengths over-subscribe.
 fn inf_build(h: InfHuff*, lengths: int32*, n: int64) -> bool {
   var i: int64 = 0;
   while (i < 16) {
@@ -169,7 +167,7 @@ fn inf_dist_base(i: int64) -> int64 {
   return b;
 }
 
-// One block's codes until end-of-block.
+// one block's codes until end-of-block.
 fn inf_codes(s: InfState*, lit: InfHuff*, dist: InfHuff*) {
   while (slen(s->err) == 0) {
     var sym: int64 = inf_decode(s, lit);
@@ -331,7 +329,7 @@ fn inf_dynamic(s: InfState*) {
   inf_huff_free(dist);
 }
 
-// The bytes of a zlib stream src[0..n).
+// the bytes of a zlib stream src[0..n).
 export fn inf_zlib(src: uint8*, n: int64) -> InfOut {
   var r: InfOut;
   r.ok = false;

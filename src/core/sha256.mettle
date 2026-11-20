@@ -20,7 +20,7 @@ fn shx_rotr(x: uint32, n: uint32) -> uint32 {
   return (x >> n) | (x << ((uint32)32 - n));
 }
 
-// One 64-byte block into h[0..8].
+// one 64-byte block into h[0..8].
 fn shx_block(h: uint32*, p: uint8*) {
   var w: uint32[64];
   var i: int64 = 0;
@@ -83,7 +83,7 @@ export fn sha_hex(p: uint8*, n: int64) -> string {
     shx_block(&h[0], &p[done]);
     done = done + 64;
   }
-  // The tail, 0x80, zeros, and the bit length: one or two blocks.
+  // the tail, 0x80, zeros, and the bit length: one or two blocks.
   var tail: uint8[128];
   memset(&tail[0], 0, 128);
   var rest: int64 = n - done;

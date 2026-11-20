@@ -1,15 +1,8 @@
 // sys_linux: the platform layer on Linux. sys_windows exports the same API.
 //
-// Only names the v0.17.0 Linux runtime carries are used.
-// What that runtime lacks (rename, rmdir, directory listing, fork) is done by
-// host programs: `ls`, `rm`, `mv`. Child processes that run in the
-// background (the -j pool, services) go through alph (third_party/alph): a
-// node runs only while they do.
-//
-// The runtime's putenv only changes what this process's getenv answers; the
-// children it starts get the environment the process started with. So every
-// variable set with sys_setenv is also remembered here and exported again in
-// front of each command that needs it.
+// only names the v0.17.0 runtime carries are used: what it lacks (rename,
+// rmdir, directory listing, fork) is done by host programs (`ls`, `rm`, `mv`),
+// and background children (the -j pool, services) go through alph.
 
 import "std/io";
 import "std/mem";
@@ -35,14 +28,14 @@ extern fn lx_chmod(path: cstring, mode: uint32) -> int32 = "chmod";
 extern fn lx_usleep(us: uint32) -> int32 = "usleep";
 extern fn lx_clock_gettime(id: int32, ts: rawptr) -> int32 = "clock_gettime";
 
-// "NAME=value" for every sys_setenv call, latest value per name.
+// "NAME=value" per sys_setenv call, latest per name; exported again before each command (putenv does not reach children).
 var g_lx_env: StrList* = 0;
 
 export fn sys_os() -> string {
   return "linux";
 }
 
-// The directories searched for programs when PATH is unset (colon-separated;
+// the directories searched for programs when PATH is unset (colon-separated;
 // sys_windows answers the same list for host programs under wine).
 export fn sys_unix_path_default() -> string {
   return "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin";
@@ -148,8 +141,8 @@ export fn sys_isatty(fd: int32) -> bool {
 // stdin's termios before sys_term_raw (x86-64: 60 bytes).
 var g_lx_term: uint8* = (uint8*)0;
 
-// Keys one at a time without echo, Ctrl-C as a byte; output processing
-// stays on. False when stdin is no terminal.
+// keys one at a time without echo, Ctrl-C as a byte; output processing
+// stays on. false when stdin is no terminal.
 export fn sys_term_raw() -> bool {
   if (g_lx_term == (uint8*)0) {
     g_lx_term = (uint8*)malloc(64);
@@ -183,15 +176,7 @@ export fn sys_term_cooked() {
   }
 }
 
-// True when stdin has input within ms.
-export fn sys_stdin_ready(ms: int64) -> bool {
-  var fds: int32[2];
-  fds[0] = 0;
-  fds[1] = 1;                                     // POLLIN
-  return syscall(7, &fds[0], 1, ms) > 0 && ((fds[1] >> 16) & 0x19) != 0;
-}
-
-// A new FIFO at path, opened read-write and non-blocking (so writers never
+// a new FIFO at path, opened read-write and non-blocking (so writers never
 // block on open and it never reads as ended); -1 when it can't be made.
 export fn sys_fifo_open(path: string) -> int32 {
   syscall(87, s_c(path));                                  // unlink
@@ -201,7 +186,7 @@ export fn sys_fifo_open(path: string) -> int32 {
   return (int32)syscall(257, -100, s_c(path), 0x80802, 0); // openat O_RDWR|O_NONBLOCK|O_CLOEXEC
 }
 
-// What fd has now, added to b; the number of bytes.
+// what fd has now, added to b; the number of bytes.
 export fn sys_fd_drain(fd: int32, b: Buf*) -> int64 {
   var n: int64 = 0;
   while (fd >= 0) {
@@ -216,7 +201,7 @@ export fn sys_fd_drain(fd: int32, b: Buf*) -> int64 {
   return n;
 }
 
-// All of s to fd (a FIFO opened non-blocking: retried while it is full);
+// all of s to fd (a FIFO opened non-blocking: retried while it is full);
 // false on an error.
 export fn sys_fd_write(fd: int32, s: string) -> bool {
   var off: int64 = 0;
@@ -241,7 +226,7 @@ export fn sys_fd_close(fd: int32) {
   }
 }
 
-// Within ms: 1 when stdin has input, 2 when fd has (-1: none), 3 both, 0 neither.
+// within ms: 1 when stdin has input, 2 when fd has (-1: none), 3 both, 0 neither.
 export fn sys_wait_input(fd: int32, ms: int64) -> int32 {
   var fds: int32[4];
   fds[0] = 0;
@@ -265,8 +250,8 @@ export fn sys_wait_input(fd: int32, ms: int64) -> int32 {
   return r;
 }
 
-// One byte from stdin, unbuffered; -1 at its end or on an error, -2 when
-// there is none yet (EAGAIN). An interrupted read (EINTR) is retried.
+// one byte from stdin, unbuffered; -1 at its end or on an error, -2 when
+// there is none yet (EAGAIN). an interrupted read (EINTR) is retried.
 export fn sys_read_byte() -> int32 {
   var b: uint8[1];
   b[0] = (uint8)0;
@@ -329,7 +314,7 @@ export fn sys_stat(p: string) -> FileInfo {
   return fi;
 }
 
-// A number that changes when the file does (mtime and size), -1 when it
+// a number that changes when the file does (mtime and size), -1 when it
 // is not there; takes a NUL-terminated path so a poll leaves nothing behind.
 export fn sys_stamp(p: cstring) -> int64 {
   var buf: uint8* = (uint8*)malloc(256);
@@ -348,13 +333,13 @@ export fn sys_mkdir(p: string) -> bool {
   return lx_is_dir(s_c(p)) != 0;
 }
 
-// Creates p and answers true only when this call created it (false when it
+// creates p and answers true only when this call created it (false when it
 // already existed or could not be made): an atomic test-and-set for locks.
 export fn sys_mkdir_new(p: string) -> bool {
   return lx_mkdir(s_c(p), (uint32)511) == 0;
 }
 
-// Runs argv (argv[0] is the program) directly, inheriting stdio. Consumes
+// runs argv (argv[0] is the program) directly, inheriting stdio. consumes
 // the list.
 fn lx_exec(args: StrList*) -> int32 {
   flush_out();
@@ -372,7 +357,7 @@ fn lx_exec(args: StrList*) -> int32 {
   return code;
 }
 
-// Reads a popen stream to EOF and closes it. Returns the exit code.
+// reads a popen stream to EOF and closes it. returns the exit code.
 fn lx_drain(fp: cstring, b: Buf*) -> int32 {
   while (true) {
     buf_reserve(b, 65536);
@@ -395,7 +380,7 @@ fn lx_decode_status(st: int32) -> int32 {
   return (st >> 8) & 255;
 }
 
-// Runs a shell line and returns its standard output.
+// runs a shell line and returns its standard output.
 fn lx_shell_capture(line: string) -> Captured {
   var r: Captured;
   r.code = 127;
@@ -507,7 +492,7 @@ fn lx_trim_slash(p: string) -> string {
   return s_sub(p, 0, n);
 }
 
-// A symbolic link to a directory: `ls -1Ap` lists it among the files of its
+// a symbolic link to a directory: `ls -1Ap` lists it among the files of its
 // parent (no trailing `/`) while stat, which follows links, sees a directory.
 export fn sys_is_link(p: string) -> bool {
   var q: string = lx_trim_slash(p);
@@ -535,8 +520,8 @@ export fn sys_is_link(p: string) -> bool {
   return found;
 }
 
-// Makes link a symbolic link to target (an absolute path), replacing a link
-// already there. A real directory at link is left alone (false).
+// makes link a symbolic link to target (an absolute path), replacing a link
+// already there. a real directory at link is left alone (false).
 export fn sys_make_link(target: string, link: string) -> bool {
   var q: string = lx_trim_slash(link);
   // lx_exists follows links: a dangling link is replaced too.
@@ -559,7 +544,7 @@ export fn sys_make_link(target: string, link: string) -> bool {
   return sys_is_link(q);
 }
 
-// Removes p only when it is a link; the target is never touched.
+// removes p only when it is a link; the target is never touched.
 export fn sys_remove_link(p: string) -> bool {
   var q: string = lx_trim_slash(p);
   if (!sys_is_link(q)) {
@@ -582,12 +567,12 @@ export fn sys_rename(from: string, to: string) -> bool {
   return lx_exec(args) == 0;
 }
 
-// Writes what the kernel holds back to the disks (before a drive is pulled).
+// writes what the kernel holds back to the disks (before a drive is pulled).
 export fn sys_sync() {
   lx_exec(sl_of("sync"));
 }
 
-// Owner-only access to the directory p (0700).
+// owner-only access to the directory p (0700).
 export fn sys_make_private(p: string) {
   lx_chmod(s_c(p), (uint32)448);
 }
@@ -599,7 +584,7 @@ export fn sys_set_executable(p: string) {
     return;
   }
   var mode: int64 = lx_rd32(buf, 24) & 4095;
-  // Execute for whoever may read it: r--r----- becomes r-xr-x---.
+  // execute for whoever may read it: r--r----- becomes r-xr-x---.
   mode = mode | ((mode & 292) >> 2) | 64;
   lx_chmod(s_c(p), (uint32)mode);
 }
@@ -699,12 +684,10 @@ export fn sys_host_path(p: string) -> string {
   return p;
 }
 
-// ---------------------------------------------------------------------------
-// Child processes through alph: the -j pool here, services in
+// child processes through alph: the -j pool here, services in
 // build/services_linux.
-// ---------------------------------------------------------------------------
 
-// The environment a child gets: the one mbuild started with, then sys_setenv's, then extra.
+// the environment a child gets: the one mbuild started with, then sys_setenv's, then extra.
 fn lx_child_env(extra: StrList*) -> StrList* {
   var out: StrList* = sl_new();
   var fp: cstring = fopen("/proc/self/environ", "rb");
@@ -770,7 +753,7 @@ fn lx_cstrs(l: StrList*) -> cstring* {
   return a;
 }
 
-// Runs handler as one actor, with a copy of size bytes at state, on a node of its own
+// runs handler as one actor, with a copy of size bytes at state, on a node of its own
 // until it halts, and answers the halt code. handles bounds the processes
 // and connections it holds at once. sig_tag > 0: Ctrl-C comes to the actor
 // as that tag instead of ending mbuild.
@@ -799,9 +782,9 @@ export fn sys_node_run(state: rawptr, size: int64, handles: int64, sig_tag: int6
   return code;
 }
 
-// Starts c owned by the calling actor: stdin /dev/null, stdout and stderr to
+// starts c owned by the calling actor: stdin /dev/null, stdout and stderr to
 // log ("" = all three inherited), in a process group of its own unless
-// keep_group. A process handle, or below 0 when nothing started.
+// keep_group. a process handle, or below 0 when nothing started.
 export fn sys_proc_start(ctx: AlphCtx*, c: Cmd*, log: string, keep_group: bool) -> int64 {
   var args: StrList* = sl_new();
   defer free(args);
@@ -876,12 +859,12 @@ export fn sys_proc_start_captured(ctx: AlphCtx*, c: Cmd*, out_h: int64*, err_h: 
   return h;
 }
 
-// This process's id.
+// this process's id.
 export fn sys_pid() -> int64 {
   return syscall(39);
 }
 
-// Whether nothing listens on 127.0.0.1:port and it can be bound now.
+// whether nothing listens on 127.0.0.1:port and it can be bound now.
 export fn sys_port_free(port: int64) -> bool {
   var fd: int64 = syscall(41, 2, 1, 0);
   if (fd < 0) {
@@ -941,8 +924,8 @@ fn lx_timed(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
   return ALPH_CONTINUE;
 }
 
-// Runs c (stdio inherited, or stdout and stderr to log), killed after ms
-// (0: no limit). The exit code; *timed_out when the limit killed it.
+// runs c (stdio inherited, or stdout and stderr to log), killed after ms
+// (0: no limit). the exit code; *timed_out when the limit killed it.
 export fn sys_run_timeout(c: Cmd*, log: string, ms: int64, timed_out: bool*) -> int32 {
   var s: LxTimed;
   memset((rawptr)&s, 0, (int64)sizeof(LxTimed));
@@ -957,7 +940,7 @@ export fn sys_run_timeout(c: Cmd*, log: string, ms: int64, timed_out: bool*) -> 
   return (int32)code;
 }
 
-// The pool's actor: asks the limiter for one permit at a time and starts the
+// the pool's actor: asks the limiter for one permit at a time and starts the
 // next job when it is granted; a job's end gives its permit back.
 struct LxPool {
   cmds: Cmd**;
@@ -976,7 +959,7 @@ struct LxPool {
   more: bool;
 }
 
-// A job has ended: its code, its permit back, and the hook.
+// a job has ended: its code, its permit back, and the hook.
 fn lx_pool_ended(ctx: AlphCtx*, s: LxPool*, i: int64, code: int32) {
   s->codes[i] = code;
   alph_release(ctx, s->limiter, s->permits[i]);
@@ -985,7 +968,7 @@ fn lx_pool_ended(ctx: AlphCtx*, s: LxPool*, i: int64, code: int32) {
   }
 }
 
-// Asks for the next permit, or halts once nothing runs and nothing is left.
+// asks for the next permit, or halts once nothing runs and nothing is left.
 fn lx_pool_next(ctx: AlphCtx*, s: LxPool*) {
   if (!s->more && s->asked != 0) {
     alph_release(ctx, s->limiter, s->asked);
@@ -1034,9 +1017,9 @@ fn lx_pool(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
   return ALPH_CONTINUE;
 }
 
-// Runs cmds[0..n), at most parallel at a time, stdout and stderr of each to
+// runs cmds[0..n), at most parallel at a time, stdout and stderr of each to
 // logs[i]. ev(arg, i, -1) as job i starts, ev(arg, i, code) as it ends (in
-// the order they end), and false from the latter starts no more. Codes in
+// the order they end), and false from the latter starts no more. codes in
 // command order, -1 for jobs never started.
 export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, arg: rawptr,
                        ev: fn(rawptr, int64, int32) -> bool with alloc, syscall, asm) -> int32* {

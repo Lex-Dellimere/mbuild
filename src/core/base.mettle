@@ -1,8 +1,6 @@
 // base: strings, string lists, byte buffers, hashing and console output.
-//
-// mbuild is built by every Mettle release since v0.17.0, whose standard
-// library differs from today's, so this file leans on std/io and std/mem only
-// and declares the few C runtime names it needs itself.
+// only std/io and std/mem are imported (mbuild builds with releases back to
+// v0.17.0, whose stdlib differs); the few c runtime names it needs are declared here.
 
 import "std/io";
 import "std/mem";
@@ -11,9 +9,7 @@ extern fn c_strlen(s: cstring) -> int64 = "strlen";
 extern fn c_getenv(name: cstring) -> cstring = "getenv";
 extern fn c_exit(code: int32) = "exit";
 
-// ---------------------------------------------------------------------------
-// Strings
-// ---------------------------------------------------------------------------
+// strings
 
 export fn slen(s: string) -> int64 {
   return (int64)s.length;
@@ -30,7 +26,7 @@ export fn s_empty() -> string {
   return s_view((uint8*)"".chars, 0);
 }
 
-// A heap copy, always followed by a nul so it can cross to C.
+// a heap copy, always followed by a nul so it can cross to C.
 export fn s_dup(s: string) -> string {
   var n: int64 = (int64)s.length;
   var p: uint8* = (uint8*)malloc(n + 1);
@@ -59,7 +55,7 @@ export fn s_byte(s: string, i: int64) -> int32 {
   return (int32)s.chars[i];
 }
 
-// The compiler frees a temporary `a + b` argument after the call unless the
+// the compiler frees a temporary `a + b` argument after the call unless the
 // callee stores it, and a view into it would dangle:
 // s_sub and s_from store their source here, so a temporary passed to any
 // function that returns a view of it stays alive.
@@ -266,7 +262,7 @@ export fn s_is_int(s: string) -> bool {
   return true;
 }
 
-// Digits only; anything else answers -1.
+// digits only; anything else answers -1.
 export fn s_to_int(s: string) -> int64 {
   if (!s_is_int(s)) {
     return -1;
@@ -308,7 +304,7 @@ export fn s_pad_right(s: string, width: int64) -> string {
   return s + s_repeat(" ", width - (int64)s.length);
 }
 
-// Splits on one byte. Empty pieces are kept.
+// splits on one byte. empty pieces are kept.
 export fn s_split(s: string, sep: int32) -> StrList* {
   var out: StrList* = sl_new();
   var start: int64 = 0;
@@ -324,7 +320,7 @@ export fn s_split(s: string, sep: int32) -> StrList* {
   return out;
 }
 
-// Lines without their terminators; a trailing empty line is dropped.
+// lines without their terminators; a trailing empty line is dropped.
 export fn s_lines(s: string) -> StrList* {
   var out: StrList* = sl_new();
   var start: int64 = 0;
@@ -350,7 +346,7 @@ export fn s_lines(s: string) -> StrList* {
   return out;
 }
 
-// Whitespace-separated words.
+// whitespace-separated words.
 export fn s_fields(s: string) -> StrList* {
   var out: StrList* = sl_new();
   var i: int64 = 0;
@@ -385,9 +381,7 @@ export fn s_hex64(v: uint64) -> string {
   return s_view(p, 16);
 }
 
-// ---------------------------------------------------------------------------
-// Byte buffer
-// ---------------------------------------------------------------------------
+// byte buffer
 
 export struct Buf {
   data: uint8*;
@@ -443,16 +437,14 @@ export fn buf_str(b: Buf*) -> string {
   return s_view(b->data, b->len);
 }
 
-// The finished string; the buffer header is released, the bytes are kept.
+// the finished string; the buffer header is released, the bytes are kept.
 export fn buf_take(b: Buf*) -> string {
   var s: string = buf_str(b);
   free(b);
   return s;
 }
 
-// ---------------------------------------------------------------------------
-// String lists
-// ---------------------------------------------------------------------------
+// string lists
 
 export struct StrList {
   items: string*;
@@ -545,7 +537,7 @@ export fn sl_remove_at(l: StrList*, at: int64) {
   l->len = l->len - 1;
 }
 
-// Insertion sort: the lists here hold tens of names, and a stable order is
+// insertion sort: the lists here hold tens of names, and a stable order is
 // what keeps fingerprints and generated files byte-identical between runs.
 export fn sl_sort(l: StrList*) {
   var i: int64 = 1;
@@ -574,9 +566,7 @@ export fn sl_join(l: StrList*, sep: string) -> string {
   return buf_take(b);
 }
 
-// ---------------------------------------------------------------------------
-// Hashing (change detection, not security): two independent 64-bit lanes.
-// ---------------------------------------------------------------------------
+// hashing (change detection, not security): two independent 64-bit lanes.
 
 export struct Hasher {
   a: uint64;
@@ -605,7 +595,7 @@ export fn h_bytes(h: Hasher*, p: uint8*, n: int64) {
   h->b = b;
 }
 
-// Strings are length-prefixed so that ("ab","c") and ("a","bc") differ.
+// strings are length-prefixed so that ("ab","c") and ("a","bc") differ.
 export fn h_str(h: Hasher*, s: string) {
   var n: int64 = (int64)s.length;
   var len: uint8[8];
@@ -628,9 +618,7 @@ export fn hash_string(s: string) -> string {
   return h_hex(&h);
 }
 
-// ---------------------------------------------------------------------------
-// Console output
-// ---------------------------------------------------------------------------
+// console output
 
 export var g_verbose: bool = false;
 export var g_quiet: bool = false;
@@ -737,18 +725,16 @@ export fn env_set(name: string) -> bool {
   return c_getenv(s_c(name)) != 0;
 }
 
-// ---------------------------------------------------------------------------
-// Shared types for the platform layer (sys_linux / sys_windows)
-// ---------------------------------------------------------------------------
+// shared types for the platform layer (sys_linux / sys_windows)
 
-// A program mbuild can start. `unix` is only ever true on Windows under wine:
+// a program mbuild can start. `unix` is only ever true on Windows under wine:
 // it marks a host Linux program (git, gcc, curl) reached through Z:\.
 export struct Tool {
   path: string;
   unix: bool;
 }
 
-// One command. args are argv[1..]; argv[0] comes from the tool. kinds runs
+// one command. args are argv[1..]; argv[0] comes from the tool. kinds runs
 // parallel to args: "p" marks a filesystem path (converted when the command
 // crosses from wine to the host), "" a plain argument. env holds
 // "NAME=value" entries for this command only. cwd "" inherits.
@@ -773,7 +759,7 @@ export struct FileInfo {
   mtime: int64;
 }
 
-// A command running in the background, its output going to log_path.
+// a command running in the background, its output going to log_path.
 export struct Job {
   handle: int64;
   aux: int64;
@@ -874,7 +860,7 @@ export fn win_quote(s: string) -> string {
   return buf_take(b);
 }
 
-// For display only: an argument the shell would not split stays bare.
+// for display only: an argument the shell would not split stays bare.
 export fn display_arg(s: string) -> string {
   if ((int64)s.length == 0) {
     return "''";

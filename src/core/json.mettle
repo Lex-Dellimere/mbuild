@@ -1,6 +1,4 @@
-// json: a cursor over JSON text for the compiler's sidecars (.mprof,
-// annot.json). It reads the values a caller asks for and skips the rest; no
-// tree is built, so a large sidecar costs one pass.
+// json: a cursor over JSON text for the compiler's sidecars; reads what is asked and builds no tree.
 
 import "std/mem";
 import "base";
@@ -26,7 +24,7 @@ fn js_ws(c: JsCur*) {
   }
 }
 
-// The next byte after blanks, -1 at the end.
+// the next byte after blanks, -1 at the end.
 export fn js_peek(c: JsCur*) -> int32 {
   js_ws(c);
   if (c->i >= slen(c->s)) {
@@ -35,7 +33,7 @@ export fn js_peek(c: JsCur*) -> int32 {
   return s_byte(c->s, c->i);
 }
 
-// Consumes byte b when it is next.
+// consumes byte b when it is next.
 export fn js_eat(c: JsCur*, b: int32) -> bool {
   if (js_peek(c) == b) {
     c->i = c->i + 1;
@@ -44,7 +42,7 @@ export fn js_eat(c: JsCur*, b: int32) -> bool {
   return false;
 }
 
-// A string's bytes as a view (escapes kept as written; the sidecars hold
+// a string's bytes as a view (escapes kept as written; the sidecars hold
 // names and paths, where they are rare).
 export fn js_str(c: JsCur*) -> string {
   if (!js_eat(c, 34)) {
@@ -65,7 +63,7 @@ export fn js_str(c: JsCur*) -> string {
   return v;
 }
 
-// An integer (a fraction or exponent is dropped); null and others give 0.
+// an integer (a fraction or exponent is dropped); null and others give 0.
 export fn js_int(c: JsCur*) -> int64 {
   var b: int32 = js_peek(c);
   if (b != 45 && !is_digit_b(b)) {
@@ -91,7 +89,7 @@ export fn js_int(c: JsCur*) -> int64 {
   return v;
 }
 
-// Skips one value of any kind.
+// skips one value of any kind.
 export fn js_skip(c: JsCur*) {
   var b: int32 = js_peek(c);
   var n: int64 = slen(c->s);
@@ -135,7 +133,7 @@ export fn js_skip(c: JsCur*) {
   }
 }
 
-// Object members: call js_key until it returns false; after a true, read or
+// object members: call js_key until it returns false; after a true, read or
 // skip the member's value. *started tracks the opening brace.
 export fn js_key(c: JsCur*, started: bool*, key: string*) -> bool {
   if (c->bad) {
@@ -161,7 +159,7 @@ export fn js_key(c: JsCur*, started: bool*, key: string*) -> bool {
   return true;
 }
 
-// Array items: call js_item until it returns false; after a true, read or
+// array items: call js_item until it returns false; after a true, read or
 // skip the item.
 export fn js_item(c: JsCur*, started: bool*) -> bool {
   if (c->bad) {

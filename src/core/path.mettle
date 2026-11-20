@@ -1,6 +1,5 @@
-// path: lexical path operations. Pure string code: nothing here touches the
-// filesystem, so the answers are the same on every OS. Both `/` and `\` are
-// separators on input; results use `/`.
+// path: lexical path operations, no filesystem access. `/` and `\` both
+// separate on input; results use `/`.
 
 import "base";
 import "std/mem";
@@ -42,7 +41,7 @@ export fn p_join(a: string, b: string) -> string {
   return a + "/" + b;
 }
 
-// The root part of a path: "", "/", "//", "X:" or "X:/" (after `\` -> `/`).
+// the root part of a path: "", "/", "//", "X:" or "X:/" (after `\` -> `/`).
 fn p_root_len(p: string) -> int64 {
   if (s_starts(p, "//")) {
     return 2;
@@ -153,7 +152,7 @@ export fn p_base(p: string) -> string {
   return b;
 }
 
-// ".c" for "a/b.c"; "" when the last component has no dot. A leading dot
+// ".c" for "a/b.c"; "" when the last component has no dot. a leading dot
 // (".gitignore") is a name, not an extension.
 export fn p_ext(p: string) -> string {
   var b: string = p_base(p);

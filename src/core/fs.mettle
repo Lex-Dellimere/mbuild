@@ -40,7 +40,7 @@ export fn fs_read(p: string) -> FsRead {
   }
   var b: Buf* = buf_new();
   buf_reserve(b, size + 1);
-  // Read until EOF rather than trusting the size: files can grow, and some
+  // read until EOF rather than trusting the size: files can grow, and some
   // (under /proc) report 0.
   while (true) {
     if (b->cap - b->len < 4097) {
@@ -97,10 +97,10 @@ export fn fs_mkdirs_private(p: string) -> bool {
   return true;
 }
 
-// Takes the lock named by the directory dir (its parent is created when
+// takes the lock named by the directory dir (its parent is created when
 // missing): creating a directory is atomic on both systems, so exactly one
-// process succeeds. Retries until timeout_ms has passed (once when it is 0 or
-// less); false on timeout. A holder that dies leaves dir behind, so the lock
+// process succeeds. retries until timeout_ms has passed (once when it is 0 or
+// less); false on timeout. a holder that dies leaves dir behind, so the lock
 // stays taken until someone removes it.
 export fn fs_lock_acquire(dir: string, timeout_ms: int64) -> bool {
   var c: string = p_clean(dir);
@@ -129,7 +129,6 @@ export fn fs_lock_acquire(dir: string, timeout_ms: int64) -> bool {
   return false;
 }
 
-// Releases a lock taken with fs_lock_acquire.
 export fn fs_lock_release(dir: string) {
   var c: string = p_clean(dir);
   if (fs_c_remove(s_c(c)) != 0 && fs_exists(c)) {
@@ -137,7 +136,7 @@ export fn fs_lock_release(dir: string) {
   }
 }
 
-// Written to p.tmp, then renamed over p, so a reader never sees half a file.
+// written to p.tmp, then renamed over p, so a reader never sees half a file.
 export fn fs_write(p: string, data: string) -> bool {
   var parent: string = p_dir(p);
   if (!s_eq(parent, ".") && !fs_mkdirs(parent)) {
@@ -201,7 +200,7 @@ export fn fs_copy(src: string, dst: string) -> bool {
   return true;
 }
 
-// True when dst was (re)written.
+// true when dst was (re)written.
 export fn fs_copy_if_changed(src: string, dst: string) -> bool {
   var a: FsRead = fs_read(src);
   if (!a.ok) {
@@ -245,8 +244,8 @@ fn fs_walk_into(root: string, rel: string, suffix: string, skip: StrList*, found
   free(dirs);
 }
 
-// Files below root whose name ends with suffix ("" for all), as sorted
-// `/`-separated paths relative to root. Directories named in skip, or whose
+// files below root whose name ends with suffix ("" for all), as sorted
+// `/`-separated paths relative to root. directories named in skip, or whose
 // name starts with a dot, are not entered; files named in skip are left out.
 export fn fs_walk(root: string, suffix: string, skip: StrList*) -> StrList* {
   var found: StrList* = sl_new();
@@ -271,7 +270,7 @@ export fn fs_home_file() -> string {
   return p_dir(s_replace_byte(sys_self_exe(), 92, 47)) + "/mbuild.home";
 }
 
-// The mbuild.home value, read once (one item).
+// the mbuild.home value, read once (one item).
 var g_fs_home_file: StrList* = 0;
 
 fn fs_home_file_value() -> string {
@@ -288,12 +287,11 @@ fn fs_home_file_value() -> string {
   return sl_get(g_fs_home_file, 0);
 }
 
-// $MBUILD_HOME, else ~/.mbuild on Linux and %LOCALAPPDATA%/mbuild on Windows.
-// $MBUILD_HOME, else ~/.mbuild on Linux. Under wine the host's ~/.mbuild is
+// $MBUILD_HOME, else ~/.mbuild on Linux. under wine the host's ~/.mbuild is
 // shared (WINEHOMEDIR names the host home as \??\Z:\home\user), so a wine
 // mbuild sees the same toolchains and git mirrors; a Linux-form MBUILD_HOME
-// is reached through Z:. Real Windows uses %LOCALAPPDATA%\mbuild.
-// Without MBUILD_HOME, a one-line mbuild.home beside the mbuild binary
+// is reached through Z:. real Windows uses %LOCALAPPDATA%\mbuild.
+// without MBUILD_HOME, a one-line mbuild.home beside the mbuild binary
 // (written by `mbuild setup --home DIR`) names it.
 export fn fs_mbuild_home() -> string {
   var h: string = s_replace_byte(env_get("MBUILD_HOME"), 92, 47);
@@ -321,7 +319,7 @@ export fn fs_mbuild_home() -> string {
   return sys_home() + "/.mbuild";
 }
 
-// Why fs_mbuild_home answers what it does: "MBUILD_HOME", the mbuild.home
+// why fs_mbuild_home answers what it does: "MBUILD_HOME", the mbuild.home
 // file, or "the default".
 export fn fs_home_origin() -> string {
   if (slen(env_get("MBUILD_HOME")) > 0) {

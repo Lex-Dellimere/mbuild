@@ -1,11 +1,7 @@
-// sys_windows: the platform layer on Windows and wine. sys_linux exports the
-// same API.
+// sys_windows: the platform layer on Windows and wine. sys_linux exports the same API.
 //
-// Processes are started with CreateProcessA directly. Output that must be
-// captured goes to a temporary file the child inherits as its stdout.
-//
-// Under wine, a host Linux program (Tool.unix) cannot be waited for: the
-// process handle wine returns for it is not waitable. Such a command is
+// under wine, a host Linux program (Tool.unix) cannot be waited for: the
+// process handle wine returns for it is not waitable. such a command is
 // written into a small shell script that runs it and then writes its exit
 // status to a file; `Z:\bin\sh` runs the script and mbuild polls for the
 // status file.
@@ -65,7 +61,7 @@ export fn sys_os() -> string {
   return "windows";
 }
 
-// The host directories searched for Linux programs under wine when
+// the host directories searched for Linux programs under wine when
 // MBUILD_UNIX_PATH is unset (colon-separated; sys_linux answers the same).
 export fn sys_unix_path_default() -> string {
   return "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin";
@@ -177,7 +173,7 @@ export fn sys_isatty(fd: int32) -> bool {
   return w_rt_isatty(fd) != 0;
 }
 
-// `mbuild shell` is Linux-only for now: no raw console, no pids.
+// `mbuild shell` is linux-only: no raw console, no pids.
 export fn sys_term_raw() -> bool {
   return false;
 }
@@ -187,10 +183,6 @@ export fn sys_term_save() -> bool {
 }
 
 export fn sys_term_cooked() {
-}
-
-export fn sys_stdin_ready(ms: int64) -> bool {
-  return true;
 }
 
 export fn sys_read_byte() -> int32 {
@@ -289,14 +281,14 @@ export fn sys_mkdir(p: string) -> bool {
   return w_is_dir(p);
 }
 
-// Creates p and answers true only when this call created it (false when it
+// creates p and answers true only when this call created it (false when it
 // already existed or could not be made): an atomic test-and-set for locks.
 export fn sys_mkdir_new(p: string) -> bool {
   return w_CreateDirectoryA(s_c(p), 0) != 0;
 }
 
-// Calls back for every entry of dir except . and ..: names and attributes
-// go to the two lists. False when dir cannot be listed.
+// calls back for every entry of dir except . and ..: names and attributes
+// go to the two lists. false when dir cannot be listed.
 fn w_list(dir: string, names: StrList*, attrs: StrList*) -> bool {
   var data: uint8* = (uint8*)malloc(400);
   defer free(data);
@@ -364,11 +356,11 @@ export fn sys_remove_file(p: string) -> bool {
   return w_DeleteFileA(s_c(p)) != 0;
 }
 
-// Read-only files (git objects) are made writable first; directory links
+// read-only files (git objects) are made writable first; directory links
 // (reparse points) are removed without entering them.
 fn w_remove_rec(p: string, attr: int64) {
   if ((attr & 1024) != 0 && sys_is_wine()) {
-    // Neither RemoveDirectoryA nor DeleteFileA removes a host link.
+    // neither RemoveDirectoryA nor DeleteFileA removes a host link.
     w_host_rm(p);
     return;
   }
@@ -391,7 +383,7 @@ fn w_remove_rec(p: string, attr: int64) {
   if ((attr & 1) != 0) {
     w_SetFileAttributesA(s_c(p), (uint32)16);
   }
-  // A just-deleted file can linger while another process holds it open.
+  // a just-deleted file can linger while another process holds it open.
   var tries: int32 = 0;
   while (w_RemoveDirectoryA(s_c(p)) == 0 && tries < 10) {
     w_Sleep(10);
@@ -408,7 +400,7 @@ export fn sys_remove_tree(p: string) -> bool {
   return w_attr(p) == W_NO_ATTR;
 }
 
-// A link: a reparse point (a junction or symbolic link natively, a host
+// a link: a reparse point (a junction or symbolic link natively, a host
 // symbolic link under wine).
 export fn sys_is_link(p: string) -> bool {
   var a: int64 = w_attr(w_trim_slash(p));
@@ -423,7 +415,7 @@ fn w_trim_slash(p: string) -> string {
   return s_sub(p, 0, n);
 }
 
-// A host program run through the wine sh-script runner; arguments are
+// a host program run through the wine sh-script runner; arguments are
 // passed as they are (callers convert paths with sys_host_path).
 fn w_host_run(prog: string, args: StrList*) -> int32 {
   var t: Tool = tool_none();
@@ -436,7 +428,7 @@ fn w_host_run(prog: string, args: StrList*) -> int32 {
   return code;
 }
 
-// Under wine: host `rm -f -- p` (removes a link, never its target).
+// under wine: host `rm -f -- p` (removes a link, never its target).
 fn w_host_rm(p: string) -> int32 {
   var args: StrList* = sl_of("-f");
   sl_push(args, "--");
@@ -446,8 +438,8 @@ fn w_host_rm(p: string) -> int32 {
   return code;
 }
 
-// Makes link point to target (an absolute path), replacing a link already
-// there. A real directory or file at link is left alone (false). Under wine
+// makes link point to target (an absolute path), replacing a link already
+// there. a real directory or file at link is left alone (false). under wine
 // a host symbolic link (`ln -s`); natively a junction (`mklink /J`, which
 // needs no administrator rights).
 export fn sys_make_link(target: string, link: string) -> bool {
@@ -457,7 +449,7 @@ export fn sys_make_link(target: string, link: string) -> bool {
     return false;
   }
   if (sys_is_wine()) {
-    // Also clears a dangling host link, which has no attributes.
+    // also clears a dangling host link, which has no attributes.
     w_host_rm(q);
     var args: StrList* = sl_of("-sn");
     sl_push(args, "--");
@@ -476,7 +468,7 @@ export fn sys_make_link(target: string, link: string) -> bool {
   return w_make_junction(target, q) && sys_is_link(q);
 }
 
-// cmd.exe /d /c mklink /J "LINK" "TARGET" with backslashes. Unverified: wine's
+// cmd.exe /d /c mklink /J "LINK" "TARGET" with backslashes. unverified: wine's
 // cmd cannot make junctions ("Failed to open").
 fn w_make_junction(target: string, link: string) -> bool {
   var tq: string = s_replace_byte(w_trim_slash(target), 47, 92);
@@ -498,7 +490,7 @@ fn w_make_junction(target: string, link: string) -> bool {
   return w_wait(h) == 0;
 }
 
-// Removes p only when it is a link; the target is never touched.
+// removes p only when it is a link; the target is never touched.
 export fn sys_remove_link(p: string) -> bool {
   var q: string = w_trim_slash(p);
   var a: int64 = w_attr(q);
@@ -561,7 +553,7 @@ fn w_write_all(p: string, data: string) -> bool {
   return put == slen(data);
 }
 
-// A Windows executable starts with "MZ"; anything else wine can only start
+// a Windows executable starts with "MZ"; anything else wine can only start
 // as a host program.
 fn w_is_pe(p: string) -> bool {
   var head: string = w_read_small(p);
@@ -584,15 +576,15 @@ fn w_has_ext(name: string) -> bool {
   return s_rfind_byte(name, 46) > slash;
 }
 
-// A batch file (.bat or .cmd), which runs through cmd.exe.
+// a batch file (.bat or .cmd), which runs through cmd.exe.
 fn w_is_batch(p: string) -> bool {
   var low: string = s_lower(p);
   return s_ends(low, ".bat") || s_ends(low, ".cmd");
 }
 
-// The existing file for base: base itself when the name has an extension,
+// the existing file for base: base itself when the name has an extension,
 // else base plus the first extension of PATHEXT (default
-// .COM;.EXE;.BAT;.CMD) that exists. Only .com, .exe, .bat and .cmd count:
+// .COM;.EXE;.BAT;.CMD) that exists. only .com, .exe, .bat and .cmd count:
 // other PATHEXT entries (.vbs, .js, ...) need their own hosts. "" when none
 // exists.
 fn w_try_exts(base: string, has_ext: bool) -> string {
@@ -620,7 +612,7 @@ fn w_try_exts(base: string, has_ext: bool) -> string {
   return "";
 }
 
-// The i-th entry of a separated list, trimmed ("" past the end).
+// the i-th entry of a separated list, trimmed ("" past the end).
 fn w_list_item(l: string, sep: int32, i: int64) -> string {
   var start: int64 = 0;
   var k: int64 = 0;
@@ -684,7 +676,7 @@ export fn sys_find_tool(name: string) -> Tool {
       return w_tool_at(direct);
     }
     if (sys_is_wine()) {
-      // A host program named by its Linux path, or by a path to a file
+      // a host program named by its Linux path, or by a path to a file
       // without extension (wine marks it unix when it is not a PE file).
       if (s_starts(name, "/") && w_is_file("Z:" + name)) {
         return w_tool_at("Z:" + name);
@@ -717,16 +709,14 @@ export fn sys_find_tool(name: string) -> Tool {
   return tool_none();
 }
 
-// ---------------------------------------------------------------------------
 // Windows processes
-// ---------------------------------------------------------------------------
 
-// One argument of a batch-file command line, always quoted. Inside quotes
+// one argument of a batch-file command line, always quoted. inside quotes
 // cmd treats ^ & | < > ( ) literally; an embedded `"` is doubled so the
 // quote parity stays even, backslashes before a `"` (and before the closing
 // quote) are doubled for programs the script passes the argument on to, and
 // each `%` becomes `%%cd:~,%` (an empty substring of %cd% follows the `%`, so
-// no %NAME% can expand). The script sees `%1` with its quotes and `%~1`
+// no %NAME% can expand). the script sees `%1` with its quotes and `%~1`
 // without; an embedded quote arrives doubled.
 fn w_bat_quote(s: string) -> string {
   var b: Buf* = buf_new();
@@ -804,7 +794,7 @@ fn w_cmdline(c: Cmd*) -> string {
   return buf_take(b);
 }
 
-// Sets each "NAME=value" and returns the previous values ("\0" marks
+// sets each "NAME=value" and returns the previous values ("\0" marks
 // "was not set") so w_env_restore can put them back.
 fn w_env_apply(env: StrList*) -> StrList* {
   var old: StrList* = sl_new();
@@ -843,8 +833,8 @@ fn w_env_restore(env: StrList*, old: StrList*) {
   w_sl_free(old);
 }
 
-// Starts a process; returns its handle, -1 when it could not start (wine
-// answers 0 for a host program it did start). With
+// starts a process; returns its handle, -1 when it could not start (wine
+// answers 0 for a host program it did start). with
 // out_h != 0 the child's stdout goes there, stderr to err_h (or the console's)
 // and stdin to in_h (or the console's).
 fn w_spawn(app: string, cmdline: string, cwd: string, env: StrList*, in_h: int64, out_h: int64, err_h: int64) -> int64 {
@@ -902,7 +892,7 @@ fn w_wait(h: int64) -> int32 {
   return (int32)code;
 }
 
-// An inheritable handle: a file created for writing, or NUL for reading.
+// an inheritable handle: a file created for writing, or NUL for reading.
 fn w_open_inheritable(p: string, write: bool) -> int64 {
   var sa: uint8* = (uint8*)malloc(24);
   defer free(sa);
@@ -929,23 +919,21 @@ fn w_tmp_dir() -> string {
   return w_slash(t);
 }
 
-// A fresh path in the temp directory, without extension.
+// a fresh path in the temp directory, without extension.
 fn w_tmp_base(kind: string) -> string {
   g_w_seq = g_w_seq + 1;
   var pid: uint32 = w_GetCurrentProcessId();
   return w_tmp_dir() + "/mbuild-" + kind + "-{pid}-{g_w_seq}-{sys_now_ms()}";
 }
 
-// ---------------------------------------------------------------------------
-// Host programs under wine
-// ---------------------------------------------------------------------------
+// host programs under wine
 
 fn w_unix_arg(c: Cmd*, i: int64) -> string {
   var a: string = sl_get(c->args, i);
   if (!cmd_is_path(c, i)) {
     return a;
   }
-  // A relative path stays relative: the script runs in the same directory.
+  // a relative path stays relative: the script runs in the same directory.
   if (w_needs_host(a)) {
     return sys_host_path(a);
   }
@@ -963,7 +951,7 @@ fn w_needs_host(a: string) -> bool {
   return slen(a) >= 2 && is_alpha_b(c0) && s_byte(a, 1) == 58;
 }
 
-// Writes and starts the script; returns the status file's Windows path, ""
+// writes and starts the script; returns the status file's Windows path, ""
 // when sh could not be started. redirect is appended to the command.
 fn w_unix_start(c: Cmd*, redirect: string) -> string {
   var base: string = w_tmp_base("sh");
@@ -1016,7 +1004,7 @@ fn w_unix_start(c: Cmd*, redirect: string) -> string {
   return st;
 }
 
-// The exit status once the script has written it; -1 while it runs.
+// the exit status once the script has written it; -1 while it runs.
 fn w_unix_status(st: string) -> int32 {
   if (!w_is_file(st)) {
     return -1;
@@ -1048,9 +1036,7 @@ fn w_unix_wait(st: string) -> int32 {
   return 127;
 }
 
-// ---------------------------------------------------------------------------
-// Running commands
-// ---------------------------------------------------------------------------
+// running commands
 
 export fn sys_run(c: Cmd*) -> int32 {
   if (c->tool.unix) {
@@ -1156,9 +1142,9 @@ export fn sys_job_poll(j: Job*) -> bool {
   return true;
 }
 
-// Runs cmds[0..n), at most parallel at a time, stdout and stderr of each to
+// runs cmds[0..n), at most parallel at a time, stdout and stderr of each to
 // logs[i]. ev(arg, i, -1) as job i starts, ev(arg, i, code) as it ends (in
-// the order they end), and false from the latter starts no more. Codes in
+// the order they end), and false from the latter starts no more. codes in
 // command order, -1 for jobs never started.
 export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, arg: rawptr,
                        ev: fn(rawptr, int64, int32) -> bool) -> int32* {
@@ -1216,12 +1202,12 @@ export fn sys_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, a
 export fn sys_sync() {
 }
 
-// A directory under the user's profile is already the user's own.
+// a directory under the user's profile is already the user's own.
 export fn sys_make_private(p: string) {
 }
 
 export fn sys_set_executable(p: string) {
-  // Windows has no execute bit. Under wine the file lives on a Linux
+  // Windows has no execute bit. under wine the file lives on a Linux
   // filesystem, where a host program may need one.
   if (!sys_is_wine()) {
     return;
@@ -1243,7 +1229,7 @@ fn w_cmd_free(c: Cmd*) {
   free(c);
 }
 
-// Under wine, the Linux form of p (made absolute first); otherwise p.
+// under wine, the Linux form of p (made absolute first); otherwise p.
 export fn sys_host_path(p: string) -> string {
   if (!sys_is_wine()) {
     return p;
@@ -1278,13 +1264,11 @@ fn w_host_path_in(p: string, full: uint8*, wide: uint8*) -> string {
   return s_from_c(r);
 }
 
-// ---------------------------------------------------------------------------
-// Background processes (services). Untested: no Windows dev compiler yet.
-// ---------------------------------------------------------------------------
+// background processes (services). untested: no Windows dev compiler yet.
 
 var g_w_wsa: uint8* = (uint8*)0;
 
-// Starts c without waiting: output to log_path ("" = inherit stdio).
+// starts c without waiting: output to log_path ("" = inherit stdio).
 export fn sys_spawn(c: Cmd*, log_path: string, own_group: bool) -> Job* {
   var j: Job* = new Job;
   j->log_path = log_path;
@@ -1350,8 +1334,8 @@ export fn sys_spawn_stop(j: Job*, grace_ms: int64) {
   sys_spawn_wait(j);
 }
 
-// Runs c (stdio inherited, or stdout and stderr to log), stopped after ms
-// (0: no limit). The exit code; *timed_out when the limit stopped it.
+// runs c (stdio inherited, or stdout and stderr to log), stopped after ms
+// (0: no limit). the exit code; *timed_out when the limit stopped it.
 export fn sys_run_timeout(c: Cmd*, log: string, ms: int64, timed_out: bool*) -> int32 {
   *timed_out = false;
   var j: Job* = sys_spawn(c, log, false);
@@ -1396,12 +1380,12 @@ export fn sys_port_open(port: int64) -> bool {
   return r == 0;
 }
 
-// This process's id.
+// this process's id.
 export fn sys_pid() -> int64 {
   return (int64)w_GetCurrentProcessId();
 }
 
-// Whether nothing accepts on 127.0.0.1:port.
+// whether nothing accepts on 127.0.0.1:port.
 export fn sys_port_free(port: int64) -> bool {
   return !sys_port_open(port);
 }

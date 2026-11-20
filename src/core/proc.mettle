@@ -1,5 +1,4 @@
-// proc: tool lookup with environment overrides, running and capturing
-// commands, and a pool of parallel jobs.
+// proc: tool lookup, running and capturing commands, a pool of parallel jobs.
 
 import "std/mem";
 import "base";
@@ -7,7 +6,7 @@ import "fs";
 import "sys_linux" if linux;
 import "sys_windows" if windows;
 
-// The program named by the environment variable env_override (e.g.
+// the program named by the environment variable env_override (e.g.
 // MBUILD_GIT) when that is set, else `name` searched on PATH.
 export fn proc_tool(name: string, env_override: string) -> Tool {
   if (slen(env_override) > 0) {
@@ -19,7 +18,7 @@ export fn proc_tool(name: string, env_override: string) -> Tool {
   return sys_find_tool(name);
 }
 
-// Returns a pointer, not a Tool: v0.17.0 cannot compile a cross-module call
+// returns a pointer, not a Tool: v0.17.0 cannot compile a cross-module call
 // that returns an aggregate through memory and takes six argument registers.
 export fn proc_require(name: string, env_override: string, why: string) -> Tool* {
   var t: Tool* = new Tool;
@@ -52,11 +51,9 @@ export fn proc_capture_all(c: Cmd*) -> Captured {
   return sys_capture(c, true);
 }
 
-// ---------------------------------------------------------------------------
-// Downloads: https only (plain http just for this machine), through curl
-// ---------------------------------------------------------------------------
+// downloads: https only (plain http just for this machine), through curl
 
-// The host of an http(s) URL, lowercased, without port or brackets; "" when
+// the host of an http(s) URL, lowercased, without port or brackets; "" when
 // the authority holds credentials (user@host) or is empty.
 fn procx_url_host(url: string) -> string {
   var at: int64 = s_find_byte(url, 58);
@@ -113,8 +110,8 @@ export fn net_url_refusal(url: string) -> string {
   return "refusing " + url + ": not an https:// URL";
 }
 
-// A curl command for url: fails on HTTP errors, follows redirects to https
-// only, gives up on a stalled or endless transfer. The caller adds -o and the URL.
+// a curl command for url: fails on HTTP errors, follows redirects to https
+// only, gives up on a stalled or endless transfer. the caller adds -o and the URL.
 export fn net_curl_cmd(curl: Tool, url: string) -> Cmd* {
   var c: Cmd* = cmd_new(curl);
   cmd_arg(c, "-fsSL");
@@ -174,9 +171,9 @@ fn procx_job(arg: rawptr, i: int64, code: int32) -> bool {
   return true;
 }
 
-// Runs n commands, at most `parallel` at a time, each with stdout and stderr
+// runs n commands, at most `parallel` at a time, each with stdout and stderr
 // going to logs[i] (logs may be 0: then to files under fs_temp_dir()).
-// Returns the exit codes, in command order.
+// returns the exit codes, in command order.
 export fn proc_run_jobs(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64) -> int32* {
   var paths: StrList* = logs;
   if (logs == 0) {
