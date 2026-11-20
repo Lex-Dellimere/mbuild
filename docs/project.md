@@ -203,6 +203,7 @@ works, `mbuild run` says there's nothing to run.
 | `native` | `skipped` | `@test` files: also run natively what the interpreter `skipped`, `always`, or `never` |
 | `golden`, `golden-dir`, `golden-cross`, `png-tolerance` | | see golden files below |
 | `ports` | `20000-29999` | `"*"` only: the pool of free ports |
+| `coverage-min` | | `"*"` only: with `--coverage`, fail under this percent of functions |
 
 Each (test, cell) runs `repeat` times, at most `-j` at once, every run in
 `.mbuild/test-run/<cell>/<name>/<run>/`: `tmp/` (its `TMPDIR`, also
@@ -314,6 +315,43 @@ $ mbuild test plot --bless
 test plot (debug, release) ... ok  0.0s
     Blessing tests/golden/plot/line.csv
 test result: ok. 1 passed, 0 failed (0.0s)
+```
+
+**Coverage.** `mbuild test --coverage` builds every test program, `@test`
+file (run natively) and bin a command test or fixture starts into
+`.mbuild/coverage/` counting blocks (`--profile-blocks`, `--annotate-asm`,
+so `-O`), runs them uncached, and merges what each run wrote (its own
+profile per run, so repeats, parallel runs and services add up). It covers
+the project's own files: not `tests/`, `examples/`, `cmd/`, `@test` or
+`@naked` functions, or dependencies. A function counts once any run called
+it; lines are approximate (the optimizer merges code). A program ending
+through `exit()` (or a signal, or a timeout) writes nothing, and a forked
+child's profile is overwritten by its parent's. `--coverage=text` or
+`=html` also writes each file annotated (`F+`/`F-` on a function's line,
+`+`/`-` on a line) into `build/coverage/` or `--coverage-out DIR`;
+`coverage-min` fails the run:
+
+```text
+$ mbuild test --coverage=html
+test tests/twice.mettle (debug) ... ok  0.0s  1 check
+test add (debug) ... ok  0.0s
+test loop (debug) ... ok  0.0s
+test quit (debug) ... ok  0.0s
+test cli (debug) ... ok  0.0s
+
+coverage (6 profiles merged):
+file             functions          lines (approximate)
+src/calc.mettle  3/5        60.0%   4/7        57.1%
+src/main.mettle  1/1       100.0%   3/3       100.0%
+total            4/6        66.6%   7/10       70.0%
+uncovered functions:
+  src/calc.mettle:18 untested
+  src/calc.mettle:23 at_exit_only
+note: no coverage from quit: it wrote no profile (a program ending through exit(), a signal or a timeout writes none)
+       Wrote build/coverage/index.html
+error: 66.6% of functions covered, under coverage-min 80%
+
+test result: FAILED. 5 passed, 0 failed, 1 check, coverage under coverage-min (0.3s)
 ```
 
 ### Documentation
