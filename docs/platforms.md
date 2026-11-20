@@ -359,6 +359,31 @@ one run: `mbuild test --matrix=linux/release,riscv64-linux/debug`. code
 that differs per target can be a [component](components.md) picked with
 `mb_use` after `mb_on`.
 
+### simulated devices
+
+a test program on rvsim can have devices on its buses, and its own
+simulator arguments:
+
+```mettle
+  mb_test_set("sensor", "devices", "bme280:t=25,p=101325,h=40; ssd1306:addr=0x3c");
+  mb_test_set("sensor", "sim-args", "--until-ms 2000");
+```
+
+each spec of `devices` (separated by `;`, as specs hold commas) becomes
+`--device SPEC` on the rvsim command line; `sim-args` is split into words
+and goes last on the emulator's command line (a cell run natively ignores
+it). a cell whose runner isn't rvsim is skipped, with the reason:
+
+```text
+$ mbuild test
+   Compiling test sensor (riscv32-none, debug)
+test sensor (riscv32-none/debug) ... ok  0.0s
+test result: ok. 1 passed, 0 failed (0.3s)
+$ mbuild test -t linux sensor
+test sensor (debug) ... skipped (devices need rvsim, and this cell runs natively)
+test result: ok. 0 passed, 0 failed, 1 skipped (0.0s)
+```
+
 ### flashing a Pico 2
 
 `mbuild flash [BIN]` builds the bin's UF2 (adding `uf2` to `outputs` when

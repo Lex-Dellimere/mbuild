@@ -1897,7 +1897,7 @@ fn mnx_test_bins(m: Manifest*) {
 // tests: [tests], [test-cmds], [test.NAME] (mb_test_*)
 
 export fn man_test_keys() -> StrList* {
-  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min");
+  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min devices sim-args");
 }
 
 // a test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
@@ -2064,6 +2064,18 @@ export fn man_test_check(name: string, key: string, value: string) -> string {
     }
     if (!ok) {
       return "png-tolerance is C or C,F,H (channel 0-255, fraction 0-1, channel 0-255: 2,0.001,48), not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "devices")) {
+    var specs: StrList* = s_split(v, 59);
+    defer free(specs);
+    var d: int64 = 0;
+    while (d < specs->len) {
+      if (slen(s_trim(sl_get(specs, d))) == 0 && specs->len > 1) {
+        return "devices are specs separated by ';' (bme280:t=25; ssd1306:addr=0x3c), and one is empty";
+      }
+      d = d + 1;
     }
     return s_empty();
   }

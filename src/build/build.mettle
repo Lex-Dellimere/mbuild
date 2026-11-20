@@ -3960,6 +3960,8 @@ fn bt_spec(pl: BtPlan*, spec: string) {
     var t: BtTest* = pl->tests[c->t];
     if (t->kind == BT_FILE && target_is_bare(target)) {
       c->skip = "@test functions run on hosted targets";
+    } else if (t->kind == BT_PROG && slen(bt_get(p, t->name, "devices")) > 0 && slen(bt_no_rvsim(p, target, t->name)) > 0) {
+      c->skip = "devices need rvsim, and this cell runs " + bt_no_rvsim(p, target, t->name);
     } else if (t->kind == BT_PROG) {
       sl_add_uniq(prog_names, t->name);
     } else if (t->kind == BT_CMD) {
@@ -4167,8 +4169,76 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
     c->skip = "cannot run a " + j->t->target + " program on this " + sys_os() + " host";
     return;
   }
+  bt_devices(p, t, cmd);
   c->console = bx_console_pass(s, j->b, j->t, cmd);
+  bt_sim_args(p, c, t, cmd);
   c->cmd = cmd;
+}
+
+// where a test program of target runs when that's not rvsim ("natively",
+// "on qemu-riscv64"), "" on rvsim
+fn bt_no_rvsim(p: Project*, target: string, prog: string) -> string {
+  if (!target_is_riscv(target)) {
+    return "natively";
+  }
+  if (!target_is_bare(target)) {
+    if (s_starts(target, "riscv32")) {
+      return "on qemu-riscv32";
+    }
+    return "on qemu-riscv64";
+  }
+  var st: Settings* = bx_settings_of(p, build_profile(p), prog, target);
+  defer free(st);
+  if (man_board_rvsim(st)) {
+    return s_empty();
+  }
+  if (slen(st->board_runner) > 0) {
+    var w: StrList* = s_split(st->board_runner, 32);
+    var first: string = sl_get(w, 0);
+    free(w);
+    return "on " + first;
+  }
+  if (s_eq(st->board, "qemu-virt")) {
+    if (s_starts(target, "riscv32")) {
+      return "on qemu-system-riscv32";
+    }
+    return "on qemu-system-riscv64";
+  }
+  return "on board " + st->board + ", which has no emulator";
+}
+
+// the test's devices onto rvsim's command, each --device SPEC (bt_spec
+// skipped the cells that don't run on rvsim)
+fn bt_devices(p: Project*, t: BtTest*, cmd: Cmd*) {
+  var devs: string = bt_get(p, t->name, "devices");
+  if (slen(devs) == 0) {
+    return;
+  }
+  var specs: StrList* = s_split(devs, 59);
+  var i: int64 = 0;
+  while (i < specs->len) {
+    var d: string = s_trim(sl_get(specs, i));
+    if (slen(d) > 0) {
+      cmd_arg(cmd, "--device");
+      cmd_arg(cmd, d);
+    }
+    i = i + 1;
+  }
+  free(specs);
+}
+
+// the test's sim-args, last on the emulator's command (none when it runs natively)
+fn bt_sim_args(p: Project*, c: BtCell*, t: BtTest*, cmd: Cmd*) {
+  var extra: string = bt_get(p, t->name, "sim-args");
+  if (slen(extra) == 0 || !c->emulated) {
+    return;
+  }
+  var w: SvcWords = svc_split(extra);
+  if (!w.ok) {
+    c->pre = "sim-args `" + extra + "` does not split into words";
+    return;
+  }
+  cmd_args(cmd, w.words);
 }
 
 // the per-run timeout: --timeout, else the test's setting, else 30 s
@@ -7236,6 +7306,7 @@ fn bx_init_cmds() {
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
   bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
+  bx_note("mb_test_set(name, \"devices\", \"bme280:t=25; ssd1306:addr=0x3c\") puts each ;-separated spec on rvsim's command line as --device SPEC; cells not on rvsim are skipped. sim-args are words appended to the emulator's command line.");
   bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");
   bx_ex("mbuild flash", "build the UF2 and copy it to the Pico 2's drive");
   bx_ex("mbuild flash -r blink", "");

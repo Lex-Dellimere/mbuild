@@ -325,6 +325,8 @@ fn project() {
   mb_targets("riscv32-none");
   mb_test_targets("riscv32-none");
   mb_test_bin("dev", "tests/dev.mettle");
+  mb_test_set("dev", "devices", "bme280:t=25,p=101325,h=40; ssd1306:addr=0x3c");
+  mb_test_set("dev", "sim-args", "--trace-uart");
   mb_profile("debug");
   mb_on("riscv32-none");
   mb_set("board", "$1");
@@ -353,6 +355,14 @@ rm -f "$F/rvsim.log"
 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb run
 check "its outputs are the default: bin, uf2" sh -c '[ -s build/riscv32-none/debug/app.bin ] && [ -s build/riscv32-none/debug/app.uf2 ] && [ ! -e build/riscv32-none/debug/app.elf ]'
 check "its runner runs it: rvsim, the runner's words, --load" sh -c 'grep -qF "Running build/riscv32-none/debug/app.bin (rvsim)" "$0/last.out" && grep -qxF -- "--machine rp2350 --load $1/build/riscv32-none/debug/app.bin" "$2/rvsim.log" && [ "$(cat "$0/last.code")" = 0 ]' "$S" "$W/brd/app" "$F"
+rm -f "$F/rvsim.log"
+METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test dev
+check "devices and sim-args on rvsim" sh -c 'grep -qF "test dev (riscv32-none/debug) ... ok" "$0/last.out" && grep -qF -- " --device bme280:t=25,p=101325,h=40 --device ssd1306:addr=0x3c " "$1/rvsim.log" && grep -q -- " --trace-uart$" "$1/rvsim.log"' "$S" "$F"
+brd_proj virtboard ''
+if [ $have_sys = 1 ]; then
+  METTLE="$F/mettle" mb test dev
+  check "devices on a runner that isn't rvsim: skipped" sh -c 'grep -qF "test dev (riscv32-none/debug) ... skipped (devices need rvsim, and this cell runs on qemu-system-riscv32)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+fi
 brd_proj myboard '  mb_dep_path("bsp2", "../bsp2");
 '
 mb build
