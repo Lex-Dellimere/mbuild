@@ -4750,6 +4750,11 @@ fn bt_runs_of(pl: BtPlan*, board: bool) {
     var env: StrList* = man_test_env(p->man, t->name);
     defer free(env);
     var ms: int64 = bt_timeout_ms(p, t->name, c->emulated);
+    var want_code: int64 = -1;
+    if (slen(bt_get(p, t->name, "expect-status")) > 0) {
+      want_code = s_to_int(bt_get(p, t->name, "expect-status"));
+    }
+    var want_out: string = bt_get(p, t->name, "expect-output");
     var svs: StrList* = bt_svc_names(p, t->name);
     var k: int64 = 1;
     while (k <= t->repeat) {
@@ -4774,6 +4779,10 @@ fn bt_runs_of(pl: BtPlan*, board: bool) {
       r->serial = serial;
       r->console = c->console;
       r->by_exit = c->by_exit;
+      if (t->kind != BT_FILE) {
+        r->want_code = want_code;
+        r->want_out = want_out;
+      }
       trn_prepare(r, p->root, t->name, c->spec, cwd_tmp, env);
       bt_cov_env(r);
       if (k == 1) {
@@ -7864,6 +7873,7 @@ fn bx_init_cmds() {
   bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000). mb_test_set(name, \"exit-on-uart\" | \"until-ms\" | \"uart-script\", ...) sets them per test (\"*\" for all) over the bin's; a failure names the text waited for.");
   bx_note("a board whose runner starts with mflash gets it as mbuild flash finds it, then --until TEXT --timeout S and the image last. exit status 77 from any emulator skips the cell (emulator not installed).");
+  bx_note("mb_test_set(name, \"expect-status\", \"3\") passes a test that exits with exactly that status (0 fails it); \"expect-output\" needs its text in stdout or stderr. programs, emulated runs and command tests.");
   bx_note("{{image:NAME} and {{elf:NAME} in a mb_test_cmd line are test program NAME's output in the cell (absolute paths; in mbuild.mettle write {{{{image:NAME}). NAME is built first, and the command runs once per cell of NAME.");
   bx_note("--on-board [--port TTY]: each board test program is flashed (as mbuild flash does), then mflash monitor waits for its exit-on-uart text (default PASS) until the timeout; one at a time. devices cells are skipped.");
   bx_note("mb_test_set(name, \"devices\", \"bme280:t=25; ssd1306:addr=0x3c\") puts each ;-separated spec on rvsim's command line as --device SPEC; cells not on rvsim are skipped. sim-args are words appended to the emulator's command line.");

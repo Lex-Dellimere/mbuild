@@ -1897,7 +1897,7 @@ fn mnx_test_bins(m: Manifest*) {
 // tests: [tests], [test-cmds], [test.NAME] (mb_test_*)
 
 export fn man_test_keys() -> StrList* {
-  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min devices sim-args exit-on-uart until-ms uart-script");
+  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min devices sim-args exit-on-uart until-ms uart-script expect-status expect-output");
 }
 
 // a test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
@@ -2085,7 +2085,13 @@ export fn man_test_check(name: string, key: string, value: string) -> string {
     }
     return s_empty();
   }
-  if (s_eq(key, "exit-on-uart") || s_eq(key, "uart-script")) {
+  if (s_eq(key, "expect-status")) {
+    if (!mnx_uint(v, 0, 255)) {
+      return "expect-status is an exit status from 0 to 255, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "exit-on-uart") || s_eq(key, "uart-script") || s_eq(key, "expect-output")) {
     if (slen(v) == 0) {
       return key + " needs text";
     }

@@ -207,6 +207,8 @@ works, `mbuild run` says there's nothing to run.
 | `devices` | | rvsim devices, `;`-separated: `bme280:t=25; ssd1306:addr=0x3c` ([RISC-V](platforms.md#simulated-devices)) |
 | `sim-args` | | words appended to the emulator's command line |
 | `exit-on-uart`, `until-ms`, `uart-script` | | board tests: the console text that passes, the simulated time limit, the UART input script; they win over the bin's settings ([RISC-V](platforms.md#simulator-settings-per-test)) |
+| `expect-status` | | the exit status the run must end with (`0`..`255`); any other, 0 included, fails it |
+| `expect-output` | | text the run's stdout or stderr must contain |
 
 each (test, cell) runs `repeat` times, at most `-j` at once, every run in
 `.mbuild/test-run/<cell>/<name>/<run>/`: `tmp/` (its `TMPDIR`, also
@@ -280,6 +282,28 @@ the tests it skipped run again: mbuild writes a copy of the file to
 calling those tests), builds it as a test program in each cell with `-I`
 the original's directory, and its result counts. `native=always` runs every
 `@test` of the file that way, in every cell.
+
+**expected failures.** a test that checks an error path passes when the
+program (or its emulator, or the command) exits with exactly
+`expect-status`, and fails with any other status; `expect-output` also
+needs its text in the output. both work for test programs, emulated runs
+and command tests, and `"*"` sets a default:
+
+```text
+$ mbuild test crash
+test crash (debug) ... FAILED
+
+failures:
+
+---- crash (linux/debug): exit 3, expected 4
+stdout:
+  error: bad input
+kept: .mbuild/test-run/linux-debug/crash/1
+```
+
+```text
+---- crash (linux/debug): no `bad name` in the output
+```
 
 **program images in command tests.** `{image:NAME}` and `{elf:NAME}` in a
 `mb_test_cmd` line stand for the output of test program `NAME` in the cell

@@ -428,6 +428,18 @@ RVSIM_QUIET=1 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain --force
 check "sim settings: the failure names the text waited for" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): no DONE on the console" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 RVSIM_EXIT=77 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain --force
 check "exit 77 from a runner: skipped, not failed" sh -c 'grep -qF "test plain (riscv32-none/debug) ... skipped (emulator not installed: rvsim exited 77)" "$0/last.out" && grep -qF "0 passed, 0 failed, 1 skipped" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+# expected failures through the emulator
+brd_proj myboard '' '  mb_test_set("plain", "expect-status", "3");
+  mb_test_set("plain", "expect-output", "PASS");
+'
+RVSIM_EXIT=3 METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain
+check "expect-status on an emulated run: the status it names passes" sh -c 'grep -qF "test plain (riscv32-none/debug) ... ok" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain --force
+check "expect-status on an emulated run: exit 0 fails" sh -c 'grep -qF -- "---- plain (riscv32-none/debug): exit 0, expected 3" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
+brd_proj myboard '' '  mb_test_set("plain", "expect-output", "NOPE");
+'
+METTLE="$F/mettle" MBUILD_RVSIM="$F/rvsim" mb test plain
+check "expect-output on an emulated run" has -- "---- plain (riscv32-none/debug): no \`NOPE\` in the output"
 # a board whose runner is mflash: --until and --timeout, the image last
 brd_proj mfboard ''
 rm -f "$F/mflash.log"

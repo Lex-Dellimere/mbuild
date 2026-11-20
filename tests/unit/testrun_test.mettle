@@ -67,6 +67,21 @@ fn test_outputs() {
   t_eq("why: by exit, the text and the status", trn_exit_why(r), "no DONE on the console (mflash exited with 1)");
   r->by_exit = false;
   r->console = "";
+  r->want_code = 3;
+  r->code = 3;
+  t_eq("why: expected status", trn_exit_why(r), "");
+  r->code = 0;
+  t_eq("why: expected status, got 0", trn_exit_why(r), "exit 0, expected 3");
+  r->code = 139;
+  t_eq("why: expected status, got a signal", trn_exit_why(r), "signal 11, expected 3");
+  r->code = 3;
+  r->want_out = "boom";
+  r->out = "all fine";
+  t_eq("why: expected output missing", trn_exit_why(r), "no `boom` in the output");
+  r->err = "a boom";
+  t_eq("why: expected output in stderr", trn_exit_why(r), "");
+  r->want_code = -1;
+  t_eq("why: expected output, exit not 0", trn_exit_why(r), "exit 3");
 }
 
 fn test_native() {

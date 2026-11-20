@@ -288,6 +288,46 @@ sed -i 's|  mb_test_cmd("img", |  mb_test_set("img", "png-tolerance", "3,0.01,48
 mb test img
 check "png: within png-tolerance" line "test img (debug) ... ok  0.0s"
 
+# --- expected failures: expect-status and expect-output, programs and command tests, "*" defaults
+proj "$W/expect" <<'EOF2'
+  mb_test_set("exit3", "expect-status", "3");
+  mb_test_set("zero", "expect-status", "3");
+  mb_test_set("four", "expect-status", "3");
+  mb_test_set("boom", "expect-status", "1");
+  mb_test_set("boom", "expect-output", "boom");
+  mb_test_set("quiet", "expect-output", "boom");
+  mb_test_cmd("cmd3", "sh tests/exit.sh 3");
+  mb_test_cmd("cmd0", "sh tests/exit.sh 0");
+  mb_test_set("cmd3", "expect-status", "3");
+  mb_test_set("cmd0", "expect-status", "3");
+EOF2
+cd "$W/expect" || exit 1
+prog tests/exit3_test.mettle 3
+prog tests/zero_test.mettle 0
+prog tests/four_test.mettle 4
+prog tests/boom_test.mettle 1 "boom: bad input"
+prog tests/quiet_test.mettle 0 "all fine"
+printf 'echo "exiting $1"\nexit "$1"\n' > tests/exit.sh
+mb test
+check "expect-status: the exit it names passes" sh -c 'grep -qF "test exit3 (debug) ... ok" "$0/last.out" && grep -qF "test cmd3 (debug) ... ok" "$0/last.out"' "$S"
+check "expect-status: exit 0 fails" has "---- zero (linux/debug): exit 0, expected 3"
+check "expect-status: another status fails" has "---- four (linux/debug): exit 4, expected 3"
+check "expect-status: a command test" has "---- cmd0 (linux/debug): exit 0, expected 3"
+check "expect-output: status and text" line "test boom (debug) ... ok  0.0s"
+check "expect-output: the text is missing" has "---- quiet (linux/debug): no \`boom\` in the output"
+check "expected failures: the run fails" code_is 1
+mb test exit3 boom cmd3
+check "expected failures: a passing run" sh -c 'grep -qF "3 passed, 0 failed" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ]' "$S"
+proj "$W/expect_star" <<'EOF2'
+  mb_test_set("*", "expect-status", "7");
+  mb_test_set("plain", "expect-status", "0");
+EOF2
+cd "$W/expect_star" || exit 1
+prog tests/seven_test.mettle 7
+prog tests/plain_test.mettle 0
+mb test
+check "expect-status: \"*\" is the default, a test's own wins" sh -c 'grep -qF "test seven (debug) ... ok" "$0/last.out" && grep -qF "test plain (debug) ... ok" "$0/last.out" && grep -qF "2 passed, 0 failed" "$0/last.out"' "$S"
+
 # --- {image:NAME} in a command test: built on demand, once per cell of the program
 proj "$W/image" <<'EOF2'
   mb_test_bin("hello", "tests/hello.mettle");

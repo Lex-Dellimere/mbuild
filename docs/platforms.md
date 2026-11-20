@@ -435,6 +435,8 @@ does (`MBUILD_MFLASH`, a dependency's bin named `mflash`, PATH), then
 its time limit) and the image's path last. its exit status says whether the
 text came. whatever the runner, exit status 77 means the emulator isn't
 installed: the cell is skipped with that reason and the run doesn't fail.
+`expect-status` and `expect-output` ([project](project.md#tests)) check
+emulated runs too.
 
 ```text
 $ mbuild test
