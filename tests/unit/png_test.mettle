@@ -1,6 +1,4 @@
-// png_test: inflate and the PNG decoder over tests/fixtures/png (make.py
-// there writes them), the compare with its tolerance, the writer.
-//
+// png_test: inflate and the png decoder over tests/fixtures/png (make.py there writes them), the compare with its tolerance, the writer.
 //   tools/mcheck.sh tests/unit/png_test.mettle --run -- tests/fixtures/png TMPDIR
 
 import "std/io";
@@ -43,7 +41,7 @@ fn want_gray(x: int64, y: int64) -> int64 {
   return (x * 15 + y * 11) & 255;
 }
 
-// The first pixel of im that is not what kind says, as "x,y: r g b a", "" when all are.
+// the first pixel of im that is not what kind says, as "x,y: r g b a", "" when all are.
 fn mismatch(im: PngImage, kind: string) -> string {
   var y: int64 = 0;
   while (y < im.h) {

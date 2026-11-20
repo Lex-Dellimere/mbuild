@@ -1,10 +1,5 @@
-// manifest_test: the manifest mbuild.mettle emits: typed build settings, [replace],
-// [package] mettle, mbuild.local.mettle, components, registries.
-//
-//   mettle test tests/unit/manifest_test.mettle     (leak warnings are expected)
-//   tools/mcheck.sh tests/unit/manifest_test.mettle --run
-//
-// Run both: `mettle test` reports a failing run as skipped (reports issue 10).
+// manifest_test: the manifest mbuild.mettle emits: typed build settings, [replace], [package] mettle, mbuild.local.mettle, components, registries.
+//   tools/mcheck.sh tests/unit/manifest_test.mettle --run   (`mettle test` too: leak warnings are expected, a failing run shows as skipped)
 
 import "std/io";
 import "../../src/core/base";
@@ -50,7 +45,7 @@ fn t_has(name: string, got: string, part: string) {
 
 var g_kept: Settings* = (Settings*)0;
 
-// Test settings are kept (a short-lived program; this also satisfies the memory analyser).
+// test settings are kept (a short-lived program; this also satisfies the memory analyser).
 fn keep(s: Settings*) {
   g_kept = s;
 }
@@ -72,7 +67,7 @@ fn query(profile: string, bin: string, target: string, sets: StrList*) -> Settin
   return q;
 }
 
-// The flags of a profile (no bin, linux), joined by ",", or "ERR: ..." on an error.
+// the flags of a profile (no bin, linux), joined by ",", or "ERR: ..." on an error.
 fn flags_of(m: Manifest*, profile: string) -> string {
   var s: Settings* = man_settings(m, query(profile, "", "linux", (StrList*)0));
   keep(s);
@@ -279,7 +274,7 @@ fn test_local() {
   t_has("local: component not a string", lc->error, "[components] logger must be an impl name");
 }
 
-// The 13.5 example as the driver emits it.
+// the example as the driver emits it.
 fn example_text() -> string {
   return "[package]\nname = \"viewer\"\nversion = \"0.3.0\"\ndescription = \"image viewer\"\n[build]\ntargets = [\"linux\", \"windows\"]\n[dependencies]\nstrutil = \"v1.1.0\"\nauth = {{ version = \"v2.0.0\", registry = \"corp\" }\nwidgets = {{ path = \"../widgets\" }\n[registry.corp]\nurl = \"https://pkgs.example.com/mettle\"\n[component.renderer]\ndir = \"src/renderer\"\nmode = \"static\"\nimpls = [\"soft\", \"gl\"]\nwindows = \"soft\"\n[rules]\nfiles = [\"rules/no_alloc_in_draw.mettle\"]\n[profile.release]\noptimize = \"full\"\ncrash-report = false\ncomponents = [\"renderer=gl\"]\n[profile.release.windows]\nsubsystem = \"windows\"\n[profile.debug]\nsafe = true\n";
 }

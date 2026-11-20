@@ -299,7 +299,7 @@ if [ $have_user = 1 ]; then
   fi
 fi
 if [ $have_rvsim = 1 ]; then
-  # A board prints the counts on its console; the capture script of the compiler's checkout makes the
+  # a board prints the counts on its console; the capture script of the compiler's checkout makes the
   # profile. A stand-in checkout and a program that prints its own block run mbuild's part with any compiler.
   mkdir -p "$W/fake/bin" "$W/fake/tools/riscv-sim"
   : > "$W/fake/bin/mettle"

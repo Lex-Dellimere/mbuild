@@ -1,7 +1,4 @@
-// graph_test: import-graph resolution against a scratch tree, checked
-// against the compiler's rules (mettle.deps nearest first, std variants,
-// guards, relative, -I, working directory) and fingerprint sensitivity.
-//
+// graph_test: import-graph resolution against a scratch tree, checked against the compiler's rules (mettle.deps nearest first, std variants, guards, relative, -I, working directory) and fingerprint sensitivity.
 //   tools/mcheck.sh tests/unit/graph_test.mettle --run
 
 import "std/io";
@@ -39,7 +36,7 @@ fn put_file(root: string, rel: string, text: string) {
   fs_write(root + "/" + rel, text);
 }
 
-// The graph's files relative to root, joined with spaces.
+// the graph's files relative to root, joined with spaces.
 fn rel_files(g: Graph*, root: string) -> string {
   var l: StrList* = sl_new();
   defer free(l);
@@ -125,7 +122,7 @@ fn main() -> int32 {
   var absent: Graph* = graph_build(lc, root + "/app/absent.mettle");
   t_ok("missing entry not ok", !absent->ok);
 
-  // Fingerprints: stable, and sensitive to content, embeds and new files.
+  // fingerprints: stable, and sensitive to content, embeds and new files.
   var f1: string = graph_fp_of(lg);
   var lc2: GraphCtx* = graph_ctx_new("linux", root + "/std");
   sl_push(lc2->includes, root + "/inc");
@@ -142,7 +139,7 @@ fn main() -> int32 {
   t_ok("fingerprint follows a missing file appearing", !s_eq(f3, f4));
   t_ok("windows fingerprint differs", !s_eq(graph_fp_of(wg), f1));
 
-  // Path keys: root-relative, stdlib-relative, wine's Z: drive dropped.
+  // path keys: root-relative, stdlib-relative, wine's Z: drive dropped.
   t_eq("key in root", graph_path_key("/p/app", "/s", "/p/app/src/a.mettle"), "@root/src/a.mettle");
   t_eq("key in root, wine form", graph_path_key("/p/app", "/s", "Z:/p/app/src/a.mettle"), "@root/src/a.mettle");
   t_eq("key, wine root", graph_path_key("z:/p/app", "", "/p/app/a.mettle"), "@root/a.mettle");
@@ -150,7 +147,7 @@ fn main() -> int32 {
   t_eq("key elsewhere", graph_path_key("/p/app", "/s", "Z:/other/b.mettle"), "/other/b.mettle");
   t_eq("key on a real drive", graph_path_key("/p/app", "", "C:/x/b.mettle"), "C:/x/b.mettle");
 
-  // A moved project keeps its fingerprint (paths are hashed relative to the root).
+  // a moved project keeps its fingerprint (paths are hashed relative to the root).
   var moved: string = root + "-moved";
   sys_remove_tree(moved);
   fs_mkdirs(moved);

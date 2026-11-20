@@ -32,7 +32,7 @@ hasnt() { ! grep -q -- "$2" "$1"; }
 args_of() { sed -n 's/^arg //p' "$1"; }
 copies_of() { sed -n 's/^copy //p' "$1"; }
 
-# --- the driver -------------------------------------------------------------------
+# --- the driver
 if out=$(sh "$here/tools/mcheck.sh" "$here/tests/unit/native_test.mettle" 2>&1); then ok "driver builds debug and --release without warnings"; else echo "$out"; exit 1; fi
 DRV="$W/mbuild-mcheck/native_test.debug"
 WDRV="$W/mbuild-mcheck/native_test.exe"
@@ -44,7 +44,7 @@ sh "$here/tests/fixtures/make-registry.sh" "$F" >/dev/null || { echo "fixtures f
 # dep APP NAME VERSION: the fixture package as APP/.mbuild/deps/NAME, frozen manifest included
 dep() { mkdir -p "$1/.mbuild/deps"; cp -r "$F/src/$2-$3" "$1/.mbuild/deps/$2"; }
 
-# --- the app: vecmath (C + libm) -> strutil, a vendored library, pkg-config -------
+# --- the app: vecmath (C + libm) -> strutil, a vendored library, pkg-config
 APP="$W/app"
 cp -r "$F/app" "$APP"
 dep "$APP" vecmath v0.1.0
@@ -52,7 +52,7 @@ dep "$APP" strutil v1.0.0
 D="$APP/.mbuild/deps"
 printf 'app=.\nvecmath=./.mbuild/deps/vecmath\nstrutil=./.mbuild/deps/strutil\n' > "$APP/mettle.deps"
 printf 'strutil=../strutil\n' > "$D/vecmath/mettle.deps"
-# A second C file in vecmath that does not include vec.h, so a header edit
+# a second C file in vecmath that does not include vec.h, so a header edit
 # must recompile exactly one object.
 echo 'int vm_extra(int x) { return x + 1; }' > "$D/vecmath/csrc/extra.c"
 mkdir -p "$APP/vendor/lib" "$APP/vendor/src"
@@ -76,7 +76,7 @@ paths = ["vendor/lib"]
 pkgconfig = ["zlib"]
 EOF
 echo 'export extern fn vend_answer() -> int32 = "vend_answer";' > "$APP/src/vend.mettle"
-# A runtime name, and a Win32 name only imported for windows.
+# a runtime name, and a Win32 name only imported for windows.
 echo 'export extern fn rt_strlen(s: cstring) -> int64 = "strlen";' > "$APP/src/rt.mettle"
 echo 'export extern fn pw_ticks() -> uint64 = "GetTickCount64";' > "$APP/src/plat_win.mettle"
 sed -i 's|^import "strutil/strutil";|import "strutil/strutil";\nimport "vend";\nimport "rt";\nimport "plat_win" if windows;|; s|^  return 0;|  println("vend={vend_answer()}");\n  return 0;|' "$APP/src/main.mettle"
@@ -289,7 +289,7 @@ echo 'export extern fn a_val() -> int32 = "a_val";' > "$CD/capi/capi.mettle"
 printf '[package]\nname = "cuser"\nversion = "v0.1.0"\n\n[dependencies]\ncapi = "v0.1.0"\n\n[c]\nsources = ["csrc"]\n' > "$CD/cuser/manifest.toml"
 printf '#include "capi.h"\nint u_val(void) { return a_val() + 2; }\n' > "$CD/cuser/csrc/u.c"
 echo 'export extern fn u_val() -> int32 = "u_val";' > "$CD/cuser/cuser.mettle"
-# A nested project and a build/ directory: their externs are not the app's.
+# a nested project and a build/ directory: their externs are not the app's.
 mkdir -p "$C/examples/nested/src" "$C/build/gen"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("nested", "0.1.0");\n}\n' > "$C/examples/nested/mbuild.mettle"
 echo 'extern fn nested_only_sym() -> int32 = "nested_only_sym";' > "$C/examples/nested/src/main.mettle"
@@ -337,7 +337,7 @@ if [ $MINGW = 1 ] && [ $WINE = 1 ]; then
   for f in $(copies_of "$W/cw1"); do cp "$f" "$C/build/windows/debug/"; done
   ( cd "$C/build/windows/debug" && wine app.exe ) >"$W/cwr1.log" 2>&1
   check "chain: windows app runs C calling C (u=42)" has "$W/cwr1.log" "u=42"
-  # The Linux driver and the wine driver alternating on one project rebuild nothing.
+  # the Linux driver and the wine driver alternating on one project rebuild nothing.
   for tg in linux windows; do
     "$DRV" "$C" $tg prepare >/dev/null 2>&1
     wdrv "Z:$C" $tg prepare >"$W/alt-$tg-w1"
@@ -400,7 +400,7 @@ fn main() -> int32 {
   return 0;
 }
 EOF
-# The interposition this is about, without mbuild: plain shared libraries
+# the interposition this is about, without mbuild: plain shared libraries
 # linked -lmb_cdup1 -lmb_cdup2 make cdup2's C call cdup1's copy.
 X="$W/control"
 mkdir -p "$X"
@@ -430,7 +430,7 @@ MB_VERBOSE=1 "$DRV" "$A" linux prepare >"$W/c2" 2>&1
 check "cdup: second prepare compiles nothing" hasnt "$W/c2" "Compiling"
 check "cdup -v: note names both packages" hasf "$W/c2" "the C function dup_value is defined by both cdup1 (libmb_cdup1.so) and cdup2 (libmb_cdup2.so); no extern binds it"
 check "cdup -v: still no warning" hasnt "$W/c2" "warning"
-# An extern of dup_value in a file nothing imports binds nothing.
+# an extern of dup_value in a file nothing imports binds nothing.
 echo 'export extern fn stray_dup() -> int32 = "dup_value";' > "$A/.mbuild/deps/cdup2/unused.mettle"
 prepare "$A" linux "$W/c2b"
 check "cdup: an extern in a file nothing imports does not warn" hasnt "$W/c2b" "warning"

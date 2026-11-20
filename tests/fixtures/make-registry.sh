@@ -6,7 +6,7 @@ ROOT=$(mkdir -p "$1" && cd "$1" && pwd); REG="$ROOT/registry"; SRC="$ROOT/src"
 rm -rf "$REG" "$SRC"; mkdir -p "$REG/index" "$REG/pkg" "$SRC"
 printf '[registry]\nformat = 1\nname = "fixtures"\n' > "$REG/registry.toml"
 # pkg NAME VERSION: package files are in $SRC/NAME-VERSION; its manifest.toml is the
-# frozen manifest the registry serves (14.7), not a user file, and stays out of the archive
+# frozen manifest the registry serves, not a user file, and stays out of the archive
 pkg() {
   d="$SRC/$1-$2"; out="$REG/pkg/$1"; mkdir -p "$out"
   ( cd "$d" && find . -type f ! -name manifest.toml | sed 's|^\./||' | LC_ALL=C sort > "$SRC/.list" && tar -czf "$out/$1-$2.tar.gz" -T "$SRC/.list" )
@@ -20,7 +20,7 @@ mk() { # NAME VERSION [frozen manifest lines after [package] on stdin]
   { printf '[package]\nname = "%s"\nversion = "%s"\n' "$1" "$2"; cat; } > "$d/manifest.toml"
 }
 
-# --- strutil: v1.0.0, v1.1.0 (adds su_twice), v2.0.0-rc.1 --------------------
+# --- strutil: v1.0.0, v1.1.0 (adds su_twice), v2.0.0-rc.1
 for v in v1.0.0 v1.1.0 v2.0.0-rc.1; do
   mk strutil $v </dev/null
   cat > "$SRC/strutil-$v/strutil.mettle" <<EOF
@@ -44,7 +44,7 @@ EOF
   pkg strutil $v
 done
 
-# --- textfmt -> strutil v1.1.0 -------------------------------------------------
+# --- textfmt -> strutil v1.1.0
 mk textfmt v0.1.0 <<'EOF'
 description = "text formatting"
 
@@ -114,7 +114,7 @@ EOF
   pkg vecmath $v
 done
 
-# --- apilib: v1.0.0, v1.1.0 (adds), v1.2.0 (breaks inside v1), v2.0.0 ---------
+# --- apilib: v1.0.0, v1.1.0 (adds), v1.2.0 (breaks inside v1), v2.0.0
 src() { mkdir -p "$SRC/$1-$2"; cat > "$SRC/$1-$2/$1.mettle"; }
 for v in v1.0.0 v1.1.0 v1.2.0 v2.0.0; do mk apilib $v </dev/null; done
 src apilib v1.0.0 <<'EOF'
@@ -133,14 +133,14 @@ export fn al2_add(a: int32, b: int32) -> int32 { return a + b; }
 EOF
 for v in v1.0.0 v1.1.0 v1.2.0 v2.0.0; do pkg apilib $v; done
 
-# --- zero: v0 lines -----------------------------------------------------------
+# --- zero: v0 lines
 for v in v0.1.0 v0.1.1 v0.2.0; do mk zero $v </dev/null; done
 printf 'export fn z_one() -> int32 { return 1; }\n' | src zero v0.1.0
 printf 'export fn z_one() -> int32 { return 1; }\nexport fn z_two() -> int32 { return 2; }\n' | src zero v0.1.1
 printf 'export fn z_two() -> int32 { return 2; }\n' | src zero v0.2.0
 for v in v0.1.0 v0.1.1 v0.2.0; do pkg zero $v; done
 
-# --- requirers ---------------------------------------------------------------
+# --- requirers
 req() { # NAME VERSION DEP DEP-VERSION; source on stdin
   printf '\n[dependencies]\n%s = "%s"\n' "$3" "$4" | mk "$1" "$2"
   src "$1" "$2"
@@ -152,7 +152,7 @@ printf 'import "apilib/apilib";\nexport fn new2_val() -> int32 { return al2_add(
 printf 'import "zero/zero";\nexport fn z1_val() -> int32 { return z_one(); }\n' | req z1 v1.0.0 zero v0.1.0
 printf 'import "zero/zero";\nexport fn z2_val() -> int32 { return z_two(); }\n' | req z2 v1.0.0 zero v0.2.0
 
-# --- needs: a minimum Mettle release ------------------------------------------
+# --- needs: a minimum Mettle release
 printf 'mettle = "v0.17.0"\n' | mk needs v0.9.0
 printf 'mettle = "v0.99.0"\n' | mk needs v1.0.0
 for v in v0.9.0 v1.0.0; do
@@ -160,7 +160,7 @@ for v in v0.9.0 v1.0.0; do
   pkg needs $v
 done
 
-# --- same C symbol in two packages; same exported Mettle name in two ----------
+# --- same C symbol in two packages; same exported Mettle name in two
 for n in 1 2; do
   printf '\n[c]\nsources = ["dup.c"]\n' | mk cdup$n v1.0.0
   printf 'int dup_value(void) { return %s; }\nint cdup%s_only(void) { return dup_value(); }\n' $n $n > "$SRC/cdup$n-v1.0.0/dup.c"
@@ -171,7 +171,7 @@ for n in 1 2; do
   pkg clash$n v1.0.0
 done
 
-# --- yanky: v1.0.0, v1.0.1 yanked ---------------------------------------------
+# --- yanky: v1.0.0, v1.0.1 yanked
 for v in v1.0.0 v1.0.1; do
   mk yanky $v </dev/null
   printf 'export fn yk_version() -> string {\n  return "yanky %s";\n}\n' $v > "$SRC/yanky-$v/yanky.mettle"
@@ -179,7 +179,7 @@ for v in v1.0.0 v1.0.1; do
 done
 sed -i 's/^\(v1\.0\.1 .*\)$/\1 yanked/' "$REG/index/yanky"
 
-# --- broken archives: evil (a symlink member), dotdot (a ../x member), badsum --
+# --- broken archives: evil (a symlink member), dotdot (a ../x member), badsum
 # bad NAME: archive already in $REG/pkg/NAME/NAME-v1.0.0.tar.gz, indexed as is.
 bad() {
   out="$REG/pkg/$1"
@@ -202,7 +202,7 @@ printf 'export fn bs() -> int32 {\n  return 1;\n}\n' > "$SRC/badsum-v1.0.0/badsu
 pkg badsum v1.0.0
 sed -i 's/sha256=[0-9a-f]*/sha256=9f8e7d6c5b4a39210f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a6978/' "$REG/index/badsum"
 
-# --- webfw: init.rules (options db, port), two templates, AGENT.rules; sqlite -
+# --- webfw: init.rules (options db, port), two templates, AGENT.rules; sqlite
 mk sqlite v1.2.0 </dev/null
 printf 'export fn sqlite_open() -> int32 {\n  return 0;\n}\n' > "$SRC/sqlite-v1.2.0/sqlite.mettle"
 pkg sqlite v1.2.0
@@ -247,7 +247,7 @@ EOF
 printf '# webfw\n\n## What it is for\nsmall web apps.\n' > "$d/AGENT.rules"
 pkg webfw v1.0.0
 
-# --- comps: a library declaring a static component kv (mem, file) ------------
+# --- comps: a library declaring a static component kv (mem, file)
 mk comps v1.0.0 <<'EOF'
 
 [component.kv]
@@ -262,7 +262,7 @@ done
 printf 'import "kv";\n\nexport fn comps_get(k: string) -> string {\n  return kv_get(k);\n}\n' > "$SRC/comps-v1.0.0/comps.mettle"
 pkg comps v1.0.0
 
-# --- app: imports strutil and vecmath, declares only vecmath -----------------
+# --- app: imports strutil and vecmath, declares only vecmath
 A="$ROOT/app"; rm -rf "$A"; mkdir -p "$A/src"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("app", "0.1.0");\n}\n\nfn deps() {\n  mb_dep("vecmath", "v0.1.0");\n}\n' > "$A/mbuild.mettle"
 cat > "$A/src/main.mettle" <<'EOF'

@@ -21,7 +21,7 @@ fn t_eq(name: string, got: string, want: string) {
   }
 }
 
-// A terminal with output processing on (\n also returns): rows, a cursor.
+// a terminal with output processing on (\n also returns): rows, a cursor.
 struct Term {
   rows: StrList*;
   row: int64;
@@ -86,7 +86,7 @@ fn term_play(t: Term*, s: string) {
   }
 }
 
-// The screen as "row|row|..." and the cursor as "@row,col".
+// the screen as "row|row|..." and the cursor as "@row,col".
 fn term_show(t: Term*) -> string {
   return sl_join(t->rows, "|") + "@" + s_int(t->row) + "," + s_int(t->col);
 }

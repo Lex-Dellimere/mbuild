@@ -49,7 +49,7 @@ MB="$S/mbuild-$mode"
 W="$S/$mode"
 mkdir -p "$W"
 
-# --- init, run, project commands (13.6, 13.10)
+# --- init, run, project commands
 mkdir -p "$W/hello" && cd "$W/hello"
 mb init
 check "init transcript" sh -c 'grep -qF "Created mbuild.mettle (package \`hello\`)" "$0/last.out" && grep -qF "Created src/main.mettle" "$0/last.out" && grep -qF "Updated .gitignore" "$0/last.out" && grep -qF "next: mbuild run" "$0/last.out"' "$S"
@@ -286,7 +286,7 @@ mb info .
 check "info . outside a project" eval 'code_is 1 && has "no project here: mbuild.mettle not found"'
 cd "$W/hello"
 
-# --- hooks (13.7)
+# --- hooks
 cat >> mbuild.mettle <<'EOF'
 
 fn hook_pre_build() -> int32 {
@@ -317,7 +317,7 @@ mb build --no-hooks
 check "--no-hooks skips it" code_is 0
 rm -f fail-hook
 
-# --- components (15)
+# --- components
 mkdir -p "$W/comp/src/logger" && cd "$W/comp"
 cat > mbuild.mettle <<'EOF'
 import "mbuild/api";
@@ -351,7 +351,7 @@ check "use logger=quiet then run" hasnt "stdout: hi"
 mb components
 check "components shows mbuild.local.mettle" has "mbuild.local.mettle"
 
-# --- toolchain use --local (9): an installed toolchain becomes mb_tool in mbuild.local.mettle
+# --- toolchain use --local: an installed toolchain becomes mb_tool in mbuild.local.mettle
 TC="$MBUILD_HOME/toolchains/v0.99.0"
 mkdir -p "$TC/bin" && cp "$METTLE" "$TC/bin/mettle"
 mb toolchain use v0.99.0 --local
@@ -360,7 +360,7 @@ check "toolchain use --local keeps mb_use" grep -qF 'mb_use("logger", "quiet");'
 (unset METTLE; mb toolchain)
 check "toolchain lists it" has "$TC/bin/mettle  (mb_tool(\"mettle-linux\") in mbuild.local.mettle: v0.99.0)"
 
-# --- rules (15.8)
+# --- rules
 mkdir -p "$W/rules/src" "$W/rules/rules" && cd "$W/rules"
 cat > mbuild.mettle <<'EOF'
 import "mbuild/api";
@@ -386,7 +386,7 @@ EOF
 mb build
 check "rule fails the build" sh -c 'grep -qF "R0002" "$0/last.out" && grep -qF "could not compile rules (linux, debug)" "$0/last.out"' "$S"
 
-# --- bin kinds (15.7)
+# --- bin kinds
 mkdir -p "$W/kinds/src" && cd "$W/kinds"
 cat > mbuild.mettle <<'EOF'
 import "mbuild/api";
@@ -439,7 +439,7 @@ check "mb_out: riscv flat" has "exists $W/kinds/build/riscv32-none/debug/rv.bin"
 mb build -r -v lib
 check "crash-report = false" has "--no-crash-report"
 
-# --- live (15.4)
+# --- live
 mkdir -p "$W/live/src" && cd "$W/live"
 printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("live", "0.1.0");\n}\n' > mbuild.mettle
 cat > src/main.mettle <<'EOF'
@@ -475,7 +475,7 @@ sed -i 's/i < 200/i < 1/' src/main.mettle
 timeout 60 "$MB" live >"$S/last.out" 2>&1
 check "live runs the post-build hook before the program" sh -c 'grep -qx "post live" "$0/last.out" && [ "$(grep -n "^post live" "$0/last.out" | cut -d: -f1)" -lt "$(grep -n "^2$" "$0/last.out" | cut -d: -f1)" ]' "$S"
 
-# --- publish, yank, registry (14.7)
+# --- publish, yank, registry
 mkdir -p "$W/pkg" && cd "$W/pkg"
 "$MB" registry init "$S/reg-$mode" >"$S/last.out" 2>&1
 check "registry init" test -f "$S/reg-$mode/registry.toml"
@@ -577,7 +577,7 @@ check "init writes mbuild.mettle beside mbuild.toml" sh -c '[ -f mbuild.mettle ]
 check "init notes mbuild.toml" has "note: mbuild.toml is no longer read and can be deleted"
 done
 
-# --- everyday commands, once with the debug mbuild ------------------------------
+# --- everyday commands, once with the debug mbuild
 MB="$S/mbuild-debug"
 W="$S/cli"
 F="$S/fx"

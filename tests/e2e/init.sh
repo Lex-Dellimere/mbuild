@@ -34,9 +34,9 @@ file_lacks() {
   if [ -f "$2" ] && ! grep -qF -- "$3" "$2"; then ok "$1"; else bad "$1 ($2 has: $3)" "$(cat "$2" 2>/dev/null)"; fi
 }
 
-# --- fixtures ------------------------------------------------------------------
+# --- fixtures
 
-# The registry fixtures; W is webfw as a path package.
+# the registry fixtures; W is webfw as a path package.
 sh "$here/tests/fixtures/make-registry.sh" "$T" >/dev/null || exit 1
 REG="$T/registry"
 SRC="$T/src"
@@ -44,7 +44,7 @@ W="$T/webfw-src"
 cp -r "$SRC/webfw-v1.0.0" "$W"
 rm "$W/manifest.toml"
 
-# --- part 1: the driver --------------------------------------------------------
+# --- part 1: the driver
 
 echo "== building the driver"
 DRV="$T/drv"
@@ -254,7 +254,7 @@ printf 'import "mbuild/api";\n\nfn project() {\n  mb_package("pk", "0.1.0");\n}\
 out=$("$D" . new fromscaffold --from ./pk --yes 2>&1)
 file_has "new from the scaffold" fromscaffold/src/main.mettle "Hello from fromscaffold, built on pk 0.1.0!"
 
-# Agents, with a hand-made DepState: textfmt (direct) -> strutil.
+# agents, with a hand-made DepState: textfmt (direct) -> strutil.
 A="$T/agents-$v"
 mkdir -p "$A/deps"
 cp -r "$SRC/textfmt-v0.1.0" "$A/deps/textfmt"
@@ -302,7 +302,7 @@ out=$("$D" "$A3" refresh "strutil:v1.1.0:deps/strutil" 2>&1)
 [ ! -e "$A3/AGENT.rules" ] && ok "no rules among dependencies: no file" || bad "no rules among dependencies: no file" "$out"
 done
 
-# --- part 2: registry and CLI -------------------------------------------------
+# --- part 2: registry and CLI
 
 echo "== part 2: registry"
 D="$DRV/init_driver.debug"
@@ -322,7 +322,7 @@ MB="$T/mbuild"
 if ! sh "$here/tools/mcompile.sh" "$here/src/main.mettle" -o "$MB" > "$T/mbuild.log" 2>&1; then
   bad "mbuild builds" "$(cat "$T/mbuild.log")"
 else
-  # a fresh cache, so the transcript has its Fetching line (14.3)
+  # a fresh cache, so the transcript has its Fetching line
   rm -rf "$MBUILD_HOME"
   out=$("$MB" new site --from webfw --opt port=9000 --yes 2>&1); rc=$?
   expect_line "cli new: mbuild.mettle line" "$out" "     Created site/mbuild.mettle (package \`site\`, depends on webfw v1.0.0, sqlite v1.2.0)"
@@ -374,7 +374,7 @@ EOF
 
   cp -r "$W" pub
   rm pub/AGENT.rules
-  # a new version: an indexed one stops publish earlier (14.7 step 2)
+  # a new version: an indexed one stops publish earlier
   sed -i 's/mb_package("webfw", "v1.0.0");/mb_package("webfw", "v1.0.1");/' pub/mbuild.mettle
   cd pub || exit 1
   out=$("$MB" publish --to "$REG" --dry-run 2>&1); rc=$?

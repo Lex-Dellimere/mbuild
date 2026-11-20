@@ -8,7 +8,7 @@
 # METTLE: the dev compiler (default ../Mettle/bin/mettle). METTLE_WIN: a Windows
 # dev compiler (mettle.exe) for a third build under wine; skipped when unset.
 # MBTEST_MODES=debug: the debug build only (no release build or compare). MBTEST_PREBUILT: see mcompile.sh.
-# Outputs: ${TMPDIR:-/tmp}/mbuild-mcheck/<stem>.{debug,release,exe} and their .log.
+# outputs: ${TMPDIR:-/tmp}/mbuild-mcheck/<stem>.{debug,release,exe} and their .log.
 
 set -u
 here="$(cd "$(dirname "$0")/.." && pwd)"

@@ -2,12 +2,12 @@
 //
 //   deps_test <project-dir> <command> [args] [--offline] [--locked] [--force] [--verbose] [--quiet]
 //
-// Commands: ensure | add-missing NAME... | auto NAME... | get SPEC... | remove NAME... |
+// commands: ensure | add-missing NAME... | auto NAME... | get SPEC... | remove NAME... |
 // update [NAME... | --all] | tidy USED... | deps [--tree] | fetch | why NAME |
 // outdated [NAME] | adopt | plan [--all] [--major] [NAME...] | apply NAME VERSION... |
 // restore-after NAME VERSION... | api NAME FROM TO [--added] | breaks NAME VERSION [DIR] |
 // mettle | vendor [--remove]
-// The project's mbuild.mettle is loaded with cfg_load. `ensure` prints one
+// the project's mbuild.mettle is loaded with cfg_load. `ensure` prints one
 // line per selected package:
 //   MOD <name> <version> <checksum> registry=<r> path=<0|1> man=<0|1> replaced=<kind> dir=<dir>
 // followed by `INCLUDE <include_dir>`.
@@ -95,7 +95,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   } else if (s_eq(command, "add-missing")) {
     say("ADDED " + drv_bool(deps_add_missing(p, opts->rest)));
   } else if (s_eq(command, "auto")) {
-    // What a build does: ensure, add what the imports miss, ensure again.
+    // what a build does: ensure, add what the imports miss, ensure again.
     deps_ensure(p);
     var added: bool = deps_add_missing(p, opts->rest);
     say("ADDED " + drv_bool(added));

@@ -33,7 +33,7 @@ if out=$(METTLE="$DEV" sh "$here/tools/mcheck.sh" "$here/tests/unit/toolchain_te
 D="$W/mbuild-mcheck/toolchain_test.debug"
 DW="$W/mbuild-mcheck/toolchain_test.exe"
 
-# Distinct copies of the dev compiler for each way of naming one.
+# distinct copies of the dev compiler for each way of naming one.
 for k in onpath env flag var local; do
   mkdir -p "$W/fake-$k/bin"
   cp "$DEV" "$W/fake-$k/bin/mettle"
@@ -175,7 +175,7 @@ expect "first run creates the home" "$o" "Created $W/tchome"
 o=$("$MB" toolchain 2>&1)
 expect_not "the first-run line comes once" "$o" "Created"
 
-# A fake Mettle checkout: make copies the dev compiler and its runtime into bin/.
+# a fake Mettle checkout: make copies the dev compiler and its runtime into bin/.
 FK="$W/fake-mettle"
 mkdir -p "$FK/src"
 touch "$FK/src/main.c"

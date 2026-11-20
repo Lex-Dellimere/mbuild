@@ -6,7 +6,7 @@
 //   components_test WORK use NAME [IMPL]  cmp_cmd_use on the static project
 //   components_test WORK components       cmp_cmd_components on the static project
 //
-// Projects and dependency states are built by hand; programs are compiled
+// projects and dependency states are built by hand; programs are compiled
 // with METTLE (default `mettle` on PATH) with -I gen_dir, debug and --release.
 
 import "std/io";
@@ -46,7 +46,7 @@ fn drv_manifest(file: string, dir: string) -> Manifest* {
   return m;
 }
 
-// What evaluating mbuild.local.mettle gives: its mb_use("NAME", "IMPL") lines.
+// what evaluating mbuild.local.mettle gives: its mb_use("NAME", "IMPL") lines.
 fn drv_local(m: Manifest*, text: string) {
   var lines: StrList* = s_lines(text);
   var i: int64 = 0;
@@ -135,7 +135,7 @@ fn drv_read(path: string) -> string {
   return r.data;
 }
 
-// Compiles o's entry with -I gen_dir (release or not) and runs it with arg;
+// compiles o's entry with -I gen_dir (release or not) and runs it with arg;
 // "" for no arg. The program's output, or "COMPILE: " + the compiler's.
 fn drv_run(p: Project*, o: CmpOut*, release: bool, arg: string) -> string {
   var exe: string = o->gen_dir + "/prog";
@@ -168,7 +168,7 @@ fn drv_run(p: Project*, o: CmpOut*, release: bool, arg: string) -> string {
   return rc.out;
 }
 
-// The same output from a debug and a --release build.
+// the same output from a debug and a --release build.
 fn drv_runs(name: string, p: Project*, o: CmpOut*, arg: string, want: string) {
   if (!o->ok) {
     drv_check(name, false, "prepare: " + o->err);

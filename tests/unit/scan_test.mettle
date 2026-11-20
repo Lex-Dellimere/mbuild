@@ -38,7 +38,7 @@ fn lines_of(l: StrList*) -> string {
   return sl_join(l, "\n");
 }
 
-// In scanner sources ` stands for " and $ for an opening brace.
+// in scanner sources ` stands for " and $ for an opening brace.
 fn src_of(s: string) -> string {
   return s_replace_byte(s_replace_byte(s, 96, 34), 36, 123);
 }

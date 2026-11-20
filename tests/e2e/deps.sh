@@ -453,7 +453,7 @@ check "get @v1 takes the highest v1" has "$P/mbuild.mettle" 'mb_dep("strutil", "
 drv "$P" get strutil@v1.9.0
 check "unknown version fails" code_is 1
 check "unknown version lists the versions" has "$S/last.out" "available versions: v1.0.0, v1.1.0, v2.0.0-rc.1"
-# The compiler resolves imports through the mettle.deps mbuild writes.
+# the compiler resolves imports through the mettle.deps mbuild writes.
 printf 'import "std/io";\nimport "strutil/strutil";\nimport "vecmath/vecmath";\nfn main() -> int32 {\n  println(su_twice(vm_banner()));\n  println(su_version());\n  return 0;\n}\n' >"$P/check.mettle"
 ( cd "$P" && "$METTLE" --build check.mettle -o "$S/check" && "$S/check" ) >"$S/last.out" 2>&1
 check "the compiler resolves through mettle.deps" has "$S/last.out" "vecmath!vecmath!"

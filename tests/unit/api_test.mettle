@@ -5,7 +5,7 @@
 //                                         (each USE is "name file:line")
 //   api_test breaking OLD_DIR NEW_DIR [USE]...  the same over api_breaking
 //
-// Directories may be given in Linux form under wine.
+// directories may be given in linux form under wine.
 
 import "std/io";
 import "std/mem";

@@ -51,7 +51,7 @@ echo "== lib/tui: UTF-8, widths, the diff renderer, keys"
 sh "$here/tools/mcompile.sh" "$here/tests/unit/tui_test.mettle" -o "$T/tui_test" >"$T/tui.log" 2>&1 && "$T/tui_test" >"$T/tui.out" 2>&1
 has "tui unit test" "$T/tui.out" '^tui_test: [0-9]+ passed, 0 failed$'
 
-# The live example, ticking faster and longer.
+# the live example, ticking faster and longer.
 W="$T/live"
 mkdir -p "$W/src"
 cp "$here/examples/live/mbuild.mettle" "$W/"

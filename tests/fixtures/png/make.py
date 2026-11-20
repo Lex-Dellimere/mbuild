@@ -1,5 +1,5 @@
 # make.py: the PNG fixtures of tests/unit/png_test.mettle (python3 make.py, in this directory).
-# Pixels follow the formulas png_test.mettle checks; rows use filters 0-4 in turn.
+# pixels follow the formulas png_test.mettle checks; rows use filters 0-4 in turn.
 import struct, zlib
 
 W, H = 16, 8

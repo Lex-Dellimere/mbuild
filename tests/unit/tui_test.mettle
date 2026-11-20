@@ -31,10 +31,7 @@ fn t_int(name: string, got: int64, want: int64) {
   t_ok(name, got == want, "got " + s_int(got) + " want " + s_int(want));
 }
 
-// ---------------------------------------------------------------------------
-// An in-memory terminal: CSI H moves, CSI m and other CSIs ignored, the rest
-// is UTF-8 text written at the cursor (a wide character takes two columns).
-// ---------------------------------------------------------------------------
+// an in-memory terminal: CSI H moves, CSI m and other CSIs are ignored, the rest is UTF-8 text written at the cursor (a wide character takes two columns).
 
 struct Screen {
   w: int64;

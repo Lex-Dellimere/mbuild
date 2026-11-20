@@ -40,7 +40,7 @@ for v in v1.0.0 v1.1.0 v1.2.0 v2.0.0; do
   rm "$S/$v/manifest.toml"
 done
 
-# A package with files that are not part of its API.
+# a package with files that are not part of its API.
 P="$S/filters"
 mkdir -p "$P/sub" "$P/tests" "$P/examples" "$P/cmd/tool" "$P/.hidden" "$P/inner/tests"
 printf 'export fn f_top() -> int32 { return 1; }\n' > "$P/top.mettle"

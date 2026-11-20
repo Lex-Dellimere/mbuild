@@ -51,7 +51,7 @@ for mode in ${MBTEST_MODES:-debug release}; do
   if [ $code = 0 ]; then ok "mbfile_test ($mode): $(printf '%s\n' "$out" | tail -1)"; else bad "mbfile_test ($mode) exit $code" "$(printf '%s\n' "$out" | grep -A2 '^FAIL')"; fi
 done
 
-# Fresh copy of a project per build so the two runs cannot share caches.
+# fresh copy of a project per build so the two runs cannot share caches.
 viewer() {
   rm -rf "$1"; mkdir -p "$1/src/version.mettle"
   cp "$here/tests/unit/mbfile_viewer.txt" "$1/mbuild.mettle"

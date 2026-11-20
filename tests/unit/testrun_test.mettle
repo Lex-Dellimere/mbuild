@@ -1,6 +1,4 @@
-// testrun_test: what mbuild test reads from runs (testrun), the native
-// copy of an @test file (testnative).
-//
+// testrun_test: what mbuild test reads from runs (testrun), the native copy of an @test file (testnative).
 //   tools/mcheck.sh tests/unit/testrun_test.mettle --run
 
 import "std/io";

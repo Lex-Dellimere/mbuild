@@ -1,4 +1,4 @@
-// A tiny simulation to patch while it runs: `mbuild live`, then edit
+// a tiny simulation to patch while it runs: `mbuild live`, then edit
 // rules.mettle; or `mbuild shell` and poke it from the prompt.
 import "std/io";
 import "std/thread";

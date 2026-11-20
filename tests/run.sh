@@ -22,7 +22,7 @@ if [ "${1:-}" = --one ]; then
     n=$(grep -c '^== ' "$logs/mcheck.log")
     echo "$n entries, $(grep -c '^\[\(debug\|release\|windows\)\] \(FAILED\|[0-9]* warnings\)' "$logs/mcheck.log") failed builds" >>"$logs/mcheck.log"
   else
-    # from an empty directory, which must stay empty (a dangling view once made garbage dirs)
+    # from an empty directory, which must stay empty
     cwd="$base/cwd-$s"
     rm -rf "$cwd"
     mkdir -p "$cwd"

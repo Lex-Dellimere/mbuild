@@ -1,5 +1,5 @@
-// sys_test: path, sys, fs, proc and links against a scratch directory; it starts itself
-// as a child (`--child ...`) to test processes.  tools/mcheck.sh tests/unit/sys_test.mettle --run
+// sys_test: path, sys, fs, proc and links against a scratch directory; it starts itself as a child (`--child ...`) to test processes.
+//   tools/mcheck.sh tests/unit/sys_test.mettle --run
 
 import "std/io";
 import "std/mem";
@@ -48,7 +48,7 @@ fn check_code(name: string, got: int32, want: int32) {
   }
 }
 
-// Child modes, used when this program starts itself.
+// child modes, used when this program starts itself.
 fn child(argc: int32, argv: cstring*) -> int32 {
   var mode: string = s_from_c(argv[2]);
   if (s_eq(mode, "exit")) {
@@ -250,7 +250,7 @@ fn t_sl_free(l: StrList*) {
   free(l);
 }
 
-// The lock test's pool events: when job 1 (the sleep) ends, job 0 must still wait; then release.
+// the lock test's pool events: when job 1 (the sleep) ends, job 0 must still wait; then release.
 struct LockRun {
   lk: string;
   waited: bool;
@@ -273,7 +273,7 @@ fn proc_run_jobs_ev(cmds: Cmd**, n: int64, logs: StrList*, parallel: int64, r: L
   return sys_run_jobs(cmds, n, logs, parallel, (rawptr)r, &lock_event);
 }
 
-// Counts starts and stops the pool after the first job ends.
+// counts starts and stops the pool after the first job ends.
 struct StopRun {
   starts: int64;
 }
@@ -404,7 +404,7 @@ fn test_tools3(dir: string) {
 
 }
 
-// Windows batch files: found through PATHEXT, run through cmd.exe with
+// windows batch files: found through PATHEXT, run through cmd.exe with
 // every argument quoted for cmd.
 fn test_batch(dir: string) {
   if (!s_eq(sys_os(), "windows")) {
@@ -454,7 +454,7 @@ fn test_lock(dir: string) {
   check("fs_lock_release removes the lock", !fs_exists(lk));
   check("fs_lock_acquire after release", fs_lock_acquire(lk, 0));
 
-  // Another process waits for the lock and gets it once it is released:
+  // another process waits for the lock and gets it once it is released:
   // job 1 sleeps 0.3 s, and when it ends job 0 must still be waiting.
   var lc: Cmd* = self_cmd("lock");
   cmd_path(lc, lk);
@@ -482,7 +482,7 @@ fn test_lock(dir: string) {
 }
 
 fn test_self(dir: string) {
-  // Native processes: this program as its own child.
+  // native processes: this program as its own child.
   var se: Cmd* = self_cmd("exit");
   defer t_cmd_free(se);
   cmd_arg(se, "5");
@@ -567,7 +567,7 @@ fn views_tail() -> string {
   return "rel/file.mettle";
 }
 
-// Views into a temporary `a + b` argument stay valid: each junk string has
+// views into a temporary `a + b` argument stay valid: each junk string has
 // its view's source length, so it would reuse a freed block.
 fn test_views() {
   var d: string = p_dir("/to/vendor/x7/" + views_tail());
@@ -582,7 +582,7 @@ fn test_views() {
   free(l);
 }
 
-// Links (sys_make_link, sys_is_link, sys_remove_link) and sys_remove_tree over them.
+// links (sys_make_link, sys_is_link, sys_remove_link) and sys_remove_tree over them.
 fn test_links(dir: string) {
   check("links: mkdirs", fs_mkdirs(dir));
   var tgt: string = dir + "/target";

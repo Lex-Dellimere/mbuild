@@ -91,7 +91,7 @@ fn drv_version(p: Project*, target: string) -> int32 {
   var m: Mettle* = tc_select(p, target);
   var v: string = tc_version(m);
   say("version=" + v);
-  // A second ask on a fresh Mettle must come from the cache.
+  // a second ask on a fresh Mettle must come from the cache.
   var again: Mettle* = tc_select(p, target);
   say("version2=" + tc_version(again));
   if (slen(v) == 0) {
@@ -201,7 +201,7 @@ fn main(argc: int32, argv: cstring*) -> int32 {
     }
     i = i + 1;
   }
-  // Options after the command (`toolchain install v -t windows`).
+  // options after the command (`toolchain install v -t windows`).
   var rest: StrList* = sl_new();
   var k: int64 = 0;
   while (k < args->len) {

@@ -1,6 +1,4 @@
-// cover_test: coverage from recorded sidecars (cover, json): declared
-// functions, the annot.json join, merging profiles, the reports.
-//
+// cover_test: coverage from recorded sidecars (cover, json): declared functions, the annot.json join, merging profiles, the reports.
 //   tools/mcheck.sh tests/unit/cover_test.mettle --run
 
 import "std/io";

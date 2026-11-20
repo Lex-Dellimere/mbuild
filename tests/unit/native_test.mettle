@@ -36,7 +36,7 @@ fn drv_manifest(dir: string, fallback: string) -> Manifest* {
   return m;
 }
 
-// Subdirectories, links to directories included.
+// subdirectories, links to directories included.
 fn drv_subdirs(dir: string) -> StrList* {
   var files: StrList* = sl_new();
   var dirs: StrList* = sl_new();

@@ -1,9 +1,5 @@
 // mbfile_test: scanning and editing mbuild.mettle.
-//
-//   mettle test tests/unit/mbfile_test.mettle     (leak warnings are expected)
-//   mettle --build tests/unit/mbfile_test.mettle -o t && ./t
-//
-// Run both: `mettle test` reports a failing run as skipped (reports issue 10).
+//   tools/mcheck.sh tests/unit/mbfile_test.mettle --run   (`mettle test` too: leak warnings are expected, a failing run shows as skipped)
 
 import "std/io";
 import "../../src/core/base";
@@ -55,7 +51,7 @@ fn viewer() -> string {
   return import_str "mbfile_viewer.txt";
 }
 
-// The lines between a's and b's common head and tail: "-old|+new".
+// the lines between a's and b's common head and tail: "-old|+new".
 fn changed_lines(a: string, b: string) -> string {
   var la: StrList* = s_lines(a);
   defer free(la);

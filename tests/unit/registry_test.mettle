@@ -19,7 +19,7 @@
 //   registry_test publish DIR NAME V ROOT MANIFEST [--dry-run]
 //                                               reg_publish of every file under ROOT
 //   registry_test yank DIR NAME V [--undo]      reg_yank
-// Flags anywhere: -v (verbose), --offline. Errors print "ERR", the kind and
+// flags anywhere: -v (verbose), --offline. errors print "ERR", the kind and
 // the message, exit 1.
 
 import "std/io";
@@ -96,7 +96,7 @@ fn drv_print_index(ix: RegIndex*) {
   }
 }
 
-// The index of NAME in REG, or 0 after printing the error.
+// the index of NAME in REG, or 0 after printing the error.
 fn drv_index(p: Project*, reg: string, name: string) -> RegIndex* {
   var ix: RegIndex* = reg_index(p, reg, name, false);
   if (!ix->ok || !ix->found) {
