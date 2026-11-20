@@ -39,6 +39,7 @@ import "testrun";
 import "testnative";
 import "golden";
 import "doc";
+import "cover";
 import "testrun_linux" if linux;
 import "testrun_windows" if windows;
 import "../core/sys_linux" if linux;
@@ -47,6 +48,8 @@ import "../core/sys_windows" if windows;
 export var build_version_text: string = "0.2.0";
 
 var g_bx_warned: bool = false;
+// mbuild test --coverage: builds count blocks into .mbuild/coverage/
+var g_bx_cov: bool = false;
 
 // One program to build.
 export struct BinInfo {
@@ -2128,6 +2131,10 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   var c: Cmd* = tc_cmd(m);
   j->c = c;
   var st: Settings* = bx_add_flags(c, s, u);
+  if (g_bx_cov && u->ti >= 0 && !bx_is_image(u) && !target_is_riscv(u->target)) {
+    cmd_arg(c, "--profile-blocks");
+    cmd_arg(c, "--annotate-asm");
+  }
   if (bx_is_image(u)) {
     var base: string = t->out_dir + "/" + b->name;
     j->outp = base + "." + bx_image_main(st);
@@ -2171,10 +2178,7 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
     xh = xh + 1;
   }
   j->fp = h_hex(&h);
-  var tag: string = "";
-  if (s->tests) {
-    tag = "test-bin-";
-  }
+  var tag: string = bx_stamp_tag(s->tests);
   j->stamp = p->state_dir + "/stamps/" + tag + t->target + "-" + t->profile + "-" + b->name + ".stamp";
 
   j->ok = false;
@@ -2220,7 +2224,11 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
   var p: Project* = s->p;
   var b: BinInfo* = j->b;
   var t: TargetCtx* = j->t;
-  bx_print_block(bx_compiler_output(output));
+  if (g_bx_cov && code == 0 && !g_verbose) {
+    bx_print_block(bx_compiler_output(cov_compile_output(output)));
+  } else {
+    bx_print_block(bx_compiler_output(output));
+  }
   if (!s_eq(b->kind, "object") && j->u->ti >= 0) {
     bx_remove_intermediates(j->outp);
   }
@@ -2349,11 +2357,38 @@ fn bx_run_jobs(s: BxSess*, jobs: BxJob**, n: int64) -> int32 {
   return r.rc;
 }
 
+// Where bins and test programs are built (coverage builds apart).
+fn bx_bins_dir(p: Project*, target: string, profile: string) -> string {
+  if (g_bx_cov) {
+    return p->state_dir + "/coverage/" + target + "/" + profile + "/bin";
+  }
+  return p->root + "/build/" + target + "/" + profile;
+}
+
+fn bx_progs_dir(p: Project*, target: string, profile: string) -> string {
+  if (g_bx_cov) {
+    return p->state_dir + "/coverage/" + target + "/" + profile + "/test";
+  }
+  return p->state_dir + "/test-bins/" + target + "/" + profile;
+}
+
+// The stamp name prefix of a session's builds.
+fn bx_stamp_tag(tests: bool) -> string {
+  var tag: string = "";
+  if (g_bx_cov) {
+    tag = "cov-";
+  }
+  if (tests) {
+    tag = tag + "test-bin-";
+  }
+  return tag;
+}
+
 fn bx_tctx_new(s: BxSess*, target: string, m: Mettle*) -> TargetCtx* {
   var t: TargetCtx* = targetctx_new(s->p, target, s->profile);
-  t->out_dir = s->app->root + "/build/" + target + "/" + s->app_profile;
+  t->out_dir = bx_bins_dir(s->app, target, s->app_profile);
   if (s->tests) {
-    t->out_dir = s->app->state_dir + "/test-bins/" + target + "/" + s->app_profile;
+    t->out_dir = bx_progs_dir(s->app, target, s->app_profile);
   }
   // A dependency's bins share the app's native cache: its C builds once.
   t->cache_dir = s->app->state_dir + "/cache/" + target;
@@ -3609,6 +3644,9 @@ struct BtPlan {
   native_from: int64; // runs from here on are native @test runs
   bless: bool;        // --bless: write the golden files instead of comparing
   only: string;       // --only S
+  cov: Cov*;          // --coverage, else 0
+  cov_fmt: string;    // "", text or html
+  cov_out: string;    // where the annotated report goes
 }
 
 // Names a cached test program's pass stamp includes: "name\tkey" (0 = no cache).
@@ -4041,8 +4079,8 @@ fn bt_spec(pl: BtPlan*, spec: string) {
   } else if (bin_names->len > 0) {
     why_run = bt_cannot_run(p, target, sl_get(bin_names, 0));
   }
-  var progs_dir: string = p->state_dir + "/test-bins/" + target + "/" + first->profile;
-  var bins_dir: string = p->root + "/build/" + target + "/" + first->profile;
+  var progs_dir: string = bx_progs_dir(p, target, first->profile);
+  var bins_dir: string = bx_bins_dir(p, target, first->profile);
   var built: StrList* = sl_new();
   defer free(built);
   var s: BxSess* = bx_sess(p, sl_of(target));
@@ -4209,7 +4247,7 @@ fn bt_prog_cell(pl: BtPlan*, s: BxSess*, us: BxUnits*, c: BtCell*, t: BtTest*) {
   }
   c->stamp = j->pass;
   c->fp = j->fp;
-  c->cached = j->state == 3;
+  c->cached = j->state == 3 && !pl->nocache;
   if (s_eq(bt_get(p, t->name, "run"), "false")) {
     return;
   }
@@ -4286,6 +4324,7 @@ fn bt_runs(pl: BtPlan*) {
       r->serial = serial;
       r->console = c->console;
       trn_prepare(r, p->root, t->name, c->spec, cwd_tmp, env);
+      bt_cov_env(r);
       if (k == 1) {
         verbose(cmd_display(cmd));
       }
@@ -4349,9 +4388,9 @@ fn bt_fixtures(p: Project*, c: BtCell*, r: TrnRun*, svs: StrList*, vars: StrList
     sv->prog = sl_get(words, 0);
     var t: Tool = tool_none();
     if (sl_has(progs, sv->prog)) {
-      t.path = p->state_dir + "/test-bins/" + c->target + "/" + c->profile + "/" + sv->prog + ext;
+      t.path = bx_progs_dir(p, c->target, c->profile) + "/" + sv->prog + ext;
     } else if (sl_has(bins, sv->prog) || bt_is_dep_bin(m, sv->prog)) {
-      t.path = p->root + "/build/" + c->target + "/" + c->profile + "/" + sv->prog + ext;
+      t.path = bx_bins_dir(p, c->target, c->profile) + "/" + sv->prog + ext;
     } else if (s_find_byte(sv->prog, 47) >= 0 || s_find_byte(sv->prog, 92) >= 0) {
       t.path = p_join(p->root, sv->prog);
     } else {
@@ -4365,6 +4404,9 @@ fn bt_fixtures(p: Project*, c: BtCell*, r: TrnRun*, svs: StrList*, vars: StrList
         k = k + 1;
       }
       sc->cwd = r->dir + "/tmp";
+      if (g_bx_cov) {
+        sl_push(sc->env, "METTLE_PROFILE_OUT=" + r->dir + "/cov-svc-" + spec->name + ".mprof");
+      }
       sl_extend(sc->env, spec->env);
       sl_extend(sc->env, vars);
       sv->cmd = sc;
@@ -4555,6 +4597,9 @@ fn bt_ended(arg: rawptr, i: int64) -> bool {
   var c: BtCell* = pl->cells[r->cell];
   var t: BtTest* = pl->tests[r->test];
   var checks: int64 = 0;
+  if (pl->cov != (Cov*)0) {
+    bt_cov_run(pl, r);
+  }
   var why: string = bt_judge(pl, r, &checks);
   c->ms = c->ms + r->ms;
   if (pl->native_from > 0 && pl->run_base + i >= pl->native_from) {
@@ -4851,6 +4896,9 @@ fn bt_native_spec(pl: BtPlan*, spec: string) {
     var main: string = rel + "/" + p_base(name) + ".mettle";
     fs_mkdirs(p->root + "/" + rel);
     fs_write_if_changed(p->root + "/" + main, tnv_source(rd.data, tests));
+    if (pl->cov != (Cov*)0) {
+      cov_alias(pl->cov, p->root + "/" + main, t->name);
+    }
     free(tests);
     bx_binset_push(bs, name, main);
     var b: BinInfo* = &bs->items[bs->n - 1];
@@ -4882,7 +4930,7 @@ fn bt_native_spec(pl: BtPlan*, spec: string) {
   // the copy's graph misses its relative imports: always rebuilt
   i = 0;
   while (i < bs->n) {
-    sys_remove_file(p->state_dir + "/stamps/test-bin-" + first->target + "-" + first->profile + "-" + bs->items[i].name + ".stamp");
+    sys_remove_file(p->state_dir + "/stamps/" + bx_stamp_tag(true) + first->target + "-" + first->profile + "-" + bs->items[i].name + ".stamp");
     i = i + 1;
   }
   var built: StrList* = sl_new();
@@ -4922,6 +4970,7 @@ fn bt_native_spec(pl: BtPlan*, spec: string) {
       r->timeout_ms = bt_timeout_ms(p, t2->name, false);
       r->serial = s_eq(bt_get(p, t2->name, "serial"), "true");
       trn_prepare(r, p->root, t2->name, c2->spec, cwd_tmp, env);
+      bt_cov_env(r);
       if (k == 1) {
         verbose(cmd_display(rc));
       }
@@ -5056,6 +5105,117 @@ fn bt_bless(pl: BtPlan*) {
   }
 }
 
+// --coverage: each run writes its own profile into its directory.
+fn bt_cov_env(r: TrnRun*) {
+  if (g_bx_cov) {
+    sl_push(r->cmd->env, "METTLE_PROFILE_OUT=" + r->dir + "/cov.mprof");
+  }
+}
+
+// One program's profile, joined with its build's annot.json when bin is
+// one of ours.
+fn bt_cov_merge(c: Cov*, prof: string, bin: string, what: string) {
+  var stem: string = bin;
+  if (s_ends(stem, ".exe")) {
+    stem = s_sub(stem, 0, slen(stem) - 4);
+  }
+  var annot: string = stem + ".annot.json";
+  var m: CovMap* = cov_annot(c, annot);
+  var rd: FsRead = fs_read(prof);
+  if (rd.ok) {
+    cov_profile(c, rd.data, m);
+  } else if (m != (CovMap*)0) {
+    cov_silent(c, what);
+  }
+}
+
+// A run that ended: its profiles (the test's, its services'), merged.
+fn bt_cov_run(pl: BtPlan*, r: TrnRun*) {
+  var c: Cov* = pl->cov;
+  r->err = cov_strip_report(r->err);
+  var what: string = pl->tests[r->test]->name;
+  if (r->native) {
+    what = what + " (native)";
+  }
+  var prof: string = r->dir + "/cov.mprof";
+  bt_cov_merge(c, prof, r->cmd->tool.path, what);
+  var q: int64 = 0;
+  while (q < r->nsvcs) {
+    var sv: TrnSvc* = &r->svcs[q];
+    q = q + 1;
+    if (sv->cmd != (Cmd*)0) {
+      var svp: string = r->dir + "/cov-svc-" + sv->name + ".mprof";
+      var svw: string = what + " service " + sv->name;
+      bt_cov_merge(c, svp, sv->cmd->tool.path, svw);
+    }
+  }
+}
+
+// The project's own files, for --coverage: no tests, examples, cmd/ or
+// dependencies.
+fn bt_cov_files(p: Project*, c: Cov*) {
+  var all: StrList* = bx_owned_files(p);
+  defer free(all);
+  var i: int64 = 0;
+  while (i < all->len) {
+    var rel: string = sl_get(all, i);
+    i = i + 1;
+    if (!bx_doc_api_file(rel)) {
+      continue;
+    }
+    var rd: FsRead = fs_read(p->root + "/" + rel);
+    if (rd.ok) {
+      cov_file(c, rel, rd.data);
+    }
+  }
+}
+
+// The coverage table and the annotated report; why coverage-min fails (""
+// when it holds).
+fn bt_cov_report(pl: BtPlan*) -> string {
+  var p: Project* = pl->p;
+  var c: Cov* = pl->cov;
+  cov_finish(c);
+  say("");
+  say("coverage (" + s_int(c->profiles) + " profiles merged):");
+  print(cov_report(c));
+  var i: int64 = 0;
+  while (i < c->silent->len) {
+    note("no coverage from " + sl_get(c->silent, i) + ": it wrote no profile (a program ending through exit(), a signal or a timeout writes none)");
+    i = i + 1;
+  }
+  if (slen(pl->cov_out) > 0) {
+    var out: string = pl->cov_out;
+    sys_remove_tree(out);
+    fs_mkdirs(out);
+    var html: bool = s_eq(pl->cov_fmt, "html");
+    var k: int64 = 0;
+    while (k < c->n) {
+      var rel: string = c->files[k]->rel;
+      var dst: string = out + "/" + rel + ".txt";
+      if (html) {
+        dst = out + "/" + rel + ".html";
+      }
+      fs_mkdirs(p_dir(dst));
+      if (html) {
+        fs_write(dst, cov_html(c, k, cov_up(rel)));
+      } else {
+        fs_write(dst, cov_text(c, k));
+      }
+      k = k + 1;
+    }
+    var index: string = out + "/index.txt";
+    if (html) {
+      index = out + "/index.html";
+      fs_write(index, cov_html_index(c));
+    } else {
+      fs_write(index, cov_report(c));
+    }
+    status("Wrote", bx_show(index));
+  }
+  return cov_below(c, man_test_get(p->man, "*", "coverage-min"));
+}
+
 // mbuild test [NAME | FILE]...: every test in every cell of its matrix,
 // repeated, in parallel; a line per test, the failures, one result.
 export fn build_cmd_test(p: Project*) -> int32 {
@@ -5072,6 +5232,21 @@ export fn build_cmd_test(p: Project*) -> int32 {
     fail("--only goes with --bless: mbuild test NAME --bless --only S");
   }
   pl->filter = p->opts->filter;
+  pl->cov_fmt = bt_rest_value(p, "--coverage");
+  pl->cov_out = bt_rest_value(p, "--coverage-out");
+  if (sl_has(p->opts->rest, "--coverage") || slen(pl->cov_fmt) > 0 || slen(pl->cov_out) > 0) {
+    if (slen(pl->cov_fmt) > 0 && !s_eq(pl->cov_fmt, "text") && !s_eq(pl->cov_fmt, "html")) {
+      fail("--coverage takes text or html, not `" + pl->cov_fmt + "`");
+    }
+    if (slen(pl->cov_out) == 0 && slen(pl->cov_fmt) > 0) {
+      pl->cov_out = "build/coverage";
+    }
+    if (slen(pl->cov_out) > 0) {
+      pl->cov_out = p_clean(p_join(bx_cwd(), pl->cov_out));
+    }
+    g_bx_cov = true;
+    pl->cov = cov_new(p->root);
+  }
   var mx: string = bt_rest_value(p, "--matrix");
   if (slen(mx) > 0) {
     var why: string = man_test_check("*", "matrix", mx);
@@ -5090,13 +5265,19 @@ export fn build_cmd_test(p: Project*) -> int32 {
   }
   var dflt: StrList* = bx_mx_entries(p);
   defer free(dflt);
-  pl->nocache = p->opts->force || pl->bless;
+  pl->nocache = p->opts->force || pl->bless || g_bx_cov;
+  if (g_bx_cov) {
+    bt_cov_files(p, pl->cov);
+  }
   g_bt_keys = sl_new();
   var i: int64 = 0;
   while (i < pl->nt) {
     var t: BtTest* = pl->tests[i];
     t->repeat = s_to_int(bt_get(p, t->name, "repeat"));
     t->native = bt_get(p, t->name, "native");
+    if (g_bx_cov) {
+      t->native = "always";
+    }
     t->hold = t->kind == BT_FILE && !s_eq(t->native, "never");
     t->golden = bt_get(p, t->name, "golden");
     t->gshown = bt_golden_dir(p, t->name);
@@ -5114,7 +5295,7 @@ export fn build_cmd_test(p: Project*) -> int32 {
     if (t->keep_first) {
       t->hold = true;
     }
-    if (t->kind == BT_PROG && !p->opts->force && !pl->bless && t->repeat == 1) {
+    if (t->kind == BT_PROG && !pl->nocache && t->repeat == 1) {
       sl_push(g_bt_keys, t->name + "\t" + bt_settings_key(p, t->name));
     }
     i = i + 1;
@@ -5157,6 +5338,10 @@ export fn build_cmd_test(p: Project*) -> int32 {
   }
   bt_stamp(pl);
   bt_failures(pl);
+  var cov_why: string = s_empty();
+  if (pl->cov != (Cov*)0) {
+    cov_why = bt_cov_report(pl);
+  }
   var passed: int64 = 0;
   var cached: int64 = 0;
   var skipped: int64 = 0;
@@ -5230,11 +5415,17 @@ export fn build_cmd_test(p: Project*) -> int32 {
   if (checks > 0) {
     line = line + ", " + bt_checks_text(checks);
   }
+  if (slen(cov_why) > 0) {
+    line = line + ", coverage under coverage-min";
+  }
   line = line + " (" + trn_secs(sys_now_ms() - t0) + ")";
   if (bt_no_names(p)) {
     bt_clean_stale(p);
   }
-  if (failed > 0) {
+  if (slen(cov_why) > 0) {
+    error_msg(cov_why);
+  }
+  if (failed > 0 || slen(cov_why) > 0) {
     say("");
     say("test result: " + red("FAILED") + ". " + line);
     return 1;
@@ -7055,7 +7246,7 @@ fn bx_init_cmds() {
   bx_note("inputs: an expression prints its value, a statement runs, `fn NAME(...) {{...}` redefines NAME; `edit NAME`, `undo [NAME]`, `r`, `pause`, `resume`, `step`, `pause when EXPR`, `watch EXPR`, `status`, `h NAME`, `i EXPR`, `:log`, `:q`. type `help` at the prompt.");
   bx_note("it writes the same events as mbuild live (paused and resumed too) for mbuild/live.");
   bx_note("a pause holds the thread calling shell_point(), between ticks; inputs and patches still run. other threads keep running. globals and functions are in scope, locals are not. Linux only.");
-  bx_def("test", "run the tests: @test files, test programs, command tests", "mbuild test [NAMES | FILES...] [--matrix=CELLS] [--repeat N] [--bless [--only S]]", "project.md");
+  bx_def("test", "run the tests: @test files, test programs, command tests", "mbuild test [NAMES | FILES...] [--matrix=CELLS] [--repeat N] [--bless [--only S]] [--coverage[=html]]", "project.md");
   bx_ex("mbuild test", "every test in every cell of its matrix (default: debug on the host)");
   bx_ex("mbuild test parse --repeat 50", "one test 50 times; it passes when every run does");
   bx_ex("mbuild test --matrix=debug,release", "every test built and run both ways");
@@ -7074,10 +7265,13 @@ fn bx_init_cmds() {
   bx_fl("--force", "run cached tests too");
   bx_fl("--bless", "write each passing test's outputs (out/, stdout with golden = files,stdout) as its golden files");
   bx_fl("--only S", "with --bless: only golden paths containing S");
+  bx_fl("--coverage[=text|html]", "build counting blocks, run, report functions and lines (approximate) per file and the uncovered functions; =text or =html also writes an annotated copy of each file");
+  bx_fl("--coverage-out DIR", "where the annotated report goes (default build/coverage)");
   bx_note("a test is an @test file (run in the compiler's interpreter), a test program (mb_test_bin, tests/NAME_test.mettle with fn main, mb_test_glob) or a command test (mb_test_cmd); it passes on exit 0. mb_test_set(name, key, value) sets matrix, timeout, repeat, serial, cwd, warnings, checks, args, run and more (docs/project.md).");
   bx_note("each run gets its own directory: TMPDIR (MBUILD_TEST_TMP), MBUILD_TEST_OUT, stdout and stderr; it runs in a process group of its own, which a timeout stops whole.");
   bx_note("golden files: what a run writes to $MBUILD_TEST_OUT must match tests/golden/NAME (the golden-dir setting) byte for byte, PNG files pixel for pixel within png-tolerance; with several cells, each cell's outputs must match the first's (golden-cross).");
   bx_note("a passing (test, cell) is cached until its build or settings change; --repeat above 1 never is.");
+  bx_note("--coverage: @test files run natively, nothing is cached, and each run writes its own profile, so repeats, parallel runs and services merge. It covers the project's own files (no tests/, examples/, cmd/ or dependencies). A program that ends through exit() writes no profile; mb_test_set(\"*\", \"coverage-min\", \"80\") fails the run under 80% of functions.");
   bx_note("a pico2 test program can't exit: it passes when its console prints exit-on-uart (default PASS; call pico2_init() first), within rvsim-until-ms (default 10000).");
   bx_def("flash", "copy a board image to the board", "mbuild flash [BIN] [-t T] [-r | -p PROFILE]", "platforms.md");
   bx_ex("mbuild flash", "build the UF2 and copy it to the Pico 2's drive");

@@ -68,7 +68,7 @@ while read -r e m; do : >"$MBTEST_PREBUILT/$(printf %s "${e%.mettle}" | sed 's|/
   echo $(($(date +%s) - start)) >"$base/prebuild.secs" ) &
 prepid=$!
 
-suites="${*:-build config registry mreg deps api components init native toolchain platform services shell live riscv test_runner doc}"
+suites="${*:-build config registry mreg deps api components init native toolchain platform services shell live riscv test_runner doc coverage}"
 # the slow ones first, so the pool ends together
 slow="build live registry services mreg shell components config test_runner"
 first=""

@@ -1,0 +1,141 @@
+// cover_test: coverage from recorded sidecars (cover, json): declared
+// functions, the annot.json join, merging profiles, the reports.
+//
+//   tools/mcheck.sh tests/unit/cover_test.mettle --run
+
+import "std/io";
+import "../../src/core/base";
+import "../../src/core/json";
+import "../../src/build/cover";
+
+var g_pass: int64 = 0;
+var g_fail: int64 = 0;
+
+fn t_eq(name: string, got: string, want: string) {
+  if (s_eq(got, want)) {
+    g_pass = g_pass + 1;
+    say("PASS " + name);
+  } else {
+    g_fail = g_fail + 1;
+    say("FAIL " + name);
+    say("     got:  [" + got + "]");
+    say("     want: [" + want + "]");
+  }
+}
+
+fn test_json() {
+  var cur: JsCur = js_new("{{\"a\": [1, -2, 3.5e2], \"s\": \"x\\\"y\", \"o\": {{\"k\": [{{}, null]}, \"n\": 7}");
+  var started: bool = false;
+  var key: string = s_empty();
+  var got: StrList* = sl_new();
+  defer free(got);
+  while (js_key(&cur, &started, &key)) {
+    if (s_eq(key, "a")) {
+      var ist: bool = false;
+      while (js_item(&cur, &ist)) {
+        sl_push(got, s_int(js_int(&cur)));
+      }
+    } else if (s_eq(key, "n")) {
+      sl_push(got, "n=" + s_int(js_int(&cur)));
+    } else if (s_eq(key, "s")) {
+      sl_push(got, js_str(&cur));
+    } else {
+      js_skip(&cur);
+    }
+  }
+  t_eq("json: values read, the rest skipped", sl_join(got, ","), "1,-2,3,x\\\"y,n=7");
+  t_eq("json: well formed", s_int((int64)cur.bad), "0");
+  var bad: JsCur = js_new("{{\"a\" 1}");
+  var st2: bool = false;
+  while (js_key(&bad, &st2, &key)) {
+    js_skip(&bad);
+  }
+  t_eq("json: a missing colon is bad", s_int((int64)bad.bad), "1");
+}
+
+// src/lib.mettle as the compiler saw it; /p is the project root.
+var g_lib: string = "fn used(x: int64) -> int64 {{\n  if (x > 100) {{\n    return 0 - 1;\n  }\n  return x + 1;\n}\n\nexport fn unused(x: int64) -> int64 {{\n  return x * 2;\n}\n\n@test fn t() -> int32 {{\n  return 0;\n}\n\n@naked\nfn nk() {{\n}\n\nfn never_built(a: int64) -> int64 {{\n  // a comment\n  return a;\n}\n";
+
+// annot.json of the test program: used (blocks 3, 4) and unused (block 5)
+// were compiled; std/io's print is not a covered file.
+var g_annot: string = "{{\"version\":1,\"source\":\"t.mettle\",\"functions\":[{{\"name\":\"print\",\"file\":\"/m/std/io.mettle\",\"line\":5,\"insns\":[{{\"line\":6,\"block\":0}]},{{\"name\":\"used\",\"file\":\"/p/src/lib.mettle\",\"line\":1,\"byte_size\":9,\"insns\":[{{\"idx\":-1,\"line\":0,\"block\":-1},{{\"line\":2,\"block\":3,\"note\":null},{{\"line\":3,\"block\":3},{{\"line\":5,\"block\":4}]},{{\"name\":\"unused\",\"file\":\"src/lib.mettle\",\"line\":8,\"insns\":[{{\"line\":9,\"block\":5}]}]}";
+
+fn test_merge() {
+  var c: Cov* = cov_new("/p/");
+  cov_file(c, "src/lib.mettle", g_lib);
+  t_eq("index: absolute", s_int(cov_index(c, "/p/src/../src/lib.mettle")), "0");
+  t_eq("index: relative to the root", s_int(cov_index(c, "src/lib.mettle")), "0");
+  t_eq("index: outside", s_int(cov_index(c, "/m/std/io.mettle")), "-1");
+  cov_alias(c, "/p/.mbuild/test-native/lib__mbt.mettle", "src/lib.mettle");
+  t_eq("index: a native copy", s_int(cov_index(c, ".mbuild/test-native/lib__mbt.mettle")), "0");
+  var miss0: StrList* = cov_missed(c);
+  t_eq("declared: no @test, no @naked", sl_join(miss0, ","), "src/lib.mettle:1 used,src/lib.mettle:8 unused,src/lib.mettle:20 never_built");
+  free(miss0);
+  var m: CovMap* = cov_annot(c, "/nonexistent/x.annot.json");
+  t_eq("annot: none", s_int((int64)(m == (CovMap*)0)), "1");
+  // a run: used called with x <= 100 (blocks 3 and 4 ran)
+  cov_profile(c, "{{\"version\":1,\"functions\":[{{\"id\":0,\"name\":\"print\",\"file\":\"/m/std/io.mettle\",\"line\":5,\"calls\":1},{{\"id\":13,\"name\":\"used\",\"file\":\"/p/src/lib.mettle\",\"line\":1,\"calls\":2,\"total_ns\":60}],\"edges\":[],\"ops\":[],\"blocks\":[1,0,0,2,2,0]}", (CovMap*)0);
+  var fh: int64 = 0;
+  var ft: int64 = 0;
+  var lh: int64 = 0;
+  var lt: int64 = 0;
+  cov_counts(c, -1, &fh, &ft, &lh, &lt);
+  t_eq("profile without annot: functions only", s_int(fh) + "/" + s_int(ft) + " " + s_int(lh) + "/" + s_int(lt), "1/3 0/0");
+  var path: string = "/p/.mbuild/a.annot.json";
+  m = cov_annot_text(c, path, g_annot);
+  t_eq("annot: covered instructions", s_int(m->n), "4");
+  cov_profile(c, "{{\"functions\":[{{\"name\":\"used\",\"file\":\"/p/src/lib.mettle\",\"line\":1,\"calls\":1}],\"blocks\":[1,0,0,2,2,0]}", m);
+  cov_finish(c);
+  cov_counts(c, -1, &fh, &ft, &lh, &lt);
+  t_eq("lines: used's ran, unused's and never_built's did not", s_int(fh) + "/" + s_int(ft) + " " + s_int(lh) + "/" + s_int(lt), "1/3 3/6");
+  t_eq("below: 33.3% under 80", cov_below(c, "80"), "33.3% of functions covered, under coverage-min 80%");
+  t_eq("below: 30 holds", cov_below(c, "30"), "");
+  // a second program calls unused: merged
+  cov_profile(c, "{{\"functions\":[{{\"name\":\"unused\",\"file\":\"src/lib.mettle\",\"line\":8,\"calls\":1}],\"blocks\":[0,0,0,0,0,1]}", m);
+  cov_counts(c, -1, &fh, &ft, &lh, &lt);
+  t_eq("merge: a second profile adds", s_int(fh) + "/" + s_int(ft) + " " + s_int(lh) + "/" + s_int(lt), "2/3 4/6");
+  t_eq("pct", cov_pct(2, 3) + " " + cov_pct(0, 0) + " " + cov_pct(3, 3), "66.6% - 100.0%");
+  var rep: string = cov_report(c);
+  var rl: StrList* = s_lines(rep);
+  t_eq("report: header", sl_get(rl, 0), "file            functions          lines (approximate)");
+  t_eq("report: file row", sl_get(rl, 1), "src/lib.mettle  2/3        66.6%   4/6        66.6%");
+  t_eq("report: uncovered", sl_get(rl, 4), "  src/lib.mettle:20 never_built");
+  free(rl);
+  var txt: StrList* = s_lines(cov_text(c, 0));
+  t_eq("text: header", sl_get(txt, 0), "src/lib.mettle: functions 2/3, lines 4/6");
+  t_eq("text: function line", sl_get(txt, 2), "    1 F+ | fn used(x: int64) -> int64 {{");
+  t_eq("text: ran", sl_get(txt, 6), "    5 +  |   return x + 1;");
+  t_eq("text: never built", sl_get(txt, 23), "   22 -  |   return a;");
+  t_eq("text: never called", sl_get(txt, 21), "   20 F- | fn never_built(a: int64) -> int64 {{");
+  free(txt);
+  var html: string = cov_html(c, 0, cov_up("src/lib.mettle"));
+  t_eq("html: up link", s_int((int64)s_contains(html, "<a href=\"../index.html\">")), "1");
+  t_eq("html: escaped, marked", s_int((int64)s_contains(html, "<span class=\"m f\">   20 F- fn never_built(a: int64) -&gt; int64 {{</span>")), "1");
+  t_eq("html: a line that ran", s_int((int64)s_contains(html, "<span class=\"h\">    9 +    return x * 2;</span>")), "1");
+  t_eq("html: index links", s_int((int64)s_contains(cov_html_index(c), "<a href=\"src/lib.mettle.html\">src/lib.mettle</a>")), "1");
+}
+
+fn test_output() {
+  var out: string = "--annotate-asm: wrote a.annot.json (3 functions)\n\n-- optimization report: a.mettle ----\n  main: kept\n\n-- src/a.mettle:5:7 -----\nwarning[W0001]: unused variable 'a'\n  help: x\n; Mettle codegen annotation\n==== main (a.mettle:3) ====\n  0000 55 prologue\n-- beliefs: a.mettle ---\n  extern\n";
+  t_eq("compile output: the diagnostics alone", cov_compile_output(out), "-- src/a.mettle:5:7 -----\nwarning[W0001]: unused variable 'a'\n  help: x\n");
+  t_eq("strip: the exit report", cov_strip_report("oops\n\nRuntime profile:\nfunction ...\n"), "oops\n");
+  t_eq("strip: nothing else", cov_strip_report("a\nb\n"), "a\nb\n");
+  t_eq("strip: report alone", cov_strip_report("\nRuntime profile:\nx\n"), "");
+}
+
+fn run_all() -> int64 {
+  test_json();
+  test_merge();
+  test_output();
+  say("");
+  say("cover_test: " + s_int(g_pass) + " passed, " + s_int(g_fail) + " failed");
+  flush_out();
+  return g_fail;
+}
+
+fn main() -> int32 {
+  if (run_all() > 0) {
+    return 1;
+  }
+  return 0;
+}

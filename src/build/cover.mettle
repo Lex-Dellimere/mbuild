@@ -1,0 +1,752 @@
+// cover: mbuild test --coverage (16.3). The declared functions are the
+// top-level fns of the project's own files (no tests, examples, cmd/ or
+// dependencies; @test and @naked left out). A test build counts blocks
+// (--profile-blocks) and writes <bin>.annot.json (--annotate-asm, -O): each
+// instruction's line and block. A function is hit when any run's .mprof
+// lists it with calls; a line is code when an instruction maps to it and hit
+// when any of its blocks ran (approximate: -O merges code).
+
+import "std/mem";
+import "../core/base";
+import "../core/path";
+import "../core/fs";
+import "../core/json";
+import "scan";
+
+export struct CovFn {
+  name: string;
+  line: int64;
+  last: int64;      // its closing line
+  hit: bool;
+  seen: bool;       // an instrumented build compiled it
+}
+
+export struct CovFile {
+  rel: string;
+  lines: StrList*;
+  fns: CovFn*;
+  nfns: int64;
+  marks: uint8*;    // per line (1-based): 0 no code, 1 code, 2 code that ran, 3 left out (@test, @naked)
+}
+
+// One build's instructions in the covered files: (file, line, block).
+export struct CovMap {
+  fi: int64*;
+  line: int64*;
+  block: int64*;
+  n: int64;
+  cap: int64;
+}
+
+export struct Cov {
+  root: string;
+  files: CovFile**;
+  n: int64;
+  alias_from: StrList*;   // a native @test copy, absolute
+  alias_to: StrList*;     // the file it was copied from, relative
+  map_keys: StrList*;     // annot.json paths read so far
+  maps: CovMap**;
+  lines: bool;            // some build had an annot.json
+  profiles: int64;        // .mprof files merged
+  silent: StrList*;       // "test (run K)" that wrote no profile
+}
+
+export fn cov_new(root: string) -> Cov* {
+  var c: Cov* = new Cov;
+  memset((rawptr)c, 0, (int64)sizeof(Cov));
+  c->root = p_clean(root);
+  c->alias_from = sl_new();
+  c->alias_to = sl_new();
+  c->map_keys = sl_new();
+  c->silent = sl_new();
+  return c;
+}
+
+// Whether the declaration starting at pos carries @test or @naked: on its
+// line before it, or on decorator lines right above.
+fn cov_skipped_decl(text: string, pos: int64) -> bool {
+  var start: int64 = pos;
+  while (start > 0 && s_byte(text, start - 1) != 10) {
+    start = start - 1;
+  }
+  var head: string = s_sub(text, start, pos);
+  if (s_contains(head, "@test") || s_contains(head, "@naked")) {
+    return true;
+  }
+  while (start > 0) {
+    var end: int64 = start - 1;
+    var b: int64 = end;
+    while (b > 0 && s_byte(text, b - 1) != 10) {
+      b = b - 1;
+    }
+    var prev: string = s_trim(s_sub(text, b, end));
+    if (!s_starts(prev, "@")) {
+      return false;
+    }
+    if (s_contains(prev, "@test") || s_contains(prev, "@naked")) {
+      return true;
+    }
+    start = b;
+  }
+  return false;
+}
+
+fn cov_line_at(text: string, pos: int64) -> int64 {
+  var n: int64 = 1;
+  var i: int64 = 0;
+  var end: int64 = pos;
+  if (end > slen(text)) {
+    end = slen(text);
+  }
+  while (i < end) {
+    if (s_byte(text, i) == 10) {
+      n = n + 1;
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+// Adds a covered file: rel from the root, text its source.
+export fn cov_file(c: Cov*, rel: string, text: string) {
+  var f: CovFile* = new CovFile;
+  f->rel = s_dup(rel);
+  f->lines = s_lines(text);
+  f->nfns = 0;
+  var d: ExportList* = scan_decls(text);
+  defer free(d);
+  f->fns = (CovFn*)malloc((d->n + 1) * sizeof(CovFn));
+  f->marks = (uint8*)malloc(f->lines->len + 2);
+  memset((rawptr)f->marks, 0, f->lines->len + 2);
+  var i: int64 = 0;
+  while (i < d->n) {
+    var it: ExportItem* = scan_export(d, i);
+    i = i + 1;
+    if (!s_eq(it->kind, "fn") || it->epos <= it->spos) {
+      continue;
+    }
+    if (cov_skipped_decl(text, it->spos)) {
+      var l: int64 = it->line;
+      var last: int64 = cov_line_at(text, it->epos - 1);
+      while (l <= last && l <= f->lines->len) {
+        f->marks[l] = (uint8)3;
+        l = l + 1;
+      }
+      continue;
+    }
+    var cf: CovFn* = &f->fns[f->nfns];
+    f->nfns = f->nfns + 1;
+    cf->name = it->name;
+    cf->line = it->line;
+    cf->last = cov_line_at(text, it->epos - 1);
+    cf->hit = false;
+    cf->seen = false;
+  }
+  c->files = (CovFile**)realloc(c->files, (c->n + 1) * 8);
+  c->files[c->n] = f;
+  c->n = c->n + 1;
+}
+
+// A file compiled from a copy (a native @test copy keeps every line).
+export fn cov_alias(c: Cov*, abs: string, rel: string) {
+  sl_push(c->alias_from, p_clean(abs));
+  sl_push(c->alias_to, s_dup(rel));
+}
+
+// The covered file a compiler path names (relative ones are from the
+// root), -1 when it is not one.
+export fn cov_index(c: Cov*, path: string) -> int64 {
+  var abs: string = path;
+  if (!p_is_abs(path)) {
+    abs = p_join(c->root, path);
+  }
+  abs = p_clean(abs);
+  var rel: string = s_empty();
+  var a: int64 = sl_index(c->alias_from, abs);
+  if (a >= 0) {
+    rel = sl_get(c->alias_to, a);
+  } else if (p_has_prefix_dir(abs, c->root) && !s_eq(abs, c->root)) {
+    rel = p_rel(c->root, abs);
+  } else {
+    return -1;
+  }
+  var i: int64 = 0;
+  while (i < c->n) {
+    if (s_eq(c->files[i]->rel, rel)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn cov_fn_at(f: CovFile*, line: int64) -> CovFn* {
+  var i: int64 = 0;
+  while (i < f->nfns) {
+    if (f->fns[i].line == line) {
+      return &f->fns[i];
+    }
+    i = i + 1;
+  }
+  return (CovFn*)0;
+}
+
+fn cov_map_push(m: CovMap*, fi: int64, line: int64, block: int64) {
+  if (m->n == m->cap) {
+    m->cap = m->cap * 2 + 64;
+    m->fi = (int64*)realloc(m->fi, m->cap * 8);
+    m->line = (int64*)realloc(m->line, m->cap * 8);
+    m->block = (int64*)realloc(m->block, m->cap * 8);
+  }
+  m->fi[m->n] = fi;
+  m->line[m->n] = line;
+  m->block[m->n] = block;
+  m->n = m->n + 1;
+}
+
+fn cov_mark(f: CovFile*, line: int64, v: uint8) {
+  if (line >= 1 && line <= f->lines->len && f->marks[line] < v && f->marks[line] != (uint8)3) {
+    f->marks[line] = v;
+  }
+}
+
+// One function of an annot.json: its file, line and instructions.
+fn cov_annot_fn(c: Cov*, cur: JsCur*, m: CovMap*) {
+  var file: string = s_empty();
+  var line: int64 = 0;
+  var ins_at: int64 = -1;
+  var started: bool = false;
+  var key: string = s_empty();
+  while (js_key(cur, &started, &key)) {
+    if (s_eq(key, "file")) {
+      file = js_str(cur);
+    } else if (s_eq(key, "line")) {
+      line = js_int(cur);
+    } else if (s_eq(key, "insns")) {
+      ins_at = cur->i;
+      js_skip(cur);
+    } else {
+      js_skip(cur);
+    }
+  }
+  var fi: int64 = cov_index(c, file);
+  if (fi < 0 || ins_at < 0) {
+    return;
+  }
+  var f: CovFile* = c->files[fi];
+  var cf: CovFn* = cov_fn_at(f, line);
+  if (cf != (CovFn*)0) {
+    cf->seen = true;
+  }
+  var ic: JsCur = js_new(cur->s);
+  ic.i = ins_at;
+  var ist: bool = false;
+  while (js_item(&ic, &ist)) {
+    var il: int64 = 0;
+    var ib: int64 = -1;
+    var ost: bool = false;
+    var k2: string = s_empty();
+    while (js_key(&ic, &ost, &k2)) {
+      if (s_eq(k2, "line")) {
+        il = js_int(&ic);
+      } else if (s_eq(k2, "block")) {
+        ib = js_int(&ic);
+      } else {
+        js_skip(&ic);
+      }
+    }
+    if (il > 0 && ib >= 0) {
+      cov_map_push(m, fi, il, ib);
+      cov_mark(f, il, (uint8)1);
+    }
+  }
+}
+
+// The instructions of the build an annot.json describes, read once per
+// path; 0 when there is none.
+export fn cov_annot(c: Cov*, path: string) -> CovMap* {
+  var at: int64 = sl_index(c->map_keys, path);
+  if (at >= 0) {
+    return c->maps[at];
+  }
+  var rd: FsRead = fs_read(path);
+  if (!rd.ok) {
+    cov_map_keep(c, path, (CovMap*)0);
+    return (CovMap*)0;
+  }
+  return cov_annot_text(c, path, rd.data);
+}
+
+fn cov_map_keep(c: Cov*, path: string, m: CovMap*) {
+  sl_push(c->map_keys, s_dup(path));
+  c->maps = (CovMap**)realloc(c->maps, c->map_keys->len * 8);
+  c->maps[c->map_keys->len - 1] = m;
+}
+
+// The map of an annot.json's text, kept under path.
+export fn cov_annot_text(c: Cov*, path: string, text: string) -> CovMap* {
+  var m: CovMap* = new CovMap;
+  memset((rawptr)m, 0, (int64)sizeof(CovMap));
+  c->lines = true;
+  var cur: JsCur = js_new(text);
+  var started: bool = false;
+  var key: string = s_empty();
+  while (js_key(&cur, &started, &key)) {
+    if (!s_eq(key, "functions")) {
+      js_skip(&cur);
+      continue;
+    }
+    var ast: bool = false;
+    while (js_item(&cur, &ast)) {
+      cov_annot_fn(c, &cur, m);
+    }
+  }
+  cov_map_keep(c, path, m);
+  return m;
+}
+
+// Merges one .mprof: its called functions, and its block counts through m
+// (the build's annot map, 0 when unknown).
+export fn cov_profile(c: Cov*, text: string, m: CovMap*) {
+  c->profiles = c->profiles + 1;
+  var cur: JsCur = js_new(text);
+  var started: bool = false;
+  var key: string = s_empty();
+  var counts: int64* = (int64*)0;
+  var nb: int64 = 0;
+  while (js_key(&cur, &started, &key)) {
+    if (s_eq(key, "functions")) {
+      var ast: bool = false;
+      while (js_item(&cur, &ast)) {
+        var file: string = s_empty();
+        var line: int64 = 0;
+        var calls: int64 = 0;
+        var ost: bool = false;
+        var k2: string = s_empty();
+        while (js_key(&cur, &ost, &k2)) {
+          if (s_eq(k2, "file")) {
+            file = js_str(&cur);
+          } else if (s_eq(k2, "line")) {
+            line = js_int(&cur);
+          } else if (s_eq(k2, "calls")) {
+            calls = js_int(&cur);
+          } else {
+            js_skip(&cur);
+          }
+        }
+        var fi: int64 = cov_index(c, file);
+        if (fi >= 0 && calls > 0) {
+          var cf: CovFn* = cov_fn_at(c->files[fi], line);
+          if (cf != (CovFn*)0) {
+            cf->hit = true;
+          }
+        }
+      }
+    } else if (s_eq(key, "blocks")) {
+      var bst: bool = false;
+      var cap: int64 = 0;
+      while (js_item(&cur, &bst)) {
+        if (nb == cap) {
+          cap = cap * 2 + 256;
+          counts = (int64*)realloc(counts, cap * 8);
+        }
+        counts[nb] = js_int(&cur);
+        nb = nb + 1;
+      }
+    } else {
+      js_skip(&cur);
+    }
+  }
+  if (m != (CovMap*)0) {
+    var i: int64 = 0;
+    while (i < m->n) {
+      var b: int64 = m->block[i];
+      if (b < nb && counts[b] > 0) {
+        cov_mark(c->files[m->fi[i]], m->line[i], (uint8)2);
+      }
+      i = i + 1;
+    }
+  }
+  if (counts != (int64*)0) {
+    free(counts);
+  }
+}
+
+// A run that wrote no profile.
+export fn cov_silent(c: Cov*, what: string) {
+  sl_add_uniq(c->silent, what);
+}
+
+fn cov_code_line(s: string) -> bool {
+  var t: string = s_trim(s);
+  return slen(t) > 0 && !s_starts(t, "//") && !s_eq(t, "}") && !s_eq(t, "{{");
+}
+
+// After the last profile: a function no instrumented build compiled counts
+// its lines as missed code.
+export fn cov_finish(c: Cov*) {
+  if (!c->lines) {
+    return;
+  }
+  var i: int64 = 0;
+  while (i < c->n) {
+    var f: CovFile* = c->files[i];
+    i = i + 1;
+    var k: int64 = 0;
+    while (k < f->nfns) {
+      var cf: CovFn* = &f->fns[k];
+      k = k + 1;
+      if (cf->seen || cf->hit) {
+        continue;
+      }
+      var l: int64 = cf->line;
+      while (l <= cf->last) {
+        if (f->marks[l] == (uint8)0 && cov_code_line(sl_get(f->lines, l - 1))) {
+          f->marks[l] = (uint8)1;
+        }
+        l = l + 1;
+      }
+    }
+  }
+}
+
+// Functions and lines of file i (or of every file when i < 0): hit, total.
+export fn cov_counts(c: Cov*, i: int64, fh: int64*, ft: int64*, lh: int64*, lt: int64*) {
+  *fh = 0;
+  *ft = 0;
+  *lh = 0;
+  *lt = 0;
+  var k: int64 = 0;
+  while (k < c->n) {
+    if (i < 0 || k == i) {
+      var f: CovFile* = c->files[k];
+      var j: int64 = 0;
+      while (j < f->nfns) {
+        *ft = *ft + 1;
+        if (f->fns[j].hit) {
+          *fh = *fh + 1;
+        }
+        j = j + 1;
+      }
+      j = 1;
+      while (j <= f->lines->len) {
+        if (f->marks[j] == (uint8)1 || f->marks[j] == (uint8)2) {
+          *lt = *lt + 1;
+        }
+        if (f->marks[j] == (uint8)2) {
+          *lh = *lh + 1;
+        }
+        j = j + 1;
+      }
+    }
+    k = k + 1;
+  }
+}
+
+// "66.7%" (rounded down, so 100% means all), "-" for nothing to cover.
+export fn cov_pct(hit: int64, total: int64) -> string {
+  if (total == 0) {
+    return "-";
+  }
+  var tenths: int64 = hit * 1000 / total;
+  return s_int(tenths / 10) + "." + s_int(tenths % 10) + "%";
+}
+
+fn cov_cell(hit: int64, total: int64) -> string {
+  var a: string = s_int(hit) + "/" + s_int(total);
+  return s_pad_right(a, 9) + " " + s_pad_left(cov_pct(hit, total), 6);
+}
+
+// The table: a row per file and the total; then each uncovered function.
+export fn cov_report(c: Cov*) -> string {
+  var b: Buf* = buf_new();
+  var w: int64 = 5;
+  var i: int64 = 0;
+  while (i < c->n) {
+    if (slen(c->files[i]->rel) > w) {
+      w = slen(c->files[i]->rel);
+    }
+    i = i + 1;
+  }
+  var head: string = s_pad_right("file", w) + "  functions";
+  if (c->lines) {
+    head = head + "          lines (approximate)";
+  }
+  buf_line(b, head);
+  var fh: int64 = 0;
+  var ft: int64 = 0;
+  var lh: int64 = 0;
+  var lt: int64 = 0;
+  i = -1;
+  while (i < c->n) {
+    var idx: int64 = i + 1;
+    var name: string = "total";
+    if (idx == c->n) {
+      idx = -1;
+    } else {
+      name = c->files[idx]->rel;
+    }
+    cov_counts(c, idx, &fh, &ft, &lh, &lt);
+    var row: string = s_pad_right(name, w) + "  " + cov_cell(fh, ft);
+    if (c->lines) {
+      row = row + "   " + cov_cell(lh, lt);
+    }
+    buf_line(b, row);
+    i = i + 1;
+  }
+  var miss: StrList* = cov_missed(c);
+  if (miss->len > 0) {
+    buf_line(b, "uncovered functions:");
+    var k: int64 = 0;
+    while (k < miss->len) {
+      buf_line(b, "  " + sl_get(miss, k));
+      k = k + 1;
+    }
+  }
+  free(miss);
+  return buf_take(b);
+}
+
+// "src/x.mettle:41 parse_tail" for every function no run called.
+export fn cov_missed(c: Cov*) -> StrList* {
+  var l: StrList* = sl_new();
+  var i: int64 = 0;
+  while (i < c->n) {
+    var f: CovFile* = c->files[i];
+    var k: int64 = 0;
+    while (k < f->nfns) {
+      if (!f->fns[k].hit) {
+        sl_push(l, f->rel + ":" + s_int(f->fns[k].line) + " " + f->fns[k].name);
+      }
+      k = k + 1;
+    }
+    i = i + 1;
+  }
+  return l;
+}
+
+// Why the run fails coverage-min (a percent of functions), "" when it holds.
+export fn cov_below(c: Cov*, min: string) -> string {
+  if (slen(min) == 0) {
+    return s_empty();
+  }
+  var want: int64 = s_to_int(min);
+  var fh: int64 = 0;
+  var ft: int64 = 0;
+  var lh: int64 = 0;
+  var lt: int64 = 0;
+  cov_counts(c, -1, &fh, &ft, &lh, &lt);
+  if (ft == 0 || fh * 100 >= want * ft) {
+    return s_empty();
+  }
+  return cov_pct(fh, ft) + " of functions covered, under coverage-min " + s_int(want) + "%";
+}
+
+// The marker of line l: "F+"/"F-" on a function's line, else "+", "-" or "".
+fn cov_marker(f: CovFile*, l: int64) -> string {
+  var cf: CovFn* = cov_fn_at(f, l);
+  if (cf != (CovFn*)0) {
+    if (cf->hit) {
+      return "F+";
+    }
+    return "F-";
+  }
+  if (f->marks[l] == (uint8)2) {
+    return "+";
+  }
+  if (f->marks[l] == (uint8)1) {
+    return "-";
+  }
+  return s_empty();
+}
+
+// File i annotated: a header, then each line with its number and marker.
+export fn cov_text(c: Cov*, i: int64) -> string {
+  var f: CovFile* = c->files[i];
+  var fh: int64 = 0;
+  var ft: int64 = 0;
+  var lh: int64 = 0;
+  var lt: int64 = 0;
+  cov_counts(c, i, &fh, &ft, &lh, &lt);
+  var b: Buf* = buf_new();
+  var head: string = f->rel + ": functions " + s_int(fh) + "/" + s_int(ft);
+  if (c->lines) {
+    head = head + ", lines " + s_int(lh) + "/" + s_int(lt);
+  }
+  buf_line(b, head);
+  buf_line(b, "(F+ function called, F- never called; + line ran, - line did not)");
+  var l: int64 = 1;
+  while (l <= f->lines->len) {
+    var num: string = s_pad_left(s_int(l), 5);
+    buf_line(b, num + " " + s_pad_right(cov_marker(f, l), 2) + " | " + sl_get(f->lines, l - 1));
+    l = l + 1;
+  }
+  return buf_take(b);
+}
+
+fn cov_html_esc(s: string) -> string {
+  var b: Buf* = buf_new();
+  var i: int64 = 0;
+  while (i < slen(s)) {
+    var ch: int32 = s_byte(s, i);
+    if (ch == 60) {
+      buf_add(b, "&lt;");
+    } else if (ch == 62) {
+      buf_add(b, "&gt;");
+    } else if (ch == 38) {
+      buf_add(b, "&amp;");
+    } else if (ch == 34) {
+      buf_add(b, "&quot;");
+    } else {
+      buf_addb(b, ch);
+    }
+    i = i + 1;
+  }
+  return buf_take(b);
+}
+
+fn cov_html_head(title: string, up: string) -> string {
+  var t: string = cov_html_esc(title);
+  return "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>" + t + "</title>\n<style>body{{font:14px sans-serif;margin:16px}pre{{font:13px monospace;line-height:1.35}table{{border-collapse:collapse}td,th{{padding:2px 10px;text-align:left}.h{{background:#d7f5dc}.m{{background:#fbd9d9}.f{{font-weight:bold}a{{color:#0645ad}</style></head><body>\n" + up + "<h1>" + t + "</h1>\n";
+}
+
+// File i as an HTML page; up is the relative path to index.html.
+export fn cov_html(c: Cov*, i: int64, up: string) -> string {
+  var f: CovFile* = c->files[i];
+  var b: Buf* = buf_new();
+  var link: string = "<p><a href=\"" + up + "\">all files</a></p>\n";
+  buf_add(b, cov_html_head(f->rel, link));
+  buf_add(b, "<pre>");
+  var l: int64 = 1;
+  while (l <= f->lines->len) {
+    var mk: string = cov_marker(f, l);
+    var cls: string = "";
+    if (s_ends(mk, "+")) {
+      cls = "h";
+    } else if (s_ends(mk, "-")) {
+      cls = "m";
+    }
+    if (s_starts(mk, "F")) {
+      cls = cls + " f";
+    }
+    var num: string = s_pad_left(s_int(l), 5);
+    var text: string = cov_html_esc(sl_get(f->lines, l - 1));
+    buf_add(b, "<span class=\"" + cls + "\">" + num + " " + s_pad_right(mk, 2) + " " + text + "</span>\n");
+    l = l + 1;
+  }
+  buf_add(b, "</pre></body></html>\n");
+  return buf_take(b);
+}
+
+// The HTML index: the table with a link per file (page path: rel + ".html").
+export fn cov_html_index(c: Cov*) -> string {
+  var b: Buf* = buf_new();
+  buf_add(b, cov_html_head("coverage", ""));
+  buf_add(b, "<table><tr><th>file</th><th>functions</th><th></th>");
+  if (c->lines) {
+    buf_add(b, "<th>lines (approximate)</th><th></th>");
+  }
+  buf_add(b, "</tr>\n");
+  var fh: int64 = 0;
+  var ft: int64 = 0;
+  var lh: int64 = 0;
+  var lt: int64 = 0;
+  var i: int64 = 0;
+  while (i <= c->n) {
+    var idx: int64 = i;
+    var name: string = "total";
+    if (i == c->n) {
+      idx = -1;
+    } else {
+      var rel: string = cov_html_esc(c->files[i]->rel);
+      name = "<a href=\"" + rel + ".html\">" + rel + "</a>";
+    }
+    cov_counts(c, idx, &fh, &ft, &lh, &lt);
+    var row: string = "<tr><td>" + name + "</td><td>" + s_int(fh) + "/" + s_int(ft) + "</td><td>" + cov_pct(fh, ft) + "</td>";
+    if (c->lines) {
+      row = row + "<td>" + s_int(lh) + "/" + s_int(lt) + "</td><td>" + cov_pct(lh, lt) + "</td>";
+    }
+    buf_add(b, row + "</tr>\n");
+    i = i + 1;
+  }
+  buf_add(b, "</table>\n");
+  var miss: StrList* = cov_missed(c);
+  if (miss->len > 0) {
+    buf_add(b, "<h2>uncovered functions</h2>\n<pre>");
+    var k: int64 = 0;
+    while (k < miss->len) {
+      buf_add(b, cov_html_esc(sl_get(miss, k)) + "\n");
+      k = k + 1;
+    }
+    buf_add(b, "</pre>\n");
+  }
+  free(miss);
+  buf_add(b, "</body></html>\n");
+  return buf_take(b);
+}
+
+// The relative path from dir rel's page back to the report root.
+export fn cov_up(rel: string) -> string {
+  var up: string = "";
+  var i: int64 = 0;
+  while (i < slen(rel)) {
+    if (s_byte(rel, i) == 47) {
+      up = up + "../";
+    }
+    i = i + 1;
+  }
+  return up + "index.html";
+}
+
+// A compile's output with --annotate-asm's listing and reports left out:
+// only diagnostic blocks ("-- file:L:C ---" and what follows) stay.
+export fn cov_compile_output(text: string) -> string {
+  var lines: StrList* = s_lines(text);
+  var b: Buf* = buf_new();
+  var keep: bool = true;
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var line: string = sl_get(lines, i);
+    i = i + 1;
+    if (s_starts(line, "-- ")) {
+      keep = cov_diag_head(line);
+    } else if (s_starts(line, "; ") || s_starts(line, "==== ") || s_starts(line, "--annotate-asm:")) {
+      keep = false;
+    }
+    if (keep) {
+      buf_line(b, line);
+    }
+  }
+  free(lines);
+  return buf_take(b);
+}
+
+// "-- src/a.mettle:5:7 -----": a diagnostic's header.
+fn cov_diag_head(line: string) -> bool {
+  var sp: int64 = s_find_from(line, " ", 3);
+  if (sp < 0) {
+    sp = slen(line);
+  }
+  var loc: string = s_sub(line, 3, sp);
+  var c2: int64 = s_rfind_byte(loc, 58);
+  if (c2 <= 0) {
+    return false;
+  }
+  var c1: int64 = s_rfind_byte(s_sub(loc, 0, c2), 58);
+  return c1 > 0 && s_is_int(s_sub(loc, c1 + 1, c2)) && s_is_int(s_from(loc, c2 + 1));
+}
+
+// A run's stderr without the profile report the runtime prints at exit.
+export fn cov_strip_report(err: string) -> string {
+  var at: int64 = s_find(err, "Runtime profile:\n");
+  if (at < 0) {
+    return err;
+  }
+  while (at > 0 && s_byte(err, at - 1) == 10) {
+    at = at - 1;
+  }
+  if (at > 0) {
+    at = at + 1;
+  }
+  return s_sub(err, 0, at);
+}

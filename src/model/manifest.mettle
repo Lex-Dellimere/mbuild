@@ -1854,7 +1854,7 @@ fn mnx_test_bins(m: Manifest*) {
 // ---------------------------------------------------------------------------
 
 export fn man_test_keys() -> StrList* {
-  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports");
+  return mnx_list("matrix timeout repeat serial cwd warnings checks services golden golden-dir golden-cross png-tolerance run args native ports coverage-min");
 }
 
 // A test setting's value when nothing sets it ("" for golden-dir: tests/golden/NAME).
@@ -2027,6 +2027,15 @@ export fn man_test_check(name: string, key: string, value: string) -> string {
   if (s_eq(key, "native")) {
     if (!s_eq(v, "skipped") && !s_eq(v, "always") && !s_eq(v, "never")) {
       return "native is skipped, always or never, not '" + value + "'";
+    }
+    return s_empty();
+  }
+  if (s_eq(key, "coverage-min")) {
+    if (!s_eq(name, "*")) {
+      return "coverage-min is set for every test: mb_test_set(\"*\", \"coverage-min\", \"" + value + "\")";
+    }
+    if (!mnx_uint(v, 0, 100)) {
+      return "coverage-min is a percent of functions from 0 to 100, not '" + value + "'";
     }
     return s_empty();
   }

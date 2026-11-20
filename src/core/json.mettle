@@ -1,0 +1,183 @@
+// json: a cursor over JSON text for the compiler's sidecars (.mprof,
+// annot.json). It reads the values a caller asks for and skips the rest; no
+// tree is built, so a large sidecar costs one pass.
+
+import "std/mem";
+import "base";
+
+export struct JsCur {
+  s: string;
+  i: int64;
+  bad: bool;      // malformed text was met; reads then return defaults
+}
+
+export fn js_new(s: string) -> JsCur {
+  var c: JsCur;
+  c.s = s;
+  c.i = 0;
+  c.bad = false;
+  return c;
+}
+
+fn js_ws(c: JsCur*) {
+  var n: int64 = slen(c->s);
+  while (c->i < n && is_space_b(s_byte(c->s, c->i))) {
+    c->i = c->i + 1;
+  }
+}
+
+// The next byte after blanks, -1 at the end.
+export fn js_peek(c: JsCur*) -> int32 {
+  js_ws(c);
+  if (c->i >= slen(c->s)) {
+    return -1;
+  }
+  return s_byte(c->s, c->i);
+}
+
+// Consumes byte b when it is next.
+export fn js_eat(c: JsCur*, b: int32) -> bool {
+  if (js_peek(c) == b) {
+    c->i = c->i + 1;
+    return true;
+  }
+  return false;
+}
+
+// A string's bytes as a view (escapes kept as written; the sidecars hold
+// names and paths, where they are rare).
+export fn js_str(c: JsCur*) -> string {
+  if (!js_eat(c, 34)) {
+    c->bad = true;
+    js_skip(c);
+    return s_empty();
+  }
+  var n: int64 = slen(c->s);
+  var start: int64 = c->i;
+  while (c->i < n && s_byte(c->s, c->i) != 34) {
+    if (s_byte(c->s, c->i) == 92) {
+      c->i = c->i + 1;
+    }
+    c->i = c->i + 1;
+  }
+  var v: string = s_sub(c->s, start, c->i);
+  c->i = c->i + 1;
+  return v;
+}
+
+// An integer (a fraction or exponent is dropped); null and others give 0.
+export fn js_int(c: JsCur*) -> int64 {
+  var b: int32 = js_peek(c);
+  if (b != 45 && !is_digit_b(b)) {
+    js_skip(c);
+    return 0;
+  }
+  var neg: bool = b == 45;
+  if (neg) {
+    c->i = c->i + 1;
+  }
+  var v: int64 = 0;
+  var n: int64 = slen(c->s);
+  while (c->i < n && is_digit_b(s_byte(c->s, c->i))) {
+    v = v * 10 + (int64)(s_byte(c->s, c->i) - 48);
+    c->i = c->i + 1;
+  }
+  while (c->i < n && (s_byte(c->s, c->i) == 46 || s_byte(c->s, c->i) == 101 || s_byte(c->s, c->i) == 69 || s_byte(c->s, c->i) == 43 || s_byte(c->s, c->i) == 45 || is_digit_b(s_byte(c->s, c->i)))) {
+    c->i = c->i + 1;
+  }
+  if (neg) {
+    return 0 - v;
+  }
+  return v;
+}
+
+// Skips one value of any kind.
+export fn js_skip(c: JsCur*) {
+  var b: int32 = js_peek(c);
+  var n: int64 = slen(c->s);
+  if (b == 34) {
+    js_str(c);
+    return;
+  }
+  if (b == 123 || b == 91) {
+    var depth: int64 = 0;
+    while (c->i < n) {
+      var x: int32 = s_byte(c->s, c->i);
+      if (x == 34) {
+        js_str(c);
+        continue;
+      }
+      if (x == 123 || x == 91) {
+        depth = depth + 1;
+      } else if (x == 125 || x == 93) {
+        depth = depth - 1;
+        if (depth == 0) {
+          c->i = c->i + 1;
+          return;
+        }
+      }
+      c->i = c->i + 1;
+    }
+    c->bad = true;
+    return;
+  }
+  if (b < 0) {
+    c->bad = true;
+    return;
+  }
+  // a number, true, false, null
+  while (c->i < n) {
+    var y: int32 = s_byte(c->s, c->i);
+    if (y == 44 || y == 125 || y == 93 || is_space_b(y)) {
+      return;
+    }
+    c->i = c->i + 1;
+  }
+}
+
+// Object members: call js_key until it returns false; after a true, read or
+// skip the member's value. *started tracks the opening brace.
+export fn js_key(c: JsCur*, started: bool*, key: string*) -> bool {
+  if (c->bad) {
+    return false;
+  }
+  if (!*started) {
+    *started = true;
+    if (!js_eat(c, 123)) {
+      c->bad = true;
+      return false;
+    }
+  } else {
+    js_eat(c, 44);
+  }
+  if (js_eat(c, 125)) {
+    return false;
+  }
+  *key = js_str(c);
+  if (!js_eat(c, 58)) {
+    c->bad = true;
+    return false;
+  }
+  return true;
+}
+
+// Array items: call js_item until it returns false; after a true, read or
+// skip the item.
+export fn js_item(c: JsCur*, started: bool*) -> bool {
+  if (c->bad) {
+    return false;
+  }
+  if (!*started) {
+    *started = true;
+    if (!js_eat(c, 91)) {
+      c->bad = true;
+      return false;
+    }
+  } else {
+    js_eat(c, 44);
+  }
+  if (js_eat(c, 93)) {
+    return false;
+  }
+  return js_peek(c) >= 0;
+}
