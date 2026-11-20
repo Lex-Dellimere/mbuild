@@ -1110,6 +1110,63 @@ check "a bin name the project has" has 'error: mb_dep_bin("meosql", "sass"): thi
 mb clean
 check "clean removes their state" sh -c 'grep -qF "Removed .mbuild/dep-bins" "$0/last.out" && [ ! -e .mbuild/dep-bins ]' "$S"
 
+echo "== the compiler's input list (--emit-deps)"
+# D/bin/mettle lists --emit-deps in --help, takes --emit-deps FILE off the command line and writes
+# $DEPS_LIST there (the files the "compile" read), then runs the real compiler
+D="$W/emitdeps"
+mkdir -p "$D/bin"
+ln -sfn "$(dirname "$(dirname "$(realpath "$METTLE")")")/stdlib" "$D/stdlib"
+cat > "$D/bin/mettle" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$D/mettle.log"
+if [ "\${1:-}" = --help ]; then "$METTLE" --help; echo "  --emit-deps <file>  Write the files the compile read"; exit 0; fi
+deps=
+prev=
+n=\$#
+for a do
+  if [ "\$prev" = --emit-deps ]; then deps="\$a"; prev=; continue; fi
+  prev="\$a"
+  [ "\$a" = --emit-deps ] && continue
+  set -- "\$@" "\$a"
+done
+shift \$n
+"$METTLE" "\$@"
+rc=\$?
+[ -n "\$deps" ] && cp "\$DEPS_LIST" "\$deps"
+exit \$rc
+EOF
+chmod +x "$D/bin/mettle"
+proj "$W/dl" </dev/null
+cd "$W/dl" || exit 1
+printf 'import "std/io";\nimport "util";\nfn main() -> int32 {\n  print(util_name());\n  return 0;\n}\n' > src/main.mettle
+printf 'export fn util_name() -> string {\n  return "one\\n";\n}\n' > src/util.mettle
+echo "a target description" > extra.txt
+printf '%s\n' "$W/dl/extra.txt" "$W/dl/src/main.mettle" "$W/dl/src/util.mettle" > "$D/list"
+export DEPS_LIST="$D/list"
+METTLE="$D/bin/mettle" mb -v build
+check "emit-deps: -v says the compiler's list is used" has "inputs of dl (linux, debug): the compiler's list (--emit-deps)"
+check "emit-deps: --emit-deps goes to every compile" sh -c 'grep -qF -- "--emit-deps .mbuild/stamps/linux-debug-dl.stamp.deps.new" "$0/mettle.log" && [ -s .mbuild/stamps/linux-debug-dl.stamp.deps ] && [ ! -e .mbuild/stamps/linux-debug-dl.stamp.deps.new ]' "$D"
+METTLE="$D/bin/mettle" mb build
+check "emit-deps: fresh" has "Fresh dl (linux, debug)"
+echo "changed" >> extra.txt
+METTLE="$D/bin/mettle" mb build
+check "emit-deps: a listed file the walk does not know rebuilds" has "Compiling dl (linux, debug)"
+METTLE="$D/bin/mettle" mb build
+check "emit-deps: fresh again" has "Fresh dl (linux, debug)"
+printf 'export fn util_name() -> string {\n  return "two\\n";\n}\n' > src/util.mettle
+METTLE="$D/bin/mettle" mb run
+check "emit-deps: an import changed rebuilds" sh -c 'grep -qF "Compiling dl (linux, debug)" "$0/last.out" && grep -qxF two "$0/last.out"' "$S"
+printf '%s\n' "$W/dl/src/main.mettle" "$W/dl/src/util.mettle" > "$D/list"
+echo "changed again" >> extra.txt
+METTLE="$D/bin/mettle" mb build
+check "emit-deps: the new list replaces the old" has "Compiling dl (linux, debug)"
+echo "and again" >> extra.txt
+METTLE="$D/bin/mettle" mb build
+check "emit-deps: a file no longer listed is no input" has "Fresh dl (linux, debug)"
+mb -v build
+check "without --emit-deps: the walk" sh -c 'grep -qF "inputs of dl (linux, debug): mbuild'"'"'s import walk" "$0/last.out" && grep -qF "Compiling dl (linux, debug)" "$0/last.out"' "$S"
+unset DEPS_LIST
+
 echo "== bootstrap"
 wait $bootpid
 cp "$S/boot.out" "$S/last.out"; cp "$S/boot.code" "$S/last.code"

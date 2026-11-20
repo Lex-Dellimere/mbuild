@@ -592,3 +592,34 @@ export fn graph_fingerprint(g: Graph*, h: Hasher*) {
     i = i + 1;
   }
 }
+
+// the compiler's input list (--emit-deps: one absolute path a line) with each
+// file's content, then the walk's paths without contents, so a variant file
+// that appears or goes away still changes it
+export fn graph_list_fingerprint(g: Graph*, h: Hasher*, list: string) {
+  h_str(h, "deps");
+  var lines: StrList* = s_lines(list);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var f: string = s_trim(sl_get(lines, i));
+    i = i + 1;
+    if (slen(f) == 0) {
+      continue;
+    }
+    h_str(h, gx_key(g, f));
+    h_str(h, fs_hash_file(f));
+  }
+  free(lines->items);
+  free(lines);
+  h_str(h, "walk");
+  i = 0;
+  while (i < g->files->len) {
+    h_str(h, gx_key(g, sl_get(g->files, i)));
+    i = i + 1;
+  }
+  i = 0;
+  while (i < g->missing->len) {
+    h_str(h, sl_get(g->missing, i));
+    i = i + 1;
+  }
+}

@@ -1994,6 +1994,8 @@ struct BxJob {
   outp: string;
   stamp: string;
   fp: string;
+  base: string;     // with deps: fp without the inputs
+  deps: string;     // the compiler's input list (stamp.deps), "" = the walk's
   state: int32;     // 0 = to compile, 1 = fresh, 2 = cannot start, 3 = test passed before
   g: Graph*;
   ok: bool;         // built (or fresh)
@@ -2150,7 +2152,17 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   h_str(&h, t->target);
   h_str(&h, t->profile);
   h_str(&h, b->name);
-  graph_fingerprint(g, &h);
+  var tag: string = bx_stamp_tag(s->tests);
+  j->stamp = p->state_dir + "/stamps/" + tag + t->target + "-" + t->profile + "-" + b->name + ".stamp";
+  j->deps = s_empty();
+  if (tc_has_emit_deps(m)) {
+    j->deps = j->stamp + ".deps";
+    fs_mkdirs(p_dir(j->stamp));
+    verbose("inputs of " + bx_label(s, b, t) + ": the compiler's list (--emit-deps)");
+  } else {
+    graph_fingerprint(g, &h);
+    verbose("inputs of " + bx_label(s, b, t) + ": mbuild's import walk");
+  }
   h_str(&h, nl->fingerprint);
   bx_hash_pgo(&h, p, st);
   free(st);
@@ -2160,8 +2172,18 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
     xh = xh + 1;
   }
   j->fp = h_hex(&h);
-  var tag: string = bx_stamp_tag(s->tests);
-  j->stamp = p->state_dir + "/stamps/" + tag + t->target + "-" + t->profile + "-" + b->name + ".stamp";
+  j->base = j->fp;
+  if (slen(j->deps) > 0) {
+    var dr: FsRead = fs_read(j->deps);
+    var list: string = "\n";
+    if (dr.ok) {
+      list = dr.data;
+    }
+    j->fp = bx_deps_fp(j, list);
+    cmd_arg(c, "--emit-deps");
+    var fresh_list: string = j->deps + ".new";
+    cmd_path(c, bx_rel(p, fresh_list));
+  }
 
   j->ok = false;
   j->pass = s_empty();
@@ -2201,6 +2223,14 @@ fn bx_plan(s: BxSess*, u: BxUnit*, t: TargetCtx*, nl: NatLink*) -> BxJob* {
   sys_remove_file(j->stamp);
   j->state = 0;
   return j;
+}
+
+// the fingerprint of a job whose inputs are the compiler's list
+fn bx_deps_fp(j: BxJob*, list: string) -> string {
+  var h: Hasher = h_new();
+  h_str(&h, j->base);
+  graph_list_fingerprint(j->g, &h, list);
+  return h_hex(&h);
 }
 
 // after the compiler ran: its output, the stamp. 0 on success
@@ -2246,6 +2276,18 @@ fn bx_finish(s: BxSess*, j: BxJob*, code: int32, output: string) -> int32 {
     var warns: StrList* = trn_warnings(lv_plain(output));
     fs_write(j->outp + ".warnings", sl_join(warns, "\n"));
     free(warns);
+  }
+  if (slen(j->deps) > 0) {
+    var fresh_list: string = j->deps + ".new";
+    var lr: FsRead = fs_read(fresh_list);
+    if (!lr.ok) {
+      verbose("the compiler wrote no " + bx_show(fresh_list) + "; " + b->name + " is built again next time");
+      j->ok = true;
+      return 0;
+    }
+    sys_remove_file(j->deps);
+    sys_rename(fresh_list, j->deps);
+    j->fp = bx_deps_fp(j, lr.data);
   }
   fs_write(j->stamp, j->fp + "\n");
   j->ok = true;
@@ -5321,7 +5363,10 @@ fn bt_clean_stale(p: Project*) {
       q = q + 1;
     }
     if (!keep) {
-      sys_remove_file(p->state_dir + "/stamps/" + st);
+      var gone: string = p->state_dir + "/stamps/" + st;
+      sys_remove_file(gone);
+      var gone_deps: string = gone + ".deps";
+      sys_remove_file(gone_deps);
     }
   }
   // .mbuild/test-run/<cell>/<name>/

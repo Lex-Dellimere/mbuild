@@ -891,6 +891,61 @@ export fn tc_unsupported(m: Mettle*, flags: StrList*) -> StrList* {
   return bad;
 }
 
+var g_tcx_deps_id: string;
+var g_tcx_deps: bool;
+var g_tcx_deps_set: bool;
+
+// whether m writes its inputs with --emit-deps FILE, from its --help; asked
+// once per compiler identity, kept in flags.cache as "<id>\t--emit-deps\t<1|0>"
+export fn tc_has_emit_deps(m: Mettle*) -> bool {
+  if (g_tcx_deps_set && s_eq(g_tcx_deps_id, m->id)) {
+    return g_tcx_deps;
+  }
+  var cache: string = tcx_root() + "/flags.cache";
+  var line: string = m->id + "\t--emit-deps\t";
+  var r: FsRead = fs_read(cache);
+  var old: string = s_empty();
+  if (r.ok) {
+    old = r.data;
+  }
+  var known: int32 = 0;
+  var lines: StrList* = s_lines(old);
+  var i: int64 = 0;
+  while (i < lines->len) {
+    var l: string = sl_get(lines, i);
+    if (s_starts(l, line)) {
+      known = 2;
+      if (s_eq(s_from(l, slen(line)), "1")) {
+        known = 1;
+      }
+    }
+    i = i + 1;
+  }
+  tcx_sl_free(lines);
+  if (known == 0) {
+    var c: Cmd* = tc_cmd(m);
+    cmd_arg(c, "--help");
+    var cap: Captured = proc_capture_all(c);
+    tcx_cmd_free(c);
+    known = 2;
+    var bit: string = "0";
+    if (s_contains(cap.out, "--emit-deps")) {
+      known = 1;
+      bit = "1";
+    }
+    if (slen(old) > 0 && !s_ends(old, "\n")) {
+      old = old + "\n";
+    }
+    fs_mkdirs(tcx_root());
+    var text: string = old + line + bit + "\n";
+    fs_write(cache, text);
+  }
+  g_tcx_deps_id = m->id;
+  g_tcx_deps = known == 1;
+  g_tcx_deps_set = true;
+  return g_tcx_deps;
+}
+
 // running built programs
 
 export fn tc_run_program_cmd(target: string, exe_path: string) -> Cmd* {

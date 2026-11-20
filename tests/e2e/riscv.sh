@@ -530,8 +530,9 @@ EOF
   check "pgo on pico2 without the capture script" sh -c 'grep -qF "has no tools/riscv-pgo-capture.py" "$0/last.out" && [ "$(cat "$0/last.code")" = 1 ]' "$S"
 fi
 # --- board variant imports: X.<board>, X.<chip>, X.bare, X; the board file and its imports are inputs
-ECO="${METTLE_BOARDS:-$here/../Mettle.eco-s5/bin/mettle}"
-V="$W/bv"
+# once with a compiler without --emit-deps (mbuild's walk), once with one that has it (its list)
+for ECO in "${METTLE_BOARDS:-$here/../Mettle.eco-s5/bin/mettle}" "${METTLE_DEPS:-$here/../Mettle.eco/bin/mettle}"; do
+V="$W/bv-$(basename "$(dirname "$(dirname "$ECO")")")"
 mkdir -p "$V/src/board" && cd "$V"
 cat > mbuild.mettle <<'EOF'
 import "mbuild/api";
@@ -576,17 +577,24 @@ bv_led "" 1; bv_led .dev_kit 2; bv_led .soc_x1 3; bv_led .bare 4
 printf 'import "bv/led";\nfn main() -> int32 {\n  return led_value();\n}\n' > src/main.mettle
 bv_sum() { md5sum build/riscv32-none/debug/app.bin 2>/dev/null | cut -d' ' -f1; }
 # bv_step NAME: the build after a change compiles again and writes another image
-bv_step() { before=$(bv_sum); METTLE="$ECO" mb build; check "board variants: $1" sh -c 'grep -qF "Compiling app (riscv32-none, debug)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ] && [ -n "$1" ] && [ "$1" != "$(md5sum build/riscv32-none/debug/app.bin | cut -d" " -f1)" ]' "$S" "$before"; }
+bv_step() { before=$(bv_sum); METTLE="$ECO" mb build; check "board variants ($how): $1" sh -c 'grep -qF "Compiling app (riscv32-none, debug)" "$0/last.out" && [ "$(cat "$0/last.code")" = 0 ] && [ -n "$1" ] && [ "$1" != "$(md5sum build/riscv32-none/debug/app.bin | cut -d" " -f1)" ]' "$S" "$before"; }
 if [ ! -x "$ECO" ]; then
-  [ $mode = debug ] && echo "note: board variant imports skipped (no compiler that takes a board file at $ECO; set METTLE_BOARDS)"
+  [ $mode = debug ] && echo "note: board variant imports skipped for $ECO (missing; set METTLE_BOARDS, METTLE_DEPS)"
 else
   METTLE="$ECO" mb build
   if grep -qF "is not a board name" "$S/last.out"; then
     [ $mode = debug ] && echo "note: board variant imports skipped ($ECO takes only board names for --board)"
   else
-    check "board variants: the first build" code_is 0
-    METTLE="$ECO" mb build
-    check "board variants: fresh" has "Fresh app (riscv32-none, debug)"
+    check "board variants: the first build ($ECO)" code_is 0
+    METTLE="$ECO" mb -v build
+    how=walk
+    grep -qF -- "--emit-deps" "$S/last.out" && how=list
+    check "board variants ($how): fresh" has "Fresh app (riscv32-none, debug)"
+    if [ $how = list ]; then
+      check "board variants (list): -v says so" has "inputs of app (riscv32-none, debug): the compiler's list (--emit-deps)"
+    else
+      check "board variants (walk): -v says so" has "inputs of app (riscv32-none, debug): mbuild's import walk"
+    fi
     bv_led .dev_kit 12; bv_step "X.<board> changed"
     bv_kit 200; bv_step "an import of the board file changed"
     rm src/led.dev_kit.mettle; bv_step "X.<board> gone: X.<chip>"
@@ -597,9 +605,10 @@ else
     bv_led "" 11; bv_step "X changed"
     bv_led .soc_x2 5; bv_step "a new X.<chip>"
     METTLE="$ECO" mb build
-    check "board variants: fresh at the end" has "Fresh app (riscv32-none, debug)"
+    check "board variants ($how): fresh at the end" has "Fresh app (riscv32-none, debug)"
   fi
 fi
+done
 
 done
 
