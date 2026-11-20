@@ -1,18 +1,4 @@
-// toolchain: finds and runs Mettle compilers per target, and installs,
-// pins and updates toolchains.
-//
-// A Windows .exe is built by the Windows compiler and a Linux binary by the
-// Linux one, so each target has its own compiler: on Linux the Windows
-// compiler runs as `wine mettle.exe`, under wine the Linux compiler runs as a
-// host program. tc_select never starts a compiler (wine takes about a second
-// to start); tc_version asks it lazily and caches the answer by identity.
-//
-// Installed toolchains are host compilers in $MBUILD_HOME/toolchains/<id>/
-// (a release tag, or dev-<git describe> for a source build), laid out like
-// the release archives: bin/mettle (mettle.exe on Windows), stdlib/,
-// runtime/ and toolchain.toml. Each is put together in a temporary directory
-// beside them and renamed into place, so a half-finished install never
-// looks installed.
+// toolchain: finds, runs, installs and pins mettle compilers per target
 
 import "std/io";
 import "std/mem";
@@ -33,7 +19,7 @@ import "../core/sys_windows" if windows;
 export struct Mettle {
   target: string;        // what it builds for: "linux" | "windows"
   path: string;          // the compiler executable (host form)
-  via_wine: bool;        // a Windows compiler started as `wine path` from Linux
+  via_wine: bool;        // a windows compiler started as `wine path` from linux
   tool: Tool;            // what actually runs (wine, the compiler, or a host program under wine)
   stdlib_dir: string;
   runtime_dir: string;
@@ -43,16 +29,14 @@ export struct Mettle {
   installed: string;     // the toolchains/<version> it came from, "" otherwise
 }
 
-// Why the last tcx_pick or tcx_download failed.
+// why the last tcx_pick or tcx_download failed
 var g_tcx_err: string;
 var g_tcx_hint: string;
 
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
+// paths
 
-// Under wine a Linux absolute path ("/home/x") becomes its Z: form, which
-// the Windows file APIs open; anything else is returned as is.
+// under wine a linux absolute path ("/home/x") becomes its Z: form, which
+// the windows file APIs open; anything else is returned as is
 fn tcx_win_form(p: string) -> string {
   if (sys_is_wine() && s_starts(p, "/") && !s_starts(p, "//")) {
     return "Z:" + p;
@@ -60,7 +44,7 @@ fn tcx_win_form(p: string) -> string {
   return p;
 }
 
-// $MBUILD_HOME accepts the Windows or (under wine) the Linux form.
+// $MBUILD_HOME accepts the windows or (under wine) the linux form
 fn tcx_home() -> string {
   var h: string = env_get("MBUILD_HOME");
   if (slen(h) > 0) {
@@ -105,7 +89,7 @@ fn tcx_upper(target: string) -> string {
   return "LINUX";
 }
 
-// "0.16.3" -> "v0.16.3"; "latest" and anything that is not a version stay.
+// "0.16.3" -> "v0.16.3"; "latest" and anything that is not a version stay
 fn tcx_norm(v: string) -> string {
   var t: string = s_trim(v);
   if (sv_is(t)) {
@@ -114,7 +98,7 @@ fn tcx_norm(v: string) -> string {
   return t;
 }
 
-// Releases first, newest first, then dev builds by id.
+// releases first, newest first, then dev builds by id
 fn tcx_id_before(a: string, b: string) -> bool {
   var ra: bool = sv_is(a);
   var rb: bool = sv_is(b);
@@ -127,7 +111,7 @@ fn tcx_id_before(a: string, b: string) -> bool {
   return s_cmp(a, b) > 0;
 }
 
-// The installed toolchain ids.
+// the installed toolchain ids
 fn tcx_ids() -> StrList* {
   var found: StrList* = sl_new();
   var files: StrList* = sl_new();
@@ -152,7 +136,7 @@ fn tcx_ids() -> StrList* {
   return found;
 }
 
-// toolchains/<id>/toolchain.toml.
+// toolchains/<id>/toolchain.toml
 struct TcxInfo {
   id: string;
   version: string;    // as the compiler reports it
@@ -193,7 +177,7 @@ fn tcx_two(n: int64) -> string {
   return s_int(n);
 }
 
-// The modification day of file as YYYY-MM-DD (UTC).
+// the modification day of file as YYYY-MM-DD (UTC)
 fn tcx_date_of(file: string) -> string {
   var fi: FileInfo = sys_stat(file);
   var secs: int64 = fi.mtime / 1000000000;
@@ -216,7 +200,7 @@ fn tcx_date_of(file: string) -> string {
   return s_int(y) + "-" + tcx_two(m) + "-" + tcx_two(d);
 }
 
-// The machine default, [toolchain] default in $MBUILD_HOME/config.toml.
+// the machine default, [toolchain] default in $MBUILD_HOME/config.toml
 fn tcx_config_file() -> string {
   return tcx_home() + "/config.toml";
 }
@@ -239,8 +223,8 @@ fn tcx_set_default(id: string) -> bool {
   return fs_write(tcx_config_file(), text);
 }
 
-// An installed toolchain named by id or version ("0.18" too), "" when none.
-// A version names the most recently installed toolchain reporting it.
+// an installed toolchain named by id or version ("0.18" too), "" when none.
+// a version names the most recently installed toolchain reporting it
 fn tcx_find(name: string) -> string {
   var n: string = tcx_norm(name);
   if (tcx_installed(n)) {
@@ -270,7 +254,7 @@ fn tcx_mbfile(p: Project*) -> string {
 }
 
 // mb_toolchain("...") in fn project(), read as text: it chooses the
-// compiler that compiles mbuild.mettle itself.
+// compiler that compiles mbuild.mettle itself
 fn tcx_pin(p: Project*) -> string {
   var file: string = tcx_mbfile(p);
   var r: FsRead = fs_read(file);
@@ -280,8 +264,8 @@ fn tcx_pin(p: Project*) -> string {
   return s_trim(mbf_call_arg(r.data, "mb_toolchain", s_empty(), 0));
 }
 
-// The compiler's own rule: <exe dir>/../leaf when it exists, else
-// <exe dir>/leaf; "" when neither does.
+// the compiler's own rule: <exe dir>/../leaf when it exists, else
+// <exe dir>/leaf; "" when neither does
 fn tcx_sibling(exe: string, leaf: string) -> string {
   var dir: string = p_dir(exe);
   var packaged: string = p_clean(p_join(dir, "../" + leaf));
@@ -295,8 +279,8 @@ fn tcx_sibling(exe: string, leaf: string) -> string {
   return s_empty();
 }
 
-// A user-given compiler (a path or a name on PATH) as a path this process
-// can open. Unresolvable names come back unchanged for the caller to report.
+// a user-given compiler (a path or a name on PATH) as a path this process
+// can open. unresolvable names come back unchanged for the caller to report
 fn tcx_resolve(given: string) -> string {
   var w: string = tcx_win_form(given);
   if (fs_is_file(w)) {
@@ -312,16 +296,14 @@ fn tcx_resolve(given: string) -> string {
   return w;
 }
 
-// ---------------------------------------------------------------------------
-// Host tools
-// ---------------------------------------------------------------------------
+// host tools
 
 fn tcx_wine() -> Tool {
   return proc_tool("wine", "MBUILD_WINE");
 }
 
 // curl, tar, unzip, ...: the variable env_override when set, else PATH;
-// under wine the host's programs (wine's PATH holds Windows programs only).
+// under wine the host's programs (wine's PATH holds windows programs only)
 fn tcx_host_tool(name: string, env_override: string) -> Tool {
   var ev: string = env_get(env_override);
   if (slen(ev) > 0) {
@@ -351,8 +333,8 @@ fn tcx_host_tool(name: string, env_override: string) -> Tool {
   return tool_none();
 }
 
-// Explains a host tool that was not found: what it is needed for (`what`),
-// then either the override variable's bad value or the plain miss.
+// explains a host tool that was not found: what it is needed for (`what`),
+// then either the override variable's bad value or the plain miss
 fn tcx_tool_missing(what: string, name: string, env_override: string, install: string) {
   var ev: string = env_get(env_override);
   if (slen(ev) == 0) {
@@ -386,8 +368,8 @@ fn tcx_cmd_free(c: Cmd*) {
   free(c);
 }
 
-// The tools KEY of mbuild.local.mettle (m->local->tools, "key=value"; read
-// as text before the file is evaluated); "" when it does not set it.
+// the tools KEY of mbuild.local.mettle (m->local->tools, "key=value"; read
+// as text before the file is evaluated); "" when it does not set it
 fn tcx_tools_value(p: Project*, key: string) -> string {
   if (p->man == (Manifest*)0 || p->man->local == (Manifest*)0) {
     var file: string = p->root + "/mbuild.local.mettle";
@@ -411,8 +393,8 @@ fn tcx_tools_value(p: Project*, key: string) -> string {
   return s_empty();
 }
 
-// A relative path in [tools] is relative to the project root; a bare name
-// is looked up on PATH.
+// a relative path in [tools] is relative to the project root; a bare name
+// is looked up on PATH
 fn tcx_tools_path(p: Project*, v: string) -> string {
   if (p_is_abs(v) || (s_find_byte(v, 47) < 0 && s_find_byte(v, 92) < 0)) {
     return v;
@@ -430,9 +412,7 @@ fn tcx_none(msg: string, hint: string) -> Mettle* {
   return (Mettle*)0;
 }
 
-// ---------------------------------------------------------------------------
-// Selection
-// ---------------------------------------------------------------------------
+// selection
 
 fn tcx_make(target: string, exe: string, source: string) -> Mettle* {
   var real: string = sys_realpath(exe);
@@ -484,10 +464,10 @@ fn tcx_make_installed(target: string, id: string, source: string) -> Mettle* {
   return tcx_make(target, tcx_exe_in(tcx_dir(id)), source);
 }
 
-// The compiler for target, or 0 with g_tcx_err/g_tcx_hint set: --mettle
+// the compiler for target, or 0 with g_tcx_err/g_tcx_hint set: --mettle
 // (host), MBUILD_METTLE_<T>, $METTLE (host), mb_tool("mettle-<t>") in
 // mbuild.local.mettle, then for the host the project's mb_toolchain pin,
-// the default toolchain and mettle on PATH.
+// the default toolchain and mettle on PATH
 fn tcx_pick(p: Project*, target: string) -> Mettle* {
   tcx_set_err(s_empty(), s_empty());
   if (!target_valid(target)) {
@@ -560,8 +540,8 @@ fn tcx_fail_last() {
   fail(g_tcx_err);
 }
 
-// The OS whose compiler builds target: a RISC-V target is cross-compiled
-// by the host's.
+// the OS whose compiler builds target: a RISC-V target is cross-compiled
+// by the host's
 export fn tc_compiler_os(target: string) -> string {
   if (target_is_riscv(target)) {
     return sys_os();
@@ -569,6 +549,7 @@ export fn tc_compiler_os(target: string) -> string {
   return target;
 }
 
+// never starts a compiler (wine takes about a second)
 export fn tc_select(p: Project*, target: string) -> Mettle* {
   var m: Mettle* = tcx_pick(p, tc_compiler_os(target));
   if (m == (Mettle*)0) {
@@ -578,7 +559,7 @@ export fn tc_select(p: Project*, target: string) -> Mettle* {
   return m;
 }
 
-// True when a compiler for target is there to be selected (tc_select would not fail).
+// true when a compiler for target is there to be selected (tc_select would not fail)
 export fn tc_available(p: Project*, target: string) -> bool {
   return tcx_pick(p, tc_compiler_os(target)) != (Mettle*)0;
 }
@@ -586,8 +567,8 @@ export fn tc_available(p: Project*, target: string) -> bool {
 var g_tcx_boards_id: string;
 var g_tcx_boards: StrList*;
 
-// The RISC-V boards the compiler has, from `mettle help riscv` ("The boards:
-// a, b."); empty when it does not say.
+// the RISC-V boards the compiler has, from `mettle help riscv` ("The boards:
+// a, b."); empty when it does not say
 export fn tc_boards(m: Mettle*) -> StrList* {
   if (g_tcx_boards != (StrList*)0 && s_eq(g_tcx_boards_id, m->id)) {
     return g_tcx_boards;
@@ -635,9 +616,7 @@ export fn tc_cmd(m: Mettle*) -> Cmd* {
   return c;
 }
 
-// ---------------------------------------------------------------------------
-// Version (cached by identity: running wine costs about a second)
-// ---------------------------------------------------------------------------
+// version (cached by identity: running wine costs about a second)
 
 fn tcx_parse_version(text: string) -> string {
   var lines: StrList* = s_lines(s_trim(text));
@@ -697,8 +676,8 @@ export fn tc_version(m: Mettle*) -> string {
 
 // "" when m is new enough for `need`, else the error text
 // without the "error: " prefix: the first line, then "\n  help: ..." that
-// callers may extend with ", or require ...". A compiler whose version is
-// not a release number (a development build) passes.
+// callers may extend with ", or require ...". a compiler whose version is
+// not a release number (a development build) passes
 export fn tc_require_minimum(m: Mettle*, need: string, who: string) -> string {
   var want: string = tcx_norm(need);
   if (!sv_is(want)) {
@@ -715,11 +694,9 @@ export fn tc_require_minimum(m: Mettle*, need: string, who: string) -> string {
   return who + " needs Mettle " + want + " or newer; the " + m->target + " compiler is " + have + " (" + m->path + ")\n  help: install a newer compiler (mbuild toolchain install)";
 }
 
-// ---------------------------------------------------------------------------
-// Flag support: probed once per compiler identity
-// ---------------------------------------------------------------------------
+// flag support: probed once per compiler identity
 
-// The argument the compiler rejected in `out`, "" when it rejected none.
+// the argument the compiler rejected in `out`, "" when it rejected none
 fn tcx_rejected(out: string) -> string {
   var mark: string = "Unknown or misplaced argument '";
   var at: int64 = s_find(out, mark);
@@ -734,8 +711,8 @@ fn tcx_rejected(out: string) -> string {
   return s_sub(out, start, end);
 }
 
-// A probe unit: a flag starting with '-' and the values that follow it
-// ("--subsystem windows"), so value pairs stay pairs.
+// a probe unit: a flag starting with '-' and the values that follow it
+// ("--subsystem windows"), so value pairs stay pairs
 struct TcxUnits {
   keys: StrList*;   // the unit's arguments joined by spaces (the cache key)
   first: int64*;    // index of the flag in the argument list
@@ -784,10 +761,10 @@ fn tcx_units_free(u: TcxUnits*) {
   free(u);
 }
 
-// The flags (of `flags`, a compiler argument list) that m rejects, each
-// named by its flag (the value of a pair is not repeated). Every flag costs
+// the flags (of `flags`, a compiler argument list) that m rejects, each
+// named by its flag (the value of a pair is not repeated). every flag costs
 // one probe per compiler identity, ever: answers live in
-// $MBUILD_HOME/toolchains/flags.cache as "<id>\t<flag>\t<1|0>".
+// $MBUILD_HOME/toolchains/flags.cache as "<id>\t<flag>\t<1|0>"
 export fn tc_unsupported(m: Mettle*, flags: StrList*) -> StrList* {
   var bad: StrList* = sl_new();
   var u: TcxUnits* = tcx_units(flags);
@@ -877,7 +854,7 @@ export fn tc_unsupported(m: Mettle*, flags: StrList*) -> StrList* {
       pending = pending - 1;
     } else {
       // "Could not read file" (or any other answer) ends the probe; only an
-      // answer from the compiler itself is worth remembering.
+      // answer from the compiler itself is worth remembering
       var answered: bool = slen(rejected) == 0 && s_contains(cap.out, "Error");
       i = 0;
       while (i < u->n) {
@@ -914,9 +891,7 @@ export fn tc_unsupported(m: Mettle*, flags: StrList*) -> StrList* {
   return bad;
 }
 
-// ---------------------------------------------------------------------------
-// Running built programs
-// ---------------------------------------------------------------------------
+// running built programs
 
 export fn tc_run_program_cmd(target: string, exe_path: string) -> Cmd* {
   var host: string = sys_os();
@@ -939,7 +914,7 @@ export fn tc_run_program_cmd(target: string, exe_path: string) -> Cmd* {
     var u: Tool = tool_none();
     u.path = sys_host_path(tcx_win_form(exe_path));
     if (s_starts(s_lower(u.path), "z:")) {
-      // wine answers nothing for a path whose directory does not exist yet.
+      // wine answers nothing for a path whose directory does not exist yet
       u.path = s_replace_byte(s_from(u.path, 2), 92, 47);
     }
     u.unix = true;
@@ -948,12 +923,10 @@ export fn tc_run_program_cmd(target: string, exe_path: string) -> Cmd* {
   return (Cmd*)0;
 }
 
-// ---------------------------------------------------------------------------
-// Releases
-// ---------------------------------------------------------------------------
+// releases
 
-// The GitHub API of the Mettle repository; MBUILD_METTLE_API replaces it
-// (mirrors, tests).
+// the GitHub API of the mettle repository; MBUILD_METTLE_API replaces it
+// (mirrors, tests)
 fn tcx_api() -> string {
   var a: string = env_get("MBUILD_METTLE_API");
   if (slen(a) > 0) {
@@ -977,9 +950,8 @@ fn tcx_curl() -> Tool {
   return tcx_host_tool("curl", "MBUILD_CURL");
 }
 
-
-// The first JSON string `"key": "..."` at or after from: at = -1 when there
-// is none, val = "" when it is not a string (null).
+// the first JSON string `"key": "..."` at or after from: at = -1 when there
+// is none, val = "" when it is not a string (null)
 struct TcxJson {
   val: string;
   at: int64;
@@ -1015,7 +987,7 @@ fn tcx_json_str(json: string, key: string, from: int64) -> TcxJson {
   return r;
 }
 
-// A release and this host's archive in it.
+// a release and this host's archive in it
 struct TcxRelease {
   tag: string;      // "" when it could not be read (g_tcx_err says why)
   url: string;
@@ -1023,7 +995,7 @@ struct TcxRelease {
   soft: bool;       // the lookup failed for want of curl or the network
 }
 
-// The release `tag` ("latest" = the newest) from the GitHub API.
+// the release `tag` ("latest" = the newest) from the GitHub API
 fn tcx_release(tag: string) -> TcxRelease {
   var rel: TcxRelease;
   rel.tag = s_empty();
@@ -1100,14 +1072,14 @@ fn tcx_release(tag: string) -> TcxRelease {
   return rel;
 }
 
-// Runs and frees c.
+// runs and frees c
 fn tcx_run_ok(c: Cmd*) -> bool {
   var ok: bool = proc_run(c) == 0;
   tcx_cmd_free(c);
   return ok;
 }
 
-// tar -xzf / unzip / bsdtar / python3 zipfile: whichever this host has.
+// tar -xzf / unzip / bsdtar / python3 zipfile: whichever this host has
 fn tcx_extract(archive: string, dir: string, target: string) -> bool {
   if (s_eq(target, "linux")) {
     var tar: Tool = tcx_host_tool("tar", "MBUILD_TAR");
@@ -1133,7 +1105,7 @@ fn tcx_extract(archive: string, dir: string, target: string) -> bool {
   }
   var tried: bool = false;
   if (s_eq(sys_os(), "windows") && !sys_is_wine()) {
-    // tar.exe (bsdtar) ships with Windows 10 and later and reads zip files.
+    // tar.exe (bsdtar) ships with windows 10 and later and reads zip files
     var wtar: Tool = sys_find_tool("tar");
     if (tool_found(wtar)) {
       tried = true;
@@ -1193,8 +1165,8 @@ fn tcx_extract(archive: string, dir: string, target: string) -> bool {
   return false;
 }
 
-// The directory of an unpacked archive that holds the compiler: dir itself,
-// or its only subdirectory (the Linux tarball has a top-level folder).
+// the directory of an unpacked archive that holds the compiler: dir itself,
+// or its only subdirectory (the linux tarball has a top-level folder)
 fn tcx_find_top(dir: string) -> string {
   if (fs_is_file(tcx_exe_in(dir))) {
     return dir;
@@ -1224,7 +1196,7 @@ fn tcx_download_failed(url: string, http: string) {
   tcx_set_err("downloading " + url + " failed" + why, "check the network and the releases at " + tcx_releases_page());
 }
 
-// The version the compiler exe reports, "" when it cannot say.
+// the version the compiler exe reports, "" when it cannot say
 fn tcx_exe_version(exe: string) -> string {
   var t: Tool = sys_find_tool(exe);
   if (!tool_found(t)) {
@@ -1240,7 +1212,7 @@ fn tcx_exe_version(exe: string) -> string {
   return tcx_parse_version(cap.out);
 }
 
-// Writes dir/toolchain.toml.
+// writes dir/toolchain.toml
 fn tcx_finish(dir: string, id: string, source: string, describe: string) {
   var file: string = dir + "/toolchain.toml";
   var t: TcxInfo;
@@ -1254,8 +1226,8 @@ fn tcx_finish(dir: string, id: string, source: string, describe: string) {
   fs_write(file, tcx_info_text(t));
 }
 
-// Renames the finished top (inside tmp) to toolchains/<id>, replacing an
-// older one, and removes tmp.
+// renames the finished top (inside tmp) to toolchains/<id>, replacing an
+// older one, and removes tmp
 fn tcx_move_in(tmp: string, top: string, id: string) -> bool {
   var dest: string = tcx_dir(id);
   if (fs_exists(dest)) {
@@ -1275,8 +1247,8 @@ fn tcx_tmp(id: string) -> string {
   return tcx_root() + "/.tmp-" + id + "-" + s_int(sys_now_ms());
 }
 
-// Downloads, verifies and unpacks rel into toolchains/<tag>. False with
-// g_tcx_err set; nothing half-installed is left behind.
+// downloads, verifies and unpacks rel into toolchains/<tag>. false with
+// g_tcx_err set; nothing half-installed is left behind
 fn tcx_install_release(rel: TcxRelease) -> bool {
   var curl: Tool = tcx_curl();
   if (!tool_found(curl)) {
@@ -1357,7 +1329,7 @@ fn tcx_copy_tree(src: string, dst: string) -> bool {
   return ok;
 }
 
-// git describe --tags of a checkout, "" when git cannot say.
+// git describe --tags of a checkout, "" when git cannot say
 fn tcx_describe(dir: string) -> string {
   var git: Tool = tcx_host_tool("git", "MBUILD_GIT");
   if (!tool_found(git)) {
@@ -1389,8 +1361,8 @@ fn tcx_is_checkout(dir: string) -> bool {
   return fs_is_file(dir + "/Makefile") && fs_is_dir(dir + "/src") && fs_is_dir(dir + "/stdlib/std");
 }
 
-// Builds the Mettle checkout at given with make and installs its compiler
-// as dev-<git describe>: the id, or "" with g_tcx_err set.
+// builds the mettle checkout at given with make and installs its compiler
+// as dev-<git describe>: the id, or "" with g_tcx_err set
 fn tcx_install_source(given: string) -> string {
   var dir: string = tcx_abs(given);
   if (!tcx_is_checkout(dir)) {
@@ -1452,9 +1424,7 @@ fn tcx_install_source(given: string) -> string {
   return id;
 }
 
-// ---------------------------------------------------------------------------
 // mbuild toolchain
-// ---------------------------------------------------------------------------
 
 fn tcx_err_last() {
   error_msg(g_tcx_err);
@@ -1471,8 +1441,8 @@ fn tcx_offline(p: Project*) -> bool {
   return p->opts != (Options*)0 && p->opts->offline;
 }
 
-// The value of "--name=VALUE" (or "--name VALUE") among the command's
-// arguments, "" when absent.
+// the value of "--name=VALUE" (or "--name VALUE") among the command's
+// arguments, "" when absent
 fn tcx_opt(p: Project*, name: string) -> string {
   var rest: StrList* = p->opts->rest;
   var eq: string = name + "=";
@@ -1494,7 +1464,7 @@ fn tcx_flag(p: Project*, name: string) -> bool {
   return sl_has(p->opts->rest, name);
 }
 
-// The arguments that are not flags (nor the value of "--from DIR").
+// the arguments that are not flags (nor the value of "--from DIR")
 fn tcx_positional(p: Project*) -> StrList* {
   var rest: StrList* = p->opts->rest;
   var l: StrList* = sl_new();
@@ -1511,9 +1481,9 @@ fn tcx_positional(p: Project*) -> StrList* {
   return l;
 }
 
-// Installs "latest", a release, or (from != "") a source checkout; the id,
+// installs "latest", a release, or (from != "") a source checkout; the id,
 // or "" after printing the error. soft (may be 0) is set when only the
-// network or curl was missing.
+// network or curl was missing
 fn tcx_install(p: Project*, given: string, from: string, soft: bool*) -> string {
   if (slen(from) > 0) {
     var id: string = tcx_install_source(from);
@@ -1668,9 +1638,9 @@ fn tcx_not_installed(given: string) -> int32 {
   return 1;
 }
 
-// Pins the project to an installed toolchain (mb_toolchain in fn
+// pins the project to an installed toolchain (mb_toolchain in fn
 // project()); --local writes its compiler as mb_tool("mettle-<host>", PATH)
-// into mbuild.local.mettle instead.
+// into mbuild.local.mettle instead
 fn tcx_cmd_use(p: Project*, given: string, local: bool) -> int32 {
   var id: string = tcx_find(given);
   if (slen(id) == 0) {
@@ -1731,7 +1701,7 @@ fn tcx_cmd_default(given: string) -> int32 {
   return 0;
 }
 
-// Drops versions.cache lines of compilers under dir.
+// drops versions.cache lines of compilers under dir
 fn tcx_forget(dir: string) {
   var cache: string = tcx_root() + "/versions.cache";
   var r: FsRead = fs_read(cache);
@@ -1772,8 +1742,8 @@ fn tcx_cmd_remove(given: string) -> int32 {
   return 0;
 }
 
-// Rebuilds source toolchains whose checkout moved on and tells of a newer
-// release than the newest installed one.
+// rebuilds source toolchains whose checkout moved on and tells of a newer
+// release than the newest installed one
 fn tcx_cmd_update(p: Project*) -> int32 {
   var ids: StrList* = tcx_ids();
   defer tcx_sl_free(ids);
@@ -1907,9 +1877,7 @@ export fn tc_cmd_toolchain(p: Project*) -> int32 {
   return 2;
 }
 
-// ---------------------------------------------------------------------------
 // Self-setup
-// ---------------------------------------------------------------------------
 
 fn tcx_show_home(h: string) -> string {
   var home: string = s_replace_byte(sys_home(), 92, 47);
@@ -1924,7 +1892,7 @@ fn tcx_layout(home: string) -> bool {
   return fs_mkdirs(home + "/toolchains") && fs_mkdirs(home + "/tmp");
 }
 
-// On the first run (no $MBUILD_HOME yet) creates it and says so once.
+// on the first run (no $MBUILD_HOME yet) creates it and says so once
 export fn tc_first_run() {
   var home: string = tcx_home();
   if (fs_is_dir(home)) {
@@ -1945,7 +1913,7 @@ fn tcx_setup_tool(label: string, name: string, env_override: string, why: string
   return false;
 }
 
-// The Mettle checkout a compiler was built in (<checkout>/bin/mettle), "".
+// the mettle checkout a compiler was built in (<checkout>/bin/mettle), ""
 fn tcx_checkout_of(exe: string) -> string {
   var real: string = sys_realpath(exe);
   if (slen(real) == 0) {

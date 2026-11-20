@@ -1,7 +1,4 @@
-// riscv: running RISC-V programs under emulators. riscv*-linux runs on
-// QEMU's user mode, a board = "qemu-virt" image on qemu-system, a board =
-// "pico2" image on rvsim (the Mettle project's simulator, built once into
-// $MBUILD_HOME/tools when it is not on PATH).
+// riscv: running RISC-V programs under qemu and rvsim
 
 import "std/mem";
 import "../core/base";
@@ -14,7 +11,7 @@ import "toolchain";
 import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
-// qemu-riscv64 / qemu-riscv32: MBUILD_QEMU_USER_DIR, ~/.local/opt/qemu-user/bin, PATH.
+// qemu-riscv64 / qemu-riscv32: MBUILD_QEMU_USER_DIR, ~/.local/opt/qemu-user/bin, PATH
 fn rvx_qemu_user(target: string) -> Tool {
   var name: string = "qemu-riscv64";
   if (s_starts(target, "riscv32")) {
@@ -39,8 +36,8 @@ fn rvx_qemu_user(target: string) -> Tool {
   return t;
 }
 
-// Why target's programs can't run here, "" when they can: the emulator is
-// missing, or the board has none (rv_image_cmd would fail).
+// why target's programs can't run here, "" when they can: the emulator is
+// missing, or the board has none (rv_image_cmd would fail)
 export fn rv_runner_missing(m: Mettle*, target: string, st: Settings*) -> string {
   if (!target_is_bare(target)) {
     var name: string = "qemu-riscv64";
@@ -95,15 +92,15 @@ export fn rv_runner_missing(m: Mettle*, target: string, st: Settings*) -> string
   return "board " + st->board + " has no emulator mbuild can run";
 }
 
-// The command that runs a riscv*-linux executable.
+// the command that runs a riscv*-linux executable
 export fn rv_program_cmd(target: string, exe: string) -> Cmd* {
   var c: Cmd* = cmd_new(rvx_qemu_user(target));
   cmd_path(c, exe);
   return c;
 }
 
-// The command that runs a board image: base is the image's path without
-// its extension, outs the files the build wrote (bin, elf, ...).
+// the command that runs a board image: base is the image's path without
+// its extension, outs the files the build wrote (bin, elf, ...)
 export fn rv_image_cmd(p: Project*, m: Mettle*, target: string, base: string, outs: StrList*, st: Settings*) -> Cmd* {
   var board: string = st->board;
   if (s_eq(board, "qemu-virt")) {
@@ -164,8 +161,8 @@ export fn rv_image_cmd(p: Project*, m: Mettle*, target: string, base: string, ou
   return (Cmd*)0;
 }
 
-// Turns the console of a --pgo-gen board run into the profile, with
-// tools/riscv-pgo-capture.py of the Mettle checkout ($METTLE's or m's).
+// turns the console of a --pgo-gen board run into the profile, with
+// tools/riscv-pgo-capture.py of the mettle checkout ($METTLE's or m's)
 export fn rv_pgo_capture(m: Mettle*, console: string, prof: string) {
   var tree: string = rvx_tree(env_get("METTLE"));
   if (slen(tree) == 0) {
@@ -195,7 +192,7 @@ export fn rv_pgo_capture(m: Mettle*, console: string, prof: string) {
   }
 }
 
-// The Mettle checkout a compiler was built in ("" when it is not in one).
+// the mettle checkout a compiler was built in ("" when it is not in one)
 fn rvx_tree(compiler: string) -> string {
   if (slen(compiler) == 0) {
     return s_empty();
@@ -212,7 +209,7 @@ fn rvx_tree(compiler: string) -> string {
 }
 
 // rvsim: MBUILD_RVSIM, PATH, $MBUILD_HOME/tools, else built there from the
-// Mettle checkout of $METTLE or of the selected compiler.
+// mettle checkout of $METTLE or of the selected compiler
 fn rvx_rvsim(m: Mettle*) -> Tool {
   var given: string = env_get("MBUILD_RVSIM");
   if (slen(given) > 0) {

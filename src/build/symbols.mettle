@@ -1,14 +1,4 @@
-// symbols: the names a binary defines, read straight from the file.
-//
-//   ELF64 shared object  .dynsym  (defined GLOBAL/WEAK/UNIQUE FUNC/OBJECT/IFUNC)
-//   ELF64 relocatable    .symtab  (the same, plus NOTYPE: assembler labels)
-//   PE image (DLL, EXE)  the export directory's name table
-//   COFF object (.obj)   external symbols defined in a section
-//
-// Written in Mettle rather than shelling out to nm/objdump so it behaves the
-// same natively and under wine. Only the parts needed are read (headers, one
-// symbol table, its string table); files over 512 MB are skipped, and every
-// offset is checked against the file size, so garbage input answers nothing.
+// symbols: the names an ELF, PE or COFF file defines, read straight from the file
 
 import "std/io";
 import "std/mem";
@@ -25,7 +15,7 @@ struct SymxFile {
   size: int64;
 }
 
-// One file's answer, cached per path by sym_defined.
+// one file's answer, cached per path by sym_defined
 struct SymxCache {
   paths: StrList*;
   lists: StrList**;
@@ -54,7 +44,7 @@ fn symx_open(f: SymxFile*, path: string) -> bool {
   return true;
 }
 
-// n bytes at off (malloc'd, plus a nul), or 0 when out of range or short.
+// n bytes at off (malloc'd, plus a nul), or 0 when out of range or short
 fn symx_read(f: SymxFile*, off: int64, n: int64) -> uint8* {
   if (off < 0 || n <= 0 || n > SYMX_MAX_PART || off > f->size || n > f->size - off) {
     return (uint8*)0;
@@ -84,8 +74,8 @@ fn symx_u64(p: uint8*, off: int64) -> int64 {
   return symx_u32(p, off) | (symx_u32(p, off + 4) << 32);
 }
 
-// The nul-terminated string at off inside a buffer of n bytes ("" when off is
-// outside or no nul follows).
+// the nul-terminated string at off inside a buffer of n bytes ("" when off is
+// outside or no nul follows)
 fn symx_cstr(p: uint8*, n: int64, off: int64) -> string {
   if (off < 0 || off >= n) {
     return s_empty();
@@ -100,7 +90,7 @@ fn symx_cstr(p: uint8*, n: int64, off: int64) -> string {
   return s_dup(s_view(&p[off], e - off));
 }
 
-// Collects a name: everything when wanted is 0, else only wanted names.
+// collects a name: everything when wanted is 0, else only wanted names
 fn symx_take(found: StrList*, wanted: StrList*, name: string) {
   if (slen(name) == 0) {
     return;
@@ -114,8 +104,8 @@ fn symx_take(found: StrList*, wanted: StrList*, name: string) {
   }
 }
 
-// Whether "name\0" occurs in a string table. Not "\0name\0": linkers
-// share tails, so "cos" may be the end of "acos".
+// whether "name\0" occurs in a string table. not "\0name\0": linkers
+// share tails, so "cos" may be the end of "acos"
 fn symx_strtab_has(p: uint8*, n: int64, name: string) -> bool {
   var m: int64 = slen(name);
   if (m == 0 || m + 1 > n) {
@@ -132,9 +122,7 @@ fn symx_strtab_has(p: uint8*, n: int64, name: string) -> bool {
   return false;
 }
 
-// ---------------------------------------------------------------------------
 // ELF64
-// ---------------------------------------------------------------------------
 
 fn symx_elf_symtab(f: SymxFile*, sh: uint8*, shnum: int64, idx: int64, wanted: StrList*, found: StrList*) {
   var s: int64 = idx * 64;
@@ -202,7 +190,7 @@ fn symx_elf(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
     return;
   }
   defer free(sh);
-  // A shared object answers what it exports; an object file what it defines.
+  // a shared object answers what it exports; an object file what it defines
   var first: int64 = 2;
   var second: int64 = 11;
   if (etype == 3) {
@@ -233,18 +221,16 @@ fn symx_elf(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
   }
 }
 
-// ---------------------------------------------------------------------------
 // PE export directory
-// ---------------------------------------------------------------------------
 
-// A section loaded into memory, to resolve RVAs inside it.
+// a section loaded into memory, to resolve RVAs inside it
 struct SymxSec {
   va: int64;
   len: int64;
   data: uint8*;
 }
 
-// The file offset of an RVA, -1 when no section holds it.
+// the file offset of an RVA, -1 when no section holds it
 fn symx_rva_off(secs: uint8*, nsec: int64, rva: int64) -> int64 {
   var i: int64 = 0;
   while (i < nsec) {
@@ -268,8 +254,8 @@ fn symx_rva_off(secs: uint8*, nsec: int64, rva: int64) -> int64 {
   return -1;
 }
 
-// The name at an RVA: from the loaded section when it lies there, else read
-// from the file.
+// the name at an RVA: from the loaded section when it lies there, else read
+// from the file
 fn symx_pe_name(f: SymxFile*, ls: SymxSec*, secs: uint8*, nsec: int64, rva: int64) -> string {
   if (rva >= ls->va && rva < ls->va + ls->len) {
     return symx_cstr(ls->data, ls->len, rva - ls->va);
@@ -335,7 +321,7 @@ fn symx_pe(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
     return;
   }
   defer free(secs);
-  // Load the section holding the export directory.
+  // load the section holding the export directory
   var ls: SymxSec;
   ls.va = 0;
   ls.len = 0;
@@ -395,9 +381,7 @@ fn symx_pe(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
   }
 }
 
-// ---------------------------------------------------------------------------
 // COFF object
-// ---------------------------------------------------------------------------
 
 fn symx_coff(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
   var symptr: int64 = symx_u32(hdr, 8);
@@ -452,11 +436,9 @@ fn symx_coff(f: SymxFile*, hdr: uint8*, wanted: StrList*, found: StrList*) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
+// dispatch
 
-// "elf-so", "elf-o", "pe", "coff", or "" for anything else.
+// "elf-so", "elf-o", "pe", "coff", or "" for anything else
 fn symx_kind(hdr: uint8*, n: int64) -> string {
   if (n >= 64 && hdr[0] == 127 && hdr[1] == 69 && hdr[2] == 76 && hdr[3] == 70) {
     var et: int64 = symx_u16(hdr, 16);
@@ -506,9 +488,9 @@ fn symx_scan(path: string, wanted: StrList*, found: StrList*) -> string {
   return kind;
 }
 
-// The binary format of a file: "elf-so" (shared object), "elf-o"
+// the binary format of a file: "elf-so" (shared object), "elf-o"
 // (relocatable), "elf" (another ELF), "pe" (DLL or EXE), "coff" (object), or
-// "" when it is none of these or cannot be read.
+// "" when it is none of these or cannot be read
 export fn sym_format(path: string) -> string {
   var f: SymxFile;
   if (!symx_open(&f, path)) {
@@ -529,7 +511,7 @@ export fn sym_format(path: string) -> string {
 }
 
 // DT_SONAME of an ELF64 shared object read from its .dynamic section ("" when
-// there is none). No defer here: head --release can't compile it.
+// there is none). no defer here: head --release can't compile it
 fn symx_elf_soname(f: SymxFile*) -> string {
   var hdr: uint8* = symx_read(f, 0, 64);
   if (hdr == (uint8*)0) {
@@ -600,8 +582,8 @@ fn symx_elf_soname(f: SymxFile*) -> string {
   return name;
 }
 
-// The soname an ELF shared object declares (DT_SONAME, e.g. "libz.so.1"),
-// "" for anything else or when it has none.
+// the soname an ELF shared object declares (DT_SONAME, e.g. "libz.so.1"),
+// "" for anything else or when it has none
 export fn sym_soname(path: string) -> string {
   var f: SymxFile;
   if (!symx_open(&f, path)) {
@@ -615,8 +597,8 @@ export fn sym_soname(path: string) -> string {
   return name;
 }
 
-// Sorts and removes duplicates (merge sort: symbol lists run to tens of
-// thousands of names).
+// sorts and removes duplicates (merge sort: symbol lists run to tens of
+// thousands of names)
 export fn sym_sort_uniq(l: StrList*) {
   if (l->len < 2) {
     return;
@@ -665,7 +647,7 @@ export fn sym_sort_uniq(l: StrList*) {
   l->len = w;
 }
 
-// Binary search in a list sorted by sym_sort_uniq.
+// binary search in a list sorted by sym_sort_uniq
 export fn sym_sorted_has(l: StrList*, name: string) -> bool {
   var lo: int64 = 0;
   var hi: int64 = l->len;
@@ -694,8 +676,8 @@ fn symx_cache() -> SymxCache* {
   return g_symx_cache;
 }
 
-// Every name the file defines, sorted, without duplicates (empty for an
-// unreadable or unknown file). Cached per path for the life of the process.
+// every name the file defines, sorted, without duplicates (empty for an
+// unreadable or unknown file). cached per path for the life of the process
 export fn sym_defined(path: string) -> StrList* {
   var c: SymxCache* = symx_cache();
   var at: int64 = sl_index(c->paths, path);
@@ -720,8 +702,8 @@ export fn sym_file_defines(path: string, name: string) -> bool {
   return sym_sorted_has(sym_defined(path), name);
 }
 
-// Which of `names` the file defines, without caching the file's full list:
-// the right call for sweeping hundreds of system libraries for a few names.
+// which of `names` the file defines, without caching the file's full list:
+// the right call for sweeping hundreds of system libraries for a few names
 export fn sym_defines_which(path: string, names: StrList*) -> StrList* {
   var c: SymxCache* = symx_cache();
   var found: StrList* = sl_new();
