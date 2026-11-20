@@ -1,6 +1,6 @@
-// mbuild/init_windows: no sandbox on Windows; init.rules and a dependency's
-// mbuild.mettle rely on mbuild's static check alone there.
+// mbuild/init_windows: no sandbox on windows; init.rules and a dependency's mbuild.mettle rely on mbuild's static check alone.
 
+// always true: nothing to sandbox with.
 export fn mii_sandbox(what: string) -> bool {
   return true;
 }

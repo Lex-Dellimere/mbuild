@@ -1,7 +1,6 @@
-// "mbuild/shell" in `mbuild shell` builds (generated from mbuild's
-// src/mbapi/shell_live.mettle). shell_point() runs mbsh_eval, whose body
-// each input at the prompt patches in and out again, writes the watch
-// values to the state file, and while the pause file exists waits there,
+// "mbuild/shell" in `mbuild shell` builds (generated from this file).
+// shell_point() runs mbsh_eval, whose body each input at the prompt patches in and out,
+// writes the watch values to the state file, and while the pause file exists waits there
 // taking patches and running evals, until it goes or a step file comes.
 
 import "std/file";
@@ -63,7 +62,7 @@ fn mbsh_eval() {
 //@body
 }
 
-// The watch lines; sets mbsh_hit when the pause-when condition turns true.
+// the watch lines; sets mbsh_hit when the pause-when condition turns true.
 fn mbsh_watch() -> string {
   var s: string = "";
 //@watch
@@ -84,8 +83,7 @@ fn mbsh_state(paused: string, w: string) {
   mbsh_put(mbsh_state_path, s);
 }
 
-// Waits while the pause file exists: patches come in at the quiesce, evals
-// run, the state is written again after each and every 100 ms.
+// waits while the pause file exists: patches come in at the quiesce, evals run, the state is written after each and every 100 ms.
 fn mbsh_paused() {
   var n: int64 = 0;
   var seen: int64 = mbsh_seq;
@@ -105,12 +103,13 @@ fn mbsh_paused() {
   }
 }
 
-// Never true: keeps the helpers in the build, so a patch only replaces mbsh_eval.
+// never true: keeps the helpers in the build, so a patch only replaces mbsh_eval.
 fn mbsh_keep() {
   mbsh_put("", mbsh_q(mbsh_hex(0)));
 //@keep
 }
 
+// runs the prompt's eval, writes the watch state, waits here while paused.
 export fn shell_point() {
   if (mbsh_seq < 0) {
     mbsh_keep();

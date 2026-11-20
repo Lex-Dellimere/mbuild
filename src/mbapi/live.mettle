@@ -1,8 +1,5 @@
-// "mbuild/live": the events `mbuild live` and `mbuild shell` write for the
-// program (docs/project.md#live-preview). They set MBUILD_LIVE_EVENTS to a
-// file of lines "KIND PAYLOAD"; mblive_next reads the next whole one. Outside
-// them the variable is unset: mblive_active() is false and mblive_next()
-// answers false after one getenv.
+// "mbuild/live": the events `mbuild live` and `mbuild shell` write for the program (docs/project.md#live-preview).
+// they set MBUILD_LIVE_EVENTS to a file of "KIND PAYLOAD" lines; outside them it is unset and mblive_active() is false.
 
 import "std/file";
 import "std/mem";
@@ -10,12 +7,10 @@ import "std/mem";
 extern fn mblive_c_getenv(name: cstring) -> cstring = "getenv";
 extern fn mblive_c_strlen(s: cstring) -> int64 = "strlen";
 
-// kind: changed, removed, patched, patch-error, built, build-error, paused,
-// resumed, exited (or a newer one: skip what you don't know). path: the
-// file, relative to the project root, for changed and removed. detail: the
-// rest of the line: the function for patched, the message for patch-error
-// and build-error ("FILE:LINE:COL: MESSAGE"), the code for exited. The
-// strings stay valid until the next mblive_next call.
+// kind: changed, removed, patched, patch-error, built, build-error, paused, resumed, exited (skip kinds you don't know).
+// path: the file, relative to the project root, for changed and removed.
+// detail: the rest of the line: the function for patched, the message for patch-error and build-error ("FILE:LINE:COL: MESSAGE"), the code for exited.
+// the strings stay valid until the next mblive_next call.
 export struct MbLiveEvent {
   kind: string;
   path: string;
@@ -54,7 +49,7 @@ fn mblive_open() -> bool {
   return true;
 }
 
-// True when the program runs under `mbuild live` or `mbuild shell`.
+// true when the program runs under `mbuild live` or `mbuild shell`.
 export fn mblive_active() -> bool {
   if (g_mblive_state == 0) {
     mblive_open();
@@ -73,8 +68,7 @@ fn mblive_newline() -> int64 {
   return -1;
 }
 
-// The next unread event into ev; false when there is none yet. One read of
-// the file when nothing is buffered, so it can run every frame.
+// the next unread event into ev; false when there is none yet (one file read when nothing is buffered, so it can run every frame).
 export fn mblive_next(ev: MbLiveEvent*) -> bool {
   if (g_mblive_state != 1) {
     if (g_mblive_state != 0 || !mblive_open()) {

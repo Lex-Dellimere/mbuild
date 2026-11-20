@@ -1,5 +1,4 @@
-// mbuild/api_windows: the Windows half of mb_spawn and friends (kernel32,
-// Winsock). Untested: no Windows dev compiler yet.
+// mbuild/api_windows: the windows half of mb_spawn and friends (kernel32, winsock). untested: no windows dev compiler yet.
 
 extern fn mbi_w_CreateProcessA(app: cstring, cmd: cstring, pa: rawptr, ta: rawptr, inherit: int32, flags: uint32, env: rawptr, cwd: cstring, si: rawptr, pi: rawptr) -> int32 = "CreateProcessA";
 extern fn mbi_w_CreateFileA(path: cstring, access: uint32, share: uint32, sa: rawptr, creation: uint32, flags: uint32, template: int64) -> int64 = "CreateFileA";
@@ -47,7 +46,7 @@ fn mbi_w_inheritable(path: cstring, write: bool) -> int64 {
   return mbi_w_CreateFileA(path, (uint32)2147483648, (uint32)3, (rawptr)sa, (uint32)3, (uint32)128, 0);
 }
 
-// Runs cmdline (extra: "K=V" entries, set for the child only), output to log; -1 on failure.
+// runs cmdline (extra: "K=V" entries, set for the child only), output to log; -1 on failure.
 export fn mbi_sys_spawn(path: cstring, argv: cstring*, envp: cstring*, cmdline: cstring, extra: cstring*, cwd: cstring, log: cstring) -> int64 {
   var out: int64 = mbi_w_inheritable(log, true);
   if (out == -1) {
@@ -114,7 +113,7 @@ export fn mbi_sys_poll(h: int64) -> int32 {
   return (int32)code;
 }
 
-// No SIGTERM for console programs: both terminate.
+// no sigterm for console programs: both terminate.
 export fn mbi_sys_signal(h: int64, kill: bool) {
   mbi_w_TerminateProcess(h, (uint32)1);
 }

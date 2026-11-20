@@ -1,7 +1,6 @@
-// mbuild/api_linux: the Linux half of mb_spawn and friends (raw x86-64
-// syscalls). api.mettle passes nul-terminated strings and arrays.
+// mbuild/api_linux: the linux half of mb_spawn and friends (raw x86-64 syscalls).
 
-// Starts path with argv and envp, output to log (stdin /dev/null); -1 when fork failed.
+// starts path with argv and envp, output to log (stdin /dev/null); -1 when fork failed.
 export fn mbi_sys_spawn(path: cstring, argv: cstring*, envp: cstring*, cmdline: cstring, extra: cstring*, cwd: cstring, log: cstring) -> int64 {
   var devnull: cstring = "/dev/null";
   var none: int64 = 0;
@@ -29,7 +28,7 @@ export fn mbi_sys_spawn(path: cstring, argv: cstring*, envp: cstring*, cmdline: 
   return pid;
 }
 
-// Its exit code once it has exited, else -1.
+// its exit code once it has exited, else -1.
 export fn mbi_sys_poll(pid: int64) -> int32 {
   var st: int32 = 0;
   var r: int64 = syscall(61, pid, &st, 1, 0);
@@ -48,7 +47,7 @@ export fn mbi_sys_poll(pid: int64) -> int32 {
   return (st >> 8) & 255;
 }
 
-// SIGTERM (kill = false) or SIGKILL.
+// sigterm (kill = false) or sigkill.
 export fn mbi_sys_signal(pid: int64, kill: bool) {
   if (kill) {
     syscall(62, pid, 9);

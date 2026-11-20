@@ -1,10 +1,6 @@
 // mbuild/api: what mbuild.mettle imports (docs/project.md).
-//
-// mbuild compiles mbuild.mettle into a driver program and runs it: `driver
-// config OUT` calls fn project(), whose mb_* declarations collect TOML that
-// mbi_finish_config writes to OUT; `driver cmd NAME ARGS...` and `driver hook
-// NAME` run a command or a hook. Every name here is exported into the user's
-// program, so private helpers carry the mbi_ prefix too.
+// the driver runs fn project() to collect toml, or a command or hook by name.
+// every name here is exported into the user's program, so private helpers carry the mbi_ prefix.
 
 import "std/io";
 import "std/mem";
@@ -44,7 +40,7 @@ export struct MbCmd {
   status: int32;
 }
 
-// A process mb_spawn started.
+// a process mb_spawn started.
 export struct MbProc {
   pid: int64;
   log: string;
@@ -56,29 +52,26 @@ var g_mbi_argc: int32 = 0;
 var g_mbi_argv: cstring* = 0;
 var g_mbi_config: bool = false;
 var g_mbi_windows: int32 = -1;
-// A dependency's config driver: the output file, opened before the sandbox.
+// a dependency's config driver: the output file, opened before the sandbox.
 var g_mbi_out: cstring = (cstring)0;
-// The TOML being built: section headers in order, then entries in parallel
-// lists (header, key literal, value literal, "1" for an accumulating list).
+// the toml being built: section headers, then entries in parallel lists (section, key, value, "1" for a list).
 var g_mbi_secs: MbiList* = 0;
 var g_mbi_esec: MbiList* = 0;
 var g_mbi_ekey: MbiList* = 0;
 var g_mbi_eval: MbiList* = 0;
 var g_mbi_elist: MbiList* = 0;
-// The cursor: "profile" | "bin" | "", its name, and the mb_on qualifier.
+// the cursor: "profile" | "bin" | "", its name, and the mb_on qualifier.
 var g_mbi_cur_kind: string;
 var g_mbi_cur_name: string;
 var g_mbi_os: string;
 var g_mbi_pkg_name: string;
 var g_mbi_pkg_version: string;
-// fn local() runs after fn project(); the project's TOML is kept here meanwhile.
+// fn local() runs after fn project(); the project's toml is kept here meanwhile.
 var g_mbi_in_local: bool = false;
 var g_mbi_in_deps: bool = false;
 var g_mbi_project_toml: string;
 
-// ---------------------------------------------------------------------------
-// Strings and lists
-// ---------------------------------------------------------------------------
+// strings and lists
 
 fn mbi_list() -> MbiList* {
   var l: MbiList* = new MbiList;
@@ -112,7 +105,7 @@ fn mbi_len(s: string) -> int64 {
   return (int64)s.length;
 }
 
-// Stored so that a temporary `a + b` argument outlives the view (base.mettle's s_sub).
+// stored so that a temporary `a + b` argument outlives the view (base.mettle's s_sub).
 var g_mbi_view_src: string;
 
 fn mbi_sub(s: string, start: int64, end: int64) -> string {
@@ -123,7 +116,6 @@ fn mbi_sub(s: string, start: int64, end: int64) -> string {
   return mbi_view(&s.chars[start], end - start);
 }
 
-// A nul-terminated heap copy for C.
 fn mbi_c(s: string) -> cstring {
   var n: int64 = mbi_len(s);
   var p: uint8* = (uint8*)malloc(n + 1);
@@ -188,7 +180,7 @@ fn mbi_trim(s: string) -> string {
   return mbi_sub(s, a, b);
 }
 
-// Splits on sep, trims each piece, drops empty ones.
+// splits on sep, trims each piece, drops empty ones.
 fn mbi_split(s: string, sep: int32) -> MbiList* {
   var out: MbiList* = mbi_list();
   var start: int64 = 0;
@@ -207,7 +199,6 @@ fn mbi_split(s: string, sep: int32) -> MbiList* {
   return out;
 }
 
-// A TOML basic string literal.
 fn mbi_quote(s: string) -> string {
   var b: MbiList* = mbi_list();
   defer free(b);
@@ -275,7 +266,7 @@ fn mbi_join(l: MbiList*, sep: string) -> string {
   return mbi_view(p, at);
 }
 
-// A key as TOML writes it: bare when it can be.
+// a key as toml writes it: bare when it can be.
 fn mbi_key(k: string) -> string {
   var i: int64 = 0;
   while (i < mbi_len(k)) {
@@ -303,9 +294,7 @@ fn mbi_csv_literal(csv: string) -> string {
   return "[" + mbi_join(parts, ", ") + "]";
 }
 
-// ---------------------------------------------------------------------------
-// Driver plumbing
-// ---------------------------------------------------------------------------
+// driver plumbing
 
 fn mbi_flush() {
   fflush((cstring)0);
@@ -326,7 +315,7 @@ fn mbi_arg_at(i: int32) -> string {
   return mbi_from_c(g_mbi_argv[i]);
 }
 
-// Driver plumbing (generated code calls these): the driver's argv.
+// driver plumbing (generated code calls these): the driver's argv.
 export fn mbi_start(argc: int32, argv: cstring*) {
   g_mbi_argc = argc;
   g_mbi_argv = argv;
@@ -336,9 +325,7 @@ export fn mbi_start(argc: int32, argv: cstring*) {
   g_mbi_pkg_version = "";
 }
 
-// Driver plumbing: a dependency's config driver calls this first. fn project()
-// and fn deps() then run sandboxed (linux: no file, process or network access
-// but writing the output file opened here), after mbuild's static check.
+// first call of a dependency's config driver: project() and deps() then run sandboxed.
 export fn mbi_sandbox() {
   if (!g_mbi_config) {
     return;
@@ -363,7 +350,7 @@ export fn mbi_name(name: string) -> bool {
   return mbi_arg_at(2) == name;
 }
 
-// The arguments after the command name.
+// the arguments after the command name.
 export fn mbi_args() -> MbArgs* {
   var a: MbArgs* = new MbArgs;
   a->items = mbi_list();
@@ -375,7 +362,7 @@ export fn mbi_args() -> MbArgs* {
   return a;
 }
 
-// No such command or hook: exit 2.
+// no such command or hook: exit 2.
 export fn mbi_unknown() -> int32 {
   mbi_die("mbuild.mettle has no " + mbi_arg_at(1) + " named '" + mbi_arg_at(2) + "'", 2);
   return 2;
@@ -415,12 +402,12 @@ fn mbi_reset() {
   g_mbi_os = "";
 }
 
-// The driver calls this between fn project() and fn deps().
+// the driver calls this between fn project() and fn deps().
 export fn mbi_deps() {
   g_mbi_in_deps = true;
 }
 
-// Declarations from here on go to the local part (mbuild.local.mettle).
+// declarations from here on go to the local part (mbuild.local.mettle).
 export fn mbi_local() {
   g_mbi_in_deps = false;
   g_mbi_project_toml = mbi_toml();
@@ -428,7 +415,7 @@ export fn mbi_local() {
   g_mbi_in_local = true;
 }
 
-// `config OUT [LOCAL_OUT]`: the project's TOML, and the local part's.
+// `config OUT [LOCAL_OUT]`: the project's toml, and the local part's.
 export fn mbi_finish_config() -> int32 {
   var path: string = mbi_arg_at(2);
   var text: string = mbi_toml();
@@ -459,7 +446,7 @@ fn mbi_where() -> string {
   return "mbuild.mettle";
 }
 
-// Commands and hooks only: fn project() must describe the project the same way everywhere.
+// commands and hooks only: fn project() must describe the project the same way everywhere.
 fn mbi_refuse(what: string) {
   if (g_mbi_config) {
     if (g_mbi_in_local) {
@@ -537,7 +524,7 @@ fn mbi_bool(on: bool) -> string {
   return "false";
 }
 
-// The section the c/link calls write to: "c", "c.linux", ...
+// the section the c/link calls write to: "c", "c.linux", ...
 fn mbi_os_section(base: string) -> string {
   if ((base == "c" || base == "link") && mbi_starts(g_mbi_os, "riscv")) {
     mbi_die(mbi_where() + ": [" + base + "] after mb_on(\"" + g_mbi_os + "\"): C code is built for \"linux\" and \"windows\" only", 1);
@@ -548,7 +535,7 @@ fn mbi_os_section(base: string) -> string {
   return base;
 }
 
-// The section mb_set / mb_use write to.
+// the section mb_set / mb_use write to.
 fn mbi_cursor(what: string) -> string {
   if (g_mbi_cur_kind == "profile") {
     return mbi_os_section("profile." + mbi_key(g_mbi_cur_name));
@@ -638,7 +625,7 @@ fn mbi_win_quote(s: string) -> string {
   return mbi_join(out, "");
 }
 
-// The command as one line for the platform shell, with its directory and environment.
+// the command as one line for the platform shell, with its directory and environment.
 fn mbi_cmd_line(c: MbCmd*) -> string {
   var out: MbiList* = mbi_list();
   defer free(out);
@@ -695,11 +682,9 @@ fn mbi_env(name: string) -> string {
   return mbi_from_c(mbi_c_getenv(mbi_c(name)));
 }
 
-// ---------------------------------------------------------------------------
-// Declarations (fn project())
-// ---------------------------------------------------------------------------
+// declarations (fn project())
 
-// The package's name and version.
+// the package's name and version.
 export fn mb_package(name: string, version: string) {
   g_mbi_pkg_name = name;
   g_mbi_pkg_version = version;
@@ -707,13 +692,12 @@ export fn mb_package(name: string, version: string) {
   mbi_put("package", "version", mbi_quote(version));
 }
 
-// This package's version is the one the mbuild.mettle in dir declares
-// (with mb_package(name, "")).
+// this package's version is the one the mbuild.mettle in dir declares.
 export fn mb_version_from(dir: string) {
   mbi_put("package", "version-from", mbi_quote(dir));
 }
 
-// A [package] field: description, license, repository or authors (a list).
+// a [package] field: description, license, repository or authors (a list).
 export fn mb_meta(key: string, value: string) {
   if (key == "authors") {
     mbi_put("package", key, mbi_csv_literal(value));
@@ -722,38 +706,37 @@ export fn mb_meta(key: string, value: string) {
   mbi_put("package", key, mbi_quote(value));
 }
 
-// The targets `mbuild build` builds by default: "linux, windows".
+// the targets `mbuild build` builds by default: "linux, windows".
 export fn mb_targets(csv: string) {
   mbi_put("build", "targets", mbi_csv_literal(csv));
 }
 
-// The targets `mbuild test --matrix` runs the tests on: "host, riscv64-linux,
-// riscv32-none:pico2" (a board target may name its board).
+// the targets `mbuild test --matrix` runs on: "host, riscv64-linux, riscv32-none:pico2".
 export fn mb_test_targets(csv: string) {
   mbi_put("build", "test-targets", mbi_csv_literal(csv));
 }
 
-// Raw compiler flags for every compile.
+// raw compiler flags for every compile.
 export fn mb_flags(csv: string) {
   mbi_put("build", "flags", mbi_csv_literal(csv));
 }
 
-// Compile with --prelude.
+// compile with --prelude.
 export fn mb_prelude(on: bool) {
   mbi_put("build", "prelude", mbi_bool(on));
 }
 
-// The directory, relative to the package, where imports of name/... start: mb_import_root("src").
+// the directory, relative to the package, where imports of name/... start: mb_import_root("src").
 export fn mb_import_root(dir: string) {
   mbi_put("package", "import-root", mbi_quote(dir));
 }
 
-// The Mettle toolchain this project builds with: an installed id or version (mbuild toolchain use).
+// the Mettle toolchain this project builds with: an installed id or version (mbuild toolchain use).
 export fn mb_toolchain(version: string) {
   mbi_put("package", "toolchain", mbi_quote(version));
 }
 
-// A program to build from main ("" = detected).
+// a program to build from main ("" = detected).
 export fn mb_bin(name: string, main: string) {
   var sec: string = "bin." + mbi_key(name);
   mbi_section(sec);
@@ -762,7 +745,7 @@ export fn mb_bin(name: string, main: string) {
   }
 }
 
-// A bin's kind ("exe", "shared", "object", "flat") and target triple ("" = the target's).
+// a bin's kind ("exe", "shared", "object", "flat") and target triple ("" = the target's).
 export fn mb_bin_kind(name: string, kind: string, triple: string) {
   var sec: string = "bin." + mbi_key(name);
   mbi_put(sec, "kind", mbi_quote(kind));
@@ -771,23 +754,22 @@ export fn mb_bin_kind(name: string, kind: string, triple: string) {
   }
 }
 
-// A program `mbuild test` builds and runs; exit 0 passes ("" = tests/<name>_test.mettle).
+// a program `mbuild test` builds and runs; exit 0 passes ("" = tests/<name>_test.mettle).
 export fn mb_test_bin(name: string, main: string) {
   mbi_put("test-bins", name, mbi_quote(main));
 }
 
-// A test setting: name "*" sets the default, a test's own value wins
-// (docs/project.md: matrix, timeout, repeat, serial, cwd, warnings, ...).
+// a test setting; name "*" sets the default, a test's own value wins (docs/project.md).
 export fn mb_test_set(name: string, key: string, value: string) {
   mbi_put("test." + mbi_key(name), key, mbi_quote(value));
 }
 
-// Every main file matching glob is a test program named by its stem: "examples/*.mettle".
+// every main file matching glob is a test program named by its stem: "examples/*.mettle".
 export fn mb_test_glob(glob: string) {
   mbi_append("tests", "globs", mbi_quote(glob));
 }
 
-// A command test: cmdline split into words like a service's; exit 0 passes.
+// a command test: cmdline split into words like a service's; exit 0 passes.
 export fn mb_test_cmd(name: string, cmdline: string) {
   mbi_put("test-cmds", name, mbi_quote(cmdline));
 }
@@ -797,7 +779,7 @@ export fn mb_test_env(name: string, kv: string) {
   mbi_append("test." + mbi_key(name), "env", mbi_quote(kv));
 }
 
-// Tests left out of the default set: "meodb, phase3_child". Naming one still runs it.
+// tests left out of the default set: "meodb, phase3_child". Naming one still runs it.
 export fn mb_test_exclude(csv: string) {
   var parts: MbiList* = mbi_split(csv, 44);
   defer free(parts);
@@ -811,46 +793,42 @@ export fn mb_test_exclude(csv: string) {
   }
 }
 
-// A dependency from the registries: "v1.2.0" (minimum), "v1", "latest".
+// a dependency from the registries: "v1.2.0" (minimum), "v1", "latest".
 export fn mb_dep(name: string, version: string) {
   mbi_put("dependencies", name, mbi_quote(version));
 }
 
-// A dependency from one named registry.
+// a dependency from one named registry.
 export fn mb_dep_from(registry: string, name: string, version: string) {
   mbi_put("dependencies", name, "{{ version = " + mbi_quote(version) + ", registry = " + mbi_quote(registry) + " }");
 }
 
-// A dependency on a local directory.
+// a dependency on a local directory.
 export fn mb_dep_path(name: string, path: string) {
   mbi_put("dependencies", name, "{{ path = " + mbi_quote(path) + " }");
 }
 
-// A local directory that is published as mb_dep(name, version); the
-// package there must be that version or a later one of its line. "" = its own.
+// a local directory published as mb_dep(name, version), at that version or a later one of its line ("" = its own).
 export fn mb_dep_path_v(name: string, path: string, version: string) {
   mbi_put("dependencies", name, "{{ path = " + mbi_quote(path) + ", version = " + mbi_quote(version) + " }");
 }
 
-// Also build a dependency's bin, for the same target and profile, into this project's output directory.
+// also build a dependency's bin, for the same target and profile, into this project's output directory.
 export fn mb_dep_bin(dep: string, bin: string) {
   mbi_append("dep-bins", dep, mbi_quote(bin));
 }
 
-// A process `mbuild run` starts before the app and stops after it, in
-// declaration order: cmdline is split into words like a shell would (quotes,
-// backslashes; no other shell features). A first word naming a bin of this
-// project or of mb_dep_bin runs it from build/<target>/<profile>/.
+// a process `mbuild run` starts before the app, in declaration order; cmdline splits into words (quotes, backslashes), a first word naming a bin runs it from build/<target>/<profile>/.
 export fn mb_service(name: string, cmdline: string) {
   mbi_put("service." + mbi_key(name), "cmd", mbi_quote(cmdline));
 }
 
-// Wait until 127.0.0.1:port accepts a connection before going on.
+// wait until 127.0.0.1:port accepts a connection before going on.
 export fn mb_service_port(name: string, port: int32) {
   mbi_put("service." + mbi_key(name), "port", "{port}");
 }
 
-// How long to wait for the port, in ms (default 10000).
+// how long to wait for the port, in ms (default 10000).
 export fn mb_service_wait(name: string, ms: int32) {
   mbi_put("service." + mbi_key(name), "wait", "{ms}");
 }
@@ -860,22 +838,22 @@ export fn mb_service_env(name: string, kv: string) {
   mbi_append("service." + mbi_key(name), "env", mbi_quote(kv));
 }
 
-// A registry, searched in call order before the default one.
+// a registry, searched in call order before the default one.
 export fn mb_registry(name: string, url: string) {
   mbi_put("registry." + mbi_key(name), "url", mbi_quote(url));
 }
 
-// Use a local directory for a package everywhere in the build.
+// use a local directory for a package everywhere in the build.
 export fn mb_replace_path(name: string, path: string) {
   mbi_put("replace", name, "{{ path = " + mbi_quote(path) + " }");
 }
 
-// Use one version of a package everywhere in the build.
+// use one version of a package everywhere in the build.
 export fn mb_replace_version(name: string, version: string) {
   mbi_put("replace", name, "{{ version = " + mbi_quote(version) + " }");
 }
 
-// Following mb_set / mb_use calls apply to this profile.
+// following mb_set / mb_use calls apply to this profile.
 export fn mb_profile(name: string) {
   g_mbi_cur_kind = "profile";
   g_mbi_cur_name = name;
@@ -883,7 +861,7 @@ export fn mb_profile(name: string) {
   mbi_section("profile." + mbi_key(name));
 }
 
-// Following mb_set / mb_use calls apply to this bin.
+// following mb_set / mb_use calls apply to this bin.
 export fn mb_for_bin(name: string) {
   g_mbi_cur_kind = "bin";
   g_mbi_cur_name = name;
@@ -891,7 +869,7 @@ export fn mb_for_bin(name: string) {
   mbi_section("bin." + mbi_key(name));
 }
 
-// Following c, link and profile calls apply on one target only ("" = everywhere);
+// following c, link and profile calls apply on one target only ("" = everywhere);
 // a profile's settings on "linux" reach riscv*-linux too.
 export fn mb_on(os: string) {
   if (os != "" && os != "linux" && os != "windows" && os != "riscv64-linux" && os != "riscv32-linux" && os != "riscv64-none" && os != "riscv32-none") {
@@ -900,7 +878,7 @@ export fn mb_on(os: string) {
   g_mbi_os = os;
 }
 
-// The current profile inherits this one's settings.
+// the current profile inherits this one's settings.
 export fn mb_inherits(profile: string) {
   if (g_mbi_cur_kind != "profile" || mbi_len(g_mbi_os) > 0) {
     mbi_die(mbi_where() + ": mb_inherits needs mb_profile(NAME) before it (and no mb_on)", 1);
@@ -908,7 +886,7 @@ export fn mb_inherits(profile: string) {
   mbi_put(mbi_cursor("mb_inherits"), "inherits", mbi_quote(profile));
 }
 
-// A typed setting of the current profile or bin: mb_set("optimize", "full"), mb_set("safe", "true").
+// a typed setting of the current profile or bin: mb_set("optimize", "full"), mb_set("safe", "true").
 export fn mb_set(key: string, value: string) {
   var lit: string = mbi_quote(value);
   if (value == "true" || value == "false") {
@@ -917,42 +895,42 @@ export fn mb_set(key: string, value: string) {
   mbi_put(mbi_cursor("mb_set"), key, lit);
 }
 
-// A list setting of the current profile or bin (flags, cflags).
+// a list setting of the current profile or bin (flags, cflags).
 export fn mb_set_list(key: string, csv: string) {
   mbi_put(mbi_cursor("mb_set_list"), key, mbi_csv_literal(csv));
 }
 
-// C sources compiled into this package's shared library: files, directories or dir/*.c.
+// c sources compiled into this package's shared library: files, directories or dir/*.c.
 export fn mb_c_sources(csv: string) {
   mbi_put(mbi_os_section("c"), "sources", mbi_csv_literal(csv));
 }
 
-// Include directories for the C sources.
+// include directories for the C sources.
 export fn mb_c_include(csv: string) {
   mbi_put(mbi_os_section("c"), "include", mbi_csv_literal(csv));
 }
 
-// Flags for the C compiler.
+// flags for the C compiler.
 export fn mb_c_flags(csv: string) {
   mbi_put(mbi_os_section("c"), "cflags", mbi_csv_literal(csv));
 }
 
-// Libraries the C code links against.
+// libraries the C code links against.
 export fn mb_c_libs(csv: string) {
   mbi_put(mbi_os_section("c"), "libs", mbi_csv_literal(csv));
 }
 
-// Libraries the package's externs bind directly.
+// libraries the package's externs bind directly.
 export fn mb_link_libs(csv: string) {
   mbi_put(mbi_os_section("link"), "libs", mbi_csv_literal(csv));
 }
 
-// One library: the first of csv the linker finds ("sodium, :libsodium.so.23").
+// one library: the first of csv the linker finds ("sodium, :libsodium.so.23").
 export fn mb_link_lib_any(csv: string) {
   mbi_append(mbi_os_section("link"), "libs-any", mbi_quote(csv));
 }
 
-// Directories searched for those libraries; libraries found there ship beside the binary.
+// directories searched for those libraries; libraries found there ship beside the binary.
 export fn mb_link_paths(csv: string) {
   mbi_put(mbi_os_section("link"), "paths", mbi_csv_literal(csv));
 }
@@ -962,7 +940,7 @@ export fn mb_pkgconfig(csv: string) {
   mbi_put(mbi_os_section("link"), "pkgconfig", mbi_csv_literal(csv));
 }
 
-// A component: impls are dir/<impl>.mettle, the first is the default; mode "static", "dyn" or "swap".
+// a component: impls are dir/<impl>.mettle, the first is the default; mode "static", "dyn" or "swap".
 export fn mb_component(name: string, dir: string, mode: string, impls: string) {
   var sec: string = "component." + mbi_key(name);
   mbi_put(sec, "dir", mbi_quote(dir));
@@ -970,12 +948,12 @@ export fn mb_component(name: string, dir: string, mode: string, impls: string) {
   mbi_put(sec, "impls", mbi_csv_literal(impls));
 }
 
-// A component's default impl on one OS.
+// a component's default impl on one OS.
 export fn mb_component_on(name: string, os: string, pick: string) {
   mbi_put("component." + mbi_key(name), os, mbi_quote(pick));
 }
 
-// Select a component's impl in the current profile or bin (in fn local() before any mb_profile: for every build).
+// select a component's impl in the current profile or bin (in fn local() before any mb_profile: for every build).
 export fn mb_use(component: string, pick: string) {
   if (g_mbi_in_local && g_mbi_cur_kind == "") {
     mbi_put("components", component, mbi_quote(pick));
@@ -984,14 +962,12 @@ export fn mb_use(component: string, pick: string) {
   mbi_append(mbi_cursor("mb_use"), "components", mbi_quote(component + "=" + pick));
 }
 
-// A tool's path (cc, cc-windows, mettle-linux, mettle-windows, pkg-config, curl, tar), used when its variable is unset.
+// a tool's path (cc, cc-windows, mettle-linux, mettle-windows, pkg-config, curl, tar), used when its variable is unset.
 export fn mb_tool(key: string, path: string) {
   mbi_put("tools", key, mbi_quote(path));
 }
 
-// Files `mbuild live` and `mbuild shell` watch beside the code, as globs from
-// the root ("shaders/**, assets/*.png"); each change is a line in the
-// program's events file (mbuild/live). Calls add up.
+// globs from the root that `mbuild live` and `mbuild shell` watch ("shaders/**, assets/*.png"); each change is a line in the events file (mbuild/live); calls add up.
 export fn mb_watch(csv: string) {
   var parts: MbiList* = mbi_split(csv, 44);
   defer free(parts);
@@ -1002,14 +978,12 @@ export fn mb_watch(csv: string) {
   }
 }
 
-// Where the program should put its preview window: "left", "right", "top",
-// "bottom" or "off"; `mbuild live` and `mbuild shell` pass it as MBUILD_PREVIEW.
+// where the program puts its preview window: "left", "right", "top", "bottom" or "off" (passed as MBUILD_PREVIEW).
 export fn mb_preview(side: string) {
   mbi_put("live", "preview", mbi_quote(side));
 }
 
-// Where `mbuild doc` writes the API reference (default "docs/API.md"); set,
-// `mbuild publish` runs `mbuild doc --check` first.
+// where `mbuild doc` writes the API reference (default "docs/API.md"); if set, `mbuild publish` runs `mbuild doc --check` first.
 export fn mb_doc_out(path: string) {
   mbi_put("doc", "out", mbi_quote(path));
 }
@@ -1027,38 +1001,37 @@ fn mbi_doc_list(key: string, csv: string) {
   }
 }
 
-// Doc fields every export must have, checked by `mbuild doc --check`:
-// "param, returns" (summary, param, in, returns, error, owns, thread, cost, example).
+// doc fields every export must have, checked by `mbuild doc --check`: "param, returns" (summary, param, in, returns, error, owns, thread, cost, example).
 export fn mb_doc_require(csv: string) {
   mbi_doc_list("require", csv);
 }
 
-// The exports `mbuild doc` shows: names with one of the prefixes ("rz_"); "!crx_" drops them.
+// the exports `mbuild doc` shows: names with one of the prefixes ("rz_"); "!crx_" drops them.
 export fn mb_doc_exports(csv: string) {
   mbi_doc_list("exports", csv);
 }
 
-// Only the modules this file imports (and itself) are documented, in import order.
+// only the modules this file imports (and itself) are documented, in import order.
 export fn mb_doc_facade(file: string) {
   mbi_put("doc", "facade", mbi_quote(file));
 }
 
-// Markdown files (globs) whose ```mettle blocks `mbuild doc --check` compiles: "README.md, docs/*.md".
+// markdown files (globs) whose ```mettle blocks `mbuild doc --check` compiles: "README.md, docs/*.md".
 export fn mb_doc_snippets(csv: string) {
   mbi_doc_list("snippets", csv);
 }
 
-// A file of @rule functions applied to every bin and test.
+// a file of @rule functions applied to every bin and test.
 export fn mb_rule(file: string) {
   mbi_append("rules", "files", mbi_quote(file));
 }
 
-// Files a published package carries.
+// files a published package carries.
 export fn mb_publish_include(csv: string) {
   mbi_put("package", "include", mbi_csv_literal(csv));
 }
 
-// Keep the dependencies' block in AGENT.rules (default true).
+// keep the dependencies' block in AGENT.rules (default true).
 export fn mb_agents(on: bool) {
   mbi_put("build", "agents", mbi_bool(on));
 }
@@ -1077,16 +1050,14 @@ export fn mb_raw(section: string, key: string, toml_literal: string) {
   mbi_push(g_mbi_elist, "");
 }
 
-// ---------------------------------------------------------------------------
-// Commands and hooks
-// ---------------------------------------------------------------------------
+// commands and hooks
 
-// The number of arguments after the command name.
+// the number of arguments after the command name.
 export fn mb_nargs(a: MbArgs*) -> int32 {
   return (int32)a->items->len;
 }
 
-// Argument i ("" past the end).
+// argument i ("" past the end).
 export fn mb_arg(a: MbArgs*, i: int32) -> string {
   if (i < 0 || (int64)i >= a->items->len) {
     return "";
@@ -1094,7 +1065,7 @@ export fn mb_arg(a: MbArgs*, i: int32) -> string {
   return a->items->items[i];
 }
 
-// True when the flag ("--force") is among the arguments.
+// true when the flag ("--force") is among the arguments.
 export fn mb_flag(a: MbArgs*, flag: string) -> bool {
   var i: int64 = 0;
   while (i < a->items->len) {
@@ -1106,7 +1077,7 @@ export fn mb_flag(a: MbArgs*, flag: string) -> bool {
   return false;
 }
 
-// The value of "--out DIR" or "--out=DIR", else dflt.
+// the value of "--out DIR" or "--out=DIR", else dflt.
 export fn mb_opt(a: MbArgs*, opt: string, dflt: string) -> string {
   var i: int64 = 0;
   while (i < a->items->len) {
@@ -1122,13 +1093,13 @@ export fn mb_opt(a: MbArgs*, opt: string, dflt: string) -> string {
   return dflt;
 }
 
-// The project root, absolute.
+// the project root, absolute.
 export fn mb_root() -> string {
   mbi_refuse("mb_root");
   return mbi_env("MBUILD_ROOT");
 }
 
-// The package name.
+// the package name.
 export fn mb_name() -> string {
   if (g_mbi_config) {
     return g_mbi_pkg_name;
@@ -1136,7 +1107,7 @@ export fn mb_name() -> string {
   return mbi_env("MBUILD_NAME");
 }
 
-// The package version.
+// the package version.
 export fn mb_version() -> string {
   if (g_mbi_config) {
     return g_mbi_pkg_version;
@@ -1162,13 +1133,13 @@ export fn mb_exe_ext() -> string {
   return "";
 }
 
-// True under mbuild -v.
+// true under mbuild -v.
 export fn mb_verbose() -> bool {
   mbi_refuse("mb_verbose");
   return mbi_env("MBUILD_VERBOSE") == "1";
 }
 
-// The absolute path mbuild builds a bin to: build/<target>/<profile>/<bin><ext>.
+// the absolute path mbuild builds a bin to: build/<target>/<profile>/<bin><ext>.
 export fn mb_out(bin: string, target: string, profile: string) -> string {
   mbi_refuse("mb_out");
   var t: string = target;
@@ -1197,7 +1168,7 @@ export fn mb_out(bin: string, target: string, profile: string) -> string {
   return mb_root() + "/build/" + t + "/" + profile + "/" + mbi_out_name(bin, kind, triple, t);
 }
 
-// The file a bin of kind writes for target t (as mbuild names it).
+// the file a bin of kind writes for target t (as mbuild names it).
 fn mbi_out_name(bin: string, kind: string, triple: string, t: string) -> string {
   if (kind == "shared") {
     if (t == "windows") {
@@ -1220,37 +1191,37 @@ fn mbi_out_name(bin: string, kind: string, triple: string, t: string) -> string 
   return bin;
 }
 
-// The target of the build a hook runs for.
+// the target of the build a hook runs for.
 export fn mb_target() -> string {
   mbi_refuse("mb_target");
   return mbi_env("MBUILD_TARGET");
 }
 
-// The profile of the build a hook runs for.
+// the profile of the build a hook runs for.
 export fn mb_profile_name() -> string {
   mbi_refuse("mb_profile_name");
   return mbi_env("MBUILD_PROFILE");
 }
 
-// The output directory of the build a hook runs for.
+// the output directory of the build a hook runs for.
 export fn mb_out_dir() -> string {
   mbi_refuse("mb_out_dir");
   return mbi_env("MBUILD_OUT_DIR");
 }
 
-// The bins of the build a hook runs for, space-separated.
+// the bins of the build a hook runs for, space-separated.
 export fn mb_bins() -> string {
   mbi_refuse("mb_bins");
   return mbi_env("MBUILD_BINS");
 }
 
-// The bins that were rebuilt (post-build hook), space-separated.
+// the bins that were rebuilt (post-build hook), space-separated.
 export fn mb_built() -> string {
   mbi_refuse("mb_built");
   return mbi_env("MBUILD_BUILT");
 }
 
-// Runs this mbuild with args split on spaces: mb_mbuild("build -r -t host").
+// runs this mbuild with args split on spaces: mb_mbuild("build -r -t host").
 export fn mb_mbuild(args: string) -> int32 {
   mbi_refuse("mb_mbuild");
   var exe: string = mbi_env("MBUILD_EXE");
@@ -1260,12 +1231,11 @@ export fn mb_mbuild(args: string) -> int32 {
   return mbi_run_argv(exe, mbi_split(args, 32));
 }
 
-// Every MbCmd mb_cmd made: they belong to the API and live until the driver
-// exits, so a command or hook frees none of them.
+// every MbCmd lives until the driver exits; nothing frees them.
 var g_mbi_cmds: MbCmd** = (MbCmd**)0;
 var g_mbi_ncmds: int64 = 0;
 
-// A command running program (searched on PATH when it has no directory).
+// a command running program (searched on PATH when it has no directory).
 export fn mb_cmd(program: string) -> MbCmd* {
   mbi_refuse("mb_cmd");
   var c: MbCmd* = new MbCmd;
@@ -1280,12 +1250,12 @@ export fn mb_cmd(program: string) -> MbCmd* {
   return c;
 }
 
-// Appends an argument.
+// appends an argument.
 export fn mb_cmd_arg(c: MbCmd*, s: string) {
   mbi_push(c->args, s);
 }
 
-// Runs it in dir.
+// runs it in dir.
 export fn mb_cmd_cwd(c: MbCmd*, dir: string) {
   c->cwd = dir;
 }
@@ -1295,7 +1265,7 @@ export fn mb_cmd_env(c: MbCmd*, kv: string) {
   mbi_push(c->env, kv);
 }
 
-// Runs it with stdio inherited and answers its exit code (127 = could not start).
+// runs it with stdio inherited and answers its exit code (127 = could not start).
 export fn mb_cmd_run(c: MbCmd*) -> int32 {
   mbi_refuse("mb_cmd_run");
   if (mbi_len(c->cwd) == 0 && c->env->len == 0) {
@@ -1307,8 +1277,7 @@ export fn mb_cmd_run(c: MbCmd*) -> int32 {
   return c->status;
 }
 
-// Runs it and answers its stdout without one trailing newline; the exit code
-// is then mb_cmd_status(c).
+// runs it and answers its stdout without one trailing newline; the exit code is mb_cmd_status(c).
 export fn mb_cmd_output(c: MbCmd*) -> string {
   mbi_refuse("mb_cmd_output");
   mbi_flush();
@@ -1342,25 +1311,25 @@ export fn mb_cmd_output(c: MbCmd*) -> string {
   return mbi_view(p, n);
 }
 
-// The exit code of the last run.
+// the exit code of the last run.
 export fn mb_cmd_status(c: MbCmd*) -> int32 {
   return c->status;
 }
 
-// Runs a line with the platform shell (sh -c, cmd /c) and answers its exit code.
+// runs a line with the platform shell (sh -c, cmd /c) and answers its exit code.
 export fn mb_sh(line: string) -> int32 {
   mbi_refuse("mb_sh");
   mbi_flush();
   return mbi_status(mbi_c_system(mbi_c(line)));
 }
 
-// An environment variable ("" when unset).
+// an environment variable ("" when unset).
 export fn mb_env(name: string) -> string {
   mbi_refuse("mb_env");
   return mbi_env(name);
 }
 
-// The user's home directory.
+// the user's home directory.
 export fn mb_home() -> string {
   mbi_refuse("mb_home");
   if (mbi_is_windows()) {
@@ -1369,19 +1338,19 @@ export fn mb_home() -> string {
   return mbi_env("HOME");
 }
 
-// True when p exists.
+// true when p exists.
 export fn mb_exists(p: string) -> bool {
   mbi_refuse("mb_exists");
   return mbi_c_exists(mbi_c(p)) != 0;
 }
 
-// True when p is a directory.
+// true when p is a directory.
 export fn mb_is_dir(p: string) -> bool {
   mbi_refuse("mb_is_dir");
   return mbi_c_is_dir(mbi_c(p)) != 0;
 }
 
-// The file's contents ("" when unreadable).
+// the file's contents ("" when unreadable).
 export fn mb_read(p: string) -> string {
   mbi_refuse("mb_read");
   if (mbi_c_is_dir(mbi_c(p)) != 0) {
@@ -1410,7 +1379,7 @@ export fn mb_read(p: string) -> string {
   return mbi_view(buf, n);
 }
 
-// Writes the file, creating parent directories.
+// writes the file, creating parent directories.
 export fn mb_write(p: string, data: string) -> bool {
   mbi_refuse("mb_write");
   return mbi_write(p, data);
@@ -1430,7 +1399,7 @@ fn mbi_write(p: string, data: string) -> bool {
   return fclose(fp) == 0 && ok;
 }
 
-// Writes the file unless it already holds data; true when it wrote.
+// writes the file unless it already holds data; true when it wrote.
 export fn mb_write_if_changed(p: string, data: string) -> bool {
   mbi_refuse("mb_write_if_changed");
   if (mbi_c_exists(mbi_c(p)) != 0 && mb_read(p) == data) {
@@ -1439,7 +1408,7 @@ export fn mb_write_if_changed(p: string, data: string) -> bool {
   return mbi_write(p, data);
 }
 
-// Copies a file, keeping the executable bit on Linux.
+// copies a file, keeping the executable bit on Linux.
 export fn mb_copy(src: string, dst: string) -> bool {
   mbi_refuse("mb_copy");
   if (mbi_c_exists(mbi_c(src)) == 0 || mbi_c_is_dir(mbi_c(src)) != 0) {
@@ -1453,7 +1422,7 @@ export fn mb_copy(src: string, dst: string) -> bool {
   return mbi_write(dst, mb_read(src));
 }
 
-// Creates a directory and its parents.
+// creates a directory and its parents.
 export fn mb_mkdirs(p: string) -> bool {
   mbi_refuse("mb_mkdirs");
   return mbi_mkdirs(p);
@@ -1485,7 +1454,7 @@ fn mbi_mkdir_parent(p: string) {
   }
 }
 
-// Removes a file, or a directory tree.
+// removes a file, or a directory tree.
 export fn mb_remove(p: string) -> bool {
   mbi_refuse("mb_remove");
   if (mbi_c_exists(mbi_c(p)) == 0) {
@@ -1503,30 +1472,28 @@ export fn mb_remove(p: string) -> bool {
   return mbi_c_exists(mbi_c(p)) == 0;
 }
 
-// Prints a line on stdout.
+// prints a line on stdout.
 export fn mb_say(s: string) {
   print(s + "\n");
 }
 
-// Prints "warning: s" on stderr.
+// prints "warning: s" on stderr.
 export fn mb_warn(s: string) {
   mbi_flush();
   print_err("warning: " + s + "\n");
 }
 
-// Prints "error: s" on stderr and exits with status 1.
+// prints "error: s" on stderr and exits with status 1.
 export fn mb_fail(s: string) {
   mbi_die(s, 1);
 }
 
-// ---------------------------------------------------------------------------
-// Background processes (commands and hooks)
-// ---------------------------------------------------------------------------
+// background processes (commands and hooks)
 
 var g_mbi_procs: MbProc** = (MbProc**)0;
 var g_mbi_nprocs: int64 = 0;
 
-// Driver plumbing: what a command or hook returned, after stopping what it left running.
+// driver plumbing: what a command or hook returned, after stopping what it left running.
 export fn mbi_done(code: int32) -> int32 {
   mbi_stop_all();
   return code;
@@ -1562,7 +1529,7 @@ fn mbi_has_slash(s: string) -> bool {
   return false;
 }
 
-// The program as an absolute path (PATH searched for a bare name), Linux.
+// the program as an absolute path (PATH searched for a bare name), Linux.
 fn mbi_which(program: string) -> string {
   if (mbi_starts(program, "/")) {
     return program;
@@ -1584,7 +1551,7 @@ fn mbi_which(program: string) -> string {
   return program;
 }
 
-// The environment a Linux child gets: this one, then c's "K=V" entries.
+// the environment a Linux child gets: this one, then c's "K=V" entries.
 fn mbi_child_env(c: MbCmd*, win: bool) -> MbiList* {
   if (win) {
     return mbi_list();
@@ -1646,8 +1613,7 @@ fn mbi_log_for(program: string) -> string {
   return name;
 }
 
-// Starts c in the background, stdout and stderr to a log (mb_proc_log). What
-// a command or hook starts and doesn't stop is stopped when it returns.
+// starts c in the background, output to a log (mb_proc_log); what it leaves running stops when the command or hook returns.
 export fn mb_spawn(c: MbCmd*) -> MbProc* {
   mbi_refuse("mb_spawn");
   var p: MbProc* = new MbProc;
@@ -1699,7 +1665,7 @@ export fn mb_spawn(c: MbCmd*) -> MbProc* {
   return p;
 }
 
-// True while it runs; once it has exited, mb_proc_code(p) is its exit code.
+// true while it runs; once it has exited, mb_proc_code(p) is its exit code.
 export fn mb_proc_running(p: MbProc*) -> bool {
   mbi_refuse("mb_proc_running");
   if (p->running) {
@@ -1712,17 +1678,18 @@ export fn mb_proc_running(p: MbProc*) -> bool {
   return p->running;
 }
 
+// its exit code once it has exited.
 export fn mb_proc_code(p: MbProc*) -> int32 {
   mb_proc_running(p);
   return p->code;
 }
 
-// Where its output goes.
+// where its output goes.
 export fn mb_proc_log(p: MbProc*) -> string {
   return p->log;
 }
 
-// Terminates it, then kills it after 2 s.
+// terminates it, then kills it after 2 s.
 export fn mb_stop(p: MbProc*) {
   mbi_refuse("mb_stop");
   if (!mb_proc_running(p)) {
@@ -1741,7 +1708,7 @@ export fn mb_stop(p: MbProc*) {
   }
 }
 
-// True once 127.0.0.1:port accepts a TCP connection, false after ms.
+// true once 127.0.0.1:port accepts a TCP connection, false after ms.
 export fn mb_wait_port(port: int32, ms: int32) -> bool {
   mbi_refuse("mb_wait_port");
   var until: int64 = mbi_sys_now_ms() + (int64)ms;

@@ -1,14 +1,11 @@
-// mbuild/init: what init.rules can call (mbuild help new). The rules only
-// describe options and a plan; mbuild checks and applies the plan.
-//
-// Every value is a string. In paths, file text, mi_line, command summaries
-// and bodies and the next note, @@name@@ is replaced by an option's value or
-// by project, package, package_version or mbuild_version; @@@@ is a literal @@.
+// mbuild/init: what init.rules can call (mbuild help new). the rules describe options and a plan; mbuild checks and applies it.
+// every value is a string; in paths, file text, mi_line, command summaries and bodies and the next note,
+// @@name@@ is replaced by an option's value or by project, package, package_version or mbuild_version; @@@@ is a literal @@.
 
 import "init_linux" if linux;
 import "init_windows" if windows;
 
-// The only C names the rules may reach: they write the plan file.
+// the only C names the rules may reach: they write the plan file.
 extern fn mii_strlen(s: cstring) -> int64 = "strlen";
 extern fn mii_malloc(n: int64) -> uint8* = "malloc";
 extern fn mii_fopen(path: cstring, mode: cstring) -> cstring = "fopen";
@@ -21,7 +18,7 @@ var mii_phase: string = "";
 var mii_out: string = "";
 var mii_fp: cstring = (cstring)0;
 
-// Declares an option (in fn options()): given with --opt NAME=VALUE or at a prompt.
+// declares an option (in fn options()): given with --opt NAME=VALUE or at a prompt.
 export fn mi_option(name: string, dflt: string, help: string) {
   if (!mii_in("options", "mi_option")) {
     return;
@@ -29,7 +26,7 @@ export fn mi_option(name: string, dflt: string, help: string) {
   mii_rec3("option", name, dflt, help);
 }
 
-// Restricts an option to a comma-separated list of values (in fn options()).
+// restricts an option to a comma-separated list of values (in fn options()).
 export fn mi_choice(name: string, csv: string) {
   if (!mii_in("options", "mi_choice")) {
     return;
@@ -37,7 +34,7 @@ export fn mi_choice(name: string, csv: string) {
   mii_rec2("choice", name, csv);
 }
 
-// The value of an option (in fn plan()).
+// the value of an option (in fn plan()).
 export fn mi_opt(name: string) -> string {
   if (!mii_in("plan", "mi_opt")) {
     return "";
@@ -55,12 +52,12 @@ export fn mi_opt(name: string) -> string {
   return "";
 }
 
-// The name of the project being created or extended (in fn plan()).
+// the name of the project being created or extended (in fn plan()).
 export fn mi_project() -> string {
   return mi_opt("project");
 }
 
-// Creates an empty directory.
+// creates an empty directory.
 export fn mi_dir(path: string) {
   if (!mii_in("plan", "mi_dir")) {
     return;
@@ -68,7 +65,7 @@ export fn mi_dir(path: string) {
   mii_rec1("dir", path);
 }
 
-// Writes dst from a template file shipped in the package, variables filled in.
+// writes dst from a template file shipped in the package, variables filled in.
 export fn mi_template(src: string, dst: string) {
   if (!mii_in("plan", "mi_template")) {
     return;
@@ -76,7 +73,7 @@ export fn mi_template(src: string, dst: string) {
   mii_rec2("template", src, dst);
 }
 
-// Writes dst with the given text, variables filled in.
+// writes dst with the given text, variables filled in.
 export fn mi_file(dst: string, text: string) {
   if (!mii_in("plan", "mi_file")) {
     return;
@@ -84,7 +81,7 @@ export fn mi_file(dst: string, text: string) {
   mii_rec2("file", dst, text);
 }
 
-// Adds a dependency to the project (the package itself is always added).
+// adds a dependency to the project (the package itself is always added).
 export fn mi_dep(name: string, version: string) {
   if (!mii_in("plan", "mi_dep")) {
     return;
@@ -92,7 +89,7 @@ export fn mi_dep(name: string, version: string) {
   mii_rec2("dep", name, version);
 }
 
-// Adds mb_profile(profile); mb_set(key, value); to fn project().
+// adds mb_profile(profile); mb_set(key, value); to fn project().
 export fn mi_set(profile: string, key: string, value: string) {
   if (!mii_in("plan", "mi_set")) {
     return;
@@ -100,7 +97,7 @@ export fn mi_set(profile: string, key: string, value: string) {
   mii_rec3("set", profile, key, value);
 }
 
-// Appends a raw line to fn project().
+// appends a raw line to fn project().
 export fn mi_line(text: string) {
   if (!mii_in("plan", "mi_line")) {
     return;
@@ -108,7 +105,7 @@ export fn mi_line(text: string) {
   mii_rec1("line", text);
 }
 
-// Adds a command to mbuild.mettle: fn cmd_NAME(a: MbArgs*) -> int32 around body.
+// adds a command to mbuild.mettle: fn cmd_NAME(a: MbArgs*) -> int32 around body.
 export fn mi_command(name: string, summary: string, body: string) {
   if (!mii_in("plan", "mi_command")) {
     return;
@@ -116,7 +113,7 @@ export fn mi_command(name: string, summary: string, body: string) {
   mii_rec3("command", name, summary, body);
 }
 
-// Printed as "next:" after the plan is applied.
+// printed as "next:" after the plan is applied.
 export fn mi_next(text: string) {
   if (!mii_in("plan", "mi_next")) {
     return;
@@ -124,8 +121,7 @@ export fn mi_next(text: string) {
   mii_rec1("next", text);
 }
 
-// Driver plumbing: argv is MODE OUT [NAME=VALUE...]. The plan file is
-// opened first, then the sandbox closes everything else off.
+// driver plumbing: argv is MODE OUT [NAME=VALUE...]; the plan file opens first, then the sandbox closes everything else off.
 export fn mii_start(argc: int32, argv: cstring*) {
   mii_argc = argc;
   mii_argv = argv;
@@ -137,11 +133,12 @@ export fn mii_start(argc: int32, argv: cstring*) {
   }
 }
 
+// driver plumbing: true when the driver runs this phase.
 export fn mii_mode(m: string) -> bool {
   return mii_eq(mii_phase, m);
 }
 
-// Writes the records; 0 on success.
+// writes the records; 0 on success.
 export fn mii_finish() -> int32 {
   var fp: cstring = mii_fp;
   if (fp == (cstring)0) {
@@ -209,7 +206,7 @@ fn mii_cstr(s: string) -> cstring {
   return (cstring)p;
 }
 
-// Stored so that a temporary `a + b` argument outlives the view (base.mettle's s_sub).
+// stored so that a temporary `a + b` argument outlives the view (base.mettle's s_sub).
 var mii_view_src: string = "";
 
 fn mii_sub(s: string, a: int64, b: int64) -> string {

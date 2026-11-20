@@ -1,6 +1,5 @@
-// "mbuild/shell": `mbuild shell` builds map this import to their own module,
-// where shell_point runs what you type at the prompt. Everywhere else it is
-// this empty function.
+// "mbuild/shell": `mbuild shell` builds map this import to their own module; elsewhere it is empty.
 
+// runs what you type at the prompt (does nothing outside `mbuild shell`).
 export fn shell_point() {
 }
