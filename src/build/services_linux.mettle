@@ -1,6 +1,4 @@
-// services_linux: svc_run on Linux as one alph actor. Each
-// service gets its own process group; the app stays in mbuild's, so the
-// terminal's Ctrl-C and reads reach it.
+// services_linux: svc_run on linux as an alph actor
 
 import "std/mem";
 import "../core/base";
@@ -51,7 +49,7 @@ fn svl_quiet(ctx: AlphCtx*, s: SvlRun*) {
   }
 }
 
-// Stops the services from the newest down; halts with s->code after the oldest.
+// stops the services from the newest down; halts with s->code after the oldest
 fn svl_stop_next(ctx: AlphCtx*, s: SvlRun*) {
   while (true) {
     s->stopping = s->stopping - 1;
@@ -106,7 +104,7 @@ fn svl_start(ctx: AlphCtx*, s: SvlRun*) {
   svl_next(ctx, s);
 }
 
-// The next service, or the app once all run.
+// the next service, or the app once all run
 fn svl_next(ctx: AlphCtx*, s: SvlRun*) {
   if (s->started == s->n) {
     status("Running", s->app_shown);
@@ -194,9 +192,9 @@ fn svl_handle(ctx: AlphCtx*, m: AlphMsg*) -> int64 {
   return ALPH_CONTINUE;
 }
 
-// Starts every service in declaration order (waiting for each port), runs
+// starts every service in declaration order (waiting for each port), runs
 // app with stdio inherited, stops the services in reverse order, and answers
-// the app's exit code. A first word in bins runs from out_dir (with ext).
+// the app's exit code. a first word in bins runs from out_dir (with ext)
 export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app: Cmd*, app_shown: string) -> int32 {
   var s: SvlRun;
   memset((rawptr)&s, 0, (int64)sizeof(SvlRun));

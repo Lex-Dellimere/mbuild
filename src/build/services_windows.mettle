@@ -1,4 +1,4 @@
-// services_windows: svc_run on Windows, polling the job code.
+// services_windows: svc_run on windows, polling the job code
 
 import "std/mem";
 import "../core/base";
@@ -15,9 +15,9 @@ fn svw_stop_all(items: SvcItem*, jobs: Job**, n: int64) {
   }
 }
 
-// Starts every service in declaration order (waiting for each port), runs
+// starts every service in declaration order (waiting for each port), runs
 // app with stdio inherited, stops the services in reverse order, and answers
-// the app's exit code. A first word in bins runs from out_dir (with ext).
+// the app's exit code. a first word in bins runs from out_dir (with ext)
 export fn svc_run(p: Project*, out_dir: string, ext: string, bins: StrList*, app: Cmd*, app_shown: string) -> int32 {
   var n: int64 = p->man->nservices;
   var items: SvcItem* = svc_items(p, out_dir, ext, bins);

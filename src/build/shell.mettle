@@ -1,14 +1,4 @@
-// shell: `mbuild shell`, a prompt inside a running program (DESIGN 18).
-//
-// The bin's project files are copied into .mbuild/shell/tree, whose
-// mettle.deps maps "mbuild/shell" to a generated hook module, and built with
-// --live. An input becomes the body of the hook's mbsh_eval: a --live-patch
-// the program takes at its next quiesce, runs once in shell_point() and
-// answers through a file in .mbuild/shell/out; --live-undo then takes the
-// body out again. A `fn` input replaces that function's text in the tree and
-// stays until `undo`. The type of an expression comes from a probe compile
-// (the compiler names it in a type mismatch). --local builds each input into
-// a program of its own that imports what the entry imports.
+// shell: mbuild shell, a prompt inside a running program
 
 import "std/io";
 import "std/mem";
@@ -89,9 +79,7 @@ struct ShxSess {
   ev_flips: int64;     // paused/resumed events so far
 }
 
-// ---------------------------------------------------------------------------
-// Declarations: struct printers, h, completion
-// ---------------------------------------------------------------------------
+// declarations: struct printers, h, completion
 
 fn shx_display(it: ExportItem*) -> string {
   if (s_eq(it->kind, "fn")) {
@@ -145,9 +133,9 @@ fn shx_add_decls(ss: ShxSess*, file: string, text: string, all: bool, types: boo
   free(l);
 }
 
-// The project's files (struct printers come from these; --local skips the
+// the project's files (struct printers come from these; --local skips the
 // entry, which the snippet does not import), then the exports of the
-// packages' files in the bin's import graph.
+// packages' files in the bin's import graph
 fn shx_scan(ss: ShxSess*) {
   ss->tnames = sl_new();
   ss->tsigs = sl_new();
@@ -185,8 +173,8 @@ fn shx_scan(ss: ShxSess*) {
   }
 }
 
-// The package directory holding f, "" when none does (the project's own
-// package, whose directory is the root, does not count).
+// the package directory holding f, "" when none does (the project's own
+// package, whose directory is the root, does not count)
 fn shx_dep_of(ss: ShxSess*, f: string) -> string {
   var sb: ShellBuild* = ss->sb;
   var i: int64 = 0;
@@ -200,7 +188,7 @@ fn shx_dep_of(ss: ShxSess*, f: string) -> string {
   return s_empty();
 }
 
-// A file as shown: PACKAGE/REL for a package's, else relative to the root.
+// a file as shown: PACKAGE/REL for a package's, else relative to the root
 fn shx_shown(ss: ShxSess*, file: string) -> string {
   var sb: ShellBuild* = ss->sb;
   var dir: string = shx_dep_of(ss, file);
@@ -222,8 +210,8 @@ fn shx_is_scalar(t: string) -> bool {
   return has;
 }
 
-// Generated code showing the value at acc (of type t) as a string; top: a
-// pointer to a struct is shown with its fields, inside a struct as an address.
+// generated code showing the value at acc (of type t) as a string; top: a
+// pointer to a struct is shown with its fields, inside a struct as an address
 fn shx_fmt(ss: ShxSess*, t: string, acc: string, top: bool) -> string {
   if (shx_is_scalar(t)) {
     return "\"{{" + acc + "}\"";
@@ -247,7 +235,7 @@ fn shx_fmt(ss: ShxSess*, t: string, acc: string, top: bool) -> string {
   return "\"#" + t + "\"";
 }
 
-// "a: int32; b: string" as names and types.
+// "a: int32; b: string" as names and types
 fn shx_fields(sig: string, names: StrList*, types: StrList*) {
   var parts: StrList* = s_split(sig, 59);
   var i: int64 = 0;
@@ -305,18 +293,16 @@ fn shx_keep(ss: ShxSess*) -> string {
   return buf_take(b);
 }
 
-// ---------------------------------------------------------------------------
-// The hook module and the commands
-// ---------------------------------------------------------------------------
+// the hook module and the commands
 
-// A path as the text of a Mettle string literal.
+// a path as the text of a mettle string literal
 fn shx_lit(s: string) -> string {
   var t: string = s_replace(s, "\\", "\\\\");
   t = s_replace(t, "\"", "\\\"");
   return "\"" + s_replace(t, "{{", "{{{{") + "\"";
 }
 
-// The project imports of the entry, resolved to absolute paths (--local).
+// the project imports of the entry, resolved to absolute paths (--local)
 fn shx_local_imports(ss: ShxSess*) -> string {
   var sb: ShellBuild* = ss->sb;
   var r: FsRead = fs_read(sb->entry);
@@ -347,7 +333,7 @@ fn shx_local_imports(ss: ShxSess*) -> string {
   return buf_take(b);
 }
 
-// The paths the hook polls and writes.
+// the paths the hook polls and writes
 fn shx_paths(ss: ShxSess*) -> string {
   var b: Buf* = buf_new();
   buf_add(b, "var mbsh_pause_path: string = " + shx_lit(ss->pausef) + ";\n");
@@ -356,7 +342,7 @@ fn shx_paths(ss: ShxSess*) -> string {
   return buf_take(b);
 }
 
-// mbsh_watch's body: a line per watch, then the pause-when condition.
+// mbsh_watch's body: a line per watch, then the pause-when condition
 fn shx_watch_body(ss: ShxSess*) -> string {
   var b: Buf* = buf_new();
   if (ss->local) {
@@ -422,7 +408,7 @@ fn shx_flags(ss: ShxSess*, c: Cmd*) {
   sl_extend(c->kinds, ss->sb->base->kinds);
 }
 
-// The compiler's diagnostics, without the boxes around the source.
+// the compiler's diagnostics, without the boxes around the source
 fn shx_show_errors(out: string) {
   var lines: StrList* = s_lines(out);
   var shown: StrList* = sl_new();
@@ -459,9 +445,9 @@ fn shx_patch_count(ss: ShxSess*) -> int64 {
   return n;
 }
 
-// Writes the hook with body and compiles: an object only (probe), a patch,
-// or (--local) the snippet program. The compiler's output, "" when it failed
-// (the errors are in *out).
+// writes the hook with body and compiles: an object only (probe), a patch,
+// or (--local) the snippet program. the compiler's output, "" when it failed
+// (the errors are in *out)
 fn shx_compile(ss: ShxSess*, body: string, probe: bool, out: Captured*) -> bool {
   fs_write(ss->hook, shx_hook_text(ss, body));
   var c: Cmd* = shx_cmd(ss);
@@ -488,7 +474,7 @@ fn shx_compile(ss: ShxSess*, body: string, probe: bool, out: Captured*) -> bool 
   return out->code == 0;
 }
 
-// The empty hook, and the eval patch undone (live).
+// the empty hook, and the eval patch undone (live)
 fn shx_revert(ss: ShxSess*) {
   fs_write(ss->hook, shx_hook_text(ss, ""));
   if (ss->local) {
@@ -509,9 +495,7 @@ fn shx_undo_patch(ss: ShxSess*) -> bool {
   return r.code == 0;
 }
 
-// ---------------------------------------------------------------------------
-// Inputs
-// ---------------------------------------------------------------------------
+// inputs
 
 fn shx_binds_text(ss: ShxSess*, indent: string) -> string {
   var b: Buf* = buf_new();
@@ -523,7 +507,7 @@ fn shx_binds_text(ss: ShxSess*, indent: string) -> string {
   return buf_take(b);
 }
 
-// The type of an expression, "" when it does not compile (errors shown).
+// the type of an expression, "" when it does not compile (errors shown)
 fn shx_type_of(ss: ShxSess*, expr: string, quiet: bool) -> string {
   var body: string = "  if (mbsh_seq < -1) {{\n" + shx_binds_text(ss, "    ") + "    var _p: MbshProbe = (" + expr + ");\n  }\n";
   var r: Captured;
@@ -542,7 +526,7 @@ fn shx_type_of(ss: ShxSess*, expr: string, quiet: bool) -> string {
   return s_empty();
 }
 
-// Runs code once in the program (or the snippet) and answers what it wrote.
+// runs code once in the program (or the snippet) and answers what it wrote
 fn shx_run(ss: ShxSess*, code: string, result: string) -> bool {
   ss->seq = ss->seq + 1;
   var n: string = s_int(ss->seq);
@@ -652,7 +636,7 @@ fn shx_eval(ss: ShxSess*, line: string) {
 }
 
 // `fn NAME...`: NAME's text in the tree replaced (or the fn added to the
-// entry), patched, kept until undo.
+// entry), patched, kept until undo
 fn shx_define(ss: ShxSess*, line: string) {
   var text: string = s_trim(line);
   var head: string = text;
@@ -732,8 +716,8 @@ fn shx_define(ss: ShxSess*, line: string) {
   }
 }
 
-// Where a function is in the tree: its file ("" when no file has it), the
-// file's text, its span and text.
+// where a function is in the tree: its file ("" when no file has it), the
+// file's text, its span and text
 struct ShxSpan {
   file: string;
   data: string;
@@ -797,9 +781,9 @@ fn shx_drop_group(ss: ShxSess*, k: int64) {
   sl_remove_at(ss->gticks, k);
 }
 
-// Takes back change k: a fn's text as it was (taken out if it was added),
-// r's files as they were; then patched in. Undo is a patch forward, so
-// the watch patches stay.
+// takes back change k: a fn's text as it was (taken out if it was added),
+// r's files as they were; then patched in. undo is a patch forward, so
+// the watch patches stay
 fn shx_undo_at(ss: ShxSess*, k: int64) -> bool {
   var name: string = sl_get(ss->gnames, k);
   var g: string = sl_get(ss->gids, k);
@@ -853,7 +837,7 @@ fn shx_undo_at(ss: ShxSess*, k: int64) -> bool {
   return true;
 }
 
-// undo [NAME]: the last change, or NAME's last redefinition.
+// undo [NAME]: the last change, or NAME's last redefinition
 fn shx_undo(ss: ShxSess*, name: string) {
   if (ss->local) {
     if (ss->defs->len == 0) {
@@ -892,8 +876,8 @@ fn shx_tree_path(ss: ShxSess*, f: string) -> string {
   return ss->tree + "/" + p_rel(ss->sb->p->root, f);
 }
 
-// The project's files into the tree; with record, the texts they replace
-// go on the undo stack as one group. The number of files that changed.
+// the project's files into the tree; with record, the texts they replace
+// go on the undo stack as one group. the number of files that changed
 fn shx_copy_tree(ss: ShxSess*, record: bool) -> int64 {
   var n: int64 = 0;
   var i: int64 = 0;
@@ -915,7 +899,7 @@ fn shx_copy_tree(ss: ShxSess*, record: bool) -> int64 {
   return n;
 }
 
-// r: the files on disk again (redefinitions dropped), patched in.
+// r: the files on disk again (redefinitions dropped), patched in
 fn shx_reload(ss: ShxSess*) {
   shx_scan(ss);
   if (ss->local) {
@@ -956,7 +940,7 @@ fn shx_reload(ss: ShxSess*) {
   }
 }
 
-// The comment lines directly above line `at` (from 1) of lines.
+// the comment lines directly above line `at` (from 1) of lines
 fn shx_doc(lines: StrList*, at: int64) -> StrList* {
   var doc: StrList* = sl_new();
   var k: int64 = at - 2;
@@ -984,7 +968,7 @@ fn shx_where(ss: ShxSess*, file: string, line: string) -> string {
   return shown + ":" + line;
 }
 
-// The first line of declaration i's doc comment.
+// the first line of declaration i's doc comment
 fn shx_doc1(ss: ShxSess*, i: int64) -> string {
   var doc: string = sl_get(ss->ddocs, i);
   var nl: int64 = s_find_byte(doc, 10);
@@ -994,7 +978,7 @@ fn shx_doc1(ss: ShxSess*, i: int64) -> string {
   return doc;
 }
 
-// Declaration i on one line; a long struct or enum body cut short.
+// declaration i on one line; a long struct or enum body cut short
 fn shx_brief(ss: ShxSess*, i: int64) -> string {
   var d: string = sl_get(ss->dsigs, i);
   var k: string = sl_get(ss->dkinds, i);
@@ -1005,8 +989,8 @@ fn shx_brief(ss: ShxSess*, i: int64) -> string {
   return d;
 }
 
-// The declarations at idx grouped by file: a line each, its signature and
-// the first line of its doc comment.
+// the declarations at idx grouped by file: a line each, its signature and
+// the first line of its doc comment
 fn shx_list(ss: ShxSess*, idx: StrList*) {
   var k: int64 = 0;
   while (k < idx->len) {
@@ -1042,7 +1026,7 @@ fn shx_file_is(shown: string, arg: string) -> bool {
   return s_eq(shown, arg) || s_eq(shown, ext) || s_ends(shown, slash) || s_ends(shown, slash_ext) || s_starts(shown, dir);
 }
 
-// ls [FILE]: what the program declares, by file.
+// ls [FILE]: what the program declares, by file
 fn shx_ls(ss: ShxSess*, arg: string) {
   var idx: StrList* = sl_new();
   defer free(idx);
@@ -1066,7 +1050,7 @@ fn shx_ls(ss: ShxSess*, arg: string) {
   shx_list(ss, idx);
 }
 
-// apropos TEXT: the declarations whose name or doc comment has TEXT, any case.
+// apropos TEXT: the declarations whose name or doc comment has TEXT, any case
 fn shx_apropos(ss: ShxSess*, text: string) {
   if (slen(text) == 0) {
     error_msg("apropos needs a word: apropos food");
@@ -1089,8 +1073,8 @@ fn shx_apropos(ss: ShxSess*, text: string) {
   shx_list(ss, idx);
 }
 
-// The comment on field f of the struct declared at line `at`: after the
-// field on its line, else the comment lines just above it.
+// the comment on field f of the struct declared at line `at`: after the
+// field on its line, else the comment lines just above it
 fn shx_field_doc(lines: StrList*, at: int64, f: string) -> string {
   var k: int64 = at;
   while (k < lines->len) {
@@ -1127,7 +1111,7 @@ fn shx_say_doc(ss: ShxSess*, i: int64) {
   free(lines);
 }
 
-// A struct's fields (with their comments) or an enum's variants.
+// a struct's fields (with their comments) or an enum's variants
 fn shx_say_body(ss: ShxSess*, i: int64) {
   if (s_eq(sl_get(ss->dkinds, i), "enum")) {
     var vs: StrList* = s_split(sl_get(ss->draws, i), 44);
@@ -1175,7 +1159,7 @@ fn shx_say_body(ss: ShxSess*, i: int64) {
 }
 
 // explain NAME (h NAME): a fn's signature and doc; a global's type, doc and
-// value in the program; a struct's fields.
+// value in the program; a struct's fields
 fn shx_explain(ss: ShxSess*, name: string) {
   if (slen(name) == 0) {
     error_msg("explain needs a name: explain harvest");
@@ -1214,7 +1198,7 @@ fn shx_explain(ss: ShxSess*, name: string) {
   }
 }
 
-// A global's value, from the program.
+// a global's value, from the program
 fn shx_value(ss: ShxSess*, name: string) {
   if (!ss->local && !sys_pid_alive(ss->pid)) {
     say("  = ?  " + dim("(the program has exited)"));
@@ -1292,7 +1276,7 @@ fn shx_help(ss: ShxSess*) {
   }
 }
 
-// :log [N]: the program's last N lines, shown or held.
+// :log [N]: the program's last N lines, shown or held
 fn shx_log(ss: ShxSess*, arg: string) {
   var n: int64 = 20;
   if (slen(arg) > 0) {
@@ -1333,7 +1317,7 @@ fn shx_mute(ss: ShxSess*, on: bool) {
   }
 }
 
-// Before a prompt: one dim line for the output held since the last one.
+// before a prompt: one dim line for the output held since the last one
 fn shx_notice(ss: ShxSess*) {
   shx_relay(ss);
   if (ss->held <= 0) {
@@ -1349,7 +1333,7 @@ fn shx_notice(ss: ShxSess*) {
   flush_out();
 }
 
-// The program ended: its last 5 lines and its exit code.
+// the program ended: its last 5 lines and its exit code
 fn shx_exited(ss: ShxSess*) -> bool {
   return !ss->local && ss->pid > 0 && !sys_pid_alive(ss->pid);
 }
@@ -1398,11 +1382,9 @@ fn shx_report_exit(ss: ShxSess*) {
   flush_out();
 }
 
-// ---------------------------------------------------------------------------
-// Pause, step, watch, edit
-// ---------------------------------------------------------------------------
+// pause, step, watch, edit
 
-// The program's state file read into ss (tick, paused); its text.
+// the program's state file read into ss (tick, paused); its text
 fn shx_state(ss: ShxSess*) -> string {
   var r: FsRead = fs_read(ss->statef);
   if (!r.ok) {
@@ -1429,7 +1411,7 @@ fn shx_state(ss: ShxSess*) -> string {
   return r.data;
 }
 
-// paused / resumed when the program's state turned.
+// paused / resumed when the program's state turned
 fn shx_ev_pause(ss: ShxSess*, paused: bool) {
   if (ss->lv == (LiveSess*)0 || paused == ss->ev_paused) {
     return;
@@ -1443,7 +1425,7 @@ fn shx_ev_pause(ss: ShxSess*, paused: bool) {
   }
 }
 
-// Beside the prompt's wait: the mb_watch files and the state, every 150 ms.
+// beside the prompt's wait: the mb_watch files and the state, every 150 ms
 fn shx_live_tick(ss: ShxSess*) {
   if (ss->lv == (LiveSess*)0 || sys_now_ms() - ss->lv->last_ms < 150) {
     return;
@@ -1455,8 +1437,8 @@ fn shx_live_tick(ss: ShxSess*) {
   shx_state(ss);
 }
 
-// After a patch compile: a patched event per function ("Patch N: a, b" in
-// its output, else name), or the first error as patch-error.
+// after a patch compile: a patched event per function ("Patch N: a, b" in
+// its output, else name), or the first error as patch-error
 fn shx_ev_patch(ss: ShxSess*, ok: bool, out: string, name: string) {
   if (ss->lv == (LiveSess*)0) {
     return;
@@ -1484,8 +1466,8 @@ fn shx_ev_patch(ss: ShxSess*, ok: bool, out: string, name: string) {
   }
 }
 
-// Up to the timeout for the state to show paused (want) at a tick past
-// after (-1: any); false, with the reason shown, when it doesn't.
+// up to the timeout for the state to show paused (want) at a tick past
+// after (-1: any); false, with the reason shown, when it doesn't
 fn shx_await(ss: ShxSess*, want: bool, after: int64) -> bool {
   var start: int64 = sys_now_ms();
   while (sys_now_ms() - start < ss->timeout) {
@@ -1593,7 +1575,7 @@ fn shx_step(ss: ShxSess*) {
   }
 }
 
-// The watch list (and pause-when) into the hook, patched in to stay.
+// the watch list (and pause-when) into the hook, patched in to stay
 fn shx_rewatch(ss: ShxSess*) -> bool {
   var r: Captured;
   if (!shx_compile(ss, "", false, &r)) {
@@ -1670,7 +1652,7 @@ fn shx_unwatch(ss: ShxSess*, expr: string) {
   say("unwatched " + expr);
 }
 
-// The watch values the program wrote last: NAME\tVALUE lines.
+// the watch values the program wrote last: NAME\tVALUE lines
 fn shx_watch_lines(ss: ShxSess*) -> StrList* {
   var out: StrList* = sl_new();
   var lines: StrList* = s_lines(shx_state(ss));
@@ -1711,7 +1693,7 @@ fn shx_watches(ss: ShxSess*) {
   }
 }
 
-// pause when [EXPR]: the program pauses at the shell_point where EXPR turns true.
+// pause when [EXPR]: the program pauses at the shell_point where EXPR turns true
 fn shx_pause_when(ss: ShxSess*, expr: string) {
   if (!shx_live_only(ss, "pause when")) {
     return;
@@ -1749,7 +1731,7 @@ fn shx_pause_when(ss: ShxSess*, expr: string) {
 }
 
 // edit NAME: NAME's source in $EDITOR (vi when unset), patched in when it
-// changed. In serve mode the editor gets the terminal.
+// changed. in serve mode the editor gets the terminal
 fn shx_edit_fn(ss: ShxSess*, name: string) {
   if (slen(name) == 0) {
     error_msg("edit needs a function: edit harvest");
@@ -1791,9 +1773,7 @@ fn shx_edit_fn(ss: ShxSess*, name: string) {
   shx_define(ss, text);
 }
 
-// ---------------------------------------------------------------------------
-// Requests from mbuild-shell (any mode; answers one per line)
-// ---------------------------------------------------------------------------
+// requests from mbuild-shell (any mode; answers one per line)
 
 fn shx_is_project(ss: ShxSess*, f: string) -> bool {
   return sl_has(ss->sb->files, f);
@@ -1803,7 +1783,7 @@ fn shx_patched(ss: ShxSess*, name: string) -> bool {
   return sl_has(ss->gnames, name);
 }
 
-// :decls: KIND\tNAME\tFILE:LINE\tpatched|"" for the project's declarations.
+// :decls: KIND\tNAME\tFILE:LINE\tpatched|"" for the project's declarations
 fn shx_decls(ss: ShxSess*) {
   var i: int64 = 0;
   while (i < ss->dnames->len) {
@@ -1822,7 +1802,7 @@ fn shx_decls(ss: ShxSess*) {
 }
 
 // :source NAME: FILE:LINE, the current text, then per patch (newest first)
-// "@@ patched at tick N, was:" and the text it replaced.
+// "@@ patched at tick N, was:" and the text it replaced
 fn shx_source(ss: ShxSess*, name: string) {
   var sp: ShxSpan = shx_find_fn(ss, name);
   if (slen(sp.file) > 0) {
@@ -1857,7 +1837,7 @@ fn shx_source(ss: ShxSess*, name: string) {
 
 // :fields EXPR: "\tTYPE\tVALUE" for EXPR, then NAME\tTYPE\tVALUE\tCHILD for
 // each field of a struct (or of the struct a pointer points to); CHILD is
-// the expression to expand it by, "" when it has no fields.
+// the expression to expand it by, "" when it has no fields
 fn shx_fields_cmd(ss: ShxSess*, expr: string) {
   if (!shx_live_only(ss, "inspect")) {
     return;
@@ -1908,7 +1888,7 @@ fn shx_fields_cmd(ss: ShxSess*, expr: string) {
   shx_run(ss, "  var _v = (" + expr + ");\n", result);
 }
 
-// One input; false to quit.
+// one input; false to quit
 fn shx_input(ss: ShxSess*, line: string) -> bool {
   var t: string = s_trim(line);
   if (slen(t) == 0) {
@@ -1970,9 +1950,7 @@ fn shx_input(ss: ShxSess*, line: string) -> bool {
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Reading lines: a small editor on a terminal, plain reads otherwise
-// ---------------------------------------------------------------------------
+// reading lines: a small editor on a terminal, plain reads otherwise
 
 fn shx_word_start(line: string, at: int64) -> int64 {
   var k: int64 = at;
@@ -1982,8 +1960,8 @@ fn shx_word_start(line: string, at: int64) -> int64 {
   return k;
 }
 
-// The program's new output: its whole lines into the log, and the text to
-// show (none while muted). A line it leaves unended shows after 300 ms.
+// the program's new output: its whole lines into the log, and the text to
+// show (none while muted). a line it leaves unended shows after 300 ms
 fn shx_take(ss: ShxSess*) -> string {
   if (ss->fd < 0) {
     return s_empty();
@@ -2029,7 +2007,7 @@ fn shx_take(ss: ShxSess*) -> string {
   return text;
 }
 
-// New program output, shown; true when there was some.
+// new program output, shown; true when there was some
 fn shx_relay(ss: ShxSess*) -> bool {
   var text: string = shx_take(ss);
   if (slen(text) == 0) {
@@ -2055,8 +2033,8 @@ fn shx_relay(ss: ShxSess*) -> bool {
   return true;
 }
 
-// A line for mbuild-shell: control byte c, then text (31 program output,
-// 30 an answer ends, 29 status).
+// a line for mbuild-shell: control byte c, then text (31 program output,
+// 30 an answer ends, 29 status)
 fn shx_ctl_line(c: int32, text: string) {
   var b: Buf* = buf_new();
   buf_addb(b, c);
@@ -2066,8 +2044,8 @@ fn shx_ctl_line(c: int32, text: string) {
   flush_out();
 }
 
-// Status for mbuild-shell when it changed (or always): "s" key=value line
-// (cond last), then "W" and a "w NAME\tVALUE" per watch.
+// status for mbuild-shell when it changed (or always): "s" key=value line
+// (cond last), then "W" and a "w NAME\tVALUE" per watch
 fn shx_send_status(ss: ShxSess*, always: bool) {
   var st: string = shx_state(ss);
   var alive: string = "1";
@@ -2095,7 +2073,7 @@ fn shx_send_status(ss: ShxSess*, always: bool) {
   free(vals);
 }
 
-// The project's globals, watched from the start.
+// the project's globals, watched from the start
 fn shx_default_watches(ss: ShxSess*) {
   if (ss->local) {
     return;
@@ -2115,12 +2093,12 @@ fn shx_redraw(prompt: string, line: string, at: int64) {
   flush_out();
 }
 
-// The commands, for tab on the first word.
+// the commands, for tab on the first word
 fn shx_commands() -> StrList* {
   return s_split("help ls apropos explain undo pause resume step status watch unwatch edit :mute :unmute :log :q", 32);
 }
 
-// Names for tab: completes the word before the cursor, or lists the choices.
+// names for tab: completes the word before the cursor, or lists the choices
 fn shx_complete(ss: ShxSess*, line: string, at: int64*) -> string {
   var from: int64 = shx_word_start(line, *at);
   if (from == 1 && s_byte(line, 0) == 58) {
@@ -2178,7 +2156,7 @@ fn shx_complete(ss: ShxSess*, line: string, at: int64*) -> string {
   return line;
 }
 
-// One line from the terminal in raw mode; *eof at Ctrl-D on an empty line.
+// one line from the terminal in raw mode; *eof at Ctrl-D on an empty line
 fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   var line: string = s_empty();
   var at: int64 = 0;
@@ -2287,8 +2265,8 @@ fn shx_edit(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   return line;
 }
 
-// A line from a pipe; the program's output relayed while none comes, the
-// prompt shown once one does.
+// a line from a pipe; the program's output relayed while none comes, the
+// prompt shown once one does
 fn shx_read_plain(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   var b: Buf* = buf_new();
   *eof = false;
@@ -2332,7 +2310,7 @@ fn shx_read_plain(ss: ShxSess*, prompt: string, eof: bool*) -> string {
   return buf_take(b);
 }
 
-// Open minus closed (, [ and { outside strings, comments and chars.
+// open minus closed (, [ and { outside strings, comments and chars
 fn shx_depth(text: string) -> int64 {
   var d: int64 = 0;
   var i: int64 = 0;
@@ -2361,7 +2339,7 @@ fn shx_depth(text: string) -> int64 {
   return d;
 }
 
-// One input: more lines while brackets are open.
+// one input: more lines while brackets are open
 fn shx_read(ss: ShxSess*, eof: bool*) -> string {
   var prompt: string = "mettle> ";
   var text: string = s_empty();
@@ -2400,14 +2378,12 @@ fn shx_read(ss: ShxSess*, eof: bool*) -> string {
   return text;
 }
 
-// ---------------------------------------------------------------------------
-// The command
-// ---------------------------------------------------------------------------
+// the command
 
-// The program in the background, its stdout and stderr into the FIFO, stderr
+// the program in the background, its stdout and stderr into the FIFO, stderr
 // through a grep that drops the live runtime's "[live] patch N: ..." lines
 // (two per input) and its "[live] main moves to the current code".
-// A watcher stops it if mbuild dies first (Ctrl-C while waiting).
+// a watcher stops it if mbuild dies first (Ctrl-C while waiting)
 fn shx_start(ss: ShxSess*) -> bool {
   var sb: ShellBuild* = ss->sb;
   var pidf: string = ss->dir + "/pid";
@@ -2469,8 +2445,8 @@ fn shx_stop(ss: ShxSess*) {
   }
 }
 
-// The tree: the project's files, a mettle.deps that maps "mbuild/shell" to
-// the hook (and the package's own name to the tree), the empty hook.
+// the tree: the project's files, a mettle.deps that maps "mbuild/shell" to
+// the hook (and the package's own name to the tree), the empty hook
 fn shx_make_tree(ss: ShxSess*) {
   var p: Project* = ss->sb->p;
   sys_remove_tree(ss->tree);
@@ -2486,7 +2462,7 @@ fn shx_make_tree(ss: ShxSess*) {
 }
 
 // mbuild-shell, the full-screen shell: beside this mbuild, else built in a
-// source checkout of mbuild above it; "" when neither.
+// source checkout of mbuild above it; "" when neither
 fn shx_find_tui() -> string {
   var self: string = sys_self_exe();
   var beside: string = p_dir(self) + "/mbuild-shell";
@@ -2522,9 +2498,9 @@ fn shx_find_tui() -> string {
   return s_empty();
 }
 
-// On a terminal: the session runs in mbuild-shell, which starts this
-// command again with --serve and talks to it through FIFOs. False (line
-// mode) when there is no mbuild-shell.
+// on a terminal: the session runs in mbuild-shell, which starts this
+// command again with --serve and talks to it through FIFOs. false (line
+// mode) when there is no mbuild-shell
 fn shx_tui(p: Project*, code: int32*) -> bool {
   var exe: string = shx_find_tui();
   if (slen(exe) == 0) {

@@ -1,6 +1,4 @@
-// services: the processes mb_service declares, started around `mbuild run`
-//, and `mbuild services`. svc_run is in services_linux
-// (alph) and services_windows; this file holds what they share.
+// services: the mb_service processes around mbuild run, and mbuild services
 
 import "std/mem";
 import "../core/base";
@@ -12,7 +10,7 @@ import "../core/sys_linux" if linux;
 import "../core/sys_windows" if windows;
 
 // cmdline split into words as sh splits them: '...', "..." (\ escapes " \ $ `),
-// \x outside quotes. ok is false on an unclosed quote.
+// \x outside quotes. ok is false on an unclosed quote
 export struct SvcWords {
   ok: bool;
   words: StrList*;
@@ -87,7 +85,7 @@ fn svx_words(sv: ServiceSpec*) -> StrList* {
   return w.words;
 }
 
-// The first words of the services: bins they may name (built with the app).
+// the first words of the services: bins they may name (built with the app)
 export fn svc_programs(m: Manifest*) -> StrList* {
   var out: StrList* = sl_new();
   var i: int64 = 0;
@@ -100,7 +98,7 @@ export fn svc_programs(m: Manifest*) -> StrList* {
   return out;
 }
 
-// A word as written back for display: quoted when it holds a space or quote.
+// a word as written back for display: quoted when it holds a space or quote
 fn svx_word(w: string) -> string {
   var i: int64 = 0;
   while (i < slen(w)) {
@@ -113,8 +111,8 @@ fn svx_word(w: string) -> string {
   return w;
 }
 
-// A service ready to start: its command (0 when prog was not found), the
-// command as shown, and its log.
+// a service ready to start: its command (0 when prog was not found), the
+// command as shown, and its log
 export struct SvcItem {
   name: string;
   cmd: Cmd*;
@@ -126,7 +124,7 @@ export struct SvcItem {
   log: string;
 }
 
-// The services in start order. A first word in bins runs from out_dir (with ext).
+// the services in start order. a first word in bins runs from out_dir (with ext)
 export fn svc_items(p: Project*, out_dir: string, ext: string, bins: StrList*) -> SvcItem* {
   var m: Manifest* = p->man;
   var logs: string = p->state_dir + "/logs";
@@ -194,7 +192,7 @@ export fn svc_say_in_use(it: SvcItem*) {
   err_line("  " + cyan("help") + ": stop what listens there, or give " + it->name + " another port");
 }
 
-// why, then the last 20 lines of the service's log, indented, on stderr.
+// why, then the last 20 lines of the service's log, indented, on stderr
 export fn svc_say_failed(p: Project*, it: SvcItem*, why: string) {
   error_msg(why);
   var r: FsRead = fs_read(it->log);
@@ -218,7 +216,7 @@ export fn svc_say_failed(p: Project*, it: SvcItem*, why: string) {
   flush_out();
 }
 
-// `mbuild services`: name, command and port of each, in start order.
+// `mbuild services`: name, command and port of each, in start order
 export fn svc_cmd_list(p: Project*) -> int32 {
   var m: Manifest* = p->man;
   if (m->nservices == 0) {
@@ -250,11 +248,9 @@ export fn svc_cmd_list(p: Project*) -> int32 {
   return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Ports: mb_service_port(name, 0) takes one from the pool, locked under
+// ports: mb_service_port(name, 0) takes one from the pool, locked under
 // $MBUILD_HOME/tmp/ports/PORT (a directory holding the owner's pid) so
-// parallel runs and parallel mbuilds get distinct ones.
-// ---------------------------------------------------------------------------
+// parallel runs and parallel mbuilds get distinct ones
 
 var g_svc_held: StrList* = (StrList*)0;
 var g_svc_next: int64 = 0;
@@ -263,7 +259,7 @@ fn svx_ports_dir() -> string {
   return fs_mbuild_home() + "/tmp/ports";
 }
 
-// Takes the lock of port: free, or held by a process that is gone.
+// takes the lock of port: free, or held by a process that is gone
 fn svx_lock(port: int64) -> bool {
   var dir: string = svx_ports_dir() + "/" + s_int(port);
   var i: int64 = 0;
@@ -283,7 +279,7 @@ fn svx_lock(port: int64) -> bool {
   return false;
 }
 
-// A free port from lo-hi, locked for this process; 0 when none is left.
+// a free port from lo-hi, locked for this process; 0 when none is left
 export fn svc_port_take(lo: int64, hi: int64) -> int64 {
   if (g_svc_held == (StrList*)0) {
     g_svc_held = sl_new();
@@ -309,7 +305,6 @@ export fn svc_port_take(lo: int64, hi: int64) -> int64 {
   return 0;
 }
 
-// Gives a port back to the pool.
 export fn svc_port_release(port: int64) {
   if (g_svc_held == (StrList*)0) {
     return;
@@ -321,14 +316,13 @@ export fn svc_port_release(port: int64) {
   }
 }
 
-// Every port this process holds back to the pool.
 export fn svc_ports_release_all() {
   while (g_svc_held != (StrList*)0 && g_svc_held->len > 0) {
     svc_port_release(s_to_int(sl_get(g_svc_held, 0)));
   }
 }
 
-// The pool of "*"'s ports setting.
+// the pool of "*"'s ports setting
 export fn svc_pool(m: Manifest*, lo: int64*, hi: int64*) {
   var v: string = man_test_get(m, "*", "ports");
   var dash: int64 = s_find_byte(v, 45);
@@ -336,7 +330,7 @@ export fn svc_pool(m: Manifest*, lo: int64*, hi: int64*) {
   *hi = s_to_int(s_from(v, dash + 1));
 }
 
-// "MBUILD_PORT_DB": the name upper-cased, other bytes '_'.
+// "MBUILD_PORT_DB": the name upper-cased, other bytes '_'
 export fn svc_port_var(name: string) -> string {
   var d: string = s_dup(s_lower(name));
   var i: int64 = 0;
@@ -352,9 +346,9 @@ export fn svc_port_var(name: string) -> string {
   return "MBUILD_PORT_" + d;
 }
 
-// The port of every service named in only (every one when only is empty),
+// the port of every service named in only (every one when only is empty),
 // "0" for the others and for those without one; auto ports taken from the
-// pool. vars gets "MBUILD_PORT_X=port" for each port.
+// pool. vars gets "MBUILD_PORT_X=port" for each port
 export fn svc_ports_for(p: Project*, m: Manifest*, only: StrList*, vars: StrList*) -> StrList* {
   var lo: int64 = 0;
   var hi: int64 = 0;
@@ -382,7 +376,7 @@ export fn svc_ports_for(p: Project*, m: Manifest*, only: StrList*, vars: StrList
   return l;
 }
 
-// The MBUILD_PORT_ entries of vars into env.
+// the MBUILD_PORT_ entries of vars into env
 export fn svc_port_env(env: StrList*, vars: StrList*) {
   var i: int64 = 0;
   while (i < vars->len) {
@@ -393,7 +387,7 @@ export fn svc_port_env(env: StrList*, vars: StrList*) {
   }
 }
 
-// word with each $NAME of vars ("NAME=value") replaced; nothing else is.
+// word with each $NAME of vars ("NAME=value") replaced; nothing else is
 export fn svc_expand(word: string, vars: StrList*) -> string {
   if (s_find_byte(word, 36) < 0) {
     return word;
@@ -430,7 +424,6 @@ export fn svc_expand(word: string, vars: StrList*) -> string {
   return buf_take(b);
 }
 
-// Every word expanded, in place.
 export fn svc_expand_all(words: StrList*, vars: StrList*) -> StrList* {
   var i: int64 = 0;
   while (i < words->len) {
@@ -440,7 +433,7 @@ export fn svc_expand_all(words: StrList*, vars: StrList*) -> StrList* {
   return words;
 }
 
-// MBUILD_PORT_X of every service with a port, into env (the app's).
+// MBUILD_PORT_X of every service with a port, into env (the app's)
 export fn svc_items_env(m: Manifest*, items: SvcItem*, env: StrList*) {
   var i: int64 = 0;
   while (i < m->nservices) {

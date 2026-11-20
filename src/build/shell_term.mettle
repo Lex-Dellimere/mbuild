@@ -1,10 +1,9 @@
-// shell_term: what the shell's line editor writes to the terminal, as text
-// (tests/unit/shell_term_test.mettle plays it on a fake terminal).
+// shell_term: what the line editor writes to the terminal, as text
 
 import "std/io";
 import "../core/base";
 
-// The prompt line drawn again, the cursor at byte at of line.
+// the prompt line drawn again, the cursor at byte at of line
 export fn shx_term_line(prompt: string, line: string, at: int64) -> string {
   var s: string = "\r" + prompt + line + g_esc + "[K";
   if (at < slen(line)) {
@@ -13,8 +12,8 @@ export fn shx_term_line(prompt: string, line: string, at: int64) -> string {
   return s;
 }
 
-// Program output (whole lines) put above the prompt line: that line cleared,
-// the text, then the prompt and the input so far drawn again.
+// program output (whole lines) put above the prompt line: that line cleared,
+// the text, then the prompt and the input so far drawn again
 export fn shx_term_above(prompt: string, line: string, at: int64, text: string) -> string {
   var t: string = text;
   if (!s_ends(t, "\n")) {
